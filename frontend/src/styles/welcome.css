@@ -1,0 +1,215 @@
+/* Welcome / empty state. Shown in place of the editor
+   split when no file is open — an invitation to open a folder/file, with
+   quick access to recent project roots. Lives inside the workspace card. */
+
+#welcome {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  /* `safe center` so that when the content is taller than the viewport (small
+     windows), it aligns to the start and the top stays scrollable — plain
+     `center` overflows equally in both directions and makes the top
+     unreachable. */
+  align-items: safe center;
+  justify-content: center;
+  background: var(--editor-bg);
+  overflow-y: auto;
+  padding: 32px;
+}
+
+#welcome.hidden {
+  display: none;
+}
+
+#welcome-inner {
+  width: 100%;
+  max-width: 420px;
+  text-align: center;
+}
+
+#welcome-mark {
+  margin-bottom: 16px;
+  /* Subtle lift so the silver mark reads as an object, matching the website. */
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.35));
+  line-height: 0;
+}
+
+#welcome-title {
+  font-size: 1.7em;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  margin-bottom: 6px;
+}
+
+#welcome-tagline {
+  font-size: 0.95em;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin-bottom: 28px;
+}
+
+#welcome-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+  max-width: 260px;
+  margin: 0 auto 26px;
+}
+
+.welcome-btn {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-family: var(--font-ui);
+  color: var(--fg);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--panel-radius);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.welcome-btn:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--text-subtle);
+}
+
+.welcome-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+  font-weight: 550;
+}
+
+.welcome-btn-primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* Recent folders — the fast path back into a project. */
+#welcome-recent {
+  text-align: left;
+  margin-bottom: 22px;
+}
+
+#welcome-recent.hidden {
+  display: none;
+}
+
+.welcome-recent-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-subtle);
+  margin-bottom: 8px;
+  padding-left: 4px;
+}
+
+.welcome-recent-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.welcome-recent-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.welcome-recent-name {
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.welcome-recent-path {
+  font-size: 11px;
+  color: var(--text-subtle);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#welcome-hint {
+  font-size: 12px;
+  color: var(--text-subtle);
+  line-height: 1.6;
+}
+
+#welcome-hint kbd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+}
+
+/* Host chip for remote entries in the recent-folders list. */
+.welcome-recent-remote {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  vertical-align: 1px;
+}
+
+
+/* Folder open, no file: a compact centered prompt (same card as welcome). */
+#welcome-workspace {
+  width: 100%;
+  max-width: 420px;
+  text-align: center;
+}
+
+#welcome-workspace[hidden],
+#welcome-inner[hidden] {
+  display: none;
+}
+
+#welcome-workspace-title {
+  font-size: 1.35em;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+  margin-bottom: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#welcome-workspace-hint {
+  font-size: 0.95em;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin-bottom: 22px;
+}
+
+#welcome-workspace-hint kbd {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+}
+
+.welcome-workspace-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}

@@ -1,0 +1,80 @@
+name: Windows package
+
+# Produces the Windows NSIS installer (preview). Not part of regular PR CI: a
+# Windows release build costs many runner minutes. Run it by hand (Actions ->
+# Windows package -> Run workflow) or push a v* tag. PRs run it only when they
+# change the Windows packaging itself (this file or the build script).
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/windows-package.yml
+      - scripts/package-windows.ps1
+
+# Default to read-only. Only the release job (below) is granted contents:write,
+# and it does nothing but download the built installer and attach it to the
+# Release — it never checks out the code or builds, so the write token is never
+# exposed to build tooling or npm lifecycle scripts.
+permissions:
+  contents: read
+
+# Actions are pinned to full commit SHAs with a version comment; Dependabot's
+# github-actions updater keeps them fresh. Do not switch back to mutable tags.
+jobs:
+  build:
+    name: Build NSIS installer
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.2"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          # Pinned by SHA, so the channel can't be read from the ref — name it.
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+      - name: Build installer with scripts/package-windows.ps1
+        # The same script the owner runs on a Windows PC, so this job also
+        # tests it: prerequisite checks, npm ci, tauri build, hashes. The
+        # runner image has the VS Build Tools C++ workload, the Windows SDK and
+        # WebView2. Unsigned: no Authenticode certificate in CI. No updater
+        # key either — Windows updates are notify-only (src-tauri/src/updates.rs).
+        shell: pwsh
+        run: ./scripts/package-windows.ps1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sparkdown-windows
+          path: src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+
+  release:
+    name: Attach to GitHub Release (tags only)
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    # The only job with write access. It does not check out the repo or run any
+    # build/npm step, so the write token never reaches third-party tooling.
+    permissions:
+      contents: write
+    steps:
+      - name: Download built installer
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sparkdown-windows
+          path: dist
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          files: dist/**/*-setup.exe

@@ -1,0 +1,226 @@
+/* ---------------------------------------------------------------------------
+   SparkDown "Silver" — one identity, two tones.
+
+   Dark:  warm charcoal (lifted off near-black for comfort) with platinum text
+          and a restrained, muted syntax palette.
+   Light: platinum-on-paper. Off-white surfaces, graphite accent — the same
+          "tone over color" discipline as dark. No stock blues.
+--------------------------------------------------------------------------- */
+
+/* Light theme — "Silver / Paper" */
+:root,
+[data-theme='light'] {
+  --bg: #fafafb;
+  --fg: #26282e;
+  --bg-secondary: #f1f1f4;
+  --bg-tertiary: #e6e7eb;
+  --border: #d6d8dd;
+  --border-light: #e6e8ec;
+  --accent: #3f434c;
+  --accent-hover: #2b2e35;
+  --text-muted: #6e7278;
+  --text-subtle: #9a9ea6;
+
+  /* Editor */
+  --editor-bg: #fafafb;
+  --editor-fg: #26282e;
+  --editor-caret: #26282e;
+  --editor-gutter-bg: #f4f4f6;
+  --editor-gutter-fg: #a0a4ac;
+  --editor-active-line: #f1f2f5;
+  --editor-active-line-gutter: #e9eaee;
+  --editor-selection: #cfd6e2;
+  --editor-search-match: #f2dd8f;
+  --editor-search-match-selected: #e8b83e;
+
+  /* Editor syntax colors — SparkDown palette (light): muted inks on paper.
+     A handful of desaturated hues; nothing shouts. */
+  --syn-keyword: #7c5fa8;      /* dusk violet */
+  --syn-atom: #3d6a94;         /* steel blue */
+  --syn-number: #8a6d3b;       /* sand */
+  --syn-string: #557a46;       /* sage */
+  --syn-regexp: #a05c42;       /* clay */
+  --syn-variable-def: #3d7085; /* slate teal */
+  --syn-variable-local: #3d7085;
+  --syn-type: #38796a;         /* seafoam ink */
+  --syn-class: #38796a;
+  --syn-special: #8a7433;      /* olive gold */
+  --syn-property-def: #4a6491; /* ink blue */
+  --syn-comment: #969ca8;      /* quiet gray, italic via style */
+  --syn-meta: #8a8f99;
+  --syn-invalid: #c04848;
+
+  /* Markdown prose highlighting (editor) */
+  --md-heading: #33517e;       /* ink-blue headings */
+  --md-quote: #6e7278;
+  --md-code-fg: #7c5fa8;
+  --md-code-bg: #eef0f4;
+
+  /* Preview */
+  --preview-bg: #fafafb;
+  --preview-fg: #2c2e34;
+  --preview-code-bg: #f0f1f4;
+  --preview-code-fg: #26282e;
+  --preview-blockquote-border: #d0d3d9;
+  --preview-blockquote-fg: #62666d;
+  /* Links: a distinct steel-blue accent so they read as links against the
+     graphite body text, not just another shade of ink. */
+  --preview-link: #2f6fb0;
+  --preview-link-hover: #1f5896;
+  --preview-table-border: #d6d8dd;
+  --preview-table-header-bg: #f0f1f4;
+  --preview-hr: #d6d8dd;
+
+  /* Panel / Chrome */
+  --panel-bg: #f1f1f4;
+  --toolbar-bg: #ededf0;
+  --toolbar-border: #d6d8dd;
+  --tab-bg: #e9e9ed;
+  --tab-active-bg: #fafafb;
+  --tab-hover-bg: #e2e3e8;
+  --statusbar-bg: #ededf0;
+  --statusbar-fg: #6e7278;
+  --sidebar-bg: #f1f1f4;
+  --sidebar-hover: #e6e7eb;
+  --sidebar-active: #dbdce1;
+  --scrollbar-thumb: #c6c8ce;
+  --scrollbar-track: transparent;
+
+  /* Floating-panels layout: platinum canvas behind lifted paper panels */
+  --canvas: #dfe0e4;
+  --panel-shadow: 0 4px 18px -8px rgba(30, 32, 40, 0.22);
+
+  /* Fonts */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Menlo, Consolas, 'Apple Symbols', 'Apple Color Emoji', monospace;
+  /* Geometric sans for editorial preview body */
+  --font-preview: 'Avenir Next', 'Avenir', 'Helvetica Neue', -apple-system, sans-serif;
+  /* App chrome (toolbar, tabs, sidebar, status) */
+  --font-ui: var(--font-sans);
+
+  /* Shape — sharp corners (Silver design); bump for a softer look */
+  --radius: 0px;
+  --radius-sm: 0px;
+
+  /* Floating-panels layout */
+  --panel-gap: 6px;
+  --panel-radius: 6px;
+}
+
+/* Dark theme — "Silver / Charcoal": platinum on warm charcoal.
+   Lifted from the old near-black (#101013) to reduce contrast fatigue;
+   text is dialed down a step for the same reason. */
+[data-theme='dark'] {
+  --bg: #191b21;
+  --fg: #dde1e8;
+  --bg-secondary: #1f222a;
+  --bg-tertiary: #2a2e38;
+  --border: #2e323c;
+  --border-light: #262a32;
+  --accent: #c3c8d2;
+  --accent-hover: #d6dae2;
+  --text-muted: #99a0ad;
+  --text-subtle: #6b7280;
+
+  /* Editor */
+  --editor-bg: #191b21;
+  --editor-fg: #dde1e8;
+  --editor-caret: #c3c8d2;
+  --editor-gutter-bg: #191b21;
+  --editor-gutter-fg: #6b7280;
+  --editor-active-line: #1f222a;
+  --editor-active-line-gutter: #22252e;
+  --editor-selection: #323848cc;
+  --editor-search-match: #454b59;
+  --editor-search-match-selected: #67708a;
+
+  /* Editor syntax colors — SparkDown palette (dark): the light inks,
+     raised to sit comfortably on charcoal. Same hue story, no borrowing. */
+  --syn-keyword: #c0a8e0;      /* dusk violet */
+  --syn-atom: #8ab4dd;         /* steel blue */
+  --syn-number: #cdb694;       /* sand */
+  --syn-string: #a8c49a;       /* sage */
+  --syn-regexp: #d4a08c;       /* clay */
+  --syn-variable-def: #9fc6d4; /* slate teal */
+  --syn-variable-local: #9fc6d4;
+  --syn-type: #8fc7bb;         /* seafoam */
+  --syn-class: #8fc7bb;
+  --syn-special: #d8c89a;      /* olive gold */
+  --syn-property-def: #a8bede; /* ink blue */
+  --syn-comment: #6d7383;      /* quiet gray, italic via style */
+  --syn-meta: #8a8f9c;
+  --syn-invalid: #d47a7a;
+
+  /* Markdown prose highlighting (editor) */
+  --md-heading: #9fb6dd;
+  --md-quote: #99a0ad;
+  --md-code-fg: #c0a8e0;
+  --md-code-bg: #22252e;
+
+  /* Preview */
+  --preview-bg: #191b21;
+  --preview-fg: #c6cbd4;
+  --preview-code-bg: #21242d;
+  --preview-code-fg: #dde1e8;
+  --preview-blockquote-border: #3e4350;
+  --preview-blockquote-fg: #99a0ad;
+  /* Links: brighter steel-blue that stands clear of the platinum body text. */
+  --preview-link: #7bb0e8;
+  --preview-link-hover: #9cc6f2;
+  --preview-table-border: #323641;
+  --preview-table-header-bg: #21242d;
+  --preview-hr: #323641;
+
+  /* Panel / Chrome */
+  --panel-bg: #1f222a;
+  --toolbar-bg: #1d2027;
+  --toolbar-border: #2e323c;
+  --tab-bg: #171920;
+  --tab-active-bg: #191b21;
+  --tab-hover-bg: #232630;
+  --statusbar-bg: #1d2027;
+  --statusbar-fg: #99a0ad;
+  --sidebar-bg: #1c1f26;
+  --sidebar-hover: #242833;
+  --sidebar-active: #2c3140;
+  --scrollbar-thumb: #3a3f4b;
+  --scrollbar-track: transparent;
+
+  /* Floating-panels layout: charcoal canvas behind lifted panels */
+  --canvas: #121317;
+  --panel-shadow: 0 6px 24px -8px rgba(0, 0, 0, 0.55);
+}
+
+/* ---------------------------------------------------------------------------
+   Theme cross-fade: theme.ts adds .theme-transition to <html> for the
+   duration of a switch so surfaces ease between palettes instead of
+   snapping. Respect reduced-motion.
+
+   Scoped to the CHROME SURFACES only — never `*`. A universal transition
+   puts an independent 180 ms animation on every element; with a large
+   document open (tens of thousands of syntax spans) WebKit recomputes and
+   composites the whole tree per frame, and the switch crawls frame by
+   frame for seconds. Document content (editor text, preview body) snaps
+   instantly; the easing chrome around it still reads as a smooth fade.
+--------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: no-preference) {
+  html.theme-transition body,
+  html.theme-transition #app,
+  html.theme-transition #toolbar,
+  html.theme-transition #tab-bar,
+  html.theme-transition #sidebar,
+  html.theme-transition #sidebar-header,
+  html.theme-transition #workspace,
+  html.theme-transition #terminal-panel,
+  html.theme-transition #status-bar,
+  html.theme-transition #editor-container,
+  html.theme-transition #preview-pane,
+  html.theme-transition .cm-editor,
+  html.theme-transition .cm-gutters {
+    transition:
+      background-color 0.18s ease,
+      color 0.18s ease,
+      border-color 0.18s ease,
+      box-shadow 0.18s ease !important;
+  }
+}

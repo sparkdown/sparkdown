@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SparkDown: read every change your agent makes</title>
+  <meta name="description" content="SparkDown is a small, local markdown editor for the files your AI agents write. Run the agent in split terminals, then review each changed file in one queue. About 4 MB on Mac, also on Linux. Free and open source (MIT)." />
+  <link rel="canonical" href="https://sparkdown.dev/" />
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="theme-color" content="#fafafb" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#191b21" media="(prefers-color-scheme: dark)" />
+
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="SparkDown" />
+  <meta property="og:url" content="https://sparkdown.dev/" />
+  <meta property="og:title" content="SparkDown: read every change your agent makes" />
+  <meta property="og:description" content="A small, local markdown editor with split terminals for your agents and a review queue for every file they change. macOS and Linux. MIT." />
+  <meta property="og:image" content="https://sparkdown.dev/assets/screenshot.png" />
+  <meta property="og:image:width" content="1280" />
+  <meta property="og:image:height" content="800" />
+  <meta property="og:image:alt" content="The SparkDown window: a markdown document beside its preview, and three terminal panes below." />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="SparkDown: read every change your agent makes" />
+  <meta name="twitter:description" content="A small, local markdown editor with split terminals for your agents and a review queue for every file they change." />
+  <meta name="twitter:image" content="https://sparkdown.dev/assets/screenshot.png" />
+
+  <style>
+    /* Tokens: the app's own "Silver" themes (frontend/src/styles/themes.css).
+       Light = Silver / Paper (the page default), dark = Silver / Charcoal. */
+    :root {
+      --paper: #fafafb;
+      --paper-2: #f1f1f4;
+      --rule: #e2e3e8;
+      --ink: #26282e;
+      --ink-2: #4a4e56;
+      --muted: #6e7278;
+      --ghost: #a6aab2;          /* the markdown source in the gutter */
+      --add: #557a46;            /* sage: additions */
+      --add-bg: #e7efe2;
+      --del: #a05c42;            /* clay: deletions, used for meaning only */
+      --link: #2f6fb0;
+      --shot-shadow: 0 30px 80px -40px rgba(30, 32, 40, .45), 0 2px 6px rgba(30, 32, 40, .08);
+
+      --serif: ui-serif, "New York", "Iowan Old Style", Charter, "Source Serif Pro", Georgia, serif;
+      --sans: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+      --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+      --measure: 64ch;
+      --gutter: 4.5rem;          /* width of the syntax gutter */
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --paper: #191b21;
+        --paper-2: #1f222a;
+        --rule: #2a2e38;
+        --ink: #dde1e8;
+        --ink-2: #c0c5ce;
+        --muted: #99a0ad;
+        --ghost: #5d6472;
+        --add: #a8c49a;
+        --add-bg: #22301f;
+        --del: #d4a08c;
+        --link: #7bb0e8;
+        --shot-shadow: 0 30px 80px -30px rgba(0, 0, 0, .7), 0 2px 6px rgba(0, 0, 0, .3);
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; }
+    html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    body {
+      background: var(--paper);
+      color: var(--ink);
+      font: 400 18px/1.62 var(--sans);
+      font-feature-settings: "kern", "liga";
+      text-rendering: optimizeLegibility;
+    }
+    a { color: var(--link); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+    a:hover { text-decoration-thickness: 2px; }
+    :focus-visible { outline: 2px solid var(--link); outline-offset: 3px; border-radius: 3px; }
+    img { display: block; max-width: 100%; height: auto; }
+    kbd {
+      font: 500 .82em var(--mono);
+      padding: .05em .4em;
+      border: 1px solid var(--rule);
+      border-bottom-width: 2px;
+      border-radius: 5px;
+      background: var(--paper-2);
+      color: var(--ink-2);
+      white-space: nowrap;
+    }
+    code { font: .88em var(--mono); background: var(--paper-2); padding: .08em .35em; border-radius: 4px; }
+    .skip { position: absolute; left: -999px; top: 8px; background: var(--ink); color: var(--paper); padding: 8px 12px; border-radius: 6px; z-index: 10; }
+    .skip:focus { left: 8px; }
+
+    /* ---- The document: rendered text with its markdown source in the gutter */
+    .doc { max-width: calc(var(--measure) + var(--gutter) * 2); margin: 0 auto; padding: 0 24px; }
+    .line { position: relative; padding-left: var(--gutter); }
+    .line[data-md]::before {
+      content: attr(data-md);
+      position: absolute; left: 0; width: calc(var(--gutter) - 1rem);
+      text-align: right;
+      font: 400 .78rem/1 var(--mono);
+      color: var(--ghost);
+      top: .62em;
+      user-select: none;
+    }
+    h2.line[data-md]::before { top: 1.05em; }
+
+    /* Top bar: the window title row of a document */
+    .bar {
+      display: flex; align-items: center; justify-content: space-between;
+      max-width: 1180px; margin: 0 auto; padding: 20px 24px;
+      font-size: 15px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-weight: 600; }
+    .brand img { width: 22px; height: 22px; }
+    .brand .file { font: 400 13px var(--mono); color: var(--muted); }
+    .bar nav { display: flex; gap: 22px; align-items: center; }
+    .bar nav a { color: var(--ink-2); text-decoration: none; }
+    .bar nav a:hover { color: var(--ink); text-decoration: underline; }
+    .bar nav .get { color: var(--paper); background: var(--ink); padding: 7px 14px; border-radius: 7px; text-decoration: none; font-weight: 600; }
+    .bar nav .get:hover { text-decoration: none; color: var(--paper); }
+
+    /* ---- Hero: the headline is a diff -------------------------------- */
+    .hero { padding: 72px 24px 0; max-width: 1180px; }
+    .diff-head {
+      font-family: var(--serif);
+      font-weight: 600;
+      font-size: clamp(1.75rem, .8rem + 2.75vw, 3.1rem);
+      line-height: 1.1;
+      letter-spacing: -0.022em;
+    }
+    .dl { position: relative; display: block; width: fit-content; max-width: 100%; padding: .12em .5em .16em var(--gutter); border-radius: 8px; }
+    .dl::before {
+      position: absolute; left: 0; width: calc(var(--gutter) - 1rem); text-align: right;
+      font: 500 .42em/1 var(--mono); top: .95em;
+    }
+    .dl.old { color: var(--muted); }
+    .dl.old::before { content: "−"; color: var(--del); }
+    .dl.old .t { text-decoration: line-through; text-decoration-color: var(--del); text-decoration-thickness: .055em; }
+    .dl.new { background: var(--add-bg); }
+    .dl.new::before { content: "+"; color: var(--add); }
+
+    /* One orchestrated moment: the old line strikes, the new line writes in. */
+    @media (prefers-reduced-motion: no-preference) {
+      .js .dl.old .t { text-decoration-color: transparent; animation: strike .5s .45s ease-out forwards; }
+      .js .dl.new { background: transparent; animation: band .35s 1.05s ease-out forwards; }
+      .js .dl.new::before { opacity: 0; animation: show .2s 1.05s forwards; }
+      .js .dl.new .t { display: inline-block; clip-path: inset(0 100% 0 0); animation: write 1.1s 1.1s steps(42, end) forwards; }
+      @keyframes strike { to { text-decoration-color: var(--del); } }
+      @keyframes band { to { background: var(--add-bg); } }
+      @keyframes show { to { opacity: 1; } }
+      @keyframes write { to { clip-path: inset(0 0 0 0); } }
+    }
+
+    .lede { margin-top: 30px; font-size: 1.22rem; line-height: 1.55; color: var(--ink-2); max-width: calc(54ch + var(--gutter)); }
+    .cta { margin-top: 30px; display: flex; flex-wrap: wrap; gap: 12px 22px; align-items: center; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 10px;
+      font: 600 16px var(--sans); text-decoration: none;
+      padding: 12px 20px; border-radius: 9px;
+      background: var(--ink); color: var(--paper);
+    }
+    .btn:hover { text-decoration: none; filter: brightness(1.15); }
+    .btn svg { width: 18px; height: 18px; }
+    .cta .alt { color: var(--ink-2); }
+    .facts { margin-top: 16px; font-size: 14.5px; color: var(--muted); max-width: none; }
+
+    .shot, .wide, .modes figure { margin: 56px auto 0; max-width: 1180px; padding: 0 24px; }
+    .wide, .modes figure { margin-top: 40px; }
+    .shot img, .wide img, .modes img { border-radius: 12px; box-shadow: var(--shot-shadow); border: 1px solid rgba(0, 0, 0, .25); }
+    figcaption { max-width: calc(var(--measure) + var(--gutter) * 2); margin: 14px auto 0; padding-left: var(--gutter); font-size: 15px; color: var(--muted); }
+
+    /* ---- Sections ---------------------------------------------------- */
+    section.doc { padding-top: 112px; }
+    h2.line {
+      font: 600 clamp(1.7rem, 1.1rem + 1.9vw, 2.45rem)/1.15 var(--serif);
+      letter-spacing: -0.015em;
+      margin-bottom: 18px;
+    }
+    h3.line { font: 600 1.18rem/1.3 var(--sans); margin: 42px 0 4px; }
+    p.line { max-width: calc(var(--measure) + var(--gutter)); color: var(--ink-2); }
+
+    /* Steps: a real sequence, so an ordered markdown list */
+    ol.steps { list-style: none; padding: 0; margin-top: 26px; display: grid; gap: 22px; }
+    ol.steps li { padding-left: var(--gutter); position: relative; max-width: calc(var(--measure) + var(--gutter)); }
+    ol.steps li::before {
+      content: counter(list-item) ".";
+      position: absolute; left: 0; width: calc(var(--gutter) - 1rem); text-align: right;
+      font: 400 .78rem/1 var(--mono); top: .55em; color: var(--ghost);
+    }
+    ol.steps b { display: block; color: var(--ink); font-weight: 600; }
+    ol.steps span { color: var(--ink-2); }
+
+    /* Reading | Full: the app's own control */
+    .seg { display: none; margin: 26px 0 0 var(--gutter); border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; background: var(--paper-2); }
+    .js .seg { display: inline-flex; }
+    .seg button { font: 500 15px var(--sans); padding: 7px 16px; border: 0; background: none; color: var(--muted); cursor: pointer; }
+    .seg button + button { border-left: 1px solid var(--rule); }
+    .seg button[aria-pressed="true"] { background: var(--paper); color: var(--ink); }
+    .js .modes figure:not(.on) { display: none; }
+    .modes figure { margin-top: 18px; max-width: calc(993px + 48px); }
+
+    /* Features: a plain markdown list, not a card grid */
+    ul.md { list-style: none; padding: 0; margin-top: 8px; }
+    ul.md li { position: relative; padding: 16px 0 16px var(--gutter); border-top: 1px solid var(--rule); max-width: calc(var(--measure) + var(--gutter)); }
+    ul.md li:last-child { border-bottom: 1px solid var(--rule); }
+    ul.md li::before { content: "-"; position: absolute; left: 0; width: calc(var(--gutter) - 1rem); text-align: right; font: 400 .78rem/1 var(--mono); top: 1.55em; color: var(--ghost); }
+    ul.md b { color: var(--ink); font-weight: 600; }
+    ul.md span { color: var(--ink-2); }
+
+    /* Agents: a small table, the way a README would list them */
+    .agents { margin: 18px 0 0 var(--gutter); border-collapse: collapse; font-size: 16px; width: min(var(--measure), calc(100% - var(--gutter))); }
+    .agents th, .agents td { text-align: left; padding: 10px 16px 10px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+    .agents th { font-weight: 600; color: var(--muted); font-size: 14px; }
+    .agents td:first-child { color: var(--ink); font-weight: 500; width: 34%; }
+    .agents td { color: var(--ink-2); }
+
+    blockquote.line { margin-top: 48px; color: var(--ink-2); font-family: var(--serif); font-size: 1.12rem; line-height: 1.6; max-width: calc(var(--measure) + var(--gutter)); }
+    blockquote.line::before { top: .7em; }
+
+    /* Download */
+    .dl-grid { margin: 26px 0 0 var(--gutter); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 40px; max-width: var(--measure); }
+    .dl-grid h3 { font: 600 1.05rem var(--sans); margin-bottom: 6px; }
+    .dl-grid p { font-size: 16px; color: var(--ink-2); }
+    .dl-grid p + p { margin-top: 6px; }
+    #download .cta { margin-left: var(--gutter); margin-top: 32px; }
+
+    footer.doc { margin-top: 128px; padding-top: 28px; padding-bottom: 56px; border-top: 1px solid var(--rule); }
+    footer .line { font-size: 15px; color: var(--muted); }
+
+    @media (max-width: 720px) {
+      :root { --gutter: 1.7rem; }
+      body { font-size: 17px; }
+      .line[data-md]::before, ol.steps li::before, ul.md li::before { font-size: .66rem; }
+      .bar nav a:not(.get) { display: none; }
+      .brand .file { display: none; }
+      .hero { padding-top: 36px; }
+      section.doc { padding-top: 80px; }
+      .dl-grid { grid-template-columns: 1fr; gap: 22px; }
+      .shot, .wide, .modes figure { padding: 0 12px; }
+      .agents td:first-child { width: auto; }
+    }
+  </style>
+  <link rel="stylesheet" href="assets/demo.css" />
+  <script>document.documentElement.classList.add('js');</script>
+  <script src="assets/demo.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="bar">
+    <a class="brand" href="#" aria-label="SparkDown home">
+      <img src="assets/logo.svg" alt="" width="22" height="22" />
+      SparkDown <span class="file">README.md</span>
+    </a>
+    <nav aria-label="Main">
+      <a href="#review">How it works</a>
+      <a href="#features">Features</a>
+      <a href="https://github.com/sparkdown/sparkdown">GitHub</a>
+      <a class="get" href="#download">Download</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <div class="hero doc">
+      <h1 class="diff-head" aria-label="Your agent writes. You read every change.">
+        <span class="dl old" aria-hidden="true"><span class="t">Your agent writes. You hope it was right.</span></span>
+        <span class="dl new" aria-hidden="true"><span class="t">Your agent writes. You read every change.</span></span>
+      </h1>
+      <p class="lede line">SparkDown is a small, local markdown editor for the files you and your AI agents write. Run the agent in a split terminal, watch its files change, and review each one in a single queue.</p>
+      <div class="cta line">
+        <a class="btn" href="#download">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M4 21h16"/></svg>
+          Download
+        </a>
+        <a class="alt" href="https://github.com/sparkdown/sparkdown">Source on GitHub</a>
+      </div>
+      <p class="facts line">For macOS on Apple Silicon and for Linux. About 4 MB installed on Mac. Free and open source (MIT).</p>
+    </div>
+
+    <figure class="demo-fig">
+      <div class="demo" data-demo="hero" role="img" aria-describedby="hero-demo-text"
+           aria-label="Animation of the SparkDown window: one document switches between Edit, Split, Preview and Diff, then the terminal drawer opens and splits into three panes."></div>
+      <p class="vh" id="hero-demo-text">A markdown document opens in Edit view. Command 2 shows it beside its live preview, Command 3 shows only the preview, and Command 4 shows the reading diff with a formatting-only hunk folded. Back in Split, Control backtick opens the terminal drawer, Command D splits it right and Command Shift D splits it down, so three terminals run git status, the diff stat and the log.</p>
+      <div class="demo-ctl"><button type="button" class="demo-btn" aria-label="Play the animation">Play</button></div>
+      <img class="demo-fallback" src="assets/screenshot.png" width="1280" height="800" loading="lazy" decoding="async"
+           alt="The SparkDown window: the file tree with modified files marked M, a markdown document beside its live preview, and three terminal panes below showing git status, the diff stat and the log."
+           onerror="this.hidden = true" />
+      <figcaption>One document in Edit, Split, Preview and Diff (<kbd>⌘1</kbd>–<kbd>⌘4</kbd>), then the terminal drawer (<kbd>⌃`</kbd>) split right and down.</figcaption>
+    </figure>
+
+    <section id="review" class="doc" aria-labelledby="review-h">
+      <h2 class="line" data-md="##" id="review-h">The review loop</h2>
+      <p class="line">Open the folder your agent works in. SparkDown follows the files on disk and keeps a list of what changed, so you read each change once and know what is left.</p>
+    </section>
+
+    <figure class="demo-fig loop">
+      <div class="demo loop" data-demo="loop" role="img" aria-describedby="loop-demo-text"
+           aria-label="Animation of the review loop: an agent edits four files, the Changes view lists them, and two are marked reviewed before the agent changes one of them again."></div>
+      <p class="vh" id="loop-demo-text">An agent in the terminal edits docs/search.md, src/indexer.ts and package-lock.json and writes notes/cache-decision.md. Each file flashes in the tree and gets an M or U badge, and the Changes badge counts the files worth reading. The Changes view shows 0 of 3 reviewed, the three files with their line counts, and package-lock.json folded under Probably noise. Space marks search.md reviewed and the down arrow moves on; after cache-decision.md is marked too, the count reads 2 of 3. Then the agent edits search.md again: it goes back to pending with a dot, and the count drops to 1 of 3.</p>
+      <div class="demo-ctl"><button type="button" class="demo-btn" aria-label="Play the animation">Play</button></div>
+    </figure>
+
+    <div class="doc">
+      <ol class="steps">
+        <li><b>Run the agent in a terminal.</b> <span>Claude Code, Codex, opencode or any other CLI runs in the terminal drawer. Split it right or down, up to four panes. With tmux, sessions survive a restart.</span></li>
+        <li><b>See what it changed.</b> <span>The Changes view lists every changed file with its line counts. Files worth reading come first; lockfiles and generated files fold into a "probably noise" group.</span></li>
+        <li><b>Mark it reviewed.</b> <span>Move with <kbd>↑</kbd> <kbd>↓</kbd> and press <kbd>Space</kbd> to mark a file reviewed. If the agent edits it again, it goes back to pending with a dot.</span></li>
+      </ol>
+    </div>
+
+    <figure class="wide">
+      <img src="assets/review.png" width="1280" height="352" loading="lazy" decoding="async"
+           alt="The Changes queue: 1 of 4 files reviewed with a progress meter, one file marked as changed again since it was reviewed, a checked file, line counts per file and a collapsed Probably noise group, next to the diff with a Mark reviewed button."
+           onerror="this.closest('figure').hidden = true" />
+      <figcaption>The real Changes view: one reviewed, one changed again since you looked, two still to read.</figcaption>
+    </figure>
+
+    <section class="doc" aria-labelledby="modes-h">
+      <h2 class="line" data-md="##" id="modes-h">Read the change, not the churn</h2>
+      <p class="line">The reading diff folds hunks that only reorder imports or reformat code, so what is left is the change itself. A moved block of code is never folded, because order can matter. Switch to Full to see everything.</p>
+      <div class="seg" role="group" aria-label="Diff mode">
+        <button type="button" data-mode="reading" aria-pressed="true">Reading</button>
+        <button type="button" data-mode="full" aria-pressed="false">Full</button>
+      </div>
+    </section>
+    <div class="modes">
+      <figure data-mode="reading" class="on">
+        <img src="assets/diff-reading.png" width="993" height="500" loading="lazy" decoding="async"
+             alt="Reading mode: one import-only hunk and one formatting-only hunk folded, leaving only the change that adds tags to the Entry type and to indexFile."
+             onerror="this.closest('figure').hidden = true" />
+        <figcaption>Reading: two hunks folded, one real change left.</figcaption>
+      </figure>
+      <figure data-mode="full">
+        <img src="assets/diff-full.png" width="993" height="500" loading="lazy" decoding="async"
+             alt="Full mode: the same diff with every hunk, including the reordered imports at the top."
+             onerror="this.closest('figure').hidden = true" />
+        <figcaption>Full: every hunk, including the reordered imports.</figcaption>
+      </figure>
+    </div>
+
+    <section id="features" class="doc" aria-labelledby="features-h">
+      <h2 class="line" data-md="##" id="features-h">What else it does</h2>
+      <ul class="md">
+        <li><b>Markdown that reads like a document.</b> <span>Live preview with Mermaid diagrams, math, tables and code highlighting. Each tab has its own view: Edit, Split, Preview or Diff (<kbd>⌘1</kbd>–<kbd>⌘4</kbd>).</span></li>
+        <li><b>Your agent can read the editor.</b> <span>A built-in MCP server lets agents in SparkDown's terminals see your open files, the line you are on, your selection and the git changes. Its one write tool edits the unsaved buffer, so you still review and save.</span></li>
+        <li><b>Remote folders over SSH.</b> <span>Pick a host from <code>~/.ssh/config</code>. Files, Changes and terminals all work on the remote folder, with your own keys.</span></li>
+        <li><b>Keyboard first.</b> <span><kbd>⌘P</kbd> finds a file, <kbd>⌘⇧P</kbd> runs any command, and the status bar keeps your word, character and line counts in view.</span></li>
+        <li><b>Small and native.</b> <span>About 4 MB on Mac. It uses the system web view instead of a bundled browser, and updates itself with signed releases.</span></li>
+      </ul>
+
+      <h3 class="line" data-md="###">Works with the agents you use</h3>
+      <table class="agents">
+        <thead><tr><th scope="col">Agent</th><th scope="col">How it gets SparkDown's tools</th></tr></thead>
+        <tbody>
+          <tr><td>Claude Code, Codex, opencode</td><td>Added for each session when you launch it. Nothing is written to their config.</td></tr>
+          <tr><td>Gemini CLI, Kiro, Grok</td><td>Asks once, then installs with the agent's own <code>mcp add</code>.</td></tr>
+          <tr><td>Cursor CLI, Antigravity</td><td>Asks once, then adds one entry to the agent's MCP config file.</td></tr>
+          <tr><td>Any other CLI</td><td>Gets a short prompt that points it at a context file.</td></tr>
+        </tbody>
+      </table>
+
+      <blockquote class="line" data-md="&gt;">
+        <p>Your files stay on your disk. There is no account and no telemetry, and SparkDown never calls an AI vendor's API. The only request it makes on its own is a check on GitHub for updates, at most once a day, with no identifier. You can turn it off in Settings.</p>
+      </blockquote>
+    </section>
+
+    <section id="download" class="doc" aria-labelledby="download-h">
+      <h2 class="line" data-md="##" id="download-h">Download</h2>
+      <p class="line">Free and open source under the MIT license. Every release is on GitHub.</p>
+      <div class="dl-grid">
+        <div>
+          <h3>macOS</h3>
+          <p>Apple Silicon, macOS 10.15 or later. A 3 MB disk image.</p>
+          <p>Not notarized yet: on first launch, right-click the app and choose Open.</p>
+        </div>
+        <div>
+          <h3>Linux</h3>
+          <p>x86_64 <code>.deb</code> (recommended) or AppImage. Tested on Wayland with Hyprland.</p>
+          <p>An AUR package is coming.</p>
+        </div>
+      </div>
+      <p class="line facts">Windows: a preview build is available. See <a href="https://github.com/sparkdown/sparkdown/blob/main/docs/windows.md">docs/windows.md</a> on GitHub.</p>
+      <div class="cta">
+        <a class="btn" href="https://github.com/sparkdown/sparkdown/releases/latest">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M4 21h16"/></svg>
+          Get the latest release
+        </a>
+        <a class="alt" href="https://github.com/sparkdown/sparkdown#build-from-source">Build from source</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="doc">
+    <p class="line">SparkDown is MIT licensed. <a href="https://github.com/sparkdown/sparkdown">GitHub</a>, <a href="https://github.com/sparkdown/sparkdown/blob/main/CHANGELOG.md">changelog</a>, <a href="https://github.com/sparkdown/sparkdown/blob/main/SECURITY.md">security</a>.</p>
+  </footer>
+
+  <script>
+    // Reading | Full toggle (without JS both screenshots show, stacked).
+    (() => {
+      const figs = document.querySelectorAll('.modes figure');
+      const btns = document.querySelectorAll('.seg button');
+      const set = (mode) => {
+        figs.forEach((f) => f.classList.toggle('on', f.dataset.mode === mode));
+        btns.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
+      };
+      btns.forEach((b) => b.addEventListener('click', () => set(b.dataset.mode)));
+    })();
+  </script>
+</body>
+</html>

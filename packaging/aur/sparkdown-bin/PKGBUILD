@@ -1,0 +1,42 @@
+# Maintainer: Paulo Vitor Justino Pereira
+# AUR-ready binary package. Submit upstream once a public GitHub Release for
+# sparkdown/sparkdown includes the .deb asset referenced below.
+#
+# This repackages the thin .deb release asset (system WebKitGTK), NOT the
+# AppImage: the AppImage is a portable bundle and must never land on PATH as
+# `sparkdown` (see README and scripts/install-linux.sh). We install the ELF
+# extracted from the .deb's data.tar as /usr/bin/sparkdown.
+#
+# The sha256sums below are for the v0.3.0 assets. On every release, regenerate
+# pkgver + the .deb checksum with:  bash scripts/update-pkgbuild.sh <version>
+# (scripts/release.sh runs it for you). Never commit 'SKIP' for the .deb.
+pkgname=sparkdown-bin
+pkgver=0.3.0
+pkgrel=1
+pkgdesc="Lightweight markdown editor (prebuilt Linux binary)"
+arch=('x86_64')
+url="https://github.com/sparkdown/sparkdown"
+license=('MIT')
+depends=('webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator')
+provides=('sparkdown')
+conflicts=('sparkdown')
+source=("sparkdown-${pkgver}.deb::https://github.com/sparkdown/sparkdown/releases/download/v${pkgver}/SparkDown_${pkgver}_amd64.deb"
+        "sparkdown.desktop"
+        "sparkdown.png")
+# .deb is an `ar` archive; let makepkg leave it alone and extract it ourselves.
+noextract=("sparkdown-${pkgver}.deb")
+sha256sums=('d1eb718cf37e991813a6ea35fe84a3689adeb98d780f6aa751f361fc36bb5874'
+            '103d3e669920c4db5651e70ca55a5e8be0d5a3b461f34eb12789113042a8b61a'
+            'bdb37ef07ca35c96cec411b7bb2491dbb3cc5173b98bf64fe6259ae239337557')
+options=(!strip)
+
+package() {
+  # The .deb is an `ar` archive carrying data.tar.{gz,xz,zst}. Stream that
+  # data tarball out and unpack it, then install the thin ELF it contains.
+  # bsdtar (libarchive) auto-detects the inner compression.
+  bsdtar -xOf "${srcdir}/sparkdown-${pkgver}.deb" 'data.tar*' \
+    | bsdtar -xf - -C "${srcdir}"
+  install -Dm755 "${srcdir}/usr/bin/sparkdown" "${pkgdir}/usr/bin/sparkdown"
+  install -Dm644 "${srcdir}/sparkdown.desktop" "${pkgdir}/usr/share/applications/sparkdown.desktop"
+  install -Dm644 "${srcdir}/sparkdown.png" "${pkgdir}/usr/share/icons/hicolor/128x128/apps/sparkdown.png"
+}

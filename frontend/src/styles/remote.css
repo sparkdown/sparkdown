@@ -1,0 +1,304 @@
+/* Remote-session dialog (#36). Same overlay shell as Settings. */
+
+.remote-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(2px);
+}
+
+.remote-dialog {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 24px 28px;
+  max-width: 460px;
+  width: 90vw;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3);
+  outline: none;
+}
+
+.remote-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 12px;
+}
+
+.remote-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.remote-close {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.remote-close:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg);
+}
+
+.remote-lead {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  margin: 0 0 16px;
+}
+
+.remote-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.remote-field select,
+.remote-field input {
+  font: inherit;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  padding: 8px 10px;
+}
+
+.remote-error {
+  font-size: 12.5px;
+  color: #e25c5c;
+  line-height: 1.4;
+  margin: 0 0 12px;
+}
+
+.remote-error.hidden {
+  display: none;
+}
+
+.remote-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.remote-btn {
+  padding: 8px 14px;
+  font-size: 13px;
+  font-family: var(--font-ui);
+  color: var(--fg);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--panel-radius, 8px);
+  cursor: pointer;
+}
+
+.remote-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+  font-weight: 550;
+}
+
+/* The status-bar host chip (#status-remote) is styled in statusbar.css. */
+
+/* Remote file picker (Open / Save As / Export while connected). Same overlay
+   shell as the remote-folder dialog; the listing uses sidebar colours so it
+   reads like the explorer in both themes. */
+.remote-picker {
+  max-width: 620px;
+  display: flex;
+  flex-direction: column;
+  max-height: 80vh;
+}
+
+.rp-host {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 600;
+  vertical-align: 2px;
+}
+
+.rp-bar {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.rp-up {
+  padding: 6px 10px;
+  line-height: 1;
+}
+
+.rp-up:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.rp-path,
+.rp-name,
+.rp-folder-name,
+.rp-filter {
+  font: inherit;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  padding: 7px 10px;
+}
+
+.rp-path {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.rp-new-folder {
+  white-space: nowrap;
+}
+
+.rp-folder-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.rp-folder-row.hidden {
+  display: none;
+}
+
+.rp-folder-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.rp-list {
+  flex: 1;
+  min-height: 180px;
+  height: 300px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--sidebar-bg, var(--bg-secondary));
+  padding: 4px 0;
+  outline: none;
+}
+
+.rp-list:focus-visible {
+  border-color: var(--accent);
+}
+
+.rp-list.rp-loading {
+  opacity: 0.6;
+}
+
+.rp-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 13px;
+  color: var(--fg);
+  cursor: default;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.rp-item:hover {
+  background: var(--sidebar-hover, var(--bg-tertiary));
+}
+
+.rp-item.selected {
+  background: var(--sidebar-active, var(--bg-tertiary));
+}
+
+.rp-list:focus .rp-item.selected {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.rp-icon {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.rp-dir .rp-icon {
+  color: var(--accent);
+}
+
+.rp-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rp-empty {
+  padding: 16px 12px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.rp-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 10px 0 12px;
+}
+
+.rp-hidden {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.rp-warning {
+  font-size: 12.5px;
+  color: #d18b1f;
+  line-height: 1.4;
+  margin: 0 0 12px;
+}
+
+.rp-warning.hidden {
+  display: none;
+}
+
+.remote-btn-primary.rp-danger {
+  background: #d9534f;
+  border-color: #d9534f;
+  color: #fff;
+}
+
+.remote-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

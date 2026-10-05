@@ -1,0 +1,529 @@
+/* Changes view + diff overlay (review queue: UI revamp
+   phase 5). The cockpit's "what did my agent change, and what have I read?"
+   surface: a git working-tree review queue in the sidebar and a rendered
+   unified diff over the editor area. */
+
+#changes-panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+#changes-panel.hidden {
+  display: none;
+}
+
+#changes-list {
+  outline: none;
+  padding-bottom: 10px;
+}
+
+#changes-list:focus-visible .change-row.current {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.changes-empty {
+  padding: 16px 14px;
+  font-size: 12px;
+  color: var(--text-subtle);
+  line-height: 1.6;
+}
+
+.changes-empty-inline {
+  padding: 10px 14px 4px;
+}
+
+/* --- Review summary: "3 / 7 reviewed", meter, key hints ---------------- */
+/* The one bold element of the view. */
+.changes-review {
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--border-light);
+  user-select: none;
+}
+
+.changes-review-top strong {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+
+.changes-review-top strong span {
+  color: var(--text-subtle);
+  font-weight: 400;
+}
+
+.changes-review-sub {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.changes-meter {
+  display: flex;
+  gap: 3px;
+  margin: 10px 0 8px;
+}
+
+.changes-meter i {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-tertiary);
+}
+
+.changes-meter i.done {
+  background: var(--syn-string);
+}
+
+.changes-meter i.now {
+  background: var(--accent);
+}
+
+.changes-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--text-subtle);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.changes-keys kbd {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  color: var(--text-muted);
+  background: var(--bg);
+}
+
+.changes-keys kbd + kbd {
+  margin-left: 2px;
+}
+
+/* --- Groups -------------------------------------------------------------- */
+
+.changes-group-h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.changes-group-count {
+  color: var(--text-subtle);
+}
+
+/* "Probably noise": generated/vendored files (lockfiles, dist/,
+   node_modules/…) fold into a collapsed group so the meaningful changes
+   read first. */
+.changes-noise-toggle {
+  width: 100%;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  text-align: left;
+}
+
+.changes-noise-toggle:hover {
+  color: var(--fg);
+}
+
+.changes-noise-caret {
+  display: grid;
+  place-items: center;
+  width: 10px;
+  color: var(--text-subtle);
+  transition: transform 0.12s;
+}
+
+.changes-noise-caret.open {
+  transform: rotate(90deg);
+}
+
+/* --- Rows ---------------------------------------------------------------- */
+
+.change-row {
+  display: grid;
+  grid-template-columns: 16px 12px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px 0 14px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--fg);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.change-row:hover {
+  background: var(--sidebar-hover);
+}
+
+.change-row.current {
+  background: var(--sidebar-active);
+}
+
+.change-check {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--text-subtle);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.change-check:hover {
+  border-color: var(--fg);
+}
+
+.change-row.reviewed .change-check {
+  background: var(--syn-string);
+  border-color: var(--syn-string);
+  color: var(--bg);
+}
+
+.change-badge {
+  width: 12px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* Status colors mapped onto the syntax palette so they read on both themes. */
+.change-modified { color: var(--syn-special); }
+.change-added { color: var(--syn-string); }
+.change-deleted { color: var(--syn-regexp); }
+.change-renamed { color: var(--syn-type); }
+.change-untracked { color: var(--syn-atom); }
+
+.change-file {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.change-name {
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.change-dir {
+  margin-left: 6px;
+  font-style: normal;
+  font-size: 11.5px;
+  color: var(--text-subtle);
+}
+
+/* Reviewed files recede (and sort after the pending ones). */
+.change-row.reviewed .change-name {
+  font-weight: 400;
+  color: var(--text-subtle);
+}
+
+/* Reviewed once, changed since: a small dot after the name. */
+.change-row.changed-again .change-name::after {
+  content: '';
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 6px;
+  vertical-align: 2px;
+  border-radius: 50%;
+  background: var(--syn-special);
+}
+
+.change-counts {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-subtle);
+}
+
+.change-adds { color: var(--syn-string); }
+.change-dels { color: var(--syn-regexp); }
+
+/* Rows inside the expanded noise group read as recessive. */
+.change-row-noise {
+  height: 24px;
+}
+
+.change-row-noise .change-name {
+  font-weight: 400;
+  color: var(--text-subtle);
+}
+
+/* --- Diff overlay ------------------------------------------------------- */
+
+#diff-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--editor-bg);
+  overflow: hidden;
+  /* Anchors the find widget (⌘F in the diff). */
+  position: relative;
+  outline: none;
+}
+
+#diff-view.hidden {
+  display: none;
+}
+
+#diff-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 8px 14px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-light);
+}
+
+#diff-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+#diff-title {
+  font-weight: 600;
+}
+
+#diff-meta {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--text-subtle);
+}
+
+#diff-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* Reading | Full: a segmented control, like the title bar's view control. */
+.diff-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+
+.diff-seg button {
+  padding: 3px 11px;
+  border: none;
+  background: none;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.diff-seg button + button {
+  border-left: 1px solid var(--border);
+}
+
+.diff-seg button:hover {
+  color: var(--fg);
+}
+
+.diff-seg button[aria-pressed='true'] {
+  background: var(--bg-tertiary);
+  color: var(--fg);
+}
+
+.diff-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.diff-btn[hidden] {
+  display: none;
+}
+
+.diff-btn:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+}
+
+.diff-btn:disabled {
+  color: var(--text-subtle);
+  cursor: default;
+}
+
+.diff-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+.diff-btn.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* Reviewed: a quiet button; hover offers the way back. */
+.diff-btn.primary.reviewed {
+  background: var(--bg);
+  border-color: var(--border);
+  color: var(--syn-string);
+}
+
+.diff-btn.primary.reviewed:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--border);
+  color: var(--fg);
+}
+
+.diff-review-undo {
+  display: none;
+}
+
+.diff-btn.reviewed:hover .diff-review-label {
+  display: none;
+}
+
+.diff-btn.reviewed:hover .diff-review-undo {
+  display: inline;
+}
+
+#diff-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 0 16px;
+}
+
+.diff-empty {
+  padding: 20px;
+  color: var(--text-subtle);
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+
+/* Placeholder standing in for import/formatting-only hunks folded away by
+   the reading diff. A seam, not content. */
+.diff-omitted {
+  margin: 14px 16px 0;
+  padding: 7px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  color: var(--text-subtle);
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+
+/* One-line explainer at the top of a reading diff when nothing was foldable
+   (Reading == Full), so the mode control doesn't look inert. */
+.diff-note {
+  padding: 10px 16px 0;
+  color: var(--text-subtle);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-style: italic;
+}
+
+/* One box per hunk: header (heading / @@ context · line, Open in editor). */
+.diff-hunk {
+  margin: 14px 16px 0;
+  border: 1px solid var(--border-light);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.diff-hunk-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 10px;
+  background: var(--bg-secondary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-subtle);
+}
+
+.diff-hunk-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.diff-open-line {
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  color: var(--preview-link);
+  cursor: pointer;
+}
+
+.diff-open-line:hover {
+  text-decoration: underline;
+}
+
+.diff-line {
+  position: relative;
+  padding: 0 10px 0 34px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 20px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--preview-fg);
+}
+
+.diff-mark {
+  position: absolute;
+  left: 12px;
+  color: var(--text-subtle);
+  user-select: none;
+}
+
+.diff-add {
+  background: color-mix(in srgb, var(--syn-string) 13%, transparent);
+}
+
+.diff-add .diff-mark {
+  color: var(--syn-string);
+}
+
+.diff-del {
+  background: color-mix(in srgb, var(--syn-regexp) 13%, transparent);
+  color: var(--text-muted);
+}
+
+.diff-del .diff-mark {
+  color: var(--syn-regexp);
+}
+
+.diff-meta {
+  color: var(--text-subtle);
+  font-style: italic;
+}

@@ -1,0 +1,163 @@
+/* Status bar. Left: the document path + unsaved dot, the git branch with
+   ahead/behind, the remote host chip and the agent tools (MCP) state. Right:
+   the update chip when one is ready, then the counts that stay exactly as
+   they were — words, chars, lines, Ln/Col, Wrap. */
+#status-bar {
+  display: flex;
+  align-items: stretch;
+  height: 26px;
+  padding: 0 4px;
+  background: var(--statusbar-bg);
+  border-top: 1px solid var(--border-light);
+  font-size: 12px;
+  color: var(--statusbar-fg);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+/* Every item fills the bar's height, so buttons get a full-height hover. */
+#status-bar > * {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+#status-bar > .hidden {
+  display: none;
+}
+
+.status-item {
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: default;
+}
+
+button.status-item:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg);
+}
+
+button.status-item:focus-visible {
+  outline: 2px solid var(--preview-link);
+  outline-offset: -2px;
+}
+
+.status-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Active file path. Truncates from the left so the file name stays visible;
+   click for copy options. The path absorbs all squeeze. */
+#status-bar > .status-path {
+  display: block;
+  align-self: center;
+  padding-right: 0;
+  max-width: 420px;
+  min-width: 0;
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* ellipsis on the left, keeping the file name visible */
+  text-align: left;
+  unicode-bidi: plaintext;
+}
+
+.status-path.clickable:hover {
+  color: var(--fg);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Unsaved dot, right after the path. Keeps its slot so the items after it
+   don't shift when a buffer becomes dirty. */
+#status-bar > .status-dirty {
+  padding: 0 6px 0 7px;
+}
+
+.status-dirty::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0;
+}
+
+.status-dirty.is-dirty::before {
+  opacity: 1;
+}
+
+.status-branch svg {
+  flex-shrink: 0;
+}
+
+/* Remote host chip: `ssh <host>`, outlined. Click → disconnect / switch. */
+.status-remote .status-remote-label {
+  display: block;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 8px;
+  line-height: 15px;
+}
+
+.status-remote:hover .status-remote-label {
+  border-color: var(--text-subtle);
+}
+
+/* Agent tools (MCP): green dot when on, hollow when off. */
+.status-agent-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1px solid var(--text-subtle);
+}
+
+.status-agent.is-on .status-agent-dot {
+  background: var(--syn-string);
+  border-color: var(--syn-string);
+}
+
+.status-spacer {
+  flex: 1 !important;
+  padding: 0 !important;
+}
+
+/* Update notice (updater.ts): a quiet chip, not a banner. */
+#status-bar > .status-update {
+  gap: 6px;
+  color: var(--fg);
+  max-width: 460px;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.status-update-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-update-btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-weight: 600;
+  line-height: 15px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  cursor: default;
+}
+
+.status-update-btn:hover {
+  background: var(--bg-tertiary);
+}

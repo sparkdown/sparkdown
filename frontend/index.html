@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SparkDown</title>
+  <script>
+    (function () {
+      var p = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+      var os = /mac/i.test(p) ? 'macos' : /win/i.test(p) ? 'windows' : 'linux';
+      document.documentElement.classList.add('os-' + os);
+      document.documentElement.dataset.os = os;
+    })();
+  </script>
+</head>
+<body>
+  <div id="app">
+    <!-- Title bar: window controls (macOS traffic lights sit in the left
+         inset; Windows/Linux get the app menu icon and caption buttons),
+         the tabs, the per-document view control and the terminal toggle.
+         Everything else is in the menus, the welcome screen and shortcuts. -->
+    <div id="toolbar" role="toolbar" aria-label="Title bar">
+      <div class="toolbar-start">
+        <button type="button" id="btn-app-menu" class="app-icon-btn" title="Menu" aria-label="Open menu" aria-haspopup="menu">
+          <img src="/app-icon.png" srcset="/app-icon.png 1x, /app-icon-2x.png 2x" width="20" height="20" alt="" draggable="false" />
+        </button>
+      </div>
+      <div class="tab-strip">
+        <div id="tab-bar" role="tablist" aria-label="Open files"></div>
+      </div>
+      <div class="toolbar-end">
+        <div id="view-mode" class="view-seg" role="group" aria-label="Document view" hidden>
+          <button type="button" data-view="edit" aria-pressed="false">Edit</button>
+          <button type="button" data-view="split" aria-pressed="false">Split</button>
+          <button type="button" data-view="preview" aria-pressed="false">Preview</button>
+          <button type="button" data-view="diff" aria-pressed="false">Diff</button>
+        </div>
+        <button id="btn-terminal" class="toolbar-btn off" title="Terminals (⌃`) · Terminals only: ⌃⇧`" aria-label="Toggle Terminal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="m7 9 3 3-3 3M12 15h5"/></svg></button>
+        <div class="toolbar-separator toolbar-separator-window" role="separator" aria-hidden="true"></div>
+        <div class="window-controls" aria-label="Window controls">
+          <button type="button" id="btn-window-min" class="window-control" title="Minimize" aria-label="Minimize">
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect y="4.25" width="10" height="1.5" rx="0.2" fill="currentColor"/></svg>
+          </button>
+          <button type="button" id="btn-window-max" class="window-control" title="Maximize" aria-label="Maximize">
+            <svg class="icon-maximize" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="1.2" y="1.2" width="7.6" height="7.6" rx="0.6" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+            <svg class="icon-restore" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.2" d="M2.4 3.2h4.4v4.4H2.4z"/><path fill="none" stroke="currentColor" stroke-width="1.2" d="M3.6 3.2V2.2h4.4v4.4H6.8"/></svg>
+          </button>
+          <button type="button" id="btn-window-close" class="window-control window-control-close" title="Close" aria-label="Close">
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div id="main-content">
+      <nav id="activity-bar" aria-label="Views">
+        <button type="button" id="act-files" class="activity-btn" data-view="files" aria-pressed="false" title="Files" aria-label="Files">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+        </button>
+        <button type="button" id="act-changes" class="activity-btn" data-view="changes" aria-pressed="false" title="Changes" aria-label="Changes">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="6" cy="6" r="2.2"/><circle cx="6" cy="18" r="2.2"/><circle cx="18" cy="9" r="2.2"/><path d="M6 8.2v7.6M18 11.2c0 4-6 2.8-11.2 5.3"/></svg>
+          <span id="changes-badge" class="activity-badge" hidden></span>
+        </button>
+        <button type="button" id="act-search" class="activity-btn" data-view="search" aria-pressed="false" title="Search in files" aria-label="Search in files">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></svg>
+        </button>
+        <span class="activity-spacer"></span>
+        <button type="button" id="act-remote" class="activity-btn" title="Open remote folder" aria-label="Open remote folder">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M8 20h8M12 16v4"/></svg>
+        </button>
+        <button type="button" id="act-settings" class="activity-btn" title="Settings" aria-label="Settings">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        </button>
+      </nav>
+      <nav id="sidebar" aria-label="Sidebar">
+        <section id="sidebar-files" class="sidebar-view" aria-label="Files">
+          <div id="sidebar-header" class="sidebar-head">
+            <h2 id="sidebar-title" class="sidebar-title">Files</h2>
+            <button type="button" id="btn-search-toggle" class="sidebar-icon-btn" aria-pressed="false" title="Filter files" aria-label="Filter files">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+            </button>
+            <button type="button" id="btn-toggle-hidden" class="sidebar-icon-btn" aria-pressed="false" title="Show hidden files" aria-label="Show hidden files">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/></svg>
+            </button>
+            <button type="button" id="btn-collapse-all" class="sidebar-icon-btn" title="Collapse all" aria-label="Collapse all">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m7 14 5-5 5 5"/></svg>
+            </button>
+          </div>
+          <div id="sidebar-filter" class="sidebar-field hidden">
+            <input id="sidebar-search-input" type="text" placeholder="Filter files" spellcheck="false" autocomplete="off" aria-label="Filter files" />
+          </div>
+          <div id="file-tree" role="tree" aria-label="Files"></div>
+        </section>
+        <section id="sidebar-changes" class="sidebar-view" aria-label="Changes" hidden>
+          <div class="sidebar-head">
+            <h2 class="sidebar-title">Changes</h2>
+            <button type="button" id="btn-changes-refresh" class="sidebar-icon-btn" title="Refresh" aria-label="Refresh changes">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>
+            </button>
+          </div>
+          <div id="changes-panel" role="region" aria-label="Changes">
+            <div id="changes-list"></div>
+          </div>
+        </section>
+        <section id="sidebar-search" class="sidebar-view" aria-label="Search in files" hidden>
+          <div class="sidebar-head">
+            <h2 class="sidebar-title">Search in files</h2>
+          </div>
+          <div class="sidebar-field">
+            <input id="search-input" type="search" placeholder="Search" spellcheck="false" autocomplete="off" aria-label="Search in files" />
+          </div>
+          <div id="search-status" class="search-status" role="status" aria-live="polite"></div>
+          <div id="search-results" class="search-results" role="tree" aria-label="Search results"></div>
+        </section>
+      </nav>
+      <div id="sidebar-resize-handle" class="resize-divider resize-divider--col" role="separator" aria-orientation="vertical" aria-label="Resize sidebar"></div>
+      <div id="center-column">
+      <div id="workspace">
+        <div id="diff-view" class="hidden" role="region" aria-label="File diff" tabindex="-1">
+          <div id="diff-header">
+            <div id="diff-path"><b id="diff-title"></b><span id="diff-meta"></span></div>
+            <div id="diff-controls">
+              <div id="diff-mode-toggle" class="diff-seg" role="group" aria-label="Diff detail">
+                <button type="button" id="diff-mode-reading" aria-pressed="true" title="Reading diff: import-only and formatting-only hunks folded">Reading</button><button type="button" id="diff-mode-full" aria-pressed="false" title="Full diff, verbatim">Full</button>
+              </div>
+              <button type="button" id="diff-prev" class="diff-btn" title="Previous file (↑)" aria-label="Previous file" hidden>↑</button>
+              <button type="button" id="diff-next" class="diff-btn" title="Next file (↓)" aria-label="Next file" hidden>↓</button>
+              <button type="button" id="diff-review" class="diff-btn primary" title="Mark reviewed (Space)" aria-pressed="false" hidden><span class="diff-review-label">Mark reviewed</span><span class="diff-review-undo" aria-hidden="true">Mark as pending</span></button>
+            </div>
+          </div>
+          <div id="diff-body"></div>
+        </div>
+        <div id="welcome" class="hidden" role="region" aria-label="Welcome">
+          <div id="welcome-inner">
+            <div id="welcome-mark" aria-hidden="true">
+              <!-- Official SparkDown bolt mark (from bolt-v5.svg), filled with
+                   the logo's own white→#ccc silver gradient. -->
+              <svg width="72" height="72" viewBox="0 0 512 512">
+                <defs>
+                  <linearGradient id="welcome-bolt-silver" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0" stop-color="#ffffff" />
+                    <stop offset="1" stop-color="#cccccc" />
+                  </linearGradient>
+                </defs>
+                <path fill="url(#welcome-bolt-silver)" d="M248.6 78.0 L350.6 78.0 Q358.6 78.0 354.6 84.9 L295.7 187.1 Q291.7 194.0 299.7 194.0 L375.7 194.0 Q383.7 194.0 379.7 200.9 L250.3 425.1 Q246.3 432.0 242.3 425.1 L176.4 310.9 Q172.4 304.0 180.4 304.0 L220.2 304.0 Q228.2 304.0 232.2 297.1 L240.3 282.9 Q244.3 276.0 236.3 276.0 L134.3 276.0 Q126.3 276.0 130.3 269.1 L236.6 84.9 Q240.6 78.0 248.6 78.0 Z" />
+              </svg>
+            </div>
+            <h1 id="welcome-title">SparkDown</h1>
+            <p id="welcome-tagline">The local home for the markdown you and your agents write.</p>
+            <div id="welcome-actions">
+              <button class="welcome-btn welcome-btn-primary" data-welcome="open-folder">Open Folder…</button>
+              <button class="welcome-btn" data-welcome="open-file">Open File…</button>
+              <button class="welcome-btn" data-welcome="new-file">New File</button>
+            </div>
+            <div id="welcome-recent" class="hidden">
+              <div class="welcome-recent-label">Recent folders</div>
+              <div id="welcome-recent-list"></div>
+            </div>
+            <div id="welcome-hint">Open a folder your agent is working in, then <kbd>⌃`</kbd> for a terminal.</div>
+          </div>
+          <!-- A folder is open but no file is: one centered prompt instead of
+               an empty editor + preview. -->
+          <div id="welcome-workspace" hidden>
+            <h1 id="welcome-workspace-title"></h1>
+            <p id="welcome-workspace-hint">Pick a file in the sidebar, or find one with <kbd id="welcome-workspace-key">⌘P</kbd>.</p>
+            <div class="welcome-workspace-actions">
+              <button class="welcome-btn welcome-btn-primary" data-welcome="quick-open">Find a File…</button>
+              <button class="welcome-btn" data-welcome="new-file">New File</button>
+            </div>
+          </div>
+        </div>
+        <div id="editor-area" role="main" aria-label="Editor workspace">
+        <div id="editor-container" role="textbox" aria-label="Markdown editor" aria-multiline="true">
+          <div id="md-toolbar" class="md-toolbar hidden" role="toolbar" aria-label="Markdown formatting">
+            <button class="md-btn" data-action="bold" title="Bold (⌘B)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 4h8a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/><path d="M6 12h9a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/></svg></button>
+            <button class="md-btn" data-action="italic" title="Italic (⌘I)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="4" x2="10" y2="4"/><line x1="14" y1="20" x2="5" y2="20"/><line x1="15" y1="4" x2="9" y2="20"/></svg></button>
+            <button class="md-btn" data-action="heading" title="Heading">H</button>
+            <span class="md-sep"></span>
+            <button class="md-btn" data-action="unordered-list" title="Bullet List"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="1" fill="currentColor"/><circle cx="4" cy="12" r="1" fill="currentColor"/><circle cx="4" cy="18" r="1" fill="currentColor"/></svg></button>
+            <button class="md-btn" data-action="ordered-list" title="Numbered List"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><text x="2" y="8" font-size="7" fill="currentColor" stroke="none">1</text><text x="2" y="14" font-size="7" fill="currentColor" stroke="none">2</text><text x="2" y="20" font-size="7" fill="currentColor" stroke="none">3</text></svg></button>
+            <span class="md-sep"></span>
+            <button class="md-btn" data-action="inline-code" title="Inline Code"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></button>
+            <button class="md-btn" data-action="code-block" title="Code Block"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="14 16 18 12 14 8"/><polyline points="10 8 6 12 10 16"/></svg></button>
+            <button class="md-btn" data-action="quote" title="Blockquote"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z"/></svg></button>
+            <button class="md-btn" data-action="link" title="Link"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></button>
+            <button class="md-btn" data-action="image" title="Image"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></button>
+            <button class="md-btn" data-action="table" title="Table"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/></svg></button>
+          </div>
+        </div>
+        <div id="resize-handle" class="resize-divider resize-divider--col" role="separator" aria-orientation="vertical" aria-label="Resize editor"></div>
+        <div id="preview-container" role="region" aria-label="Document preview">
+          <div id="preview-pane" class="preview-pane" aria-live="polite" aria-atomic="false"></div>
+        </div>
+        </div>
+      </div>
+        <div id="terminal-resize-handle" class="resize-divider resize-divider--row hidden" role="separator" aria-orientation="horizontal" aria-label="Resize terminal"></div>
+        <div id="terminal-panel" class="hidden" role="region" aria-label="Terminal">
+          <div id="terminal-host"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Status bar: workspace state on the left, the document counts
+         (words, chars, lines, Ln/Col, Wrap) on the right. -->
+    <div id="status-bar" role="status" aria-label="Editor status" aria-live="polite" aria-atomic="true">
+      <span id="status-path" class="status-path" title="Click for path options">No file open</span>
+      <i id="status-modified" class="status-dirty" aria-label="Saved"></i>
+      <span id="status-branch" class="status-item status-branch hidden"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7M18 10.5c0 4-7 3-11 5.5"/></svg><span class="status-branch-name"></span></span>
+      <button type="button" id="status-remote" class="status-item status-remote hidden" aria-haspopup="menu"><span class="status-remote-label"></span></button>
+      <button type="button" id="status-agent" class="status-item status-agent hidden"><i class="status-agent-dot" aria-hidden="true"></i><span class="status-agent-label">Agent tools</span></button>
+      <span class="status-spacer"></span>
+      <span id="status-update" class="status-update hidden"></span>
+      <span id="status-words" class="status-num" aria-label="Word count">0 words</span>
+      <span id="status-chars" class="status-num" aria-label="Character count">0 chars</span>
+      <span id="status-lines" class="status-num" aria-label="Line count">0 lines</span>
+      <button type="button" id="status-cursor" class="status-item status-num">Ln 1, Col 1</button>
+      <button type="button" id="status-wrap" class="status-item">Wrap: On</button>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=SparkDown
+Comment=Lightweight markdown editor
+Exec=sparkdown %F
+Icon=sparkdown
+Terminal=false
+Categories=Office;TextEditor;Development;
+MimeType=text/markdown;text/x-markdown;text/html;text/plain;application/json;application/xml;text/csv;image/svg+xml;
+StartupWMClass=sparkdown
+Keywords=markdown;editor;notes;

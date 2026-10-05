@@ -1,0 +1,407 @@
+#preview-pane {
+  flex: 1;
+  overflow-y: auto;
+  padding: 28px 32px 48px;
+  padding-right: 26px;
+  background: var(--preview-bg);
+  color: var(--preview-fg);
+  font-family: var(--font-preview);
+  font-size: 16px;
+  line-height: 1.75;
+}
+
+/* Editorial measure: cap line length for readability; the column centers
+   itself when the pane is wider than the measure. Everything markdown
+   renders into is a direct child of the pane. Scoped to markdown mode —
+   in html-mode the only child is the full-bleed preview iframe.
+
+   NOTE: no content-visibility here. It was tried for large-file open time
+   and didn't help, while its placeholder sizing made offsetTop estimates
+   wrong (breaking heading-anchored scroll sync) and caused blank-then-pop
+   jank as blocks materialized mid-scroll. */
+#preview-pane:not(.html-mode) > * {
+  max-width: 68ch;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.preview-empty-state {
+  min-height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 32px 48px;
+  color: var(--preview-blockquote-fg);
+  font-size: 14px;
+  letter-spacing: 0.01em;
+  text-align: center;
+}
+
+/* Preview scrollbar — styled to match editor custom scrollbar */
+#preview-pane::-webkit-scrollbar {
+  width: 10px;
+}
+
+#preview-pane::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#preview-pane::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background-clip: padding-box;
+}
+
+#preview-pane::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+  border: 1px solid transparent;
+  background-clip: padding-box;
+}
+
+/* HTML file preview — verbatim render inside a sandboxed iframe */
+/* HTML mode: pane is just a frame host — no markdown padding/scroll. */
+#preview-pane.html-mode {
+  padding: 0;
+  overflow: hidden;
+}
+
+#preview-pane iframe.html-preview-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
+}
+
+/* Floating JS toggle for HTML previews — mirrors the TOC trigger placement. */
+/* JS toggle for HTML previews. On/off is signaled by the JS logo's own
+   square only — the button chrome stays neutral. OFF = grayscale + dim
+   (the square reads gray); ON = the official yellow JS square lights up. */
+.preview-float-btn {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  width: 28px;
+  height: 28px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  z-index: 50;
+  /* OFF: dim so it reads as "not active". */
+  opacity: 0.55;
+  transition: opacity 0.15s;
+}
+
+.preview-float-btn.visible {
+  display: flex;
+}
+
+.preview-float-btn svg {
+  border-radius: 3px;
+  /* OFF: gray out the brand-yellow square. Removed when active. */
+  filter: grayscale(1);
+  transition: filter 0.15s;
+}
+
+.preview-float-btn:hover {
+  opacity: 0.85;
+}
+
+/* ON: only the logo's own yellow square lights up; button chrome unchanged. */
+.preview-float-btn.active {
+  opacity: 1;
+}
+
+.preview-float-btn.active svg {
+  filter: none;
+}
+
+/* Typography — editorial scale. Headings get generous top space (documents
+   breathe between sections), tight negative tracking at display sizes, and
+   a weight ramp instead of one flat 600. */
+#preview-pane h1,
+#preview-pane h2,
+#preview-pane h3,
+#preview-pane h4,
+#preview-pane h5,
+#preview-pane h6 {
+  margin-top: 1.9em;
+  margin-bottom: 0.55em;
+  line-height: 1.25;
+}
+
+/* First block flush with the pane top. */
+#preview-pane > :first-child {
+  margin-top: 0;
+}
+
+#preview-pane h1 {
+  font-size: 2.1em;
+  font-weight: 600;
+  letter-spacing: -0.021em;
+  line-height: 1.15;
+  border-bottom: 1px solid var(--border-light);
+  padding-bottom: 0.35em;
+}
+
+#preview-pane h2 {
+  font-size: 1.55em;
+  font-weight: 500;
+  letter-spacing: -0.014em;
+  border-bottom: 1px solid var(--border-light);
+  padding-bottom: 0.3em;
+}
+
+#preview-pane h3 {
+  font-size: 1.25em;
+  font-weight: 500;
+  letter-spacing: -0.008em;
+}
+
+#preview-pane h4 {
+  font-size: 1.05em;
+  font-weight: 500;
+}
+
+#preview-pane h5 {
+  font-size: 0.9em;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+#preview-pane h6 {
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+#preview-pane p {
+  margin-bottom: 1em;
+}
+
+#preview-pane a {
+  color: var(--preview-link);
+  /* Persistent underline so links read as links without hovering; offset and
+     thinned so prose stays clean. Hover deepens color + underline. */
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, var(--preview-link) 45%, transparent);
+  transition: color 0.1s, text-decoration-color 0.1s;
+}
+
+#preview-pane a:hover {
+  color: var(--preview-link-hover);
+  text-decoration-color: var(--preview-link-hover);
+}
+
+/* Lists */
+#preview-pane ul,
+#preview-pane ol {
+  margin-bottom: 16px;
+  padding-left: 2em;
+}
+
+#preview-pane li {
+  margin-bottom: 4px;
+}
+
+#preview-pane li > p {
+  margin-bottom: 4px;
+}
+
+/* Blockquotes — thinner rule, italic, roomier: an editorial pull-quote. */
+#preview-pane blockquote {
+  border-left: 3px solid var(--preview-blockquote-border);
+  margin: 1.4em auto;
+  padding: 2px 20px;
+  color: var(--preview-blockquote-fg);
+  font-style: italic;
+}
+
+#preview-pane blockquote code,
+#preview-pane blockquote pre {
+  font-style: normal;
+}
+
+#preview-pane blockquote p:last-child {
+  margin-bottom: 0;
+}
+
+/* Code */
+#preview-pane code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--preview-code-bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+#preview-pane pre {
+  background: var(--preview-code-bg);
+  padding: 16px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin-bottom: 16px;
+}
+
+#preview-pane pre code {
+  background: none;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Syntax highlighting (highlight.js token classes), mapped onto the same
+   --syn-* palette the CodeMirror editor uses so both panes match in every
+   theme. Class → token mapping follows highlight.js' CSS class reference. */
+#preview-pane .hljs-keyword,
+#preview-pane .hljs-selector-tag,
+#preview-pane .hljs-tag {
+  color: var(--syn-keyword);
+}
+
+#preview-pane .hljs-literal,
+#preview-pane .hljs-built_in,
+#preview-pane .hljs-symbol {
+  color: var(--syn-atom);
+}
+
+#preview-pane .hljs-number {
+  color: var(--syn-number);
+}
+
+#preview-pane .hljs-string,
+#preview-pane .hljs-char.escape_,
+#preview-pane .hljs-addition {
+  color: var(--syn-string);
+}
+
+#preview-pane .hljs-regexp,
+#preview-pane .hljs-deletion {
+  color: var(--syn-regexp);
+}
+
+#preview-pane .hljs-variable,
+#preview-pane .hljs-template-variable,
+#preview-pane .hljs-params {
+  color: var(--syn-variable-def);
+}
+
+#preview-pane .hljs-type,
+#preview-pane .hljs-class,
+#preview-pane .hljs-selector-class {
+  color: var(--syn-type);
+}
+
+#preview-pane .hljs-title,
+#preview-pane .hljs-title.class_,
+#preview-pane .hljs-name {
+  color: var(--syn-class);
+}
+
+#preview-pane .hljs-title.function_,
+#preview-pane .hljs-function {
+  color: var(--syn-special);
+}
+
+#preview-pane .hljs-attr,
+#preview-pane .hljs-attribute,
+#preview-pane .hljs-property,
+#preview-pane .hljs-selector-attr,
+#preview-pane .hljs-selector-id {
+  color: var(--syn-property-def);
+}
+
+#preview-pane .hljs-comment,
+#preview-pane .hljs-quote {
+  color: var(--syn-comment);
+  font-style: italic;
+}
+
+#preview-pane .hljs-meta,
+#preview-pane .hljs-doctag,
+#preview-pane .hljs-section {
+  color: var(--syn-meta);
+}
+
+#preview-pane .hljs-emphasis {
+  font-style: italic;
+}
+
+#preview-pane .hljs-strong {
+  font-weight: 600;
+}
+
+/* Tables */
+#preview-pane table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+#preview-pane th,
+#preview-pane td {
+  border: 1px solid var(--preview-table-border);
+  padding: 8px 12px;
+  text-align: left;
+}
+
+#preview-pane th {
+  background: var(--preview-table-header-bg);
+  font-weight: 600;
+}
+
+#preview-pane tr:nth-child(even) {
+  background: var(--bg-secondary);
+}
+
+/* Horizontal rule — a short centered stroke, not a page-wide divider. */
+#preview-pane hr {
+  border: none;
+  border-top: 1px solid var(--preview-hr);
+  width: 20%;
+  min-width: 96px;
+  margin: 2.4em auto;
+}
+
+/* Images */
+#preview-pane img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  margin: 8px 0;
+}
+
+/* Mermaid diagrams */
+#preview-pane .mermaid {
+  display: flex;
+  justify-content: center;
+  margin: 16px 0;
+  padding: 16px;
+  background: var(--preview-code-bg);
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+#preview-pane .mermaid svg {
+  max-width: 100%;
+}
+
+/* Checkbox lists (GFM) */
+#preview-pane input[type='checkbox'] {
+  margin-right: 6px;
+}
+
+/* Strikethrough */
+#preview-pane del {
+  color: var(--text-muted);
+}

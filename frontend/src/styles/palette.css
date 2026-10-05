@@ -1,0 +1,148 @@
+/* Quick open / command palette (palette.ts). Matches docs/ui-revamp/mockup.html
+   ("?pal=files", "?pal=cmds") with the Silver tokens. */
+
+.palette-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  background: rgba(10, 11, 14, 0.35);
+}
+
+.palette {
+  position: absolute;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(620px, calc(100vw - 32px));
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 24px 60px -18px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--fg);
+  outline: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .palette {
+    animation: palette-pop 0.14s ease-out;
+  }
+  @keyframes palette-pop {
+    from { opacity: 0; transform: translate(-50%, -6px); }
+    to { opacity: 1; transform: translate(-50%, 0); }
+  }
+}
+
+.pal-in {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-light);
+  font-size: 15px;
+}
+
+.pal-mode {
+  color: var(--text-subtle);
+}
+
+.pal-mode[hidden] {
+  display: none;
+}
+
+.pal-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  padding: 0;
+  caret-color: var(--fg);
+}
+
+.pal-input::placeholder {
+  color: var(--text-subtle);
+}
+
+.pal-list {
+  padding: 6px 0;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.pal-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 14px;
+  cursor: default;
+}
+
+.pal-item.sel {
+  background: var(--sidebar-active);
+}
+
+.pal-item .t {
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pal-item .t mark {
+  background: none;
+  color: var(--fg);
+  font-weight: 700;
+}
+
+.pal-item .t small {
+  color: var(--text-subtle);
+  margin-left: 8px;
+  font-size: 12px;
+}
+
+.pal-item .t small mark {
+  color: var(--text-muted);
+}
+
+.pal-item .k {
+  color: var(--text-subtle);
+  font-size: 12px;
+}
+
+.pal-item.disabled {
+  opacity: 0.45;
+}
+
+.pal-item.info .t {
+  color: var(--text-subtle);
+}
+
+.pal-foot {
+  display: flex;
+  gap: 14px;
+  padding: 7px 14px;
+  border-top: 1px solid var(--border-light);
+  color: var(--text-subtle);
+  font-size: 11.5px;
+}
+
+.pal-foot kbd {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  padding: 0 4px;
+  color: var(--text-muted);
+  background: var(--bg);
+}
+
+.pal-foot .pal-note {
+  margin-left: auto;
+}

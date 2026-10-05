@@ -1,0 +1,146 @@
+{
+  "productName": "SparkDown",
+  "version": "0.3.1",
+  "identifier": "com.sparkdown.editor",
+  "build": {
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../frontend/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "SparkDown",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 600,
+        "minHeight": 400,
+        "decorations": true,
+        "transparent": false,
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay",
+        "trafficLightPosition": {
+          "x": 12,
+          "y": 22
+        }
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: https://asset.localhost; script-src 'self'; frame-src 'self' asset: https://asset.localhost htmlpreview: htmlpreview://localhost",
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
+    },
+    "macOSPrivateApi": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "PearTree Forge LLC",
+    "copyright": "\u00a9 2026 PearTree Forge LLC",
+    "category": "DeveloperTool",
+    "homepage": "https://sparkdown.dev/",
+    "shortDescription": "A small markdown editor for you and your coding agents",
+    "longDescription": "SparkDown is a small, local markdown editor for the files you and your AI agents write. Run the agent in split terminals, watch its files change, and review each changed file in one queue with a diff that hides the noise.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "-"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "fileAssociations": [
+      {
+        "ext": [
+          "md",
+          "markdown",
+          "mkd"
+        ],
+        "mimeType": "text/markdown",
+        "description": "Markdown Document"
+      },
+      {
+        "ext": [
+          "html",
+          "htm"
+        ],
+        "mimeType": "text/html",
+        "description": "HTML Document"
+      },
+      {
+        "ext": [
+          "svg"
+        ],
+        "mimeType": "image/svg+xml",
+        "description": "SVG Image"
+      },
+      {
+        "ext": [
+          "csv"
+        ],
+        "mimeType": "text/csv",
+        "description": "CSV Document"
+      },
+      {
+        "ext": [
+          "json"
+        ],
+        "mimeType": "application/json",
+        "description": "JSON Document"
+      },
+      {
+        "ext": [
+          "yaml",
+          "yml"
+        ],
+        "mimeType": "application/yaml",
+        "description": "YAML Document"
+      },
+      {
+        "ext": [
+          "txt",
+          "log"
+        ],
+        "mimeType": "text/plain",
+        "description": "Text Document"
+      },
+      {
+        "ext": [
+          "xml"
+        ],
+        "mimeType": "application/xml",
+        "description": "XML Document"
+      },
+      {
+        "ext": [
+          "toml",
+          "toon",
+          "ini",
+          "cfg",
+          "conf",
+          "env",
+          "properties",
+          "tsv"
+        ],
+        "mimeType": "text/plain",
+        "description": "Config / Data File"
+      }
+    ]
+  }
+}

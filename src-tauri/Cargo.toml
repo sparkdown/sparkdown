@@ -1,0 +1,70 @@
+[package]
+name = "sparkdown"
+version = "0.3.1"
+edition = "2021"
+description = "A small, local markdown editor for you and your coding agents"
+authors = ["Paulo Vitor Justino Pereira"]
+license = "MIT"
+repository = "https://github.com/sparkdown/sparkdown"
+homepage = "https://sparkdown.dev/"
+readme = "../README.md"
+keywords = ["markdown", "editor", "tauri", "mcp", "ai-agents"]
+categories = ["text-editors", "development-tools"]
+publish = false
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api", "protocol-asset"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+# preserve_order: keep key order when SparkDown edits a user's JSON file
+# (the one Cursor entry in ~/.cursor/mcp.json). indexmap is already in the
+# tree via tauri, so this adds no new crate.
+serde_json = { version = "1", features = ["preserve_order"] }
+tauri-plugin-drag = "2"
+tauri-plugin-window-state = "2"
+thiserror = "2"
+# Agent-cockpit (feat/agent-cockpit): embedded terminal + live file watching.
+portable-pty = "0.9"
+notify = "8"
+# Auto-update signature check (minisign, as written by `tauri signer sign`).
+# Pure Rust, no dependencies. Downloads use the system curl (updates.rs), so
+# the app carries no HTTP/TLS stack.
+minisign-verify = "0.2"
+
+# macOS: install an applicationShouldTerminate: delegate hook so dock/menu
+# Quit can be intercepted (tao doesn't implement it). objc2 is already in the
+# tree via tauri; pin to the resolved versions.
+# Windows: std has no local-socket listener, so the MCP transport uses a named
+# pipe via `interprocess` (Windows-only dep; the Unix build stays std-only).
+# windows-sys + widestring (both already in the tree via interprocess, same
+# versions) build the pipe's per-user security descriptor: the current
+# user's SID from the process token, as SDDL.
+[target.'cfg(windows)'.dependencies]
+interprocess = "2"
+widestring = "1"
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Threading",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder"] }
+objc2-foundation = "0.3"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+# Tests only: sign fake update artifacts with a throwaway key made in-test.
+minisign = "0.7"
+ts-rs = "12"
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "z"
+codegen-units = 1
+panic = "abort"

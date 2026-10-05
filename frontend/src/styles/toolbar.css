@@ -1,0 +1,227 @@
+/* Title bar: window controls · tabs · the per-document view control · the
+   terminal toggle. Nothing else lives here (New / Open / Save / theme / wrap
+   are in the menus, the welcome screen and the shortcuts). */
+#toolbar {
+  display: flex;
+  align-items: stretch;
+  box-sizing: border-box;
+  height: 38px;
+  padding: 0;
+  background: var(--toolbar-bg);
+  border-bottom: 1px solid var(--border-light);
+  user-select: none;
+  flex-shrink: 0;
+}
+
+/* macOS overlay title bar: leave room for the native traffic lights. */
+html.os-macos #toolbar {
+  padding-left: 80px;
+}
+
+/* Fullscreen hides traffic lights — reclaim the gutter so chrome is full-width. */
+html.os-macos.is-fullscreen #toolbar {
+  padding-left: 8px;
+}
+
+html.os-macos .app-icon-btn,
+html.os-macos .window-controls,
+html.os-macos .toolbar-separator-window {
+  display: none;
+}
+
+.toolbar-start,
+.toolbar-end {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+/* Win/Linux frameless chrome: the app icon (menu) where traffic lights
+   would sit, caption buttons flush with the right edge. */
+html:not(.os-macos) .toolbar-start {
+  padding: 0 6px 0 8px;
+}
+
+.toolbar-end {
+  gap: 10px;
+  padding-left: 12px;
+  align-self: stretch;
+}
+
+/* macOS has no caption buttons: keep the terminal toggle off the edge. */
+html.os-macos .toolbar-end {
+  padding-right: 12px;
+}
+
+.app-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: default;
+  flex-shrink: 0;
+}
+
+.app-icon-btn:hover {
+  background: var(--bg-tertiary);
+}
+
+.app-icon-btn img {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  display: block;
+}
+
+.window-controls {
+  display: flex;
+  align-items: stretch;
+  align-self: stretch;
+  flex-shrink: 0;
+}
+
+.window-control {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  cursor: default;
+  padding: 0;
+}
+
+.window-control:hover {
+  background: var(--bg-tertiary);
+}
+
+.window-control:active {
+  background: var(--border);
+}
+
+.window-control-close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
+.window-control-close:active {
+  background: #bf0f1d;
+  color: #fff;
+}
+
+.window-control .icon-restore {
+  display: none;
+}
+
+.window-control.is-maximized .icon-maximize {
+  display: none;
+}
+
+.window-control.is-maximized .icon-restore {
+  display: block;
+}
+
+/* File-tab strip layout lives in tabs.css. */
+
+/* Per-document view control: Edit | Split | Preview | Diff (⌘1–⌘4). */
+.view-seg {
+  display: inline-flex;
+  align-self: center;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+
+.view-seg[hidden] {
+  display: none;
+}
+
+.view-seg button {
+  background: none;
+  border: none;
+  padding: 3px 11px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.view-seg button + button {
+  border-left: 1px solid var(--border);
+}
+
+.view-seg button:hover {
+  color: var(--fg);
+}
+
+.view-seg button[aria-pressed='true'] {
+  background: var(--bg-tertiary);
+  color: var(--fg);
+}
+
+.view-seg button[aria-disabled='true'] {
+  color: var(--text-subtle);
+  opacity: 0.55;
+}
+
+.view-seg button:focus-visible {
+  outline: 2px solid var(--preview-link);
+  outline-offset: -2px;
+}
+
+/* Icon buttons (the terminal toggle). */
+.toolbar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  width: 28px;
+  height: 26px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: default;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.toolbar-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg);
+}
+
+.toolbar-btn:active {
+  background: var(--border);
+}
+
+/* The terminal toggle reads as pressed while the terminals are shown
+   (cockpit.ts adds .off while they are hidden). */
+#btn-terminal:not(.off) {
+  background: var(--bg-tertiary);
+  color: var(--fg);
+}
+
+.toolbar-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.toolbar-separator {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  flex-shrink: 0;
+  align-self: center;
+}

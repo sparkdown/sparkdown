@@ -1,0 +1,241 @@
+/* Title bar file tabs: square cards on the bar's bottom edge. Inactive tabs
+   use the tab surface; the active one takes the editor surface and a hairline
+   border so it reads as the sheet being edited. */
+
+.tab-strip {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+}
+
+#tab-bar {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  padding-top: 5px;
+  height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+  /* Side fades when the strip can scroll; variables flip on in JS. */
+  --fade-left: 0px;
+  --fade-right: 0px;
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 var(--fade-left),
+    #000 calc(100% - var(--fade-right)),
+    transparent 100%
+  );
+}
+
+#tab-bar::-webkit-scrollbar {
+  display: none;
+}
+
+#tab-bar.overflow-left {
+  --fade-left: 20px;
+}
+
+#tab-bar.overflow-right {
+  --fade-right: 20px;
+}
+
+/* Quiet end-caps: only the direction that still has tabs. Sit in the
+   toolbar row (not over the hanging folder) so they don't fight the
+   editor-continuation look. */
+.tab-scroll-btn {
+  position: absolute;
+  top: 6px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--toolbar-bg) 82%, transparent);
+  color: var(--text-muted);
+  cursor: default;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+
+.tab-scroll-btn:hover {
+  color: var(--fg);
+  background: var(--tab-hover-bg);
+}
+
+.tab-scroll-btn.is-left {
+  left: 0;
+}
+
+.tab-scroll-btn.is-right {
+  right: 0;
+}
+
+.tab-strip.overflow-left .tab-scroll-btn.is-left,
+.tab-strip.overflow-right .tab-scroll-btn.is-right {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.tab-scroll-btn svg {
+  display: block;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px 0 12px;
+  height: 33px;
+  background: var(--tab-bg);
+  border: 1px solid transparent;
+  border-bottom: none;
+  cursor: default;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  /* Sized to the title up to the max; below the min the strip scrolls
+     instead of crushing titles into unreadability. */
+  flex: 0 1 auto;
+  min-width: 86px;
+  max-width: 210px;
+  transition: background 0.15s, color 0.15s;
+  user-select: none;
+  position: relative;
+}
+
+.tab:hover {
+  background: var(--tab-hover-bg);
+  color: var(--fg);
+}
+
+.tab.active {
+  background: var(--tab-active-bg);
+  color: var(--fg);
+  border-color: var(--border-light);
+}
+
+/* Remote tabs name their host, small and subtle, after the title. */
+.tab-host {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-subtle);
+}
+
+.tab-host[hidden] {
+  display: none;
+}
+
+.tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0; /* allow the title to ellipsize before the dot/close */
+}
+
+/* Leading ± glyph on a diff tab, marking it as a read-only review view. */
+.tab-diff-icon {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1;
+}
+
+.tab-modified-dot {
+  color: var(--accent);
+  font-size: 10px;
+  flex-shrink: 0;
+  /* Accent glow effect */
+  text-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
+/* Ease the dot in when a buffer first becomes dirty. */
+@media (prefers-reduced-motion: no-preference) {
+  .tab-modified-dot {
+    animation: dot-in 0.18s ease-out;
+  }
+
+  @keyframes dot-in {
+    from {
+      opacity: 0;
+      transform: scale(0.4);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+}
+
+.tab-close {
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-subtle);
+  cursor: pointer;
+  padding: 0 2px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.tab:hover .tab-close,
+.tab.active .tab-close {
+  opacity: 1;
+}
+
+.tab-close:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg);
+}
+
+/* Full name for a truncated tab title. pointer-events none so it never
+   steals hover or window-drag. */
+.tab-tip {
+  position: fixed;
+  z-index: 4000;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  line-height: 1.3;
+  color: var(--fg);
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--panel-shadow, 0 8px 24px -10px rgba(0, 0, 0, 0.45));
+  pointer-events: none;
+  white-space: nowrap;
+  max-width: min(360px, calc(100vw - 16px));
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tab-tip {
+    animation: tab-tip-in 0.12s ease-out;
+  }
+
+  @keyframes tab-tip-in {
+    from { opacity: 0; transform: translateY(-2px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
+
+/* Unsaved edits AND the file changed on disk: warn-colored dot. */
+.tab.tab-conflict .tab-modified-dot {
+  color: var(--warning, #d29922);
+  text-shadow: none;
+}

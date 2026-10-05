@@ -1,0 +1,157 @@
+/* VS Code / Kiro-style floating search widget (see search-panel.ts).
+   The CodeMirror panel host is made transparent and non-blocking so our
+   widget can float in the top-right corner, sized to its own content. */
+.cm-panels {
+  background: transparent !important;
+  border: none !important;
+  color: var(--fg) !important;
+}
+.cm-panels.cm-panels-bottom {
+  position: absolute !important;
+  bottom: 0 !important;
+  right: 0 !important;
+  left: auto !important;
+  top: auto !important;
+  width: auto !important;
+  z-index: 45;
+  pointer-events: none; /* let editor clicks through the empty host area */
+}
+
+/* The widget itself */
+.sd-find {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  margin: 0 14px 10px 0;
+  padding: 4px 6px 4px 2px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px -4px rgba(0, 0, 0, 0.45);
+  font-family: var(--font-sans);
+}
+
+/* Preview variant floats in the bottom-right of #preview-container. */
+.sd-find-preview {
+  position: absolute;
+  bottom: 10px;
+  right: 14px;
+  margin: 0;
+  z-index: 50;
+}
+
+/* Active preview match (markdown div case — iframe uses inline styles). */
+mark.sd-phit { background: #f5c518; color: #000; border-radius: 2px; }
+mark.sd-phit-active { background: #ff9632; }
+
+/* Left chevron column (expand/collapse replace) */
+.sd-find-chevron {
+  width: 18px;
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: default;
+  flex-shrink: 0;
+}
+.sd-find-chevron:hover { background: var(--bg-tertiary); color: var(--fg); }
+
+.sd-find-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sd-find-row {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* Replace row hidden until expanded */
+.sd-find-replace { display: none; }
+.sd-find.expanded .sd-find-replace { display: flex; }
+
+/* Input + inline tools share one bordered box, like VS Code */
+.sd-find-inputwrap {
+  display: flex;
+  align-items: center;
+  width: 220px;
+  height: 26px;
+  background: var(--editor-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 3px 0 0;
+}
+.sd-find-inputwrap:focus-within { border-color: var(--accent); }
+
+.sd-find-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 8px;
+  font-size: 13px;
+  font-family: var(--font-sans);
+  color: var(--fg);
+  background: transparent;
+  border: none;
+  outline: none;
+}
+.sd-find-input::placeholder { color: var(--text-subtle); }
+
+/* Toggles inside the input box */
+.sd-find-intools { display: flex; align-items: center; gap: 1px; flex-shrink: 0; }
+.sd-find-mini {
+  width: 22px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  cursor: default;
+}
+.sd-find-mini svg { width: 13px; height: 13px; }
+/* Whole-word toggle: underlined "ab" (matches the "Aa" case toggle's text style) */
+.sd-find-mini-word { text-decoration: underline; text-underline-offset: 2px; }
+.sd-find-mini:hover { background: var(--bg-tertiary); color: var(--fg); }
+.sd-find-mini.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+/* "N of M" counter */
+.sd-find-count {
+  flex-shrink: 0;
+  min-width: 52px;
+  padding: 0 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.sd-find-noresults { color: var(--syn-invalid); }
+
+/* Nav / action icon buttons */
+.sd-find-icon {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: default;
+}
+.sd-find-icon:hover { background: var(--bg-tertiary); color: var(--fg); }

@@ -1,0 +1,292 @@
+/* Settings modal. Same overlay/dialog shell as the
+   shortcuts dialog, with switch-style toggle rows. */
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(2px);
+}
+
+.settings-dialog {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 24px 28px;
+  max-width: 460px;
+  width: 90vw;
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3);
+  /* We focus the dialog on open (so Escape works immediately) — suppress the
+     default focus ring that focusing draws around the whole modal. */
+  outline: none;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 18px;
+}
+
+.settings-header h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+/* Close (×) button in the dialog header. */
+.settings-close {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.settings-close:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg);
+}
+
+.settings-section h3 {
+  margin: 0 0 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--fg-muted);
+}
+
+.settings-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 10px 0;
+  cursor: pointer;
+}
+
+.settings-row-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-row-label {
+  font-size: 13px;
+  color: var(--fg);
+  margin-bottom: 3px;
+}
+
+.settings-row-desc {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+/* Install / Remove button for MCP agent connections. */
+.settings-btn {
+  flex-shrink: 0;
+  align-self: center;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  color: var(--fg);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.settings-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.settings-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Single-line text input (per-agent launch flags). */
+.settings-text {
+  flex-shrink: 0;
+  width: 200px;
+  margin: 1px 0 0;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-family: var(--mono, monospace);
+  color: var(--fg);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.settings-text:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Checkbox rendered as a pill switch. */
+.settings-switch {
+  appearance: none;
+  -webkit-appearance: none;
+  flex-shrink: 0;
+  margin: 2px 0 0;
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.settings-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform 0.15s, background 0.15s;
+}
+
+.settings-switch:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.settings-switch:checked::after {
+  transform: translateX(14px);
+  background: var(--bg);
+}
+
+.settings-hint {
+  margin: 18px 0 0;
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-align: center;
+}
+
+/* Primary action button (the MCP install prompt's Install / Continue). */
+.settings-btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+  font-weight: 600;
+}
+
+.settings-btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* "Give <Agent> SparkDown's tools?" prompt at agent launch
+   (mcp-install-prompt.ts): the settings shell, smaller. */
+.mcp-prompt {
+  max-width: 400px;
+  padding: 20px 22px 18px;
+}
+
+.mcp-prompt-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.mcp-prompt-body {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.mcp-prompt-never {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.mcp-prompt-never[hidden] {
+  display: none;
+}
+
+.mcp-prompt-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.mcp-prompt-status[hidden] {
+  display: none;
+}
+
+.mcp-prompt-spinner {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  margin-top: 1px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .mcp-prompt-spinner {
+    animation: mcp-prompt-spin 0.8s linear infinite;
+  }
+}
+
+@keyframes mcp-prompt-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.mcp-prompt-status.is-error {
+  color: var(--fg);
+}
+
+.mcp-prompt-status.is-error .mcp-prompt-spinner {
+  display: none;
+}
+
+.mcp-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.mcp-prompt-actions .settings-btn[hidden] {
+  display: none;
+}

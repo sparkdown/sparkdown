@@ -1,0 +1,165 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: CI only reads the code. No job here writes to the repo.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Third-party (and actions/*) actions are pinned to full commit SHAs with a
+# version comment. Dependabot's github-actions updater (.github/dependabot.yml)
+# bumps both the SHA and the comment. Do not switch back to mutable tags.
+jobs:
+  frontend:
+    name: Frontend (typecheck, tests, audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.2"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Unit tests
+        run: npm test
+      - name: Production build
+        # tsc and vitest don't compile CSS or bundle — a broken @import once
+        # reached main invisibly. Build what tauri build would build.
+        run: npm run build
+      - name: Dependency audit
+        # Retry transient npm registry 503s (seen twice on #66). Still fails
+        # the job on real high-severity findings after a successful audit run.
+        run: |
+          set -euo pipefail
+          attempt=1
+          max=3
+          until npm audit --audit-level=high; do
+            status=$?
+            if [ "$attempt" -ge "$max" ]; then
+              exit "$status"
+            fi
+            echo "npm audit failed (exit $status); retry $attempt/$max in 15s"
+            attempt=$((attempt + 1))
+            sleep 15
+          done
+
+  rust:
+    name: Rust (fmt, clippy, tests) — Linux
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
+            build-essential curl wget file libssl-dev
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          # Pinned by SHA, so the channel can't be read from the ref — name it.
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+      - name: Format check
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test
+
+  rust-windows:
+    # Name kept as is: branch protection may require this check by name.
+    name: Rust (check) — Windows
+    # Windows-only code (interprocess named-pipe MCP transport in mcp.rs,
+    # the PowerShell agent launch in terminal.rs) never compiles on
+    # Linux/macOS. cargo check (not clippy) keeps this cheap and avoids
+    # failing on lints we can't reproduce locally; it still catches the
+    # compile errors that matter for the Windows paths.
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+      - name: Check
+        run: cargo check --all-targets
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # The smoke tests' fake agent CLIs are node scripts behind
+          # npm-style .cmd / .ps1 shims, like the real agents.
+          node-version: "22.22.2"
+      - name: Windows tests (terminal, context, mcp)
+        # The modules with Windows-only behavior: the named-pipe MCP
+        # transport (per-user DACL, first-instance flag), PATH + PATHEXT agent
+        # detection, and agent launch. The smoke tests run every agent-chip
+        # launch line (tests-fixtures/windows-launch-cases.json) through a
+        # real ConPTY in pwsh 7 and Windows PowerShell 5.1 against npm-style
+        # fake agents, and `mcp add` through .cmd / .ps1 shims, and check
+        # what arrived. SPARKDOWN_WIN_SMOKE turns "node or pwsh missing" from
+        # a skip into a failure.
+        env:
+          SPARKDOWN_WIN_SMOKE: "1"
+        run: "cargo test -- terminal:: context:: mcp:: --show-output"
+      - name: Parse scripts/package-windows.ps1
+        # Syntax check only (seconds), in both PowerShell 7 and Windows
+        # PowerShell 5.1. The full build runs in windows-package.yml.
+        working-directory: .
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $check = {
+            $tokens = $null; $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path 'scripts/package-windows.ps1').Path, [ref]$tokens, [ref]$errors)
+            if ($errors) { $errors | ForEach-Object { Write-Output "$_" }; exit 1 }
+            Write-Output "OK: PowerShell $($PSVersionTable.PSVersion)"
+          }
+          & $check
+          # Same check in Windows PowerShell 5.1, from a temp file (-File:
+          # no argument quoting, and no CLIXML noise as with -EncodedCommand).
+          $tmp = Join-Path $env:RUNNER_TEMP 'parse-check.ps1'
+          Set-Content -Path $tmp -Value $check.ToString() -Encoding ASCII
+          powershell.exe -NoProfile -NonInteractive -File $tmp
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+  cargo-audit:
+    name: Rust dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+        working-directory: src-tauri

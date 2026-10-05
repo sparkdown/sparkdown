@@ -1,0 +1,425 @@
+/* #sidebar layout (size, visibility) is defined in main.css; the activity
+   bar left of it lives in activity.css. This file styles the sidebar's
+   views: Files (the explorer), Changes and Search in files. Sizes follow
+   docs/ui-revamp/mockup.html. */
+
+.sidebar-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-view[hidden] {
+  display: none;
+}
+
+/* View header: title + icon buttons. */
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 8px 0 14px;
+  border-bottom: 1px solid var(--border-light);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.sidebar-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-icon-btn {
+  width: 26px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.sidebar-icon-btn svg {
+  display: block;
+}
+
+.sidebar-icon-btn:hover,
+.sidebar-icon-btn[aria-pressed='true'] {
+  background: var(--bg-tertiary);
+  color: var(--fg);
+}
+
+.sidebar-icon-btn:focus-visible,
+.sidebar-field:focus-within {
+  outline: 2px solid var(--preview-link);
+  outline-offset: 1px;
+}
+
+/* A text field under the header (file filter, search query). */
+.sidebar-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 10px 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  flex-shrink: 0;
+}
+
+.sidebar-field.hidden {
+  display: none;
+}
+
+.sidebar-field input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.sidebar-field input::placeholder {
+  color: var(--text-subtle);
+}
+
+.sidebar-field input::-webkit-search-cancel-button {
+  display: none;
+}
+
+#file-tree {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0 10px;
+  /* Isolate the scroll container's layout/paint (not size — it's a flex child). */
+  contain: layout paint;
+}
+
+/* Virtualized tree: spacer holds full scroll height; only visible rows are
+   mounted into the absolutely-positioned row layer. */
+.tree-spacer {
+  position: relative;
+  width: 100%;
+}
+.tree-rowlayer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+/* Tree rows — fixed 24px height (must match ROW_H in file-tree.ts). Left
+   padding is set inline per depth (file-tree.ts rowIndent). */
+.tree-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding-right: 10px;
+  font-size: 13px;
+  cursor: default;
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+  color: var(--text-muted);
+  /* WebKitGTK paints a native selected-row (accent bar) on :focus that
+     looked identical to the watcher flash (#27). Kill the UA highlight. */
+  -webkit-tap-highlight-color: transparent;
+  outline: none;
+}
+
+.tree-item:hover,
+.tree-item:focus,
+.tree-item:focus-visible {
+  background: var(--sidebar-hover);
+  outline: none;
+}
+
+.tree-item.directory .tree-name,
+.tree-item.tree-open .tree-name {
+  color: var(--fg);
+}
+
+/* The file in the editor (tab focus). Background only — NEVER the inset
+   accent bar, which is reserved for the watcher flash so the two signals
+   cannot collapse. */
+.tree-item.tree-current {
+  background: var(--sidebar-active);
+}
+
+.tree-item.tree-current .tree-name {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+/* Recently written to disk (watcher). A leading accent bar + brief wash.
+   The class is removed after a few seconds; the transition eases it out.
+   Git badges are a separate .tree-git-badge; tab focus is .tree-current. */
+.tree-item.tree-flash {
+  box-shadow: inset 2px 0 0 var(--accent);
+  transition: background 0.3s ease, box-shadow 0.3s ease;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tree-item.tree-flash {
+    animation: tree-changed-flash 0.4s ease-out;
+  }
+  @keyframes tree-changed-flash {
+    from { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+    to { background: transparent; }
+  }
+}
+
+.tree-item.directory {
+  cursor: pointer;
+}
+
+.tree-item.text-file {
+  cursor: pointer;
+}
+
+.tree-chevron {
+  width: 14px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  color: var(--text-subtle);
+}
+
+.tree-chevron svg {
+  display: block;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tree-chevron svg {
+    transition: transform 0.15s;
+  }
+}
+
+.tree-chevron.expanded svg {
+  transform: rotate(90deg);
+}
+
+.tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Inline git-status marker (M/A/U…) at the row end; folders above a change
+   get a dot in the same color. Letters come only from `git status`. */
+.tree-git-badge {
+  width: 12px;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: center;
+}
+
+.tree-git-badge.git-m { color: var(--syn-special); }
+.tree-git-badge.git-a { color: var(--syn-string); }
+.tree-git-badge.git-u { color: var(--syn-atom); }
+.tree-git-badge.git-d { color: var(--syn-regexp); }
+.tree-git-badge.git-r { color: var(--syn-type); }
+
+/* A file open in another tab. */
+.tree-open-dot {
+  width: 5px;
+  height: 5px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--text-subtle);
+}
+
+.tree-empty,
+.tree-error {
+  padding: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* Search in files */
+.search-status {
+  padding: 4px 14px 2px;
+  font-size: 11.5px;
+  color: var(--text-subtle);
+  flex-shrink: 0;
+}
+
+.search-status[hidden] {
+  display: none;
+}
+
+.search-results {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0 10px;
+}
+
+.search-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.search-file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-count {
+  color: var(--text-subtle);
+}
+
+.search-hit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px 0 22px;
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.search-hit:hover {
+  background: var(--sidebar-hover);
+}
+
+.search-hit.selected {
+  background: var(--sidebar-active);
+}
+
+.search-hit-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-hit-text b {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.search-hit-line {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-subtle);
+}
+
+/* TOC trigger button (floating in editor/preview panels) */
+.toc-trigger {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  width: 24px;
+  height: 24px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  cursor: default;
+  z-index: 50;
+  opacity: 0.6;
+  transition: opacity 0.15s, top 0.15s;
+}
+
+#toc-btn-editor {
+  top: 38px;
+}
+
+.toc-trigger.has-entries {
+  display: flex;
+}
+
+.toc-trigger:hover {
+  opacity: 1;
+  color: var(--fg);
+  background: var(--sidebar-hover);
+}
+
+/* TOC popup (positioned dynamically by JS) */
+#toc-popup {
+  position: fixed;
+  width: 220px;
+  max-height: 400px;
+  overflow-y: auto;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+  z-index: 200;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 0.15s, transform 0.15s;
+  padding: 4px 0;
+}
+
+#toc-popup.visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.toc-popup-title {
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.toc-popup-item {
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toc-popup-item:hover {
+  background: var(--sidebar-hover);
+  color: var(--fg);
+}
+
+.toc-popup-item.toc-level-1 { font-weight: 600; color: var(--fg); }
+.toc-popup-item.toc-level-2 { font-weight: 500; }

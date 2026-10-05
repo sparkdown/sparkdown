@@ -1,0 +1,276 @@
+/* Terminal drawer: a grid of terminal panes below editor/preview (spec
+   item 6). The drawer itself is transparent; each pane is its own rounded
+   card on the canvas, separated by panel-gap dividers that are also the
+   drag handles. Spacing above comes from #terminal-resize-handle. */
+#terminal-panel {
+  height: var(--terminal-height, 200px);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+#terminal-panel.hidden {
+  display: none;
+}
+
+/* Holds the layout tree root (a split or a single pane). */
+#terminal-host {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* One split node: two children and the divider between them. */
+.terminal-split {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.terminal-split--row {
+  flex-direction: row;
+}
+
+.terminal-split--column {
+  flex-direction: column;
+}
+
+/* Divider gutters reuse .resize-divider (main.css); a faint hairline shows
+   on hover / drag so the handle can be found. */
+.terminal-split-divider::before {
+  content: '';
+  position: absolute;
+  background: transparent;
+  transition: background 0.12s;
+}
+
+.terminal-split-divider.resize-divider--col::before {
+  top: 30%;
+  bottom: 30%;
+  left: 50%;
+  width: 1px;
+}
+
+.terminal-split-divider.resize-divider--row::before {
+  left: 30%;
+  right: 30%;
+  top: 50%;
+  height: 1px;
+}
+
+.terminal-split-divider:hover::before,
+.terminal-split-divider.is-active::before {
+  background: var(--border);
+}
+
+/* A pane card: header over the terminal. */
+.terminal-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--editor-bg);
+  border-radius: var(--panel-radius);
+  box-shadow: var(--panel-shadow);
+  overflow: hidden;
+}
+
+/* Focused pane (only marked when there is more than one). */
+.terminal-pane.focused {
+  outline: 1px solid var(--border);
+  outline-offset: -1px;
+}
+
+.terminal-pane-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  flex-shrink: 0;
+  padding: 0 6px 0 10px;
+  border-bottom: 1px solid var(--border-light);
+  font-size: 12px;
+  color: var(--text-muted);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Live dot: running (sage), starting (subtle), failed to start (red). */
+.terminal-pane-live {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--text-subtle);
+}
+
+.terminal-pane-live.is-running {
+  background: var(--syn-string);
+}
+
+.terminal-pane-live.is-failed {
+  background: var(--syn-regexp);
+}
+
+.terminal-pane-name {
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+  max-width: 40%;
+}
+
+.terminal-pane-cwd {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-subtle);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-pane-agents {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.terminal-pane-agents:empty {
+  display: none;
+}
+
+.terminal-pane-btn {
+  width: 22px;
+  height: 20px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.terminal-pane-btn svg {
+  display: block;
+}
+
+.terminal-pane-btn:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+  color: var(--fg);
+}
+
+.terminal-pane-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Inline rename input (double-click a pane name), sized like the name. */
+.terminal-pane-rename {
+  width: 110px;
+  height: 18px;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  color: var(--fg);
+  background: var(--editor-bg);
+  border: 1px solid var(--text-subtle);
+  border-radius: 4px;
+  padding: 0 5px;
+  outline: none;
+}
+
+/* Launch buttons for detected agent CLIs, in the focused pane's header:
+   square icon chips, name in the tooltip. */
+.terminal-agent-btn {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 5px;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+
+.terminal-agent-btn svg {
+  display: block;
+  width: 12px;
+  height: 12px;
+}
+
+.terminal-agent-btn:hover {
+  color: var(--fg);
+  border-color: var(--text-subtle);
+  background: var(--bg-tertiary);
+}
+
+/* Fallback monogram for agents without a glyph. */
+.terminal-agent-monogram {
+  font-size: 10.5px;
+  font-weight: 650;
+  font-family: var(--font-ui);
+  line-height: 1;
+}
+
+.terminal-pane-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.terminal-pane-host {
+  position: absolute;
+  /* Spacing via inset, NOT padding: the FitAddon measures this element's
+     border-box height to compute the row count, and with the global
+     box-sizing: border-box it does not subtract the host's own padding. Any
+     vertical padding here would make it over-count by a row and the terminal's
+     last line (e.g. tmux's status bar) would be clipped by the panel's
+     overflow:hidden. Insets keep the same visual gap with no padding. */
+  inset: 6px 8px;
+}
+
+/* xterm viewport fills the host and inherits our surface color. */
+.terminal-pane-host .xterm,
+.terminal-pane-host .xterm-viewport {
+  background: transparent !important;
+  height: 100%;
+}
+
+/* Terminal gutter (#terminal-resize-handle): transparent panel-gap hit-target
+   via shared .resize-divider--row in main.css. Hidden with the panel so no
+   leftover gap. */
+
+
+/* Terminals Only: hide the editor/preview card and let the terminal
+   grid fill the center column at full height. Sidebar stays; the drawer
+   resize gutter is unused (the drawer height persists for the next time). */
+#center-column.terminals-only #workspace {
+  display: none;
+}
+
+#center-column.terminals-only #terminal-resize-handle {
+  display: none !important;
+}
+
+#center-column.terminals-only #terminal-panel {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
+#center-column.terminals-only #terminal-panel.hidden {
+  /* Mode implies a visible terminal; keep the class rule explicit so a stale
+     .hidden cannot collapse the center column to empty. */
+  display: flex;
+}

@@ -1,0 +1,188 @@
+#editor-container {
+  background: var(--editor-bg);
+}
+
+/* Empty-buffer hint (CodeMirror placeholder extension). */
+.cm-editor .cm-placeholder {
+  color: var(--text-subtle);
+  font-style: italic;
+}
+
+/* CodeMirror overrides to match our theme */
+.cm-editor {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.cm-editor .cm-scroller {
+  font-family: var(--font-mono);
+}
+
+/* Hide native CM vertical scrollbar — replaced by custom scrollbar.
+   Horizontal scrollbar is kept for when word wrap is off. */
+.cm-editor .cm-scroller::-webkit-scrollbar:vertical {
+  width: 0;
+  display: none;
+}
+
+.cm-editor .cm-scroller::-webkit-scrollbar:horizontal {
+  height: 6px;
+}
+
+.cm-editor .cm-scroller::-webkit-scrollbar-track:horizontal {
+  background: transparent;
+}
+
+.cm-editor .cm-scroller::-webkit-scrollbar-thumb:horizontal {
+  background: var(--scrollbar-thumb);
+  border-radius: 3px;
+}
+
+.cm-editor .cm-scroller::-webkit-scrollbar-thumb:horizontal:hover {
+  background: var(--text-muted);
+}
+
+/* Custom scrollbar for CM editor */
+.cm-custom-scrollbar-track {
+  position: absolute;
+  top: 34px; /* Below md-toolbar */
+  right: 0;
+  bottom: 0;
+  width: 10px;
+  z-index: 30;
+}
+
+.cm-custom-scrollbar-thumb {
+  position: absolute;
+  right: 1px;
+  width: 8px;
+  min-height: 24px;
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.2s;
+  cursor: default;
+}
+
+/* Show on hover or when editor is hovered */
+#editor-container:hover .cm-custom-scrollbar-thumb,
+.cm-custom-scrollbar-thumb.active {
+  opacity: 1;
+}
+
+.cm-custom-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+.cm-custom-scrollbar-thumb.active {
+  background: var(--text-muted);
+}
+
+/* Markdown formatting toolbar (inside editor pane) */
+.md-toolbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 4px 8px;
+  background: var(--toolbar-bg);
+  border-bottom: 1px solid var(--border);
+  z-index: 40;
+  transition: opacity 0.2s, background 0.2s, border-radius 0.2s;
+}
+
+.md-toolbar.floating {
+  left: 50%;
+  right: auto;
+  transform: translateX(-50%);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  border-bottom: 1px solid var(--border);
+  top: 4px;
+  padding: 2px 4px;
+  opacity: 0.5;
+  background: var(--panel-bg);
+}
+
+.md-toolbar.floating:hover {
+  opacity: 1;
+}
+
+.md-toolbar.hidden {
+  display: none !important;
+}
+
+.md-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fg);
+  cursor: default;
+  padding: 0;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.md-btn:hover {
+  background: var(--border);
+}
+
+.md-btn:active {
+  background: var(--border);
+}
+
+.md-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--border);
+  margin: 0 2px;
+}
+
+/* Code folding: keep the fold-arrow column quiet — arrows fade in only when
+   the editor (or that line's gutter) is hovered, so the gutter stays clean. */
+.cm-foldGutter .cm-gutterElement {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s;
+  cursor: default;
+}
+/* Custom chevron marker (see makeFoldMarker) — a flex box so the SVG centers
+   exactly with the line number in both open and collapsed states. */
+.sd-fold-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  transition: transform 0.12s;
+}
+.sd-fold-marker svg { display: block; }
+#editor-container:hover .cm-foldGutter .cm-gutterElement {
+  opacity: 0.7;
+}
+.cm-foldGutter .cm-gutterElement:hover {
+  opacity: 1;
+  color: var(--fg);
+}
+/* A folded region's inline "…" placeholder. */
+.cm-foldPlaceholder {
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  margin: 0 2px;
+  padding: 0 4px;
+}

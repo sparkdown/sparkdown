@@ -1,0 +1,190 @@
+{
+  "_comment": "Agent chip launch lines for local Windows (PowerShell). frontend/src/__tests__/terminal-launch-powershell.test.ts checks that agentLaunchCommand produces each `launch` (run it with UPDATE_WIN_FIXTURE=1 to rewrite `launch` after a deliberate change). terminal.rs `windows_smoke_agent_launch_lines_arrive_intact` runs each `launch` on windows-latest in pwsh and Windows PowerShell 5.1 through ConPTY, with npm-style fake agents, and checks `argv` and `opencodeConfig` (the parsed OPENCODE_CONFIG_CONTENT, or null = unset) as the agent received them.",
+  "cases": [
+    {
+      "name": "claude: session config file, extra args with a quoted space",
+      "bin": "claude",
+      "ctx": {
+        "shim": {
+          "program": "C:\\Users\\Jane O'Brien\\AppData\\Local\\SparkDown\\sparkdown.exe",
+          "args": [
+            "--mcp-stdio"
+          ],
+          "configFile": "C:\\Users\\Jane O'Brien\\AppData\\Local\\Temp\\sparkdown-4242-claude-mcp.json"
+        },
+        "installed": false,
+        "extraArgs": "--model 'opus 4'"
+      },
+      "launch": "claude --mcp-config 'C:\\Users\\Jane O''Brien\\AppData\\Local\\Temp\\sparkdown-4242-claude-mcp.json' --model 'opus 4'",
+      "argv": [
+        "--mcp-config",
+        "C:\\Users\\Jane O'Brien\\AppData\\Local\\Temp\\sparkdown-4242-claude-mcp.json",
+        "--model",
+        "opus 4"
+      ],
+      "opencodeConfig": null
+    },
+    {
+      "name": "claude: installed",
+      "bin": "claude",
+      "ctx": {
+        "shim": {
+          "program": "C:\\Users\\Jane O'Brien\\AppData\\Local\\SparkDown\\sparkdown.exe",
+          "args": [
+            "--mcp-stdio"
+          ],
+          "configFile": "C:\\Users\\Jane O'Brien\\AppData\\Local\\Temp\\sparkdown-4242-claude-mcp.json"
+        },
+        "installed": true,
+        "extraArgs": ""
+      },
+      "launch": "claude",
+      "argv": [],
+      "opencodeConfig": null
+    },
+    {
+      "name": "codex: shim path with an apostrophe (TOML multi-line literal)",
+      "bin": "codex",
+      "ctx": {
+        "shim": {
+          "program": "C:\\Users\\Jane O'Brien\\AppData\\Local\\SparkDown\\sparkdown.exe",
+          "args": [
+            "--mcp-stdio"
+          ]
+        },
+        "installed": false,
+        "extraArgs": ""
+      },
+      "launch": "codex -c 'mcp_servers.sparkdown.command=''''''C:\\Users\\Jane O''Brien\\AppData\\Local\\SparkDown\\sparkdown.exe''''''' -c 'mcp_servers.sparkdown.args=[''--mcp-stdio'']' -c 'mcp_servers.sparkdown.env_vars=[''SPARKDOWN_MCP'']'",
+      "argv": [
+        "-c",
+        "mcp_servers.sparkdown.command='''C:\\Users\\Jane O'Brien\\AppData\\Local\\SparkDown\\sparkdown.exe'''",
+        "-c",
+        "mcp_servers.sparkdown.args=['--mcp-stdio']",
+        "-c",
+        "mcp_servers.sparkdown.env_vars=['SPARKDOWN_MCP']"
+      ],
+      "opencodeConfig": null
+    },
+    {
+      "name": "codex: Program Files path, extra args",
+      "bin": "codex",
+      "ctx": {
+        "shim": {
+          "program": "C:\\Program Files\\SparkDown\\sparkdown.exe",
+          "args": [
+            "--mcp-stdio"
+          ]
+        },
+        "installed": false,
+        "extraArgs": "--model gpt-5"
+      },
+      "launch": "codex -c 'mcp_servers.sparkdown.command=''C:\\Program Files\\SparkDown\\sparkdown.exe''' -c 'mcp_servers.sparkdown.args=[''--mcp-stdio'']' -c 'mcp_servers.sparkdown.env_vars=[''SPARKDOWN_MCP'']' --model gpt-5",
+      "argv": [
+        "-c",
+        "mcp_servers.sparkdown.command='C:\\Program Files\\SparkDown\\sparkdown.exe'",
+        "-c",
+        "mcp_servers.sparkdown.args=['--mcp-stdio']",
+        "-c",
+        "mcp_servers.sparkdown.env_vars=['SPARKDOWN_MCP']",
+        "--model",
+        "gpt-5"
+      ],
+      "opencodeConfig": null
+    },
+    {
+      "name": "codex: typographic apostrophe in the path",
+      "bin": "codex",
+      "ctx": {
+        "shim": {
+          "program": "C:\\Users\\Jane O’Brien\\sd.exe",
+          "args": [
+            "--mcp-stdio"
+          ]
+        },
+        "installed": false,
+        "extraArgs": ""
+      },
+      "launch": "codex -c 'mcp_servers.sparkdown.command=''C:\\Users\\Jane O’’Brien\\sd.exe''' -c 'mcp_servers.sparkdown.args=[''--mcp-stdio'']' -c 'mcp_servers.sparkdown.env_vars=[''SPARKDOWN_MCP'']'",
+      "argv": [
+        "-c",
+        "mcp_servers.sparkdown.command='C:\\Users\\Jane O’Brien\\sd.exe'",
+        "-c",
+        "mcp_servers.sparkdown.args=['--mcp-stdio']",
+        "-c",
+        "mcp_servers.sparkdown.env_vars=['SPARKDOWN_MCP']"
+      ],
+      "opencodeConfig": null
+    },
+    {
+      "name": "codex: installed, still forwards SPARKDOWN_MCP",
+      "bin": "codex",
+      "ctx": {
+        "shim": {
+          "program": "C:\\Program Files\\SparkDown\\sparkdown.exe",
+          "args": [
+            "--mcp-stdio"
+          ]
+        },
+        "installed": true,
+        "extraArgs": "--yolo"
+      },
+      "launch": "codex -c 'mcp_servers.sparkdown.env_vars=[''SPARKDOWN_MCP'']' --yolo",
+      "argv": [
+        "-c",
+        "mcp_servers.sparkdown.env_vars=['SPARKDOWN_MCP']",
+        "--yolo"
+      ],
+      "opencodeConfig": null
+    },
+    {
+      "name": "opencode: inline config in the env for this run only",
+      "bin": "opencode",
+      "ctx": {
+        "shim": {
+          "program": "C:\\Users\\Jane O'Brien\\AppData\\Local\\SparkDown\\sparkdown.exe",
+          "args": [
+            "--mcp-stdio"
+          ]
+        },
+        "installed": false,
+        "extraArgs": "--model x/y"
+      },
+      "launch": "$env:OPENCODE_CONFIG_CONTENT = '{\"mcp\":{\"sparkdown\":{\"type\":\"local\",\"command\":[\"C:\\\\Users\\\\Jane O''Brien\\\\AppData\\\\Local\\\\SparkDown\\\\sparkdown.exe\",\"--mcp-stdio\"],\"enabled\":true,\"environment\":{\"SPARKDOWN_MCP\":\"{env:SPARKDOWN_MCP}\"}}}}'; try { opencode --model x/y } finally { Remove-Item Env:OPENCODE_CONFIG_CONTENT -ErrorAction SilentlyContinue }",
+      "argv": [
+        "--model",
+        "x/y"
+      ],
+      "opencodeConfig": {
+        "mcp": {
+          "sparkdown": {
+            "type": "local",
+            "command": [
+              "C:\\Users\\Jane O'Brien\\AppData\\Local\\SparkDown\\sparkdown.exe",
+              "--mcp-stdio"
+            ],
+            "enabled": true,
+            "environment": {
+              "SPARKDOWN_MCP": "{env:SPARKDOWN_MCP}"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "gemini: no server, teaching prompt",
+      "bin": "gemini",
+      "ctx": {
+        "shim": null,
+        "installed": false,
+        "extraArgs": "--yolo"
+      },
+      "launch": "gemini --yolo 'Read the file $SPARKDOWN_CONTEXT/context.json first: it shows the file I am viewing in my editor and all open tabs; entries with a shadow field are unsaved buffers you can read at that path (relative to the $SPARKDOWN_CONTEXT directory). Re-read it whenever you need to know what I am looking at. Wait for further instructions before proceeding with any other task.'",
+      "argv": [
+        "--yolo",
+        "Read the file $SPARKDOWN_CONTEXT/context.json first: it shows the file I am viewing in my editor and all open tabs; entries with a shadow field are unsaved buffers you can read at that path (relative to the $SPARKDOWN_CONTEXT directory). Re-read it whenever you need to know what I am looking at. Wait for further instructions before proceeding with any other task."
+      ],
+      "opencodeConfig": null
+    }
+  ]
+}
