@@ -29,7 +29,7 @@ notify = "8"
 # Auto-update signature check (minisign, as written by `tauri signer sign`).
 # Pure Rust, no dependencies. Downloads use the system curl (updates.rs), so
 # the app carries no HTTP/TLS stack.
-minisign-verify = "0.2"
+minisign-verify = "0.3"
 
 # macOS: install an applicationShouldTerminate: delegate hook so dock/menu
 # Quit can be intercepted (tao doesn't implement it). objc2 is already in the
