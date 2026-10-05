@@ -39,7 +39,7 @@
     "dompurify": "^3.4.15",
     "highlight.js": "^11.11.1",
     "marked": "^18.0.14",
-    "mermaid": "^11.14.0"
+    "mermaid": "^12.1.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.1",
