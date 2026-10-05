@@ -59,7 +59,7 @@ tauri-build = { version = "2", features = [] }
 
 [dev-dependencies]
 # Tests only: sign fake update artifacts with a throwaway key made in-test.
-minisign = "0.7"
+minisign = "0.10"
 ts-rs = "12"
 
 [profile.release]
