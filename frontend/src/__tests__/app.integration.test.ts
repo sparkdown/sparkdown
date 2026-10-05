@@ -212,9 +212,14 @@ const APP_SHELL = `
     </div>
   </div>`;
 
+/** Apps started by the current test; torn down in afterEach so a debounced
+ *  config save from one test can't land in the next test's savedConfigs. */
+const liveApps: App[] = [];
+
 async function startApp(): Promise<App> {
   document.body.innerHTML = APP_SHELL;
   const app = new App();
+  liveApps.push(app);
   await app.init();
   return app;
 }
@@ -261,6 +266,7 @@ describe('App integration', () => {
   });
 
   afterEach(() => {
+    for (const app of liveApps.splice(0)) app.destroy();
     document.body.innerHTML = '';
   });
 

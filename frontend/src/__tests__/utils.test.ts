@@ -188,6 +188,22 @@ describe('debounce', () => {
     vi.advanceTimersByTime(40);
     expect(fn).toHaveBeenCalledTimes(1);
   });
+
+  it('cancel() drops a pending call and later calls still work', () => {
+    const fn = vi.fn();
+    const debounced = debounce(fn, 100);
+
+    debounced('a');
+    debounced.cancel();
+    vi.advanceTimersByTime(200);
+    expect(fn).not.toHaveBeenCalled();
+
+    debounced.cancel(); // no-op with nothing pending
+    debounced('b');
+    vi.advanceTimersByTime(100);
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(fn).toHaveBeenCalledWith('b');
+  });
 });
 
 describe('scroll-sync line/pixel mapping', () => {

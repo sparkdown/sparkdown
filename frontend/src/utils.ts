@@ -138,15 +138,25 @@ export function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;');
 }
 
-export function debounce<T extends (...args: any[]) => void>(
-  fn: T,
-  ms: number
-): (...args: Parameters<T>) => void {
+export type Debounced<T extends (...args: any[]) => void> = ((...args: Parameters<T>) => void) & {
+  /** Drop a pending call, if any. */
+  cancel(): void;
+};
+
+export function debounce<T extends (...args: any[]) => void>(fn: T, ms: number): Debounced<T> {
   let timer: ReturnType<typeof setTimeout> | null = null;
-  return (...args) => {
+  const debounced = ((...args: Parameters<T>) => {
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => fn(...args), ms);
+    timer = setTimeout(() => {
+      timer = null;
+      fn(...args);
+    }, ms);
+  }) as Debounced<T>;
+  debounced.cancel = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
   };
+  return debounced;
 }
 
 /**

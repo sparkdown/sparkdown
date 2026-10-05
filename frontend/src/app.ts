@@ -540,6 +540,9 @@ export class App {
   destroy(): void {
     for (const unlisten of this.unlisteners) unlisten();
     this.unlisteners = [];
+    // Quit persists the config itself right after this; a debounced save
+    // still pending would only land late with the same (or staler) state.
+    this.debouncedSaveConfig.cancel();
   }
 
   /** Quick open / command palette (palette.ts) over the workspace root. */
