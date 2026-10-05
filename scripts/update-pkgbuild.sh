@@ -26,7 +26,7 @@ fi
 [ -f "$PKGBUILD" ] || { echo "error: $PKGBUILD not found" >&2; exit 1; }
 
 TMP=""
-cleanup() { [ -n "$TMP" ] && rm -rf "$TMP"; }
+cleanup() { if [ -n "$TMP" ]; then rm -rf "$TMP"; fi; }
 trap cleanup EXIT
 
 if [ -z "$DEB" ]; then
