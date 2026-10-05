@@ -34,7 +34,7 @@ jobs:
         working-directory: frontend
       - name: Install Tauri system dependencies
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev build-essential curl wget file libssl-dev
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
           # Pinned by SHA, so the channel can't be read from the ref — name it.
           toolchain: stable
