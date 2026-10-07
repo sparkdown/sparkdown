@@ -3,10 +3,11 @@
  * Performance measurement harness — NOT run in CI (vitest bench is opt-in:
  * `npx vitest bench --run`). Times the real render pipeline over documents
  * of increasing size to locate where wall-clock goes on large files.
+ * Uses vitest 5's `bench` test-context fixture (no longer a root export).
  *
  * Regenerate the corpus shape by editing makeDoc(); sizes are deterministic.
  */
-import { bench, describe } from 'vitest';
+import { describe, test } from 'vitest';
 import { PreviewPane } from '../preview';
 import { EventBus } from '../events';
 
@@ -50,29 +51,37 @@ function makePane(): { pane: PreviewPane; container: HTMLElement } {
 }
 
 describe('full render (parse + highlight + innerHTML)', () => {
-  bench('small (~33 KB)', async () => {
-    const { pane } = makePane();
-    await pane.renderImmediateForExport(SMALL);
+  test('small (~33 KB)', async ({ bench }) => {
+    await bench('small (~33 KB)', async () => {
+      const { pane } = makePane();
+      await pane.renderImmediateForExport(SMALL);
+    }).run();
   });
 
-  bench('medium (~200 KB)', async () => {
-    const { pane } = makePane();
-    await pane.renderImmediateForExport(MEDIUM);
+  test('medium (~200 KB)', async ({ bench }) => {
+    await bench('medium (~200 KB)', async () => {
+      const { pane } = makePane();
+      await pane.renderImmediateForExport(MEDIUM);
+    }).run();
   });
 
-  bench('large (~660 KB)', async () => {
-    const { pane } = makePane();
-    await pane.renderImmediateForExport(LARGE);
+  test('large (~660 KB)', async ({ bench }) => {
+    await bench('large (~660 KB)', async () => {
+      const { pane } = makePane();
+      await pane.renderImmediateForExport(LARGE);
+    }).run();
   });
 });
 
 describe('re-render same pane (highlight cache warm)', () => {
-  bench('large, 1-char append per render', async () => {
-    const { pane } = makePane();
-    await pane.renderImmediateForExport(LARGE);
-    // Simulates typing at the end of a large doc: every keystroke re-parses
-    // and re-renders the entire document today.
-    await pane.renderImmediateForExport(LARGE + 'x');
-    await pane.renderImmediateForExport(LARGE + 'xy');
+  test('large, 1-char append per render', async ({ bench }) => {
+    await bench('large, 1-char append per render', async () => {
+      const { pane } = makePane();
+      await pane.renderImmediateForExport(LARGE);
+      // Simulates typing at the end of a large doc: every keystroke re-parses
+      // and re-renders the entire document today.
+      await pane.renderImmediateForExport(LARGE + 'x');
+      await pane.renderImmediateForExport(LARGE + 'xy');
+    }).run();
   });
 });
