@@ -9,6 +9,26 @@ function hashSource(s: string): number {
   return h;
 }
 
+/**
+ * Options for mermaid.initialize(). initialize() replaces the whole site
+ * config, so every call (first load and theme switch) must pass all of them.
+ *
+ * mermaid 12 changed the defaults: the top-level `layout` went from 'dagre'
+ * to 'elk', and flowchart, sequence, class, state and other diagrams now
+ * default to `look: 'neo'` (and a 'redux-color' theme). Top-level values
+ * passed here override those per-diagram defaults, so this keeps the
+ * mermaid 11 rendering and stops flowcharts from loading the ~1.5 MB ELK
+ * chunk.
+ */
+export function mermaidConfig(theme: 'light' | 'dark') {
+  return {
+    startOnLoad: false,
+    theme: theme === 'dark' ? 'dark' : 'default',
+    layout: 'dagre',
+    look: 'classic',
+  } as const;
+}
+
 export class MermaidLoader {
   private svgCache = new Map<number, string>();
   private theme: 'light' | 'dark' =
@@ -21,10 +41,7 @@ export class MermaidLoader {
     loading = (async () => {
       const mod = await import('mermaid');
       mermaidModule = mod.default;
-      mermaidModule.initialize({
-        startOnLoad: false,
-        theme: this.theme === 'dark' ? 'dark' : 'default',
-      });
+      mermaidModule.initialize(mermaidConfig(this.theme));
     })();
 
     return loading;
@@ -74,9 +91,6 @@ export class MermaidLoader {
     this.theme = theme;
     this.svgCache.clear();
     if (!mermaidModule) return;
-    mermaidModule.initialize({
-      startOnLoad: false,
-      theme: theme === 'dark' ? 'dark' : 'default',
-    });
+    mermaidModule.initialize(mermaidConfig(theme));
   }
 }
