@@ -10,6 +10,51 @@ function hashSource(s: string): number {
 }
 
 /**
+ * Object.groupBy (ES2024) for older WebKit (Safari < 17.4; tauri.conf.json
+ * still allows macOS 10.15). mermaid 12 bundles chevrotain, whose grammar
+ * validation calls it: the usecase-beta parser runs that validation when it
+ * loads, and the langium parsers (pie, gitGraph, ...) carry the same code but
+ * skip it in production mode. Installed before mermaid loads, only when the
+ * native one is missing. Follows the spec: items must be iterable, the
+ * callback gets (value, index), keys go through ToPropertyKey once, and the
+ * result is a null-prototype object of arrays.
+ */
+export function installObjectGroupByPolyfill(): void {
+  const O = Object as unknown as { groupBy?: unknown };
+  if (typeof O.groupBy === 'function') return;
+  Object.defineProperty(Object, 'groupBy', {
+    value: function groupBy<T>(
+      items: Iterable<T>,
+      callbackfn: (value: T, index: number) => PropertyKey,
+    ): Record<PropertyKey, T[]> {
+      if (items === null || items === undefined) {
+        throw new TypeError('Object.groupBy called on null or undefined');
+      }
+      if (typeof callbackfn !== 'function') {
+        throw new TypeError('Object.groupBy: callback is not a function');
+      }
+      const groups: Record<PropertyKey, T[]> = Object.create(null);
+      let k = 0;
+      for (const value of items) {
+        if (k >= Number.MAX_SAFE_INTEGER) {
+          throw new TypeError('Object.groupBy: too many items');
+        }
+        // A computed property name applies ToPropertyKey exactly once.
+        const key = Reflect.ownKeys({ [callbackfn(value, k)]: 0 })[0];
+        const group = groups[key];
+        if (group) group.push(value);
+        else groups[key] = [value];
+        k++;
+      }
+      return groups;
+    },
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+/**
  * Options for mermaid.initialize(). initialize() replaces the whole site
  * config, so every call (first load and theme switch) must pass all of them.
  *
@@ -39,6 +84,7 @@ export class MermaidLoader {
     if (loading) return loading;
 
     loading = (async () => {
+      installObjectGroupByPolyfill();
       const mod = await import('mermaid');
       mermaidModule = mod.default;
       mermaidModule.initialize(mermaidConfig(this.theme));
