@@ -32,10 +32,6 @@ export async function initPerfTrace(): Promise<void> {
   }
 }
 
-export function isTracing(): boolean {
-  return enabled;
-}
-
 /** Record a completed span. Durations in ms. */
 export function trace(name: string, durationMs: number, detail?: string): void {
   if (!enabled) return;
