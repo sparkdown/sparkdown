@@ -270,7 +270,7 @@ fn tmux_session_exists(name: &str) -> bool {
     let Some(tmux) = tmux_path() else {
         return false;
     };
-    std::process::Command::new(tmux)
+    crate::proc::command(tmux)
         // `=name` forces an exact match: tmux otherwise falls back to unique
         // prefix then fnmatch, so `has-session -t sd-..-1` would report alive
         // while only `sd-..-10` exists.
@@ -768,7 +768,7 @@ fn tmux_sessions_impl(prefix: String) -> Vec<String> {
     let Some(tmux) = tmux_path() else {
         return vec![];
     };
-    let Ok(output) = std::process::Command::new(tmux)
+    let Ok(output) = crate::proc::command(tmux)
         .args(["list-sessions", "-F", "#{session_name}"])
         .output()
     else {
@@ -826,7 +826,7 @@ fn tmux_send_keys_impl(session: &str, text: &str) -> Result<(), String> {
     let Some(tmux) = tmux_path() else {
         return Err("tmux not found".into());
     };
-    std::process::Command::new(tmux)
+    crate::proc::command(tmux)
         // `=session` forces an exact match so keys can't be typed into a
         // same-prefixed session's active pane (e.g. sd-..-1 vs sd-..-10).
         // Pane target: `=session:` (exact session, its active pane).
@@ -856,7 +856,7 @@ fn tmux_kill_session_impl(session: &str) -> Result<(), String> {
     let Some(tmux) = tmux_path() else {
         return Ok(());
     };
-    std::process::Command::new(tmux)
+    crate::proc::command(tmux)
         // `=session` forces an exact match so we can't kill a same-prefixed
         // session (e.g. sd-..-1 vs sd-..-10).
         .args(["kill-session", "-t", &format!("={session}")])
@@ -1231,14 +1231,13 @@ mod tests {
     /// options silently never applied. Skipped where tmux is not installed.
     #[test]
     fn tmux_exact_targets_work_on_real_tmux() {
-        use std::process::Command;
-        if Command::new("tmux").arg("-V").output().is_err() {
+        if crate::proc::command("tmux").arg("-V").output().is_err() {
             return;
         }
         let sock = format!("sdtest-{}", std::process::id());
         let name = "sdtest-ab12-zsh-1";
         let run = |args: &[&str]| {
-            Command::new("tmux")
+            crate::proc::command("tmux")
                 .args(["-L", &sock, "-f", "/dev/null"])
                 .args(args)
                 .output()

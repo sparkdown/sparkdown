@@ -699,22 +699,14 @@ where
     P: AsRef<std::ffi::OsStr>,
     A: AsRef<std::ffi::OsStr>,
 {
-    use std::process::{Command, Stdio};
-    let mut command = Command::new(program);
+    use std::process::Stdio;
+    let mut command = crate::proc::command(program);
     command
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // A GUI app on Windows would flash a console window for each console
-    // child (git, an agent CLI, cmd.exe for a .cmd shim) without this.
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
     // Own process group, so a timeout can kill the shell AND anything it
     // spawned (the agent CLI, its MCP children). Killing only the shell would
     // leave grandchildren holding our pipes open.

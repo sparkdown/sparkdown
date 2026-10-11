@@ -10,7 +10,7 @@ use crate::file_index::FileListing;
 use crate::git::{branch_status_from, parse_porcelain, GitBranchStatus, GitStatus};
 use portable_pty::CommandBuilder;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -207,7 +207,7 @@ fn local_hostname() -> String {
             return h;
         }
     }
-    Command::new("hostname")
+    crate::proc::command("hostname")
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -1099,7 +1099,7 @@ pub fn mcp_forward_start(session: &RemoteSession, local_sock: &Path) -> Result<S
     //    `-O forward` with "already forwarded" WITHOUT re-listening on the
     //    (now-deleted) socket, so the remote MCP would be silently offline.
     //    Best effort — "cancel" of a missing forward just errors and is fine.
-    let _ = Command::new("ssh")
+    let _ = crate::proc::command("ssh")
         .args(&opts)
         .args(forward_args(
             &session.host,
@@ -1113,7 +1113,7 @@ pub fn mcp_forward_start(session: &RemoteSession, local_sock: &Path) -> Result<S
         .status();
     // 3. Ask the control (mux) connection (kept warm by ControlPersist) to
     //    add the forward.
-    let out = Command::new("ssh")
+    let out = crate::proc::command("ssh")
         .args(&opts)
         .args(forward_args(
             &session.host,
@@ -1159,7 +1159,7 @@ pub fn mcp_forward_stop(session: &RemoteSession) {
         return;
     };
     if let Some(local) = crate::mcp::running_socket_path() {
-        let _ = Command::new("ssh")
+        let _ = crate::proc::command("ssh")
             .args(mux_options())
             .args(forward_args(
                 &session.host,
@@ -1449,7 +1449,7 @@ Host *.example.com
             script.trim_end().ends_with("; true"),
             "probe must force exit 0: {script}"
         );
-        let out = std::process::Command::new("sh")
+        let out = crate::proc::command("sh")
             .arg("-c")
             .arg(&script)
             .output()
@@ -1511,7 +1511,11 @@ Host *.example.com
 
         let run = || {
             let script = watch_fingerprint_script(dir.to_str().unwrap());
-            let out = Command::new("sh").arg("-c").arg(&script).output().unwrap();
+            let out = crate::proc::command("sh")
+                .arg("-c")
+                .arg(&script)
+                .output()
+                .unwrap();
             assert!(
                 out.status.success(),
                 "stderr={}",
@@ -1761,7 +1765,7 @@ Host *.example.com
         use std::io::Write;
         let parent = path.parent().unwrap().to_str().unwrap();
         let script = remote_write_script(path.to_str().unwrap(), parent, declared);
-        let mut cmd = Command::new("sh");
+        let mut cmd = crate::proc::command("sh");
         cmd.arg("-c")
             .arg(format!("{prelude}\n{script}"))
             .stdin(Stdio::piped())
@@ -1803,7 +1807,7 @@ Host *.example.com
     fn read_for_edit_script_distinguishes_missing_files() {
         let dir = fresh_test_dir("remote-read-edit");
         let sh = |p: &std::path::Path| {
-            let out = Command::new("/bin/sh")
+            let out = crate::proc::command("/bin/sh")
                 .arg("-c")
                 .arg(read_for_edit_script(p.to_str().unwrap()))
                 .output()
@@ -1836,7 +1840,7 @@ Host *.example.com
         let sub = dir.join(".cursor");
         let file = sub.join("mcp.json");
         let run = || {
-            let st = Command::new("/bin/sh")
+            let st = crate::proc::command("/bin/sh")
                 .arg("-c")
                 .arg(prepare_private_file_script(
                     file.to_str().unwrap(),
@@ -1899,7 +1903,7 @@ Host *.example.com
         // Fallback route (directory not writable, file writable): staged in
         // TMPDIR, size-checked, then copied in place. Root ignores mode
         // bits, so skip there.
-        let is_root = Command::new("id")
+        let is_root = crate::proc::command("id")
             .arg("-u")
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
@@ -1946,7 +1950,7 @@ Host *.example.com
     #[test]
     fn remote_write_script_fallback_restores_original_on_copy_failure() {
         use std::os::unix::fs::PermissionsExt;
-        let is_root = Command::new("id")
+        let is_root = crate::proc::command("id")
             .arg("-u")
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
@@ -2180,8 +2184,7 @@ Host *.example.com
     #[test]
     fn remote_git_status_script_runs_through_a_symlink() {
         use std::fs;
-        use std::process::Command;
-        let git_ok = Command::new("git")
+        let git_ok = crate::proc::command("git")
             .arg("--version")
             .output()
             .map(|o| o.status.success())
@@ -2195,7 +2198,7 @@ Host *.example.com
         fs::create_dir_all(base.join("real/docs")).unwrap();
         let base = base.canonicalize().unwrap();
         let real = base.join("real");
-        let init = Command::new("git")
+        let init = crate::proc::command("git")
             .current_dir(&real)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -2208,7 +2211,7 @@ Host *.example.com
         let link = base.join("link");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let root = format!("{}/docs", link.to_string_lossy());
-        let out = Command::new("/bin/sh")
+        let out = crate::proc::command("/bin/sh")
             .args(["-c", &git_status_script(&root)])
             .output()
             .unwrap();
@@ -2687,7 +2690,7 @@ mod image_tests {
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&secret, &link).unwrap();
         let run = |p: &std::path::Path| {
-            Command::new("sh")
+            crate::proc::command("sh")
                 .arg("-c")
                 .arg(remote_image_script(p.to_str().unwrap()))
                 .output()
@@ -2759,7 +2762,7 @@ mod mkdir_tests {
         let target = dir.join("a b").join("-c");
         for _ in 0..2 {
             // The second run hits an existing folder: still a success.
-            let status = Command::new("sh")
+            let status = crate::proc::command("sh")
                 .arg("-c")
                 .arg(remote_mkdir_script(target.to_str().unwrap()))
                 .status()
@@ -2823,7 +2826,7 @@ mod workspace_files_tests {
         }
         let r = root.to_str().unwrap();
         let run = |hidden: bool, cap: usize| {
-            let out = Command::new("sh")
+            let out = crate::proc::command("sh")
                 .arg("-c")
                 .arg(workspace_files_script(r, hidden, cap))
                 .output()

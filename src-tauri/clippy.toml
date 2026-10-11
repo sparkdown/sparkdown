@@ -1,0 +1,5 @@
+# Spawn helper processes through crate::proc::command, which sets
+# CREATE_NO_WINDOW on Windows (no console window flash, #15).
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "use crate::proc::command (sets CREATE_NO_WINDOW on Windows, #15)" },
+]

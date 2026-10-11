@@ -91,7 +91,7 @@ impl Drop for FakeAgents {
 /// True when Node.js can run the fakes. False = skip the test, except in CI
 /// (`SPARKDOWN_WIN_SMOKE=1`), where a missing node is a failure.
 pub fn node_ready() -> bool {
-    let ok = std::process::Command::new("node")
+    let ok = crate::proc::command("node")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
