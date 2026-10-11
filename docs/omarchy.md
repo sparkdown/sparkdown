@@ -30,10 +30,14 @@ macOS `⌘` keys in the [README](../README.md#keyboard-shortcuts) are `Ctrl`
 here (`Ctrl+P` quick open, `Ctrl+Shift+P` command palette, `Ctrl+1`–`Ctrl+4`
 view, `Ctrl+Shift+E` / `G` / `F` sidebar views). The terminal toggle is
 `Ctrl+\`` and Terminals Only `Ctrl+Shift+\``. With a terminal pane focused,
-splits use `Ctrl+Shift` so the shell keeps plain `Ctrl+D` / `Ctrl+W`:
-`Ctrl+Shift+D` split right, `Ctrl+Shift+E` split down, `Ctrl+Shift+W` close
-pane, `Ctrl+Shift+]` / `Ctrl+Shift+[` next / previous pane. If a Hyprland
-binding takes one of these keys first, the app never sees it.
+splits use `Ctrl+Shift` so the shell keeps plain `Ctrl+D` (EOF) and
+`Ctrl+W` (delete word): `Ctrl+Shift+D` split right, `Ctrl+Shift+E` split
+down, `Ctrl+Shift+W` close pane, `Ctrl+Shift+]` / `Ctrl+Shift+[` next /
+previous pane. `Ctrl+W` closes the editor tab only when the editor has
+focus. Closing a pane (`Ctrl+Shift+W` or its ×) asks first when something
+other than the idle shell runs in it (an agent, a build, an editor). If a
+Hyprland binding takes one of these keys first, the app never sees it
+(Omarchy binds `Super+W` to close the window).
 
 `Ctrl+Shift+E` is also the Files view key. In a focused terminal it splits
 down; anywhere else it opens Files.
