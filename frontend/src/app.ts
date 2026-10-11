@@ -10,7 +10,7 @@ import { FileTree } from './file-tree';
 import { ActivityBar, parseSidebarView } from './activity-bar';
 import { SearchView } from './search-view';
 import { TOC } from './toc';
-import { ShortcutManager } from './shortcuts';
+import { ShortcutManager, applyShortcutLabels } from './shortcuts';
 import { EventBus } from './events';
 import { SettingsDialog } from './settings-dialog';
 import { UpdateManager } from './updater';
@@ -223,6 +223,8 @@ export class App {
     );
     this.toc.init(document.getElementById('app')!);
     this.shortcuts.init();
+    // Static HTML tooltips and hints (index.html) in this platform's keys.
+    applyShortcutLabels();
 
     this.viewMode.init();
     this.statusbar.updateWrap(this.config.word_wrap);

@@ -1,3 +1,5 @@
+import { formatShortcut } from './shortcuts';
+
 /**
  * Find-only search for the preview pane. Mirrors the editor's floating widget
  * (bottom-right, compact) but searches rendered content rather than source, so
@@ -83,7 +85,7 @@ export class PreviewSearch {
     this.count = document.createElement('span');
     this.count.className = 'sd-find-count';
 
-    const prev = iconBtn('Previous (⇧⏎)', '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="6 11 12 5 18 11"/></svg>');
+    const prev = iconBtn(`Previous (${formatShortcut('Shift+Enter')})`, '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="6 11 12 5 18 11"/></svg>');
     const next = iconBtn('Next (⏎)', '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="6 13 12 19 18 13"/></svg>');
     const closeB = iconBtn('Close (Esc)', '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>');
 

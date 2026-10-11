@@ -32,6 +32,7 @@ import { TIMING } from './constants';
 import { getLanguageFor } from './file-types';
 import { EVENTS, ACTIONS } from './event-names';
 import { createSearchPanel } from './search-panel';
+import { shortcutFor } from './shortcuts';
 
 /**
  * Fold-gutter marker. CodeMirror's default glyph (⌄) sits low in its font box
@@ -278,7 +279,8 @@ export class EditorManager {
       bracketMatching(),
       history(),
       // Quiet empty-state hint for a fresh buffer (styled in editor.css).
-      placeholder('Start writing…  (⌘/ for shortcuts)'),
+      // The shortcuts-dialog key for this platform (⌘⇧H / Ctrl+Shift+H).
+      placeholder(editorPlaceholder()),
       // Code folding for HTML/XML/SVG elements, JSON objects/arrays, JS/CSS
       // blocks, and markdown sections. The gutter arrows reveal on hover only
       // (see editor.css) so the gutter stays clean for prose.
@@ -609,4 +611,10 @@ export class EditorManager {
     // The whole-doc replacement resets the scroller; put the reader back.
     this.view.scrollDOM.scrollTop = scrollTop;
   }
+}
+
+/** Empty-buffer hint. Names the real shortcuts-dialog key for this platform
+ *  (it used to say "⌘/" everywhere, which was never bound). */
+export function editorPlaceholder(mac?: boolean): string {
+  return `Start writing…  (${shortcutFor(ACTIONS.SHOW_SHORTCUTS, mac)} for shortcuts)`;
 }

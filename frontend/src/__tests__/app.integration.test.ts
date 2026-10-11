@@ -38,6 +38,7 @@ vi.mock('../terminal', () => ({
     setUseTmux() {}
     setAgentArgs() {}
     setOnEmpty() {}
+    setOnTerminalsOnly() {}
     refitAll() {}
     setLayoutStore(store: typeof terminalStub.store) {
       terminalStub.store = store;
