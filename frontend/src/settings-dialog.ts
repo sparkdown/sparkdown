@@ -331,6 +331,9 @@ export function mcpStatusText(st: AgentMcpStatus): string {
 
 /** One agent's install control: label, status, a toggle button and, for a
  *  stale entry, Repair. Starts pending until `setStatus` is called. */
+/** Frontend backstop for an MCP install/repair/remove (#49). */
+export const MCP_ACTION_BACKSTOP_MS = 45_000;
+
 function mcpInstallRow(
   label: string,
   bin: string,
@@ -356,6 +359,7 @@ function mcpInstallRow(
 
   let state: AgentMcpStatus | null = null;
   const render = () => {
+    status.classList.remove('settings-row-error');
     if (state === null) {
       status.textContent = 'Checking…';
       btn.textContent = 'Install';
@@ -365,6 +369,7 @@ function mcpInstallRow(
     }
     status.textContent = mcpStatusText(state);
     btn.textContent = state.installed ? 'Remove' : 'Install';
+    repair.textContent = 'Repair';
     btn.disabled = !serverUp;
     repair.hidden = !(state.installed && state.stale);
     repair.disabled = !serverUp;
@@ -376,15 +381,26 @@ function mcpInstallRow(
     btn.disabled = true;
     repair.disabled = true;
     (repair.hidden ? btn : repair).textContent = busy;
-    void action
+    // The backend stops the agent CLI after 20 s (a Repair after ~30 s);
+    // this is only a backstop so the row can never stay busy (#49).
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const backstop = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('The agent CLI did not answer. Try again, or run it in a terminal.')),
+        MCP_ACTION_BACKSTOP_MS,
+      );
+    });
+    void Promise.race([action, backstop])
       .then(() => {
         state = after;
         render();
       })
       .catch((err) => {
         render();
-        status.textContent = String(err);
-      });
+        status.textContent = err instanceof Error ? err.message : String(err);
+        status.classList.add('settings-row-error');
+      })
+      .finally(() => clearTimeout(timer));
   };
   btn.addEventListener('click', () => {
     if (state === null) return;

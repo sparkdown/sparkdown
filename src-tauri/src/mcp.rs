@@ -279,18 +279,33 @@ fn shim_for_target() -> Result<(String, bool), String> {
     ))
 }
 
-/// Run an agent CLI command (argv) where the agent lives: the remote login
-/// shell for a remote workspace, else the local login shell (Unix) or the
-/// resolved program itself (Windows, see [`run_local_argv_windows`]).
-/// Blocking.
-fn run_agent_cli(argv: &[String], remote: bool) -> Result<String, String> {
-    if remote {
-        crate::remote::run_in_login_shell(&posix_command_line(argv))
+/// Run an agent CLI command (argv) where the agent lives: on the remote
+/// host for a remote workspace (see `remote::run_agent_cli`), else locally
+/// (Unix: [`run_local_argv_unix`]; Windows: [`run_local_argv_windows`]).
+/// Stopped after `timeout` (#49). Errors carry the CLI's own stderr and its
+/// exit code. Blocking.
+fn run_agent_cli(argv: &[String], remote: bool, timeout: Duration) -> Result<String, String> {
+    let label = cli_label(argv);
+    let outcome = if remote {
+        let bin = argv.first().ok_or("empty agent command")?;
+        crate::remote::run_agent_cli(&posix_command_line(argv), bin, timeout)?
     } else if cfg!(windows) {
-        run_local_argv_windows(argv)
+        run_local_argv_windows(argv, timeout)?
     } else {
-        run_in_login_shell(&posix_command_line(argv))
-    }
+        run_local_argv_unix(argv, timeout)?
+    };
+    cli_result(&label, outcome, timeout)
+}
+
+/// A short name for the command in messages: the agent and its subcommand
+/// (`claude mcp add`), not the full argv with paths.
+fn cli_label(argv: &[String]) -> String {
+    argv.iter()
+        .take(3)
+        .take_while(|w| !w.starts_with('-') && !w.contains('/') && !w.contains('\\'))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The CLI flag that switches this binary into stdio-MCP mode (main.rs).
@@ -409,40 +424,96 @@ pub(crate) fn windows_runner(program: &std::path::Path) -> Vec<std::ffi::OsStrin
 /// PATH + PATHEXT (`claude` → `claude.exe` or npm's `claude.cmd`), so the
 /// arguments (the shim path can hold spaces or an apostrophe) are never
 /// parsed by PowerShell. Same timeout and error shape as the Unix
-/// [`run_in_login_shell`]. Blocking.
-pub(crate) fn run_local_argv_windows(argv: &[String]) -> Result<String, String> {
+/// [`run_local_argv_unix`]. Blocking.
+pub(crate) fn run_local_argv_windows(
+    argv: &[String],
+    timeout: Duration,
+) -> Result<CliOutcome, String> {
     let (bin, rest) = argv.split_first().ok_or("empty agent command")?;
     let program =
         crate::context::find_on_path(bin).ok_or_else(|| format!("could not find {bin} on PATH"))?;
-    run_program_windows(&program, rest)
+    run_program_windows(&program, rest, timeout)
 }
 
 /// Run a resolved agent `program` (see [`windows_runner`]) with `rest`.
 pub(crate) fn run_program_windows(
     program: &std::path::Path,
     rest: &[String],
-) -> Result<String, String> {
+    timeout: Duration,
+) -> Result<CliOutcome, String> {
     let mut full = windows_runner(program);
     let runner = full.remove(0);
     full.extend(rest.iter().map(std::ffi::OsString::from));
-    let (ok, stdout, stderr) =
-        run_with_timeout(&runner, &full, &std::env::temp_dir(), CLI_TIMEOUT)?;
-    cli_result(ok, stdout, stderr)
+    let mut command = crate::proc::command(&runner);
+    command.args(&full);
+    run_command_with_timeout(command, &std::env::temp_dir(), timeout)
 }
 
-/// Combined output on success, else an error with the CLI's own message.
-fn cli_result(ok: bool, stdout: String, stderr: String) -> Result<String, String> {
-    if ok {
-        Ok(format!("{stdout}{stderr}"))
-    } else {
-        Err(format!(
-            "the agent CLI reported an error:\n{}",
-            if stderr.trim().is_empty() {
-                stdout
+/// How an agent CLI run ended.
+#[derive(Debug)]
+pub(crate) enum CliOutcome {
+    /// It exited: its code (None if killed by a signal), stdout, stderr.
+    Exited {
+        code: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
+    /// It outlived the timeout and was killed (with its process group).
+    TimedOut,
+}
+
+/// Lines a login shell prints about itself, not the CLI: an interactive
+/// shell without a terminal (bash `-i` with no tty) reports job control.
+fn is_shell_noise(line: &str) -> bool {
+    let l = line.trim();
+    l.ends_with("no job control in this shell")
+        || l.contains("cannot set terminal process group")
+        || l.contains("can't change option: monitor")
+        || l.contains("can't set tty pgrp")
+}
+
+/// Combined output on success, else an error with the CLI's own message
+/// (stderr, or stdout when stderr is empty) and its exit code (#49).
+pub(crate) fn cli_result(
+    label: &str,
+    outcome: CliOutcome,
+    timeout: Duration,
+) -> Result<String, String> {
+    match outcome {
+        CliOutcome::TimedOut => Err(format!(
+            "`{label}` did not finish within {} s and was stopped. Run it in a terminal to see what it is waiting for.",
+            timeout.as_secs()
+        )),
+        CliOutcome::Exited {
+            code: Some(0),
+            stdout,
+            stderr,
+        } => Ok(format!("{stdout}{stderr}")),
+        CliOutcome::Exited {
+            code,
+            stdout,
+            stderr,
+        } => {
+            let clean = |t: &str| {
+                t.lines()
+                    .filter(|l| !is_shell_noise(l))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .trim()
+                    .to_string()
+            };
+            let err = clean(&stderr);
+            let msg = if err.is_empty() { clean(&stdout) } else { err };
+            let status = match code {
+                Some(c) => format!("exit code {c}"),
+                None => "killed by a signal".to_string(),
+            };
+            Err(if msg.is_empty() {
+                format!("`{label}` failed ({status}) with no output.")
             } else {
-                stderr
-            }
-        ))
+                format!("`{label}` failed ({status}):\n{msg}")
+            })
+        }
     }
 }
 
@@ -685,6 +756,8 @@ fn home_dir() -> Option<PathBuf> {
 /// How long an agent CLI may take for `mcp add` / `mcp remove` before we
 /// give up and kill it (some CLIs contact every configured server).
 const CLI_TIMEOUT: Duration = Duration::from_secs(20);
+/// The remove step that a Repair runs before `mcp add`: best effort.
+const REPAIR_REMOVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Run `program args…` with a deadline: stdin closed, stdout/stderr drained
 /// on helper threads (so a chatty child never blocks on a full pipe), and the
@@ -699,10 +772,31 @@ where
     P: AsRef<std::ffi::OsStr>,
     A: AsRef<std::ffi::OsStr>,
 {
-    use std::process::Stdio;
     let mut command = crate::proc::command(program);
+    command.args(args);
+    match run_command_with_timeout(command, cwd, timeout)? {
+        CliOutcome::Exited {
+            code,
+            stdout,
+            stderr,
+        } => Ok((code == Some(0), stdout, stderr)),
+        CliOutcome::TimedOut => Err(format!(
+            "the agent CLI did not finish within {} s and was stopped",
+            timeout.as_secs()
+        )),
+    }
+}
+
+/// [`run_with_timeout`] for a prepared `command` (program, args, env): stdin
+/// closed, its own process group, output drained, killed with its group
+/// after `timeout`.
+pub(crate) fn run_command_with_timeout(
+    mut command: std::process::Command,
+    cwd: &std::path::Path,
+    timeout: Duration,
+) -> Result<CliOutcome, String> {
+    use std::process::Stdio;
     command
-        .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -739,10 +833,7 @@ where
                 // Do NOT join the drain threads here: a grandchild that
                 // survived may still hold the pipes; the threads end when it
                 // exits, and we have nothing to read from a failed run.
-                return Err(format!(
-                    "the agent CLI did not finish within {} s and was stopped",
-                    timeout.as_secs()
-                ));
+                return Ok(CliOutcome::TimedOut);
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(e) => return Err(format!("could not wait for the agent CLI: {e}")),
@@ -750,7 +841,11 @@ where
     };
     let stdout = out_t.join().unwrap_or_default();
     let stderr = err_t.join().unwrap_or_default();
-    Ok((status.success(), stdout, stderr))
+    Ok(CliOutcome::Exited {
+        code: status.code(),
+        stdout,
+        stderr,
+    })
 }
 
 /// Kill `child` and, on Unix, its whole process group (see `process_group(0)`
@@ -771,18 +866,76 @@ fn kill_tree(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
-/// Run a command in the user's interactive login shell (so the agent binary,
-/// possibly a shell function or on a profile-only PATH, resolves). The
-/// working directory is the temp dir, NOT the app's (home or `/` for a Dock
-/// launch): agent CLIs scan the cwd for project config, and a scan of `$HOME`
-/// touches Documents/Downloads/Desktop, which macOS attributes to SparkDown
-/// and prompts for. Returns combined output on success, or an error with the
-/// CLI's own message. Blocking: call from a worker thread, never the UI.
-fn run_in_login_shell(cmd: &str) -> Result<String, String> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let (ok, stdout, stderr) =
-        run_with_timeout(&shell, &["-lic", cmd], &std::env::temp_dir(), CLI_TIMEOUT)?;
-    cli_result(ok, stdout, stderr)
+/// Unix: run the agent CLI `argv` directly (no shell string), not in an
+/// interactive shell (#49): an interactive shell without a terminal prints
+/// job-control noise, and its own job control puts the CLI in a process
+/// group a timeout could not kill. `argv[0]` is resolved on the login
+/// shell's PATH, then on the interactive shell's PATH (an rc file can add
+/// to PATH, e.g. nvm), and the CLI runs with that PATH. Only a name that is
+/// neither (an alias or shell function) still goes through `$SHELL -lic`,
+/// with the noise lines dropped from its error. The working directory is
+/// the temp dir, NOT the app's (home or `/` for a Dock launch): agent CLIs
+/// scan the cwd for project config, and a scan of `$HOME` touches
+/// Documents/Downloads/Desktop, which macOS attributes to SparkDown and
+/// prompts for. Blocking: call from a worker thread, never the UI.
+#[cfg_attr(windows, allow(dead_code))]
+fn run_local_argv_unix(argv: &[String], timeout: Duration) -> Result<CliOutcome, String> {
+    let (bin, rest) = argv.split_first().ok_or("empty agent command")?;
+    let tmp = std::env::temp_dir();
+    let login = crate::context::login_shell_path();
+    let found = crate::context::find_in_path(bin, &login, "", false)
+        .map(|p| (p, login.clone()))
+        .or_else(|| {
+            let interactive = interactive_shell_path()?;
+            crate::context::find_in_path(bin, &interactive, "", false).map(|p| (p, interactive))
+        });
+    match found {
+        Some((program, path)) => {
+            let mut command = crate::proc::command(&program);
+            command.args(rest).env("PATH", path);
+            run_command_with_timeout(command, &tmp, timeout)
+        }
+        None => {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+            let mut command = crate::proc::command(shell);
+            command.args(["-lic", &posix_command_line(argv)]);
+            run_command_with_timeout(command, &tmp, timeout)
+        }
+    }
+}
+
+/// PATH as the user's interactive login shell sets it (rc files included),
+/// cached. The probe's stderr (job-control noise) is discarded, and a
+/// marker separates PATH from anything the rc prints. None when it fails.
+#[cfg_attr(windows, allow(dead_code))]
+fn interactive_shell_path() -> Option<String> {
+    use std::sync::OnceLock;
+    static PATH: OnceLock<Option<String>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let (ok, stdout, _noise) = run_with_timeout(
+            &shell,
+            &["-lic", "printf '\\n__SD_PATH__%s\\n' \"$PATH\""],
+            &std::env::temp_dir(),
+            Duration::from_secs(5),
+        )
+        .ok()?;
+        if !ok {
+            return None;
+        }
+        marked_path(&stdout)
+    })
+    .clone()
+}
+
+/// The PATH after the last `__SD_PATH__` marker line of a probe's output.
+pub(crate) fn marked_path(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .rev()
+        .find_map(|l| l.strip_prefix("__SD_PATH__"))
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
 }
 
 /// Register SparkDown as a stdio MCP server in `bin`'s own config, via that
@@ -823,10 +976,12 @@ pub async fn mcp_install_agent(bin: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         // Repair (#32): an existing entry (maybe pointing at a deleted
         // binary) is removed first, since most `mcp add` refuse to replace.
+        // Each CLI call is stopped after CLI_TIMEOUT (#49); the best-effort
+        // remove before a repair gets less, so a Repair ends within ~30 s.
         if agent_status_blocking(&agent).installed {
-            let _ = run_agent_cli(&remove, remote);
+            let _ = run_agent_cli(&remove, remote, REPAIR_REMOVE_TIMEOUT);
         }
-        run_agent_cli(&add, remote)
+        run_agent_cli(&add, remote, CLI_TIMEOUT)
     })
     .await
     .map_err(|e| format!("install task failed: {e}"))?
@@ -846,7 +1001,7 @@ pub async fn mcp_uninstall_agent(bin: String) -> Result<String, String> {
     }
     let (_add, remove) = agent_mcp_commands(&bin, "")
         .ok_or_else(|| format!("{bin} has no MCP config SparkDown manages"))?;
-    tauri::async_runtime::spawn_blocking(move || run_agent_cli(&remove, remote))
+    tauri::async_runtime::spawn_blocking(move || run_agent_cli(&remove, remote, CLI_TIMEOUT))
         .await
         .map_err(|e| format!("uninstall task failed: {e}"))?
         .map(|_| format!("Removed the SparkDown MCP server from {bin}."))
@@ -2486,7 +2641,8 @@ mod tests {
         let (add, _) = agent_mcp_commands("claude", exe).unwrap();
         for shim in ["claude.cmd", "claude.ps1"] {
             let _ = std::fs::remove_file(agents.default_out());
-            run_program_windows(&agents.bin_dir.join(shim), &add[1..])
+            run_program_windows(&agents.bin_dir.join(shim), &add[1..], CLI_TIMEOUT)
+                .and_then(|o| cli_result("claude mcp add", o, CLI_TIMEOUT))
                 .unwrap_or_else(|e| panic!("{shim}: {e}"));
             let text = wait_for_file(&agents.default_out(), Duration::from_secs(20))
                 .unwrap_or_else(|| panic!("{shim}: the fake agent did not run"));
@@ -2948,6 +3104,148 @@ mod tests {
         assert!(!config_lists_server(other, f, "sparkdown"));
         assert!(!config_lists_server(none, f, "sparkdown"));
         assert!(!config_lists_server("", f, "sparkdown"));
+    }
+
+    #[test]
+    fn cli_errors_show_the_real_stderr_and_exit_code() {
+        // #49: job-control noise from a tty-less interactive shell is not
+        // the error; the CLI's own stderr and exit code are.
+        let out = CliOutcome::Exited {
+            code: Some(1),
+            stdout: String::new(),
+            stderr:
+                "bash: cannot set terminal process group (-1): Inappropriate ioctl for device\n\
+                     bash: no job control in this shell\n\
+                     Error: MCP server sparkdown already exists in user config\n"
+                    .into(),
+        };
+        let e = cli_result("claude mcp add", out, CLI_TIMEOUT).unwrap_err();
+        assert_eq!(
+            e,
+            "`claude mcp add` failed (exit code 1):\nError: MCP server sparkdown already exists in user config"
+        );
+        // Empty stderr: stdout is the message.
+        let out = CliOutcome::Exited {
+            code: Some(2),
+            stdout: "usage: grok mcp add ...\n".into(),
+            stderr: String::new(),
+        };
+        let e = cli_result("grok mcp add", out, CLI_TIMEOUT).unwrap_err();
+        assert!(
+            e.contains("(exit code 2)") && e.contains("usage: grok"),
+            "{e}"
+        );
+        // No output at all, killed by a signal.
+        let out = CliOutcome::Exited {
+            code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let e = cli_result("codex mcp add", out, CLI_TIMEOUT).unwrap_err();
+        assert!(
+            e.contains("killed by a signal") && e.contains("no output"),
+            "{e}"
+        );
+        // Timeout names the limit.
+        let e = cli_result("codex mcp add", CliOutcome::TimedOut, CLI_TIMEOUT).unwrap_err();
+        assert!(e.contains("within 20 s") && e.contains("stopped"), "{e}");
+        // Success passes output through.
+        let ok = CliOutcome::Exited {
+            code: Some(0),
+            stdout: "added".into(),
+            stderr: String::new(),
+        };
+        assert_eq!(cli_result("x", ok, CLI_TIMEOUT).unwrap(), "added");
+    }
+
+    #[test]
+    fn cli_label_is_the_agent_and_subcommand() {
+        let argv: Vec<String> = [
+            "claude",
+            "mcp",
+            "add",
+            "-s",
+            "user",
+            "sparkdown",
+            "--",
+            "/usr/bin/sparkdown",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(cli_label(&argv), "claude mcp add");
+        let argv: Vec<String> = ["grok", "mcp", "remove", "sparkdown"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(cli_label(&argv), "grok mcp remove");
+    }
+
+    #[test]
+    fn marked_path_ignores_rc_output() {
+        assert_eq!(
+            marked_path("Welcome!\nnvm loaded\n\n__SD_PATH__/home/u/.nvm/bin:/usr/bin\n")
+                .as_deref(),
+            Some("/home/u/.nvm/bin:/usr/bin")
+        );
+        assert_eq!(marked_path("no marker"), None);
+        assert_eq!(marked_path("__SD_PATH__\n"), None);
+    }
+
+    /// #49: a hung CLI is stopped at the timeout with its whole process
+    /// group, grandchildren included, and reported as TimedOut.
+    #[cfg(unix)]
+    #[test]
+    fn hung_cli_is_killed_with_its_process_group() {
+        let dir = std::env::temp_dir().join(format!("sd-cli-hang-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let pidfile = dir.join("child.pid");
+        let mut cmd = crate::proc::command("/bin/sh");
+        cmd.args([
+            "-c",
+            &format!("sleep 60 & echo $! > '{}'; wait", pidfile.display()),
+        ]);
+        let t0 = std::time::Instant::now();
+        let out = run_command_with_timeout(cmd, &dir, Duration::from_millis(500)).unwrap();
+        assert!(matches!(out, CliOutcome::TimedOut), "{out:?}");
+        assert!(t0.elapsed() < Duration::from_secs(5));
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // SAFETY: signal 0 only checks that the pid exists.
+        while unsafe { kill(pid, 0) } == 0 {
+            // A zombie still answers kill(0) until reaped by init.
+            let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            if state.is_empty() || state.contains(") Z") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grandchild {pid} survived the timeout"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #49: a direct (non-shell) run returns the CLI's exit code and stderr.
+    #[cfg(unix)]
+    #[test]
+    fn direct_run_reports_exit_code_and_stderr() {
+        let mut cmd = crate::proc::command("/bin/sh");
+        cmd.args(["-c", "echo 'Error: not logged in' >&2; exit 7"]);
+        let out = run_command_with_timeout(cmd, &std::env::temp_dir(), CLI_TIMEOUT).unwrap();
+        let e = cli_result("claude mcp add", out, CLI_TIMEOUT).unwrap_err();
+        assert_eq!(
+            e,
+            "`claude mcp add` failed (exit code 7):\nError: not logged in"
+        );
     }
 
     #[cfg(unix)]
