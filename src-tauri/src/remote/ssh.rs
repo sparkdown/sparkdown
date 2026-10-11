@@ -479,7 +479,7 @@ pub fn map_ssh_failure(host: &str, stderr: &str) -> String {
 }
 
 /// The key-auth refusal `map_ssh_failure` produces.
-fn is_key_refusal(host: &str, msg: &str) -> bool {
+pub(crate) fn is_key_refusal(host: &str, msg: &str) -> bool {
     msg.starts_with(&format!(
         "Host '{host}' requires a password or rejected the SSH key"
     ))
@@ -667,6 +667,18 @@ fn ssh_config_path() -> PathBuf {
         return PathBuf::from(p);
     }
     home_dir().join(".ssh").join("config")
+}
+
+/// `path` with the home dir shown as `~` (for prompts and messages).
+pub fn display_home_path(path: &str) -> String {
+    let home = home_dir();
+    let home = home.to_string_lossy();
+    match path.strip_prefix(home.as_ref()) {
+        Some(rest) if !home.is_empty() && home != "/" && rest.starts_with(['/', '\\']) => {
+            format!("~{rest}")
+        }
+        _ => path.to_string(),
+    }
 }
 
 pub(crate) fn home_dir() -> PathBuf {
@@ -912,9 +924,30 @@ fn ssh_exec(host: &str, remote_cmd: &str, stdin: Option<&[u8]>) -> Result<SshRes
     let sh_arg = format!("exec /bin/sh -c {}", shell_quote(&wrap_marked(remote_cmd)));
     let mut cmd = crate::proc::command("ssh");
     cmd.args(mux_options());
+    // #27: with a session askpass broker, ssh may ask SparkDown for a KEY
+    // passphrase (BatchMode=no is required for askpass), and can never ask
+    // for the server password: password and keyboard-interactive auth are
+    // off and only publickey is tried. Without a broker, BatchMode as before.
+    match crate::askpass::current() {
+        Some(broker) => {
+            cmd.envs(broker.ssh_env());
+            cmd.args([
+                "-o",
+                "BatchMode=no",
+                "-o",
+                "PasswordAuthentication=no",
+                "-o",
+                "KbdInteractiveAuthentication=no",
+                // DISPLAY may be a placeholder for old ssh (see ssh_env).
+                "-o",
+                "ForwardX11=no",
+            ]);
+        }
+        None => {
+            cmd.args(["-o", "BatchMode=yes"]);
+        }
+    }
     cmd.args([
-        "-o",
-        "BatchMode=yes",
         "-o",
         "ConnectTimeout=8",
         "-o",

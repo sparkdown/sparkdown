@@ -397,7 +397,7 @@ export class RemoteSessions {
     const hint = document.createElement('p');
     hint.className = 'remote-lead';
     hint.textContent =
-      'Pick a host from ~/.ssh/config or type one (user@host or user@host:port). Auth uses your SSH keys and agent; SparkDown never asks for the server password and never hosts the files.';
+      'Pick a host from ~/.ssh/config or type one (user@host or user@host:port). Auth uses your SSH keys and agent (SparkDown can ask for a key’s passphrase); it never asks for the server password and never hosts the files.';
     dialog.appendChild(hint);
 
     const hostLabel = document.createElement('label');

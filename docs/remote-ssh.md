@@ -32,7 +32,23 @@ ssh-keygen -R '[example.com]:2222'   # other ports
 
 ## Passphrase-protected keys
 
-If your key has a passphrase, ssh needs either an **SSH agent** that holds the unlocked key, or a way to ask you for the passphrase. When no agent holds it, SparkDown says:
+If your key has a passphrase and no SSH agent holds it, SparkDown asks for it in a dialog:
+
+- The dialog names the key file (for example `~/.ssh/id_ed25519`). Type that key's passphrase, **not** the server password. SparkDown never asks for, and ssh is never allowed to ask for, a server password: password and keyboard-interactive authentication are turned off for SparkDown's connections and only public-key authentication is tried.
+- **Cancel** stops the connection ("no passphrase was entered for your SSH key").
+- A wrong passphrase asks again, the way `ssh` does in a terminal. If every attempt fails, SparkDown says the passphrase was wrong or the server did not accept the key.
+
+### How it works and what is kept
+
+ssh runs SparkDown's own binary as its `SSH_ASKPASS` program (`SSH_ASKPASS_REQUIRE=force`, so no terminal is involved). That helper only answers prompts of the form `Enter passphrase for key '…':` (and ssh's "Bad passphrase, try again for …" re-prompt). It refuses anything else, such as `password:` prompts, host-key yes/no questions or security-key PINs, by exiting with an error.
+
+The helper fetches the passphrase from the running app over a private channel created for each remote connection: on Linux and macOS a Unix socket inside a `0700` temporary directory (socket mode `0600`); on Windows a named pipe that only the current user can open. Each connection has a random one-time token that the helper must present. The passphrase never goes into environment variables, command-line arguments, files, logs or settings.
+
+Cache policy: after a successful unlock, the passphrase stays in memory **for that remote session only**, in a buffer that is wiped when it is dropped (Rust `zeroize`). It is reused only when ssh asks again for the same key during the session (for example after a dropped connection, or on Windows, where ssh cannot share one connection). Disconnecting, switching hosts or quitting SparkDown wipes it. It is never written to disk. A passphrase that ssh rejects is dropped at once and you are asked again.
+
+### Using an SSH agent instead
+
+An agent avoids the dialog entirely. If SparkDown can't run its prompt (for example with an old ssh), it falls back to saying:
 
 > Your key needs an SSH agent: run ssh-add and relaunch SparkDown.
 
@@ -51,3 +67,8 @@ Then relaunch SparkDown. It picks up the agent (`SSH_AUTH_SOCK`) from the enviro
   An agent started from `~/.bashrc` (for example `eval $(ssh-agent)` or keychain) only exists in terminals, not in apps started from the launcher.
 - **macOS:** the system agent is always available. To store the passphrase in the Keychain, run `ssh-add --apple-use-keychain ~/.ssh/id_ed25519`.
 - **Windows:** start the OpenSSH agent service once from an elevated PowerShell (`Get-Service ssh-agent | Set-Service -StartupType Automatic; Start-Service ssh-agent`), then run `ssh-add`. Windows `ssh.exe` finds the agent on its own; no environment variable is needed.
+
+### ssh versions
+
+- OpenSSH 8.4 and newer honour `SSH_ASKPASS_REQUIRE=force`. Older versions use the askpass program only when `DISPLAY` is set, so SparkDown gives its ssh processes a placeholder `DISPLAY` when none exists (X11 forwarding is turned off for them).
+- Windows: the OpenSSH that ships with Windows 11 22H2/23H2 is 8.6p1, and Windows 11 24H2 (and Windows 10 after the October 2024 update) ships 9.5p1; both support `SSH_ASKPASS_REQUIRE` ([Win32-OpenSSH 8.6.0.0p1-Beta release notes](https://github.com/PowerShell/Win32-OpenSSH/releases/tag/V8.6.0.0p1-Beta), [#1726](https://github.com/PowerShell/Win32-OpenSSH/issues/1726)). Older Windows 10 builds ship 8.1p1, which uses `SSH_ASKPASS` without the `REQUIRE` variable ([#2115](https://github.com/PowerShell/Win32-OpenSSH/issues/2115)). If the dialog never appears on Windows, use the agent instead (above). Check your version with `ssh -V`.

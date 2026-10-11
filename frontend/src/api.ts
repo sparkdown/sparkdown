@@ -131,6 +131,9 @@ export const api = {
   remoteHostkeyForget: (scanId: string) => invoke<void>('remote_hostkey_forget', { scanId }),
   // Both stop the backend watcher (watch_stop in remote/mod.rs), so drop the
   // watchStart pin too — else reopening the same root never restarts it.
+  /** #27: the in-app key passphrase prompt's answer (null = cancelled). */
+  askpassAnswer: (id: number, passphrase: string | null) =>
+    invoke<void>('askpass_answer', { id, passphrase }),
   remoteConnect: (host: string, path: string) =>
     invoke<RemoteSession>('remote_connect', { host, path }).finally(() => {
       watchRoot = null;
