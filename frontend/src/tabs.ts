@@ -379,14 +379,24 @@ export class TabManager {
     icon.style.display = tab.viewMode === 'diff' ? '' : 'none';
     el.appendChild(icon);
 
+    // Small "remote" glyph (remote tabs only, see updateHost).
+    const remoteIcon = document.createElement('span');
+    remoteIcon.className = 'tab-remote-icon';
+    remoteIcon.setAttribute('aria-hidden', 'true');
+    remoteIcon.innerHTML =
+      '<svg width="10" height="10" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M1 5h8M5 1c1.6 1.2 1.6 6.8 0 8M5 1c-1.6 1.2-1.6 6.8 0 8" fill="none" stroke="currentColor" stroke-width="1"/></svg>';
+    el.appendChild(remoteIcon);
+
     const title = document.createElement('span');
     title.className = 'tab-title';
     title.textContent = tab.title;
-    title.addEventListener('mouseenter', () => this.showTitleTip(title));
+    title.addEventListener('mouseenter', () => this.showTitleTip(title, tab.id));
     title.addEventListener('mouseleave', () => this.hideTitleTip());
     el.appendChild(title);
 
-    // Remote tabs name their host in small subtle text after the title.
+    // #52: remote tabs show the whole filename; the host goes in the
+    // tooltip (and this visually hidden label, for screen readers). A
+    // visible host label pushed long names down to "not…".
     const host = document.createElement('span');
     host.className = 'tab-host';
     el.appendChild(host);
@@ -416,6 +426,8 @@ export class TabManager {
     host.textContent = tab.origin ?? '';
     host.hidden = !tab.origin;
     el.classList.toggle('tab-remote', !!tab.origin);
+    const icon = el.querySelector<HTMLElement>('.tab-remote-icon');
+    if (icon) icon.hidden = !tab.origin;
   }
 
   private revealTab(el: HTMLElement | undefined): void {
@@ -479,11 +491,19 @@ export class TabManager {
     return el.scrollWidth > el.clientWidth + 1;
   }
 
-  private showTitleTip(titleEl: HTMLElement): void {
+  /** Tooltip text: the full name, plus the SSH host for a remote tab. */
+  static titleTipText(title: string, origin?: string | null): string {
+    return origin ? `${title} — ${origin}` : title;
+  }
+
+  private showTitleTip(titleEl: HTMLElement, tabId?: string): void {
     this.hideTitleTip();
-    if (!TabManager.isTitleTruncated(titleEl)) return;
-    const text = titleEl.textContent?.trim();
-    if (!text) return;
+    const origin = tabId ? this.getTab(tabId)?.origin : undefined;
+    // Local tabs: only when the name is cut off. Remote: always (the host).
+    if (!origin && !TabManager.isTitleTruncated(titleEl)) return;
+    const name = titleEl.textContent?.trim();
+    if (!name) return;
+    const text = TabManager.titleTipText(name, origin);
 
     const tip = document.createElement('div');
     tip.className = 'tab-tip';

@@ -27,7 +27,7 @@ export const KEYBINDINGS: Partial<Record<ActionName, string>> = {
   [ACTIONS.BOLD]: 'CmdOrCtrl+B',
   [ACTIONS.ITALIC]: 'CmdOrCtrl+I',
   [ACTIONS.TOGGLE_SIDEBAR]: 'CmdOrCtrl+Shift+B',
-  [ACTIONS.TOGGLE_WRAP]: 'CmdOrCtrl+Shift+W',
+  [ACTIONS.TOGGLE_WRAP]: 'Alt+Z',
   [ACTIONS.TOGGLE_TERMINAL]: 'Ctrl+`',
   [ACTIONS.TOGGLE_TERMINALS_ONLY]: 'Ctrl+Shift+`',
   [ACTIONS.NEXT_TAB]: 'CmdOrCtrl+Alt+Right',
@@ -168,6 +168,21 @@ export class ShortcutManager {
     // wrapped/selected range).
     if (e.defaultPrevented) return;
 
+    // Toggle word wrap: Alt+Z (VS Code's key, #52). It used to be
+    // Ctrl+Shift+W, which is also Close Pane. macOS gets it from the menu.
+    if (
+      !isMacOS() &&
+      e.altKey &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.shiftKey &&
+      shortcutKey(e) === 'z'
+    ) {
+      e.preventDefault();
+      this.bus.emit(ACTIONS.TOGGLE_WRAP);
+      return;
+    }
+
     const mod = e.metaKey || e.ctrlKey;
     if (!mod) return;
 
@@ -262,9 +277,6 @@ export class ShortcutManager {
       // Mirrors View → Edit / Split / Preview / Diff (CmdOrCtrl+1–4).
       e.preventDefault();
       this.bus.emit(ACTIONS.SET_VIEW_MODE, { mode: viewForDigit(key)! });
-    } else if (key === 'w' && e.shiftKey) {
-      e.preventDefault();
-      this.bus.emit(ACTIONS.TOGGLE_WRAP);
     } else if (key === 'h' && e.shiftKey) {
       e.preventDefault();
       this.bus.emit(ACTIONS.SHOW_SHORTCUTS);

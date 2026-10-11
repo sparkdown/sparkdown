@@ -75,7 +75,7 @@ On Windows and Linux, `⌘` is `Ctrl` and `⌥` is `Alt`. Help → Keyboard Shor
 | Files / Changes / Search in files | `⌘⇧E` / `⌘⇧G` / `⌘⇧F` |
 | Toggle sidebar | `⌘⇧B` |
 | Toggle terminal / Terminals Only | `⌃\`` / `⌃⇧\`` (Ctrl on every platform) |
-| Toggle word wrap | `⌘⇧W` |
+| Toggle word wrap | `⌥Z` |
 | Next / previous tab | `⌘⌥→` / `⌘⌥←` |
 | Settings / keyboard shortcuts | `⌘,` / `⌘⇧H` |
 

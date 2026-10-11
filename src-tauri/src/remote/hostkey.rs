@@ -193,7 +193,7 @@ fn safe_scan_target(h: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '%'))
 }
 
-fn resolve(host: &str) -> Result<ResolvedHost, String> {
+pub(crate) fn resolve(host: &str) -> Result<ResolvedHost, String> {
     let dest = destination_args(host)?;
     let out = crate::proc::command("ssh")
         .arg("-G")

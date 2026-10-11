@@ -15,7 +15,11 @@ export interface AskpassRequest {
   id: number;
   /** Key path from ssh's prompt, home shown as ~. */
   key: string;
+  /** ssh asked again: the passphrase just entered was wrong (#52). */
+  retry?: boolean;
 }
+
+export const INCORRECT_PASSPHRASE_HINT = 'Incorrect passphrase, try again.';
 
 /**
  * Show the masked prompt. Resolves the passphrase, or null on Cancel / Esc /
@@ -58,6 +62,16 @@ export function showPassphrasePrompt(
     input.setAttribute('aria-label', `Passphrase for ${req.key}`);
     label.appendChild(input);
 
+    const hint = document.createElement('p');
+    hint.className = 'askpass-retry';
+    hint.setAttribute('role', 'alert');
+    if (req.retry) {
+      hint.textContent = INCORRECT_PASSPHRASE_HINT;
+      input.setAttribute('aria-invalid', 'true');
+    } else {
+      hint.hidden = true;
+    }
+
     const actions = document.createElement('div');
     actions.className = 'remote-actions';
     const cancel = document.createElement('button');
@@ -72,7 +86,7 @@ export function showPassphrasePrompt(
     ok.disabled = true;
     actions.append(cancel, ok);
 
-    dialog.append(title, lead, key, label, actions);
+    dialog.append(title, lead, key, label, hint, actions);
     overlay.appendChild(dialog);
     document.body.appendChild(overlay);
     const modal = trapFocus(dialog);

@@ -127,14 +127,32 @@
   border-color: var(--border-light);
 }
 
-/* Remote tabs name their host, small and subtle, after the title. */
+/* #52: the host is in the tooltip; this label is for screen readers only,
+   so it never squeezes the filename. */
 .tab-host {
-  flex-shrink: 0;
-  font-size: 11px;
-  color: var(--text-subtle);
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .tab-host[hidden] {
+  display: none;
+}
+
+.tab-remote-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  color: var(--text-subtle);
+  margin-right: -3px;
+}
+
+.tab-remote-icon[hidden] {
   display: none;
 }
 
