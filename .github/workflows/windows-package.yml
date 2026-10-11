@@ -3,7 +3,8 @@ name: Windows package
 # Produces the Windows NSIS installer (preview). Not part of regular PR CI: a
 # Windows release build costs many runner minutes. Run it by hand (Actions ->
 # Windows package -> Run workflow) or push a v* tag. PRs run it only when they
-# change the Windows packaging itself (this file or the build script).
+# change the Windows packaging itself (this file, the build script or the
+# NSIS installer hooks).
 on:
   workflow_dispatch:
   push:
@@ -12,6 +13,7 @@ on:
     paths:
       - .github/workflows/windows-package.yml
       - scripts/package-windows.ps1
+      - src-tauri/windows/**
 
 # Default to read-only. Only the release job (below) is granted contents:write,
 # and it does nothing but download the built installer and attach it to the
@@ -53,6 +55,47 @@ jobs:
         # key either — Windows updates are notify-only (src-tauri/src/updates.rs).
         shell: pwsh
         run: ./scripts/package-windows.ps1
+      - name: Upgrade over a pre-0.3.1 install (#17)
+        # Install, then make the install look like one from before v0.3.1
+        # (folder registered under the default manufacturer "sparkdown", not
+        # the publisher), then run the installer again in passive mode. Same
+        # version + passive takes the stock "uninstall first" path, which
+        # runs the old uninstaller with `_?=<folder from the publisher key>`.
+        # Without src-tauri/windows/hooks.nsh that folder is empty, the
+        # uninstall fails and the installer stops on an error dialog (here:
+        # a timeout).
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = (Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1).FullName
+          $dir = Join-Path $env:LOCALAPPDATA 'SparkDown'
+          $cur = 'HKCU:\Software\PearTree Forge LLC\SparkDown'
+          $legacy = 'HKCU:\Software\sparkdown\SparkDown'
+          $uninst = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SparkDown'
+          function Run-Setup([string]$arg) {
+            $p = Start-Process -FilePath $setup -ArgumentList $arg -PassThru
+            if (-not $p.WaitForExit(240000)) {
+              Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+              throw "setup $arg did not finish in 4 min (stuck on an error dialog?)"
+            }
+            if ($p.ExitCode -ne 0) { throw "setup $arg exited with $($p.ExitCode)" }
+          }
+          Run-Setup '/S'
+          if (-not (Test-Path "$dir\uninstall.exe")) { throw "no uninstall.exe in $dir" }
+          Write-Host "UninstallString: $((Get-ItemProperty $uninst).UninstallString)"
+          # Simulate the pre-0.3.1 registry layout.
+          New-Item -Path $legacy -Force | Out-Null
+          Set-Item -Path $legacy -Value $dir
+          Remove-Item -Path $cur -Recurse -Force
+          # Marker: the old uninstaller deletes the whole uninstall key, so
+          # it is gone afterwards only if the uninstall really ran.
+          Set-ItemProperty -Path $uninst -Name 'SdUpgradeProbe' -Value 1
+          Run-Setup '/P'
+          if ($null -ne (Get-ItemProperty $uninst).SdUpgradeProbe) { throw 'the previous install was not uninstalled' }
+          $now = (Get-Item -Path $cur).GetValue('')
+          if ($now -ne $dir) { throw "publisher key is '$now', expected '$dir'" }
+          if (-not (Test-Path "$dir\uninstall.exe")) { throw "reinstall left no uninstall.exe" }
+          Write-Host "OK: uninstalled the pre-0.3.1 layout and reinstalled; publisher key -> $now"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sparkdown-windows

@@ -459,4 +459,35 @@ mod tests {
         }
         assert_eq!(allowed("http://localhost:1420/"), cfg!(debug_assertions));
     }
+
+    /// The NSIS upgrade hook (#17) hard-codes the registry keys Tauri's
+    /// template derives from productName / bundle.publisher / identifier;
+    /// keep them in sync with tauri.conf.json.
+    #[test]
+    fn nsis_hooks_match_bundle_config() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let conf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("tauri.conf.json")).unwrap())
+                .unwrap();
+        let hooks_rel = conf["bundle"]["windows"]["nsis"]["installerHooks"]
+            .as_str()
+            .expect("bundle.windows.nsis.installerHooks");
+        let hooks = std::fs::read_to_string(dir.join(hooks_rel)).unwrap();
+        let product = conf["productName"].as_str().unwrap();
+        let publisher = conf["bundle"]["publisher"].as_str().unwrap();
+        // Tauri's manufacturer when no publisher is set: the identifier's 2nd part.
+        let legacy = conf["identifier"]
+            .as_str()
+            .unwrap()
+            .split('.')
+            .nth(1)
+            .unwrap();
+        for line in [
+            format!("!define SD_PRODUCTNAME \"{product}\""),
+            format!("!define SD_PUBLISHER \"{publisher}\""),
+            format!("!define SD_LEGACY_MANUFACTURER \"{legacy}\""),
+        ] {
+            assert!(hooks.contains(&line), "{hooks_rel} must contain `{line}`");
+        }
+    }
 }

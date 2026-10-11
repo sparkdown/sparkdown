@@ -93,6 +93,14 @@ UAC prompt. If the WebView2 runtime is missing, the installer downloads it.
 To remove SparkDown: Settings → Apps → Installed apps → SparkDown →
 Uninstall.
 
+Installing over an older SparkDown: the installer offers to uninstall it
+first. From v0.3.2 this also works over a build made before v0.3.1 (those
+registered under a different publisher; see
+[#17](https://github.com/sparkdown/sparkdown/issues/17)). If the v0.3.1
+installer says it can't uninstall the old version, uninstall it from
+Installed apps (or run `%LOCALAPPDATA%\SparkDown\uninstall.exe`), then run
+the installer again.
+
 ### Why SmartScreen warns
 
 The installer is **not code-signed**. A code-signing certificate costs money
