@@ -1603,6 +1603,9 @@ Host *.example.com
         .unwrap();
         assert_eq!(s.host, "me@127.0.0.1:2222");
         assert_eq!(seen.lock().unwrap()[0], "me@127.0.0.1:2222");
+        // Don't leave a global session behind: other modules' tests (review)
+        // would route their calls over ssh to it.
+        disconnect_now();
         let err = connect_with(&[], "-oProxyCommand=x", "/", |_, _| Ok("/".into())).unwrap_err();
         assert!(err.contains("Invalid SSH host"), "{err}");
     }
