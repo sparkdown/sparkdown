@@ -290,3 +290,8 @@
 .mcp-prompt-actions .settings-btn[hidden] {
   display: none;
 }
+
+/* #32: Repair for an agent entry that points at a missing / other SparkDown. */
+.settings-mcp-repair[hidden] {
+  display: none;
+}

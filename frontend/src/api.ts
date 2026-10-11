@@ -4,6 +4,14 @@ import type { AppConfig } from './types/AppConfig';
 
 export type { AppConfig };
 
+/** An agent's SparkDown MCP entry (#32). `stale`: the configured program
+ *  is gone ('missing') or another SparkDown copy ('other'). */
+export interface AgentMcpStatus {
+  installed: boolean;
+  command: string | null;
+  stale: 'missing' | 'other' | null;
+}
+
 export interface FileEntry {
   name: string;
   path: string;
@@ -122,6 +130,8 @@ export const api = {
   mcpInstallAgent: (bin: string) => invoke<string>('mcp_install_agent', { bin }),
   mcpUninstallAgent: (bin: string) => invoke<string>('mcp_uninstall_agent', { bin }),
   mcpAgentInstalled: (bin: string) => invoke<boolean>('mcp_agent_installed', { bin }),
+  /** #32: installed, and whether the entry points at a missing / other SparkDown. */
+  mcpAgentStatus: (bin: string) => invoke<AgentMcpStatus>('mcp_agent_status', { bin }),
   // Remote sessions v1 (#36): SSH config hosts + one workspace at a time.
   sshConfigHosts: () => invoke<SshHost[]>('ssh_config_hosts'),
   // First connect to an unknown host (#24): scan its keys for the user to

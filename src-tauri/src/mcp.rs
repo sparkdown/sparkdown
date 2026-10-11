@@ -795,6 +795,13 @@ fn run_in_login_shell(cmd: &str) -> Result<String, String> {
 #[tauri::command]
 pub async fn mcp_install_agent(bin: String) -> Result<String, String> {
     let (exe, remote) = shim_for_target()?;
+    if !remote && !std::path::Path::new(&exe).is_file() {
+        // The running binary was removed or replaced (#32): writing its old
+        // path would install a broken entry.
+        return Err(format!(
+            "SparkDown's own program ({exe}) is gone, probably updated or moved. Restart SparkDown, then install again."
+        ));
+    }
     if let Some(agent) = json_file_agent(&bin) {
         // Same program + args as the session ShimCommand: the remote shim
         // script takes none.
@@ -810,12 +817,20 @@ pub async fn mcp_install_agent(bin: String) -> Result<String, String> {
         .map_err(|e| format!("install task failed: {e}"))?
         .map(|_| format!("Installed the SparkDown MCP server for {bin}."));
     }
-    let (add, _remove) = agent_mcp_commands(&bin, &exe)
+    let (add, remove) = agent_mcp_commands(&bin, &exe)
         .ok_or_else(|| format!("{bin} has no MCP install command SparkDown knows"))?;
-    tauri::async_runtime::spawn_blocking(move || run_agent_cli(&add, remote))
-        .await
-        .map_err(|e| format!("install task failed: {e}"))?
-        .map(|_| format!("Installed the SparkDown MCP server for {bin}."))
+    let agent = bin.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Repair (#32): an existing entry (maybe pointing at a deleted
+        // binary) is removed first, since most `mcp add` refuse to replace.
+        if agent_status_blocking(&agent).installed {
+            let _ = run_agent_cli(&remove, remote);
+        }
+        run_agent_cli(&add, remote)
+    })
+    .await
+    .map_err(|e| format!("install task failed: {e}"))?
+    .map(|_| format!("Installed the SparkDown MCP server for {bin}."))
 }
 
 /// Remove SparkDown from `bin`'s MCP config.
@@ -888,30 +903,142 @@ pub fn config_lists_server(text: &str, fmt: ConfigFormat, name: &str) -> bool {
     }
 }
 
+/// The `command` of server `name` in an agent config, when it has one.
+/// JSON: `mcpServers.<name>.command`. TOML: `command = "…"` inside the
+/// `[mcp_servers.<name>]` table (basic or literal string).
+pub fn config_server_command(text: &str, fmt: ConfigFormat, name: &str) -> Option<String> {
+    match fmt {
+        ConfigFormat::JsonMcpServers => serde_json::from_str::<Value>(text)
+            .ok()?
+            .get("mcpServers")?
+            .get(name)?
+            .get("command")?
+            .as_str()
+            .map(str::to_string),
+        ConfigFormat::TomlMcpServers => {
+            let headers = [
+                format!("[mcp_servers.{name}]"),
+                format!("[mcp_servers.\"{name}\"]"),
+            ];
+            let mut inside = false;
+            for line in text.lines().map(str::trim) {
+                if line.starts_with('[') {
+                    inside = headers.iter().any(|h| line.starts_with(h.as_str()));
+                    continue;
+                }
+                if !inside {
+                    continue;
+                }
+                let Some((key, value)) = line.split_once('=') else {
+                    continue;
+                };
+                if key.trim() != "command" {
+                    continue;
+                }
+                return toml_string(value.trim());
+            }
+            None
+        }
+    }
+}
+
+/// A TOML basic (`"…"`, JSON-compatible escapes) or literal (`'…'`) string
+/// at the start of `v`; trailing comments are ignored.
+fn toml_string(v: &str) -> Option<String> {
+    if let Some(rest) = v.strip_prefix('\'') {
+        return rest.split_once('\'').map(|(s, _)| s.to_string());
+    }
+    let rest = v.strip_prefix('"')?;
+    let mut escaped = false;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '\\' if !escaped => escaped = true,
+            '"' if !escaped => return serde_json::from_str(&v[..i + 2]).ok(),
+            _ => escaped = false,
+        }
+    }
+    None
+}
+
+/// Installed / not, and whether the entry points at a SparkDown that is
+/// gone or is another copy (#32). Shown in Settings with a Repair action.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentMcpStatus {
+    pub installed: bool,
+    /// The configured program (local workspaces only).
+    pub command: Option<String>,
+    pub stale: Option<StaleCommand>,
+}
+
+fn agent_status_from(text: Option<&str>, fmt: ConfigFormat, local: bool) -> AgentMcpStatus {
+    let Some(text) = text else {
+        return AgentMcpStatus {
+            installed: false,
+            command: None,
+            stale: None,
+        };
+    };
+    let installed = config_lists_server(text, fmt, SERVER_NAME);
+    let command = if installed && local {
+        config_server_command(text, fmt, SERVER_NAME)
+    } else {
+        None
+    };
+    let stale = command
+        .as_deref()
+        .and_then(|c| stale_command(c, shim_program().as_deref()));
+    AgentMcpStatus {
+        installed,
+        command,
+        stale,
+    }
+}
+
+/// Read `bin`'s config where the agent lives and judge our entry. Blocking.
+fn agent_status_blocking(bin: &str) -> AgentMcpStatus {
+    let none = AgentMcpStatus {
+        installed: false,
+        command: None,
+        stale: None,
+    };
+    let Some((rel, fmt)) = agent_mcp_config(bin) else {
+        return none;
+    };
+    if crate::remote::is_active() {
+        // The remote shim path is SparkDown's own script there; only the
+        // presence of the entry is checked.
+        let text = crate::remote::read_home_file(rel);
+        return agent_status_from(text.as_deref(), fmt, false);
+    }
+    let Some(home) = home_dir() else {
+        return none;
+    };
+    let text = std::fs::read_to_string(home.join(rel)).ok();
+    agent_status_from(text.as_deref(), fmt, true)
+}
+
+/// Settings status for one agent: installed, and stale (#32).
+#[tauri::command]
+pub async fn mcp_agent_status(bin: String) -> AgentMcpStatus {
+    tauri::async_runtime::spawn_blocking(move || agent_status_blocking(&bin))
+        .await
+        .unwrap_or(AgentMcpStatus {
+            installed: false,
+            command: None,
+            stale: None,
+        })
+}
+
 /// Whether `bin`'s user-scope MCP config already lists our server. Reads the
 /// agent's config file directly (see `agent_mcp_config`); never runs the CLI.
 /// For a remote workspace the file is read on the host (one SSH round trip
 /// over the control (mux) connection), hence async.
+/// An entry whose program no longer exists counts as NOT installed (#32):
+/// the agent cannot start it, so the launch flow offers to (re)install.
 #[tauri::command]
 pub async fn mcp_agent_installed(bin: String) -> bool {
-    let Some((rel, fmt)) = agent_mcp_config(&bin) else {
-        return false;
-    };
-    if crate::remote::is_active() {
-        return tauri::async_runtime::spawn_blocking(move || {
-            crate::remote::read_home_file(rel)
-                .map(|t| config_lists_server(&t, fmt, SERVER_NAME))
-                .unwrap_or(false)
-        })
-        .await
-        .unwrap_or(false);
-    }
-    let Some(home) = home_dir() else {
-        return false;
-    };
-    std::fs::read_to_string(home.join(rel))
-        .map(|t| config_lists_server(&t, fmt, SERVER_NAME))
-        .unwrap_or(false)
+    let st = mcp_agent_status(bin).await;
+    st.installed && st.stale != Some(StaleCommand::Missing)
 }
 /// Env var naming the socket; set in SparkDown terminals only.
 pub const SOCKET_ENV: &str = "SPARKDOWN_MCP";
@@ -922,7 +1049,50 @@ pub fn shim_program() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("APPIMAGE") {
         return Some(PathBuf::from(p));
     }
-    std::env::current_exe().ok()
+    std::env::current_exe().ok().map(strip_deleted_suffix)
+}
+
+/// Linux reports the executable of a process whose file was replaced or
+/// removed as `<path> (deleted)` (/proc/self/exe). An agent config must hold
+/// the plain path: after an in-place upgrade it is the new binary (#32).
+pub(crate) fn strip_deleted_suffix(p: PathBuf) -> PathBuf {
+    match p.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(plain) => PathBuf::from(plain),
+        None => p,
+    }
+}
+
+/// Why an installed entry's `command` is not this SparkDown (#32): the
+/// program is gone (an old install that was removed), or it is a different
+/// copy than the one running. None = fine, or not a path we can judge (a
+/// bare name resolved on PATH).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StaleCommand {
+    Missing,
+    Other,
+}
+
+pub(crate) fn stale_command(
+    command: &str,
+    running: Option<&std::path::Path>,
+) -> Option<StaleCommand> {
+    let path = std::path::Path::new(command);
+    if !path.is_absolute() {
+        return None;
+    }
+    if !path.is_file() {
+        return Some(StaleCommand::Missing);
+    }
+    let running = running?;
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (a, b) = (canon(path), canon(running));
+    let same = if cfg!(windows) {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    } else {
+        a == b
+    };
+    (!same).then_some(StaleCommand::Other)
 }
 
 /// Stable per-user socket path: `<runtime dir>/sparkdown/mcp.sock`. macOS
@@ -2322,6 +2492,108 @@ mod tests {
                 .unwrap_or_else(|| panic!("{shim}: the fake agent did not run"));
             assert_eq!(dump_argv(&parse_dump(&text)), add[1..], "{shim}");
         }
+    }
+
+    #[test]
+    fn config_server_command_reads_json_and_toml() {
+        let json = r#"{"mcpServers":{"other":{"command":"/x"},"sparkdown":{"command":"/home/u/.local/bin/sparkdown","args":["--mcp-stdio"]}}}"#;
+        assert_eq!(
+            config_server_command(json, ConfigFormat::JsonMcpServers, SERVER_NAME).as_deref(),
+            Some("/home/u/.local/bin/sparkdown")
+        );
+        assert_eq!(
+            config_server_command("{}", ConfigFormat::JsonMcpServers, SERVER_NAME),
+            None
+        );
+        let toml = "[mcp_servers.other]\ncommand = \"/nope\"\n\n[mcp_servers.sparkdown]\nargs = [\"--mcp-stdio\"]\ncommand = \"/home/u/.local/bin/sparkdown\" # old\n\n[mcp_servers.sparkdown.env]\ncommand = \"/not-this\"\n";
+        assert_eq!(
+            config_server_command(toml, ConfigFormat::TomlMcpServers, SERVER_NAME).as_deref(),
+            Some("/home/u/.local/bin/sparkdown")
+        );
+        let quoted = "[mcp_servers.\"sparkdown\"]\ncommand = 'C:\\Users\\me\\sparkdown.exe'\n";
+        assert_eq!(
+            config_server_command(quoted, ConfigFormat::TomlMcpServers, SERVER_NAME).as_deref(),
+            Some("C:\\Users\\me\\sparkdown.exe")
+        );
+        let escaped = "[mcp_servers.sparkdown]\ncommand = \"C:\\\\Program Files\\\\SparkDown\\\\sparkdown.exe\"\n";
+        assert_eq!(
+            config_server_command(escaped, ConfigFormat::TomlMcpServers, SERVER_NAME).as_deref(),
+            Some("C:\\Program Files\\SparkDown\\sparkdown.exe")
+        );
+        // Another server's command is never taken for ours.
+        assert_eq!(
+            config_server_command(
+                "[mcp_servers.other]\ncommand = \"/x\"\n",
+                ConfigFormat::TomlMcpServers,
+                SERVER_NAME
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn deleted_exe_suffix_is_stripped() {
+        assert_eq!(
+            strip_deleted_suffix(PathBuf::from("/home/u/.local/bin/sparkdown (deleted)")),
+            PathBuf::from("/home/u/.local/bin/sparkdown")
+        );
+        assert_eq!(
+            strip_deleted_suffix(PathBuf::from("/usr/bin/sparkdown")),
+            PathBuf::from("/usr/bin/sparkdown")
+        );
+    }
+
+    #[test]
+    fn stale_command_flags_missing_and_other_copies() {
+        let dir = std::env::temp_dir().join(format!("sd-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let running = dir.join("sparkdown");
+        let other = dir.join("sparkdown-old");
+        std::fs::write(&running, b"").unwrap();
+        std::fs::write(&other, b"").unwrap();
+        let s = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        // The #32 case: the config points at a deleted ~/.local/bin binary.
+        let gone = dir.join("deleted-sparkdown");
+        assert_eq!(
+            stale_command(&s(&gone), Some(&running)),
+            Some(StaleCommand::Missing)
+        );
+        assert_eq!(
+            stale_command(&s(&other), Some(&running)),
+            Some(StaleCommand::Other)
+        );
+        assert_eq!(stale_command(&s(&running), Some(&running)), None);
+        // Same file through a different spelling is not stale.
+        let dotted = dir.join(".").join("sparkdown");
+        assert_eq!(stale_command(&s(&dotted), Some(&running)), None);
+        // A bare name (resolved on PATH by the agent) is not judged.
+        assert_eq!(stale_command("sparkdown", Some(&running)), None);
+        // Missing is judged even when the running exe is unknown.
+        assert_eq!(stale_command(&s(&gone), None), Some(StaleCommand::Missing));
+        assert_eq!(stale_command(&s(&other), None), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn status_of_a_stale_entry_is_not_plain_installed() {
+        let gone = std::env::temp_dir().join(format!("sd-gone-{}/sparkdown", std::process::id()));
+        let json = serde_json::json!({"mcpServers": {"sparkdown": {"command": gone, "args": ["--mcp-stdio"]}}}).to_string();
+        let st = agent_status_from(Some(&json), ConfigFormat::JsonMcpServers, true);
+        assert!(st.installed);
+        assert_eq!(st.stale, Some(StaleCommand::Missing));
+        assert_eq!(st.command.as_deref(), Some(gone.to_str().unwrap()));
+        // Remote: presence only.
+        let st = agent_status_from(Some(&json), ConfigFormat::JsonMcpServers, false);
+        assert!(st.installed && st.stale.is_none() && st.command.is_none());
+        let st = agent_status_from(None, ConfigFormat::JsonMcpServers, true);
+        assert!(!st.installed);
+        let v = serde_json::to_value(agent_status_from(
+            Some(&json),
+            ConfigFormat::JsonMcpServers,
+            true,
+        ))
+        .unwrap();
+        assert_eq!(v["stale"], "missing");
     }
 
     #[test]
