@@ -105,7 +105,11 @@ jobs:
   release:
     name: Attach to GitHub Release (tags only)
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    # Only a pushed v* tag publishes. A manual run (workflow_dispatch), even
+    # one started on a tag ref, only uploads workflow artifacts: test builds
+    # never create or touch a Release, and latest.json is never written here
+    # (scripts/release.sh writes it, by hand, for real releases).
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     # The only job with write access. It does not check out the repo or run any
     # build/npm step, so the write token never reaches third-party tooling.

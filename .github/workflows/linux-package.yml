@@ -1,6 +1,9 @@
 name: Linux package
 
-# Produces AppImage + .deb for Omarchy / Linux. Not part of PR CI.
+# Produces AppImage + .deb, and a pacman package made from the .deb, for
+# Omarchy / Linux. Not part of PR CI. A manual run (Actions -> Linux package
+# -> Run workflow) only uploads workflow artifacts; only a v* tag push
+# attaches the AppImage and .deb to a Release.
 on:
   workflow_dispatch:
   push:
@@ -82,10 +85,77 @@ jobs:
             src-tauri/target/release/bundle/appimage/*.AppImage.sig
             src-tauri/target/release/bundle/deb/*.deb
 
+  arch:
+    # A pacman package for Arch / Omarchy test builds, made from the .deb
+    # above with the repo's own PKGBUILD (packaging/aur/sparkdown-bin) and a
+    # local source instead of the Release URL. Then installed in a clean
+    # Arch container and run (`sparkdown --version`) as a smoke test.
+    # Artifact only: never attached to a Release.
+    name: Build pacman package (from the deb)
+    needs: build
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    permissions:
+      contents: read
+    steps:
+      - name: Install git (for checkout)
+        run: pacman -Syu --noconfirm --needed git
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download built bundles
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sparkdown-linux
+          path: dist
+      - name: makepkg from the local deb
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb=$(find dist -name '*.deb' | head -n1)
+          test -n "$deb"
+          version=$(sed -n 's/^ *"version": *"\([^"]*\)".*/\1/p' src-tauri/tauri.conf.json | head -n1)
+          pkgver="${version}.r${GITHUB_RUN_NUMBER}.g${GITHUB_SHA::7}"
+          work=/tmp/pkg
+          mkdir -p "$work"
+          cp packaging/aur/sparkdown-bin/PKGBUILD packaging/aur/sparkdown-bin/sparkdown.desktop packaging/aur/sparkdown-bin/sparkdown.png "$work/"
+          cp "$deb" "$work/sparkdown-${pkgver}.deb"
+          sha=$(sha256sum "$work/sparkdown-${pkgver}.deb" | cut -d' ' -f1)
+          cd "$work"
+          sed -i "s/^pkgver=.*/pkgver=${pkgver}/" PKGBUILD
+          # Local source: drop the Release URL, keep the file name.
+          sed -i 's|::https://github\.com/sparkdown/sparkdown/releases/download/[^"]*"|"|' PKGBUILD
+          sed -i "0,/^sha256sums=('[0-9a-f]*'/s//sha256sums=('${sha}'/" PKGBUILD
+          grep -q "releases/download" PKGBUILD && { echo "PKGBUILD still points at a Release"; exit 1; }
+          cat PKGBUILD
+          useradd -m builder
+          chown -R builder "$work"
+          su builder -c "cd $work && makepkg -f --nodeps --noconfirm"
+          ls -l "$work"/*.pkg.tar.zst
+      - name: Install it in this clean Arch container and run it
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg=$(ls /tmp/pkg/*.pkg.tar.zst)
+          pacman -Qip "$pkg"
+          pacman -U --noconfirm "$pkg"
+          pacman -Ql sparkdown-bin
+          sparkdown --version
+          mkdir -p arch-dist && cp "$pkg" arch-dist/
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sparkdown-arch
+          path: arch-dist/*.pkg.tar.zst
+          if-no-files-found: error
+
   release:
     name: Attach to GitHub Release (tags only)
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    # Only a pushed v* tag publishes. A manual run (workflow_dispatch), even
+    # one started on a tag ref, only uploads workflow artifacts: test builds
+    # never create or touch a Release, and latest.json is never written here
+    # (scripts/release.sh writes it, by hand, for real releases).
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     # The only job with write access. It does not check out the repo or run any
     # build/npm step, so the write token never reaches third-party tooling.
