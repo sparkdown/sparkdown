@@ -9,6 +9,7 @@ import {
   replaceAll,
   closeSearchPanel,
 } from '@codemirror/search';
+import { formatShortcut } from './shortcuts';
 
 /**
  * VS Code / Kiro-style floating search widget. Sits in the top-right of the
@@ -46,7 +47,7 @@ export function createSearchPanel(view: EditorView): Panel {
   const count = document.createElement('span');
   count.className = 'sd-find-count';
 
-  const prevBtn = iconBtn('Previous (⇧⏎)', svgArrowUp());
+  const prevBtn = iconBtn(`Previous (${formatShortcut('Shift+Enter')})`, svgArrowUp());
   const nextBtn = iconBtn('Next (⏎)', svgArrowDown());
   const closeBtn = iconBtn('Close (Esc)', svgClose());
 

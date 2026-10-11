@@ -3,6 +3,7 @@ import type { EventBus } from './events';
 import type { FileTree } from './file-tree';
 import { ACTIONS, EVENTS, MENU } from './event-names';
 import { isMacOS } from './utils';
+import { shortcutKey } from './shortcuts';
 
 /** The views the activity bar can show in the sidebar. */
 export type SidebarView = 'files' | 'changes' | 'search';
@@ -151,7 +152,7 @@ export class ActivityBar {
   private onKeydown(e: KeyboardEvent): void {
     if (isMacOS()) return; // the native menu handles these (see init)
     if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return;
-    const key = e.key.toLowerCase();
+    const key = shortcutKey(e);
     const view = SIDEBAR_VIEWS.find((v) => VIEW_INFO[v].key.toLowerCase() === key);
     if (!view) return;
     // Ctrl+Shift+E is also "split down" while a terminal pane has focus

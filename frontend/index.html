@@ -35,7 +35,7 @@
           <button type="button" data-view="preview" aria-pressed="false">Preview</button>
           <button type="button" data-view="diff" aria-pressed="false">Diff</button>
         </div>
-        <button id="btn-terminal" class="toolbar-btn off" title="Terminals (⌃`) · Terminals only: ⌃⇧`" aria-label="Toggle Terminal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="m7 9 3 3-3 3M12 15h5"/></svg></button>
+        <button id="btn-terminal" class="toolbar-btn off" title="Terminals (Ctrl+`) · Terminals only: Ctrl+Shift+`" data-shortcut-title="Terminals ({action:toggle-terminal}) · Terminals only: {action:toggle-terminals-only}" aria-label="Toggle Terminal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="m7 9 3 3-3 3M12 15h5"/></svg></button>
         <div class="toolbar-separator toolbar-separator-window" role="separator" aria-hidden="true"></div>
         <div class="window-controls" aria-label="Window controls">
           <button type="button" id="btn-window-min" class="window-control" title="Minimize" aria-label="Minimize">
@@ -156,13 +156,13 @@
               <div class="welcome-recent-label">Recent folders</div>
               <div id="welcome-recent-list"></div>
             </div>
-            <div id="welcome-hint">Open a folder your agent is working in, then <kbd>⌃`</kbd> for a terminal.</div>
+            <div id="welcome-hint">Open a folder your agent is working in, then <kbd data-shortcut="action:toggle-terminal">Ctrl+`</kbd> for a terminal.</div>
           </div>
           <!-- A folder is open but no file is: one centered prompt instead of
                an empty editor + preview. -->
           <div id="welcome-workspace" hidden>
             <h1 id="welcome-workspace-title"></h1>
-            <p id="welcome-workspace-hint">Pick a file in the sidebar, or find one with <kbd id="welcome-workspace-key">⌘P</kbd>.</p>
+            <p id="welcome-workspace-hint">Pick a file in the sidebar, or find one with <kbd id="welcome-workspace-key" data-shortcut="action:quick-open">Ctrl+P</kbd>.</p>
             <div class="welcome-workspace-actions">
               <button class="welcome-btn welcome-btn-primary" data-welcome="quick-open">Find a File…</button>
               <button class="welcome-btn" data-welcome="new-file">New File</button>
@@ -172,8 +172,8 @@
         <div id="editor-area" role="main" aria-label="Editor workspace">
         <div id="editor-container" role="textbox" aria-label="Markdown editor" aria-multiline="true">
           <div id="md-toolbar" class="md-toolbar hidden" role="toolbar" aria-label="Markdown formatting">
-            <button class="md-btn" data-action="bold" title="Bold (⌘B)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 4h8a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/><path d="M6 12h9a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/></svg></button>
-            <button class="md-btn" data-action="italic" title="Italic (⌘I)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="4" x2="10" y2="4"/><line x1="14" y1="20" x2="5" y2="20"/><line x1="15" y1="4" x2="9" y2="20"/></svg></button>
+            <button class="md-btn" data-action="bold" title="Bold (Ctrl+B)" data-shortcut-title="Bold ({action:bold})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 4h8a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/><path d="M6 12h9a4 4 0 0 1 4 4 4 4 0 0 1-4 4H6z"/></svg></button>
+            <button class="md-btn" data-action="italic" title="Italic (Ctrl+I)" data-shortcut-title="Italic ({action:italic})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="4" x2="10" y2="4"/><line x1="14" y1="20" x2="5" y2="20"/><line x1="15" y1="4" x2="9" y2="20"/></svg></button>
             <button class="md-btn" data-action="heading" title="Heading">H</button>
             <span class="md-sep"></span>
             <button class="md-btn" data-action="unordered-list" title="Bullet List"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="1" fill="currentColor"/><circle cx="4" cy="12" r="1" fill="currentColor"/><circle cx="4" cy="18" r="1" fill="currentColor"/></svg></button>

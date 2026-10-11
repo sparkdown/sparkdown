@@ -2,7 +2,7 @@ import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { api, type RemoteSession } from './api';
-import { terminalPaneAction, type TerminalPaneAction } from './shortcuts';
+import { terminalPaneAction, terminalPassesToApp, type TerminalPaneAction } from './shortcuts';
 import { attachResizeDrag } from './resize-drag';
 import { isMacOS } from './utils';
 import { showMcpInstallPrompt } from './mcp-install-prompt';
@@ -151,6 +151,9 @@ export class TerminalPane {
         this.onAction?.(pane);
         return false;
       }
+      // App shortcuts that must work from a focused terminal (Ctrl+` on
+      // Windows/Linux): skip xterm so the keydown reaches ShortcutManager.
+      if (terminalPassesToApp(e, isMacOS())) return false;
       return true;
     });
   }
