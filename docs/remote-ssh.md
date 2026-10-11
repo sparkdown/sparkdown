@@ -60,6 +60,14 @@ ssh-add ~/.ssh/id_ed25519
 
 Then relaunch SparkDown. It picks up the agent (`SSH_AUTH_SOCK`) from the environment it was started in.
 
+### When the server rejects the key
+
+If the server refuses the key itself (the public key is not in the account's `~/.ssh/authorized_keys`, or the account is locked), no passphrase or agent can help, and SparkDown says so:
+
+> Not connected to 'host': the server rejected your SSH key (tried: ~/.ssh/id_ed25519, 1 key in ssh-agent). …
+
+The list shows the key files ssh offered (from `ssh -G` for that host) and how many keys your agent holds. The agent message above appears only when a passphrase-locked key could not be unlocked because the in-app prompt could not run.
+
 - **Linux:** an app started from the launcher only sees `SSH_AUTH_SOCK` if your session exports it. Typical setups:
   - a systemd user agent, with `SSH_AUTH_SOCK` set in `~/.config/environment.d/` (or `~/.config/uwsm/env` on uwsm/Hyprland sessions such as Omarchy).
   - `gcr-ssh-agent` (`systemctl --user enable --now gcr-ssh-agent.socket`), with `SSH_AUTH_SOCK=${XDG_RUNTIME_DIR}/gcr/ssh` in `~/.config/environment.d/`.
