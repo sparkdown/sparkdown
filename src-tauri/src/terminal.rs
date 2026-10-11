@@ -928,7 +928,8 @@ pub fn terminal_resize(
 /// - Unix: the pty's foreground process group (tcgetpgrp on the controller)
 ///   vs the shell pid: a running command is its own foreground job.
 /// - Local tmux: the pty child is the tmux client, so ask tmux for the
-///   active pane's foreground command (`pane_current_command`) vs its shell.
+///   active pane's shell (`pane_pid`) and compare its tty's foreground
+///   process group with the shell's own (#48). Never by name.
 /// - Windows (ConPTY): whether the shell has child processes (Toolhelp32).
 /// - Remote (ssh): the remote shell is not visible from here: None.
 #[tauri::command]
@@ -992,23 +993,50 @@ pub(crate) fn foreground_job(shell_pid: u32, fg_pgrp: Option<i32>) -> Option<u32
     }
 }
 
-/// tmux pane: busy when its foreground command is not its shell. Login
-/// shells may show as `-zsh`; names compare without that dash and any path.
-pub(crate) fn tmux_busy(current_command: &str, shell_name: &str) -> Option<String> {
-    let norm = |s: &str| {
-        let s = s.trim();
-        let s = s.rsplit('/').next().unwrap_or(s);
-        s.trim_start_matches('-').to_string()
-    };
-    let current = norm(current_command);
-    if current.is_empty() || current == norm(shell_name) {
+/// tmux pane: busy when the foreground process group of the pane's tty is
+/// not the pane shell's own (#48). Never by name: an agent that is itself a
+/// bash script runs as `bash` too. `pane_pid` is the pane's shell; its pgid
+/// and the tty's foreground pgid (`tpgid`) come from the process table.
+pub(crate) fn pane_foreground_job(pane_pid: u32, pane_pgid: i32, tpgid: i32) -> Option<u32> {
+    if tpgid <= 0 || tpgid as u32 == pane_pid || tpgid == pane_pgid {
         None
     } else {
-        Some(current)
+        Some(tpgid as u32)
     }
 }
 
-/// Ask tmux what the active pane of `session` runs. Blocking.
+/// (pgid, tpgid) of process `pid`: its own process group and the
+/// foreground process group of its controlling tty. Blocking.
+fn pgid_and_tty_foreground(pid: u32) -> Option<(i32, i32)> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        parse_proc_stat_pgrps(&stat)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let out = crate::proc::command("ps")
+            .args(["-o", "pgid=,tpgid=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut it = text.split_whitespace().map(|v| v.parse::<i32>().ok());
+        Some((it.next()??, it.next()??))
+    }
+}
+
+/// `/proc/<pid>/stat` → (pgrp, tpgid). The command name (field 2) is in
+/// parentheses and may hold spaces or ')', so split after the LAST ')'.
+/// Then: state ppid pgrp session tty_nr tpgid ...
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn parse_proc_stat_pgrps(stat: &str) -> Option<(i32, i32)> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    Some((f.get(2)?.parse().ok()?, f.get(5)?.parse().ok()?))
+}
+
+/// Ask tmux for the active pane's shell pid of `session`, then compare its
+/// tty's foreground process group with the shell's own. Blocking.
 fn tmux_busy_command(session: &str) -> Option<String> {
     let tmux = tmux_path()?;
     let out = crate::proc::command(tmux)
@@ -1017,17 +1045,20 @@ fn tmux_busy_command(session: &str) -> Option<String> {
             "-p",
             "-t",
             &format!("={session}:"),
-            "#{pane_current_command}\t#{pane_pid}",
+            "#{pane_pid}",
         ])
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let (current, pid) = text.trim().split_once('\t')?;
-    let shell = pid.trim().parse::<u32>().ok().and_then(process_name)?;
-    tmux_busy(current, &shell)
+    let pane_pid = String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u32>()
+        .ok()?;
+    let (pgid, tpgid) = pgid_and_tty_foreground(pane_pid)?;
+    let fg = pane_foreground_job(pane_pid, pgid, tpgid)?;
+    Some(process_name(fg).unwrap_or_else(|| "A program".into()))
 }
 
 /// Short name of process `pid` (`claude`, `node`, `vim`). Blocking.
@@ -1133,14 +1164,22 @@ mod tests {
     }
 
     #[test]
-    fn tmux_busy_compares_the_pane_command_with_its_shell() {
-        use super::tmux_busy;
-        assert_eq!(tmux_busy("zsh", "zsh"), None);
-        assert_eq!(tmux_busy("-zsh", "zsh"), None);
-        assert_eq!(tmux_busy("zsh\n", "/usr/bin/zsh"), None);
-        assert_eq!(tmux_busy("", "zsh"), None);
-        assert_eq!(tmux_busy("claude", "zsh").as_deref(), Some("claude"));
-        assert_eq!(tmux_busy("vim", "-bash").as_deref(), Some("vim"));
+    fn pane_busy_is_by_process_group_not_by_name() {
+        use super::{pane_foreground_job, parse_proc_stat_pgrps};
+        // Idle: the tty's foreground group is the shell's own.
+        assert_eq!(pane_foreground_job(100, 100, 100), None);
+        // A shell that is not its group leader (pgid != pid) is still idle.
+        assert_eq!(pane_foreground_job(100, 90, 90), None);
+        // No controlling tty / unknown.
+        assert_eq!(pane_foreground_job(100, 100, -1), None);
+        assert_eq!(pane_foreground_job(100, 100, 0), None);
+        // Any other foreground group is busy, whatever it is called
+        // (a bash-script agent shows as "bash", like the shell).
+        assert_eq!(pane_foreground_job(100, 100, 250), Some(250));
+        // /proc/<pid>/stat: the name may hold spaces and ')'.
+        let stat = "4242 (my agent) x) S 4000 4242 4242 34817 4300 4194560 0 0";
+        assert_eq!(parse_proc_stat_pgrps(stat), Some((4242, 4300)));
+        assert_eq!(parse_proc_stat_pgrps("garbage"), None);
     }
 
     #[test]
@@ -1168,8 +1207,24 @@ mod tests {
     fn tmux_pane_busy_follows_its_foreground_command() {
         use super::{tmux_busy_command, tmux_path};
         use std::time::{Duration, Instant};
-        let Some(tmux) = tmux_path() else { return };
+        let Some(tmux) = tmux_path() else {
+            eprintln!("tmux test skipped: no tmux on PATH");
+            return;
+        };
+        if !std::path::Path::new("/bin/bash").exists() {
+            return;
+        }
         let name = format!("sd-busy-test-{}", std::process::id());
+        // #48: the "agent" is itself a bash script, so by name it looks
+        // exactly like the pane's bash. Only the process group tells.
+        let dir = std::env::temp_dir().join(format!("sd-busy-agent-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let agent = dir.join("agent.sh");
+        std::fs::write(&agent, "#!/bin/bash\nwhile :; do sleep 1; done\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let run = |args: &[&str]| {
             crate::proc::command(&tmux)
                 .args(args)
@@ -1178,25 +1233,102 @@ mod tests {
                 .map(|s| s.success())
                 .unwrap_or(false)
         };
-        if !run(&["new-session", "-d", "-s", &name, "/bin/sh"]) {
+        if !run(&[
+            "new-session",
+            "-d",
+            "-s",
+            &name,
+            "/bin/bash --norc --noprofile -i",
+        ]) {
             eprintln!("tmux test skipped: no usable tmux server");
             return;
         }
-        let wait = |want: Option<&str>| {
+        let wait = |want_busy: bool| {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
                 let got = tmux_busy_command(&name);
-                if got.as_deref() == want {
-                    return;
+                if got.is_some() == want_busy {
+                    return got;
                 }
-                assert!(Instant::now() < deadline, "want {want:?}, got {got:?}");
+                assert!(
+                    Instant::now() < deadline,
+                    "want busy={want_busy}, got {got:?}"
+                );
                 std::thread::sleep(Duration::from_millis(100));
             }
         };
-        wait(None);
-        run(&["send-keys", "-t", &format!("={name}:"), "sleep 30", "Enter"]);
-        wait(Some("sleep"));
+        wait(false);
+        let target = format!("={name}:");
+        run(&["send-keys", "-t", &target, agent.to_str().unwrap(), "Enter"]);
+        let got = wait(true);
+        #[cfg(target_os = "linux")]
+        assert_eq!(got.as_deref(), Some("agent.sh"));
+        let _ = got;
+        run(&["send-keys", "-t", &target, "C-c", ""]);
+        wait(false);
+        run(&["send-keys", "-t", &target, "sleep 30", "Enter"]);
+        wait(true);
         run(&["kill-session", "-t", &format!("={name}")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #48: an agent chip whose agent is a bash script is busy too (the
+    /// launch wrapper runs it as its own foreground job).
+    #[cfg(unix)]
+    #[test]
+    fn real_pty_bash_script_agent_is_busy() {
+        use super::{foreground_job, launch_wrapper};
+        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+        use std::time::{Duration, Instant};
+        if !std::path::Path::new("/bin/bash").exists() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sd-busy-pty-agent-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let agent = dir.join("agent.sh");
+        std::fs::write(&agent, "#!/bin/bash\nwhile :; do sleep 1; done\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("/bin/bash");
+        cmd.arg("-lic");
+        cmd.arg(launch_wrapper("bash"));
+        cmd.env("SPARKDOWN_LAUNCH", agent.to_str().unwrap());
+        cmd.env("SHELL", "/bin/bash");
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let controller = pair.master;
+        let mut reader = controller.try_clone_reader().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while matches!(std::io::Read::read(&mut reader, &mut buf), Ok(n) if n > 0) {}
+        });
+        let shell = child.process_id().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let fg = loop {
+            if let Some(fg) = foreground_job(shell, controller.process_group_leader()) {
+                break fg;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "bash-script agent never became busy"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        #[cfg(target_os = "linux")]
+        assert_eq!(super::process_name(fg).as_deref(), Some("agent.sh"));
+        let _ = fg;
+        let _ = child.kill();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// #43: an agent chip's launch (`bash -lic <wrapper>`) runs the command
