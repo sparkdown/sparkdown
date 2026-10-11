@@ -5,6 +5,9 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+// An integration test can't reach the crate's `proc::command`; no console
+// window concern here (test runs only).
+#[allow(clippy::disallowed_methods)]
 fn run(flag: &str) -> (bool, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_sparkdown"))
         .arg(flag)
