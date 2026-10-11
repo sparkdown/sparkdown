@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 /// Entry point from main.rs when argv contains `--mcp-stdio`. Never returns a
 /// value the caller uses; the process exits when stdin closes.
 pub fn run() {
+    exit_when_orphaned();
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
 
@@ -34,6 +35,43 @@ pub fn run() {
     let out = stdout.lock();
     crate::mcp::serve_lines(stdin.lock(), out, offline_reply);
 }
+
+/// How often the orphan check looks at the parent pid.
+#[cfg(unix)]
+const PARENT_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether the shim lost the agent that launched it: its parent pid changed
+/// (the kernel re-parents an orphan to init or a subreaper). A shim started
+/// already orphaned (`start <= 1`) has nothing to watch.
+#[cfg(unix)]
+fn is_orphaned(start: u32, now: u32) -> bool {
+    start > 1 && now != start
+}
+
+/// Safety net (#31): normally the shim ends when the agent closes stdin
+/// (EOF) or the app's socket hangs up. If the agent dies while something
+/// else still holds our stdin pipe open (a grandchild, a shell wrapper), EOF
+/// never comes; poll `getppid()` and exit once the parent is gone. Portable
+/// across Linux and macOS (no `prctl(PR_SET_PDEATHSIG)`, which is Linux-only
+/// and fires on the death of the parent *thread*, not process). Windows has
+/// no re-parenting signal; there the stdin EOF and socket hang-up paths
+/// apply.
+#[cfg(unix)]
+fn exit_when_orphaned() {
+    let start = std::os::unix::process::parent_id();
+    if start <= 1 {
+        return;
+    }
+    std::thread::spawn(move || loop {
+        std::thread::sleep(PARENT_POLL);
+        if is_orphaned(start, std::os::unix::process::parent_id()) {
+            std::process::exit(0);
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn exit_when_orphaned() {}
 
 /// Connect to `$SPARKDOWN_MCP` if it is a working SparkDown socket.
 #[cfg(unix)]
@@ -139,6 +177,15 @@ fn offline_reply(msg: &Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_check_fires_only_when_the_parent_changes() {
+        assert!(!is_orphaned(4242, 4242));
+        assert!(is_orphaned(4242, 1)); // re-parented to init
+        assert!(is_orphaned(4242, 777)); // or to a subreaper
+        assert!(!is_orphaned(1, 1)); // started orphaned: nothing to watch
+    }
 
     #[test]
     fn offline_initialize_and_empty_tools() {
