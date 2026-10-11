@@ -102,6 +102,8 @@ export class App {
   private settingsDialog = new SettingsDialog();
   /** init() finished building the UI (gates RemoteHandler.attach). */
   private ready = false;
+  /** Paths forwarded by a second launch before init() finished (#51). */
+  private forwardedPaths: string[] = [];
   private unlisteners: Array<() => void> = [];
   private configSaveFailures = 0;
   private raf = createRafBatch();
@@ -112,6 +114,16 @@ export class App {
     await initPerfTrace();
     // Fire both startup IPC calls immediately; config gates UI construction
     // but pending "Open With" files aren't needed until the very end.
+    // #51: paths from a second `sparkdown <path>` launch. Listen BEFORE
+    // taking the startup queue: the backend switches from queueing to this
+    // event at that moment, so nothing falls between the two.
+    const unlistenOpenPaths = await listen<{ paths: string[] }>('open-paths', (e) => {
+      const paths = e.payload?.paths ?? [];
+      if (paths.length === 0) return;
+      if (this.ready) void this.openForwardedPaths(paths);
+      else this.forwardedPaths.push(...paths);
+    }).catch(() => null);
+    if (unlistenOpenPaths) this.unlisteners.push(unlistenOpenPaths);
     const pendingFilesPromise = api.getPendingFiles().catch(() => [] as string[]);
     try {
       this.config = await api.loadConfig();
@@ -269,6 +281,14 @@ export class App {
 
     this.ready = true;
     this.remoteHandler?.attach();
+    if (this.forwardedPaths.length > 0) {
+      void this.openForwardedPaths(this.forwardedPaths.splice(0));
+    }
+  }
+
+  /** A second launch's files and folders (#51): opened like CLI paths. */
+  private async openForwardedPaths(paths: string[]): Promise<void> {
+    await this.workspace.openDroppedPaths(paths);
   }
 
   /** The shared state controllers see (see app/context.ts). Services are
