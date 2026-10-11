@@ -16,6 +16,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
+pub mod hostkey;
 mod ssh;
 use ssh::{
     classify_remote_watch_delta, close_mux, load_ssh_hosts, map_ssh_failure, mux_options,
@@ -333,7 +334,8 @@ pub async fn remote_connect(host: String, path: String) -> Result<RemoteSession,
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let hosts = load_ssh_hosts()?;
-        let session = connect_with(&hosts, &host, &path, ssh_run)?;
+        let session = connect_with(&hosts, &host, &path, ssh_run)
+            .map_err(|e| ssh::refine_key_refusal(&host, e))?;
         // Phase 4: give remote agents the live MCP server by reverse-forwarding
         // the local socket over the SSH control (mux) connection. Best effort
         // — when it fails (no mux, old sshd, no home) the remote keeps the
@@ -1593,6 +1595,135 @@ Host *.example.com
         assert!(err.to_ascii_lowercase().contains("password"), "{err}");
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(current_session().is_none() || current_session().unwrap().host != "passwordbox");
+    }
+
+    #[test]
+    fn host_key_failures_map_to_codes() {
+        use ssh::{ERR_HOSTKEY_CHANGED, ERR_HOSTKEY_UNKNOWN};
+        let unknown = map_ssh_failure("me@h:2222", "Host key verification failed.\r\n");
+        assert!(unknown.starts_with(ERR_HOSTKEY_UNKNOWN), "{unknown}");
+        let strict = map_ssh_failure(
+            "h",
+            "No ED25519 host key is known for h and you have requested strict checking.\nHost key verification failed.",
+        );
+        assert!(strict.starts_with(ERR_HOSTKEY_UNKNOWN), "{strict}");
+        // The real changed-key banner also says "Password authentication is
+        // disabled": it must not read as a password error, and must never be
+        // the accept-able unknown case.
+        let changed_stderr = "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\
+            @    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n\
+            IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!\n\
+            Password authentication is disabled to avoid man-in-the-middle attacks.\n\
+            Host key verification failed.";
+        let changed = map_ssh_failure("h", changed_stderr);
+        assert!(changed.starts_with(ERR_HOSTKEY_CHANGED), "{changed}");
+        assert!(changed.contains("man-in-the-middle"));
+        // Mapping twice (connect maps the probe's error again) keeps the code.
+        assert_eq!(map_ssh_failure("h", &changed), changed);
+        assert_eq!(map_ssh_failure("h", &unknown), unknown);
+    }
+
+    #[test]
+    fn key_refusal_message_names_the_agent_fix_and_docs() {
+        let msg = ssh::needs_agent_message("~/.ssh/id_ed25519");
+        assert!(msg.starts_with(ssh::ERR_KEY_NEEDS_AGENT));
+        assert!(msg.contains("Your key needs an SSH agent: run ssh-add and relaunch SparkDown"));
+        assert!(msg.contains("~/.ssh/id_ed25519"));
+        assert!(msg.contains(ssh::AGENT_DOCS_URL));
+        // Only the key-refusal message is refined; others pass through.
+        let other = "Host 'h' is unreachable.".to_string();
+        assert_eq!(ssh::refine_key_refusal("h", other.clone()), other);
+    }
+
+    #[test]
+    fn identity_files_and_pub_fingerprints_parse() {
+        let home = std::path::Path::new("/home/u");
+        let files = ssh::identity_files(
+            "user u\nidentityfile ~/.ssh/id_rsa\nidentityfile %d/.ssh/id_ed25519\nport 22\n",
+            home,
+        );
+        assert_eq!(
+            files,
+            vec![
+                std::path::PathBuf::from("/home/u/.ssh/id_rsa"),
+                std::path::PathBuf::from("/home/u/.ssh/id_ed25519")
+            ]
+        );
+        assert_eq!(
+            ssh::pub_fingerprint(
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl me@x"
+            )
+            .as_deref(),
+            Some("SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU")
+        );
+        assert_eq!(ssh::pub_fingerprint("garbage"), None);
+    }
+
+    /// Live first-connect flow against a real sshd (#24). Run with the host
+    /// NOT in ~/.ssh/known_hosts (back the file up first):
+    /// `SPARKDOWN_SSH_TEST_DEST=me@127.0.0.1:2223 cargo test live_first_connect -- --ignored`
+    #[test]
+    #[ignore]
+    fn live_first_connect_scan_trust_then_changed_key() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dest = std::env::var("SPARKDOWN_SSH_TEST_DEST").expect("SPARKDOWN_SSH_TEST_DEST");
+        close_mux(&dest);
+        let err = ssh_run(&dest, "true").unwrap_err();
+        assert!(err.starts_with(ssh::ERR_HOSTKEY_UNKNOWN), "{err}");
+        let scan = hostkey::scan(&dest).unwrap();
+        assert!(!scan.keys.is_empty());
+        assert!(scan
+            .keys
+            .iter()
+            .all(|k| k.fingerprint.starts_with("SHA256:")));
+        hostkey::trust_scan(&scan.scan_id).unwrap();
+        // Normal strict checking now passes.
+        assert_eq!(ssh_run(&dest, "printf ok").unwrap(), "ok");
+        close_mux(&dest);
+        // Swap every trusted key for a different one: a changed host key.
+        let kh = std::path::PathBuf::from(&scan.known_hosts_file);
+        let text = std::fs::read_to_string(&kh).unwrap();
+        let fake = std::env::temp_dir().join(format!("sd-fake-{}", std::process::id()));
+        let _ = std::fs::remove_file(&fake);
+        crate::proc::command("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&fake)
+            .status()
+            .unwrap();
+        let fake_pub = std::fs::read_to_string(fake.with_extension("pub")).unwrap();
+        let fake_b64 = fake_pub.split_whitespace().nth(1).unwrap().to_string();
+        let swapped: String = text
+            .lines()
+            .map(|l| {
+                let mut p: Vec<&str> = l.split_whitespace().collect();
+                if p.len() >= 3 {
+                    p[1] = "ssh-ed25519";
+                    p[2] = &fake_b64;
+                }
+                p.join(" ") + "\n"
+            })
+            .collect();
+        std::fs::write(&kh, swapped).unwrap();
+        let err = ssh_run(&dest, "true").unwrap_err();
+        let _ = std::fs::remove_file(&fake);
+        let _ = std::fs::remove_file(fake.with_extension("pub"));
+        std::fs::write(&kh, text).unwrap();
+        assert!(err.starts_with(ssh::ERR_HOSTKEY_CHANGED), "{err}");
+    }
+
+    /// Live (#25): a passphrase-protected key and no agent gives the agent
+    /// message. Needs a ~/.ssh/config alias whose IdentityFile is encrypted:
+    /// `SPARKDOWN_SSH_TEST_PASS_ALIAS=sdpass cargo test live_key_needs_agent -- --ignored`
+    /// (run with SSH_AUTH_SOCK unset).
+    #[test]
+    #[ignore]
+    fn live_key_needs_agent() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let alias = std::env::var("SPARKDOWN_SSH_TEST_PASS_ALIAS").expect("alias");
+        let hosts = load_ssh_hosts().unwrap();
+        let err = connect_with(&hosts, &alias, "~", ssh_run).unwrap_err();
+        let err = ssh::refine_key_refusal(&alias, err);
+        assert!(err.starts_with(ssh::ERR_KEY_NEEDS_AGENT), "{err}");
     }
 
     #[test]

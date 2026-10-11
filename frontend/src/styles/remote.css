@@ -353,3 +353,63 @@
   opacity: 0.5;
   cursor: default;
 }
+
+/* Changed host key (#24): a hard stop, styled as a warning. */
+.remote-error.remote-error-danger {
+  font-weight: 600;
+  border-left: 3px solid var(--danger, #d64545);
+  padding-left: 8px;
+}
+
+.remote-error-link {
+  color: var(--accent, var(--fg));
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* First-connect host-key confirmation (#24). */
+.remote-hostkey {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.remote-hostkey h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.remote-hostkey-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+}
+
+.remote-hostkey-list li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 4px 0;
+  font-size: 12.5px;
+}
+
+.remote-hostkey-type {
+  min-width: 64px;
+  color: var(--text-muted);
+}
+
+.remote-hostkey-fp {
+  font-family: var(--font-mono, monospace);
+  color: var(--fg);
+  word-break: break-all;
+  user-select: text;
+}
+
+.remote-hostkey-where {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0 0 12px;
+  word-break: break-all;
+}

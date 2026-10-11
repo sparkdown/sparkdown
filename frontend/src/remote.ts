@@ -7,7 +7,7 @@
  */
 import { listen } from '@tauri-apps/api/event';
 import { message } from '@tauri-apps/plugin-dialog';
-import { api, type RemoteSession, type SshHost } from './api';
+import { api, type HostKeyScan, type RemoteSession, type SshHost } from './api';
 import { MENU } from './event-names';
 import { trapFocus, type ModalHandle } from './modal';
 import { showContextMenu } from './context-menu';
@@ -67,6 +67,39 @@ export type RemoteRecent = { host: string; path: string };
  * instant feedback: `[user@]host[:port]`, IPv6 in brackets. The backend
  * check is the authoritative one.
  */
+/** Error codes the backend prefixes onto connect errors (remote/ssh.rs). */
+export type RemoteErrorCode = 'hostkey-unknown' | 'hostkey-changed' | 'key-needs-agent';
+
+/** Split a backend error into its code (if any), text, and a docs link. */
+export function parseRemoteError(raw: string): {
+  code: RemoteErrorCode | null;
+  text: string;
+  link: string | null;
+} {
+  const m = /^\[(hostkey-unknown|hostkey-changed|key-needs-agent)\] /.exec(raw);
+  const code = (m?.[1] as RemoteErrorCode | undefined) ?? null;
+  let text = m ? raw.slice(m[0].length) : raw;
+  let link: string | null = null;
+  const see = / See (https:\/\/github\.com\/sparkdown\/sparkdown\/\S+)$/.exec(text);
+  if (see) {
+    link = see[1];
+    text = text.slice(0, see.index);
+  }
+  return { code, text, link };
+}
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** Short display name for an ssh key type (ED25519, ECDSA, RSA). */
+export function keyTypeLabel(t: string): string {
+  if (t.includes('ed25519')) return t.startsWith('sk-') ? 'ED25519-SK' : 'ED25519';
+  if (t.includes('ecdsa')) return t.startsWith('sk-') ? 'ECDSA-SK' : 'ECDSA';
+  if (t === 'ssh-rsa') return 'RSA';
+  return t;
+}
+
 export function isValidTypedHost(s: string): boolean {
   if (s.length === 0 || s.length > 255) return false;
   const m = /^(?:([A-Za-z0-9._][A-Za-z0-9._-]{0,63})@)?(?:\[([0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*)\]|([A-Za-z0-9_][A-Za-z0-9._-]*))(?::([0-9]{1,5}))?$/.exec(s);
@@ -153,9 +186,15 @@ export class RemoteSessions {
         await this.reopen(remote.host, remote.path, openPath);
       } catch (e) {
         if (e instanceof OriginSwitchCancelled) return;
-        const msg = e instanceof Error ? e.message : String(e);
+        const parsed = parseRemoteError(errorText(e));
+        const hint =
+          parsed.code === 'hostkey-unknown'
+            ? '\n\nUse File → Open Remote Folder to check and trust its host key.'
+            : parsed.link
+              ? `\n\n${parsed.link}`
+              : '';
         await message(
-          `Could not open remote folder ssh ${remote.host}:${remote.path}.\n\n${msg}`,
+          `Could not open remote folder ssh ${remote.host}:${remote.path}.\n\n${parsed.text}${hint}`,
           { title: 'Remote Folder', kind: 'error' },
         );
       }
@@ -441,10 +480,25 @@ export class RemoteSessions {
     };
     typedInput.addEventListener('input', syncGo);
     syncGo();
-    const showError = (msg: string) => {
+    const showError = (msg: string, opts: { link?: string | null; danger?: boolean } = {}) => {
       err.textContent = msg;
+      err.classList.toggle('remote-error-danger', opts.danger === true);
+      if (opts.link) {
+        const a = document.createElement('a');
+        a.href = opts.link;
+        a.className = 'remote-error-link';
+        a.textContent = 'How to fix this';
+        a.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          void api.openExternal(opts.link!);
+        });
+        err.append(' ', a);
+      }
       err.classList.remove('hidden');
     };
+    const connectOnce = () =>
+      this.connect(currentAlias, pathInput.value.trim() || '~', (dir) => this.app.openFolder(dir));
+    let currentAlias = '';
     const submit = async (): Promise<void> => {
       err.classList.add('hidden');
       const typed = typedInput.value.trim();
@@ -464,15 +518,50 @@ export class RemoteSessions {
       }
       go.disabled = true;
       go.textContent = 'Connecting…';
-      try {
-        await this.connect(alias, pathInput.value.trim() || '~', (dir) => this.app.openFolder(dir));
-        this.closeDialog();
-      } catch (e) {
-        if (!(e instanceof OriginSwitchCancelled)) {
-          showError(e instanceof Error ? e.message : String(e));
-        }
+      currentAlias = alias;
+      const reset = () => {
         go.disabled = false;
         go.textContent = 'Connect';
+      };
+      try {
+        await connectOnce();
+        this.closeDialog();
+        return;
+      } catch (e) {
+        if (e instanceof OriginSwitchCancelled) return reset();
+        const first = parseRemoteError(errorText(e));
+        if (first.code !== 'hostkey-unknown') {
+          showError(first.text, { link: first.link, danger: first.code === 'hostkey-changed' });
+          return reset();
+        }
+      }
+      // #24: unknown host key. Scan, show the fingerprints, and only on an
+      // explicit yes write them to known_hosts and connect with strict
+      // checking.
+      go.textContent = 'Checking host key…';
+      let scan: HostKeyScan;
+      try {
+        scan = await api.remoteHostkeyScan(alias);
+      } catch (e) {
+        showError(`Could not check the host key of '${alias}': ${parseRemoteError(errorText(e)).text}`);
+        return reset();
+      }
+      const trusted = await confirmHostKey(dialog, scan);
+      if (!trusted) {
+        void api.remoteHostkeyForget(scan.scan_id).catch(() => {});
+        showError(`Not connected: the host key of '${alias}' was not trusted.`);
+        return reset();
+      }
+      try {
+        await api.remoteHostkeyTrust(scan.scan_id);
+        go.textContent = 'Connecting…';
+        await connectOnce();
+        this.closeDialog();
+      } catch (e) {
+        if (e instanceof OriginSwitchCancelled) return reset();
+        const again = parseRemoteError(errorText(e));
+        showError(again.text, { link: again.link, danger: again.code === 'hostkey-changed' });
+        reset();
       }
     };
     go.addEventListener('click', () => void submit());
@@ -515,4 +604,65 @@ export class RemoteSessions {
 /** Create the App's RemoteSessions and register it (see RemoteSessions.install). */
 export function installRemoteSessions(app: RemoteApp): RemoteSessions {
   return new RemoteSessions(app).install();
+}
+
+/**
+ * Show the scanned host key(s) inside the remote dialog and wait for the
+ * user's decision (#24). Never resolves true without a click on "Trust".
+ */
+export function confirmHostKey(dialog: HTMLElement, scan: HostKeyScan): Promise<boolean> {
+  return new Promise((resolve) => {
+    const panel = document.createElement('div');
+    panel.className = 'remote-hostkey';
+    panel.setAttribute('role', 'group');
+    panel.setAttribute('aria-label', 'Verify host key');
+
+    const h = document.createElement('h3');
+    h.textContent = `First connection to ${scan.known_hosts_name}`;
+    const lead = document.createElement('p');
+    lead.className = 'remote-lead';
+    lead.textContent =
+      "This host isn't in your known_hosts yet. Compare these fingerprints with the ones from the server " +
+      "(on the server: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub) and trust them only if they match.";
+    const list = document.createElement('ul');
+    list.className = 'remote-hostkey-list';
+    for (const k of scan.keys) {
+      const li = document.createElement('li');
+      const type = document.createElement('span');
+      type.className = 'remote-hostkey-type';
+      type.textContent = keyTypeLabel(k.key_type);
+      const fp = document.createElement('code');
+      fp.className = 'remote-hostkey-fp';
+      fp.textContent = k.fingerprint;
+      li.append(type, fp);
+      list.appendChild(li);
+    }
+    const where = document.createElement('p');
+    where.className = 'remote-hostkey-where';
+    const n = scan.keys.length;
+    where.textContent = `Trusting adds ${n} line${n === 1 ? '' : 's'}${scan.hashed ? ' (hashed)' : ''} to ${scan.known_hosts_file}.`;
+
+    const actions = document.createElement('div');
+    actions.className = 'remote-actions';
+    const no = document.createElement('button');
+    no.type = 'button';
+    no.className = 'remote-btn';
+    no.textContent = "Don't trust";
+    const yes = document.createElement('button');
+    yes.type = 'button';
+    yes.className = 'remote-btn remote-btn-primary';
+    yes.id = 'remote-hostkey-trust';
+    yes.textContent = 'Trust and connect';
+    actions.append(no, yes);
+    panel.append(h, lead, list, where, actions);
+
+    const finish = (ok: boolean) => {
+      panel.remove();
+      resolve(ok);
+    };
+    no.addEventListener('click', () => finish(false));
+    yes.addEventListener('click', () => finish(true));
+    dialog.appendChild(panel);
+    no.focus();
+  });
 }

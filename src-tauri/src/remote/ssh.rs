@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -403,9 +403,45 @@ pub(crate) fn validate_remote_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Error-code prefixes the frontend acts on (remote.ts `remoteErrorCode`).
+/// Unknown host key: offer the scan + confirm flow (#24).
+pub const ERR_HOSTKEY_UNKNOWN: &str = "[hostkey-unknown] ";
+/// Changed host key: a hard stop, never an accept button (#24).
+pub const ERR_HOSTKEY_CHANGED: &str = "[hostkey-changed] ";
+/// A passphrase-protected key that no agent holds (#25).
+pub const ERR_KEY_NEEDS_AGENT: &str = "[key-needs-agent] ";
+/// Docs section linked from the agent message.
+pub const AGENT_DOCS_URL: &str =
+    "https://github.com/sparkdown/sparkdown/blob/main/docs/remote-ssh.md#passphrase-protected-keys";
+
+const CODES: &[&str] = &[
+    ERR_HOSTKEY_UNKNOWN,
+    ERR_HOSTKEY_CHANGED,
+    ERR_KEY_NEEDS_AGENT,
+];
+
 /// Map ssh(1) failure text into the v1 user-facing errors.
 pub fn map_ssh_failure(host: &str, stderr: &str) -> String {
+    // Already mapped (connect maps the probe's error again): keep the code.
+    if CODES.iter().any(|c| stderr.starts_with(c)) {
+        return stderr.to_string();
+    }
     let s = stderr.to_ascii_lowercase();
+    // Before the password check: this warning itself mentions "Password
+    // authentication is disabled to avoid man-in-the-middle attacks".
+    if s.contains("remote host identification has changed") {
+        return format!(
+            "{ERR_HOSTKEY_CHANGED}WARNING: the host key for '{host}' has CHANGED since you last connected. \
+             Someone may be intercepting the connection (a man-in-the-middle attack), or the server was reinstalled. \
+             SparkDown will not connect and will not replace the key. Check with the server's administrator; \
+             only if the change is expected, remove the old key with `ssh-keygen -R <host>` and connect again."
+        );
+    }
+    if s.contains("host key verification failed")
+        || (s.contains("host key is known for") && s.contains("strict checking"))
+    {
+        return format!("{ERR_HOSTKEY_UNKNOWN}'{host}' is not in your known_hosts yet.");
+    }
     if s.contains("permission denied")
         || s.contains("password")
         || s.contains("keyboard-interactive")
@@ -440,6 +476,131 @@ pub fn map_ssh_failure(host: &str, stderr: &str) -> String {
     } else {
         format!("SSH to '{host}' failed: {detail}")
     }
+}
+
+/// The key-auth refusal `map_ssh_failure` produces.
+fn is_key_refusal(host: &str, msg: &str) -> bool {
+    msg.starts_with(&format!(
+        "Host '{host}' requires a password or rejected the SSH key"
+    ))
+}
+
+/// The #25 message for a passphrase-protected key no agent holds.
+pub(crate) fn needs_agent_message(key: &str) -> String {
+    format!(
+        "{ERR_KEY_NEEDS_AGENT}Your key needs an SSH agent: run ssh-add and relaunch SparkDown. \
+         (Key: {key}, protected by a passphrase, and no running SSH agent holds it.) See {AGENT_DOCS_URL}"
+    )
+}
+
+/// After a key refusal, look for the likely cause: a passphrase-protected
+/// identity file that no reachable agent holds (BatchMode can't ask for the
+/// passphrase). Returns the refined message, or `msg` unchanged.
+pub(crate) fn refine_key_refusal(host: &str, msg: String) -> String {
+    if !is_key_refusal(host, &msg) {
+        return msg;
+    }
+    match encrypted_key_without_agent(host) {
+        Some(key) => needs_agent_message(&key),
+        None => msg,
+    }
+}
+
+/// `identityfile` entries of `ssh -G` output, `~`/`%d` expanded.
+pub(crate) fn identity_files(ssh_g: &str, home: &Path) -> Vec<PathBuf> {
+    ssh_g
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("identityfile "))
+        .map(|p| super::hostkey::expand_home(p.trim(), home))
+        .collect()
+}
+
+/// `SHA256:…` of a `.pub` file's key.
+pub(crate) fn pub_fingerprint(pub_text: &str) -> Option<String> {
+    use base64::Engine as _;
+    let b64 = pub_text.split_whitespace().nth(1)?;
+    let blob = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    Some(super::hostkey::fingerprint(&blob))
+}
+
+/// Whether `ssh-keygen` says this private key needs a passphrase. The key
+/// is only read by ssh-keygen (empty passphrase, stdin closed); nothing of
+/// it reaches SparkDown.
+fn key_is_encrypted(path: &Path) -> bool {
+    let Ok(out) = crate::proc::command("ssh-keygen")
+        .arg("-y")
+        .arg("-P")
+        .arg("")
+        .arg("-f")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    !out.status.success()
+        && String::from_utf8_lossy(&out.stderr)
+            .to_ascii_lowercase()
+            .contains("passphrase")
+}
+
+/// Fingerprints the running agent holds; `None` when no agent is reachable.
+fn agent_fingerprints() -> Option<Vec<String>> {
+    let out = crate::proc::command("ssh-add")
+        .args(["-l", "-E", "sha256"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    match out.status.code() {
+        // 0: keys listed; 1: agent reachable but empty.
+        Some(0) | Some(1) => Some(
+            String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .filter(|w| w.starts_with("SHA256:"))
+                .map(str::to_string)
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// The first passphrase-protected identity for `host` that no agent holds,
+/// shown with `~` for the home dir.
+fn encrypted_key_without_agent(host: &str) -> Option<String> {
+    let dest = destination_args(host).ok()?;
+    let out = crate::proc::command("ssh")
+        .arg("-G")
+        .args(&dest)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    let home = home_dir();
+    let agent = agent_fingerprints();
+    for key in identity_files(&String::from_utf8_lossy(&out.stdout), &home) {
+        if !key.is_file() || !key_is_encrypted(&key) {
+            continue;
+        }
+        let mut pub_path = key.clone().into_os_string();
+        pub_path.push(".pub");
+        let fp = std::fs::read_to_string(&pub_path)
+            .ok()
+            .and_then(|t| pub_fingerprint(&t));
+        let held = match (&agent, &fp) {
+            (Some(list), Some(fp)) => list.contains(fp),
+            // Agent up but no .pub to compare: assume it may hold the key.
+            (Some(list), None) => !list.is_empty(),
+            (None, _) => false,
+        };
+        if !held {
+            let shown = key
+                .strip_prefix(&home)
+                .map(|r| format!("~/{}", r.display()))
+                .unwrap_or_else(|_| key.display().to_string());
+            return Some(shown);
+        }
+    }
+    None
 }
 
 /// Connection-multiplexing options: the first ssh call opens a control (mux)
@@ -508,7 +669,7 @@ fn ssh_config_path() -> PathBuf {
     home_dir().join(".ssh").join("config")
 }
 
-fn home_dir() -> PathBuf {
+pub(crate) fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)

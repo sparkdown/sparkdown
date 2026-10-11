@@ -124,6 +124,11 @@ export const api = {
   mcpAgentInstalled: (bin: string) => invoke<boolean>('mcp_agent_installed', { bin }),
   // Remote sessions v1 (#36): SSH config hosts + one workspace at a time.
   sshConfigHosts: () => invoke<SshHost[]>('ssh_config_hosts'),
+  // First connect to an unknown host (#24): scan its keys for the user to
+  // confirm, then append exactly the scanned lines to known_hosts.
+  remoteHostkeyScan: (host: string) => invoke<HostKeyScan>('remote_hostkey_scan', { host }),
+  remoteHostkeyTrust: (scanId: string) => invoke<void>('remote_hostkey_trust', { scanId }),
+  remoteHostkeyForget: (scanId: string) => invoke<void>('remote_hostkey_forget', { scanId }),
   // Both stop the backend watcher (watch_stop in remote/mod.rs), so drop the
   // watchStart pin too — else reopening the same root never restarts it.
   remoteConnect: (host: string, path: string) =>
@@ -149,6 +154,16 @@ export interface McpTab {
 }
 
 /** Editor state pushed to the in-app MCP server (mcp.rs). */
+/** remote_hostkey_scan result (remote/hostkey.rs). */
+export interface HostKeyScan {
+  scan_id: string;
+  /** `host` or `[host]:port`, as written to known_hosts. */
+  known_hosts_name: string;
+  keys: { key_type: string; fingerprint: string }[];
+  known_hosts_file: string;
+  hashed: boolean;
+}
+
 export interface McpSnapshot {
   workspace_root: string | null;
   active_path: string | null;

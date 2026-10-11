@@ -25,6 +25,8 @@ import {
   installRemoteSessions,
   isValidTypedHost,
   isRemoteRecent,
+  keyTypeLabel,
+  parseRemoteError,
   parseRemoteRecent,
   passwordOnlyMessage,
   RemoteSessions,
@@ -346,6 +348,130 @@ describe('remote sessions UI', () => {
       expect(err.textContent).toContain('unreachable');
     });
     expect(opened).toEqual([]);
+  });
+
+  describe('first connect and key errors (#24, #25)', () => {
+    const SCAN = {
+      scan_id: 'scan-1',
+      known_hosts_name: '[127.0.0.1]:2222',
+      keys: [{ key_type: 'ssh-ed25519', fingerprint: 'SHA256:abcDEF123' }],
+      known_hosts_file: '/home/u/.ssh/known_hosts',
+      hashed: true,
+    };
+    let connectCalls: number;
+    let firstError: string;
+    function mock(): void {
+      connectCalls = 0;
+      invoke.mockImplementation(async (...args: unknown[]) => {
+        const cmd = args[0] as string;
+        switch (cmd) {
+          case 'ssh_config_hosts':
+            return HOSTS;
+          case 'remote_session':
+            return null;
+          case 'remote_connect':
+            connectCalls += 1;
+            if (connectCalls === 1) throw firstError;
+            return { host: 'dev', path: '/home/u/proj' };
+          case 'remote_hostkey_scan':
+            return SCAN;
+          case 'remote_hostkey_trust':
+          case 'remote_hostkey_forget':
+            return null;
+          default:
+            throw new Error(`unmocked ${cmd}`);
+        }
+      });
+    }
+    const calls = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd);
+    async function start(): Promise<void> {
+      const remote = installRemoteSessions(app);
+      await remote.openDialog();
+      (document.querySelector('.remote-btn-primary') as HTMLButtonElement).click();
+    }
+
+    it('an unknown host key shows the fingerprints and connects only after Trust', async () => {
+      firstError = "[hostkey-unknown] 'dev' is not in your known_hosts yet.";
+      mock();
+      await start();
+      await vi.waitFor(() => expect(document.querySelector('.remote-hostkey')).not.toBeNull());
+      const panel = document.querySelector('.remote-hostkey') as HTMLElement;
+      expect(panel.textContent).toContain('[127.0.0.1]:2222');
+      expect(panel.textContent).toContain('ED25519');
+      expect(panel.textContent).toContain('SHA256:abcDEF123');
+      expect(panel.textContent).toContain('(hashed)');
+      // Nothing is trusted or retried before the click.
+      expect(calls('remote_hostkey_trust')).toHaveLength(0);
+      expect(connectCalls).toBe(1);
+      (document.getElementById('remote-hostkey-trust') as HTMLButtonElement).click();
+      await vi.waitFor(() => expect(opened).toEqual(['/home/u/proj']));
+      expect(calls('remote_hostkey_trust')[0][1]).toEqual({ scanId: 'scan-1' });
+      expect(connectCalls).toBe(2);
+    });
+
+    it("Don't trust leaves known_hosts alone and does not connect", async () => {
+      firstError = "[hostkey-unknown] 'dev' is not in your known_hosts yet.";
+      mock();
+      await start();
+      await vi.waitFor(() => expect(document.querySelector('.remote-hostkey')).not.toBeNull());
+      const no = [...document.querySelectorAll<HTMLButtonElement>('.remote-hostkey .remote-btn')].find(
+        (b) => b.textContent === "Don't trust",
+      )!;
+      no.click();
+      await vi.waitFor(() => {
+        const err = document.querySelector('.remote-error') as HTMLElement;
+        expect(err.textContent).toContain('not trusted');
+      });
+      expect(calls('remote_hostkey_trust')).toHaveLength(0);
+      expect(calls('remote_hostkey_forget')[0][1]).toEqual({ scanId: 'scan-1' });
+      expect(connectCalls).toBe(1);
+      expect(opened).toEqual([]);
+    });
+
+    it('a changed host key is a hard stop: no scan, no accept button', async () => {
+      firstError = "[hostkey-changed] WARNING: the host key for 'dev' has CHANGED since you last connected.";
+      mock();
+      await start();
+      await vi.waitFor(() => {
+        const err = document.querySelector('.remote-error') as HTMLElement;
+        expect(err.textContent).toContain('CHANGED');
+        expect(err.classList.contains('remote-error-danger')).toBe(true);
+        expect(err.textContent).not.toContain('[hostkey-changed]');
+      });
+      expect(calls('remote_hostkey_scan')).toHaveLength(0);
+      expect(document.querySelector('.remote-hostkey')).toBeNull();
+    });
+
+    it('a passphrase key without an agent explains ssh-add and links the docs', async () => {
+      const url = 'https://github.com/sparkdown/sparkdown/blob/main/docs/remote-ssh.md#passphrase-protected-keys';
+      firstError = `[key-needs-agent] Your key needs an SSH agent: run ssh-add and relaunch SparkDown. (Key: ~/.ssh/id_ed25519) See ${url}`;
+      mock();
+      await start();
+      await vi.waitFor(() => {
+        const err = document.querySelector('.remote-error') as HTMLElement;
+        expect(err.textContent).toContain('run ssh-add and relaunch SparkDown');
+        expect(err.querySelector('a')?.getAttribute('href')).toBe(url);
+      });
+    });
+  });
+
+  it('parseRemoteError splits code, text and docs link', () => {
+    expect(parseRemoteError("Host 'x' is unreachable.")).toEqual({
+      code: null,
+      text: "Host 'x' is unreachable.",
+      link: null,
+    });
+    const p = parseRemoteError(
+      '[key-needs-agent] Run ssh-add. See https://github.com/sparkdown/sparkdown/blob/main/docs/remote-ssh.md#x',
+    );
+    expect(p.code).toBe('key-needs-agent');
+    expect(p.text).toBe('Run ssh-add.');
+    expect(p.link).toContain('docs/remote-ssh.md#x');
+    // Links elsewhere are never turned into clickable links.
+    expect(parseRemoteError('[hostkey-changed] See https://evil.example/x').link).toBeNull();
+    expect(keyTypeLabel('ssh-ed25519')).toBe('ED25519');
+    expect(keyTypeLabel('ecdsa-sha2-nistp256')).toBe('ECDSA');
+    expect(keyTypeLabel('ssh-rsa')).toBe('RSA');
   });
 
   it('one workspace at a time: opening a local folder disconnects remote', async () => {
