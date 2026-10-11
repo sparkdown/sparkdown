@@ -18,6 +18,7 @@ use tauri::{AppHandle, Emitter};
 
 pub mod hostkey;
 mod ssh;
+pub use ssh::display_home_path;
 use ssh::{
     classify_remote_watch_delta, close_mux, load_ssh_hosts, map_ssh_failure, mux_options,
     shell_quote, ssh_git, ssh_run, ssh_run_bytes, ssh_run_stdin, validate_host_alias,
@@ -325,7 +326,11 @@ pub fn ssh_config_hosts() -> Result<Vec<SshHost>, String> {
 // Async: the connect probe and the MCP forward are SSH round trips; run them
 // on the worker pool so the window stays responsive.
 #[tauri::command]
-pub async fn remote_connect(host: String, path: String) -> Result<RemoteSession, String> {
+pub async fn remote_connect(
+    app: tauri::AppHandle,
+    host: String,
+    path: String,
+) -> Result<RemoteSession, String> {
     tauri::async_runtime::spawn_blocking(move || {
         // Held across the whole connect (probe + forward setup) so a disconnect
         // or a second connect can't interleave and orphan the SSH control
@@ -334,8 +339,25 @@ pub async fn remote_connect(host: String, path: String) -> Result<RemoteSession,
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let hosts = load_ssh_hosts()?;
-        let session = connect_with(&hosts, &host, &path, ssh_run)
-            .map_err(|e| ssh::refine_key_refusal(&host, e))?;
+        // #27: a fresh askpass endpoint and token for this connection, so a
+        // passphrase-protected key can be unlocked in the app. If it can't
+        // be set up, ssh runs in BatchMode and the agent message (#25) is
+        // the fallback.
+        let previous = crate::askpass::current();
+        let broker = std::env::current_exe().ok().and_then(|exe| {
+            crate::askpass::Broker::start(crate::askpass::ui_provider(app.clone()), exe).ok()
+        });
+        crate::askpass::set_current(broker.clone());
+        let result = connect_with(&hosts, &host, &path, ssh_run).map_err(|e| {
+            let cancelled = broker.as_ref().is_some_and(|b| b.take_cancelled());
+            let answered = broker.as_ref().is_some_and(|b| b.take_answered());
+            passphrase_outcome_message(&host, e, cancelled, answered)
+        });
+        if result.is_err() {
+            // The live session (if any) keeps its own endpoint.
+            crate::askpass::set_current(previous);
+        }
+        let session = result?;
         // Phase 4: give remote agents the live MCP server by reverse-forwarding
         // the local socket over the SSH control (mux) connection. Best effort
         // — when it fails (no mux, old sshd, no home) the remote keeps the
@@ -349,6 +371,25 @@ pub async fn remote_connect(host: String, path: String) -> Result<RemoteSession,
     })
     .await
     .map_err(|e| format!("connect task failed: {e}"))?
+}
+
+/// The connect error after an askpass round: cancelled prompt, refused
+/// passphrase, or (askpass never ran) the agent hint from #25.
+pub(crate) fn passphrase_outcome_message(
+    host: &str,
+    err: String,
+    cancelled: bool,
+    answered: bool,
+) -> String {
+    if cancelled {
+        return format!("Not connected to '{host}': no passphrase was entered for your SSH key.");
+    }
+    if answered && ssh::is_key_refusal(host, &err) {
+        return format!(
+            "Not connected to '{host}': the key passphrase was wrong, or the server did not accept the key."
+        );
+    }
+    ssh::refine_key_refusal(host, err)
 }
 
 /// Tear down the active session synchronously. Serialized against connect via
@@ -366,6 +407,8 @@ fn disconnect_now() {
         close_mux(&prev.host);
     }
     set_session(None);
+    // Close the askpass endpoint and wipe the session's cached passphrase.
+    crate::askpass::set_current(None);
 }
 
 // Async + spawn_blocking: disconnect shells out to ssh (`-O cancel`, `-O exit`,
@@ -1724,6 +1767,96 @@ Host *.example.com
         let err = connect_with(&hosts, &alias, "~", ssh_run).unwrap_err();
         let err = ssh::refine_key_refusal(&alias, err);
         assert!(err.starts_with(ssh::ERR_KEY_NEEDS_AGENT), "{err}");
+    }
+
+    /// Live (#27): a passphrase-protected key, no agent, and the askpass
+    /// helper (the real sparkdown binary) answered programmatically through
+    /// the broker. Same alias as above plus the passphrase:
+    /// `SPARKDOWN_SSH_TEST_PASS_ALIAS=sdpass SPARKDOWN_SSH_TEST_PASSPHRASE=... \
+    ///  env -u SSH_AUTH_SOCK cargo test live_askpass -- --ignored`
+    /// (build the binary first: `cargo build`).
+    #[test]
+    #[ignore]
+    fn live_askpass_unlocks_passphrase_key_without_agent() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            std::env::var_os("SSH_AUTH_SOCK").is_none(),
+            "run with SSH_AUTH_SOCK unset"
+        );
+        let alias = std::env::var("SPARKDOWN_SSH_TEST_PASS_ALIAS").expect("alias");
+        let pass = std::env::var("SPARKDOWN_SSH_TEST_PASSPHRASE").expect("passphrase");
+        // target/debug/deps/<test> -> target/debug/sparkdown
+        let exe = std::env::current_exe().unwrap();
+        let helper = exe
+            .parent()
+            .and_then(|d| d.parent())
+            .unwrap()
+            .join(if cfg!(windows) {
+                "sparkdown.exe"
+            } else {
+                "sparkdown"
+            });
+        assert!(
+            helper.exists(),
+            "build the binary first: {}",
+            helper.display()
+        );
+        let hosts = load_ssh_hosts().unwrap();
+        close_mux(&alias); // a leftover master would skip authentication
+
+        // Wrong passphrase first: refused, and the message says so (not the
+        // agent hint, not a password prompt).
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = asked.clone();
+        let provider: crate::askpass::Provider = std::sync::Arc::new(move |key: &str| {
+            seen.lock().unwrap().push(key.to_string());
+            Some(zeroize::Zeroizing::new("wrong".to_string()))
+        });
+        let broker = crate::askpass::Broker::start(provider, helper.clone()).unwrap();
+        crate::askpass::set_current(Some(broker.clone()));
+        let err = connect_with(&hosts, &alias, "~", ssh_run).unwrap_err();
+        let msg = passphrase_outcome_message(
+            &alias,
+            err,
+            broker.take_cancelled(),
+            broker.take_answered(),
+        );
+        assert!(msg.contains("passphrase was wrong"), "{msg}");
+        assert!(!asked.lock().unwrap().is_empty());
+        assert!(asked.lock().unwrap().iter().all(|k| !k.is_empty()));
+        crate::askpass::set_current(None);
+
+        // Right passphrase: connected over publickey, asked once.
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = asked.clone();
+        let provider: crate::askpass::Provider = std::sync::Arc::new(move |key: &str| {
+            seen.lock().unwrap().push(key.to_string());
+            Some(zeroize::Zeroizing::new(pass.clone()))
+        });
+        let broker = crate::askpass::Broker::start(provider, helper).unwrap();
+        crate::askpass::set_current(Some(broker));
+        let session = connect_with(&hosts, &alias, "~", ssh_run);
+        let n = asked.lock().unwrap().len();
+        disconnect_now();
+        let session = session.expect("connect with askpass");
+        assert!(!session.path.is_empty());
+        assert_eq!(n, 1, "asked once per connect");
+        assert!(
+            crate::askpass::current().is_none(),
+            "disconnect drops the broker"
+        );
+    }
+
+    #[test]
+    fn passphrase_outcome_messages() {
+        let refused = "Host 'h' requires a password or rejected the SSH key. x".to_string();
+        let m = passphrase_outcome_message("h", refused.clone(), true, true);
+        assert!(m.contains("no passphrase was entered"), "{m}");
+        let m = passphrase_outcome_message("h", refused, false, true);
+        assert!(m.contains("passphrase was wrong"), "{m}");
+        // Other failures pass through untouched.
+        let m = passphrase_outcome_message("h", "Could not reach 'h'".into(), false, true);
+        assert_eq!(m, "Could not reach 'h'");
     }
 
     #[test]

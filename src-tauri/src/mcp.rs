@@ -976,7 +976,7 @@ pub fn mcp_socket_path() -> PathBuf {
 /// hashing a fixed input under two fresh instances yields an unguessable token
 /// for the pipe name.
 #[cfg(windows)]
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     use std::hash::{BuildHasher, Hasher};
     let mut token = String::with_capacity(32);
     for _ in 0..2 {
@@ -1160,7 +1160,7 @@ fn pipe_security_descriptor(
 /// this name (another instance, or a squatter) makes the create fail
 /// (first-instance flag); there is no stale file to reclaim.
 #[cfg(windows)]
-fn create_pipe_listener(
+pub(crate) fn create_pipe_listener(
     path: &std::path::Path,
 ) -> std::io::Result<interprocess::local_socket::Listener> {
     use interprocess::local_socket::{prelude::*, GenericFilePath, ListenerOptions};
