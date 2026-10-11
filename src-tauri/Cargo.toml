@@ -30,6 +30,10 @@ notify = "8"
 # Pure Rust, no dependencies. Downloads use the system curl (updates.rs), so
 # the app carries no HTTP/TLS stack.
 minisign-verify = "0.2"
+# Remote SSH first connect (#24): SHA256 host-key fingerprints, shown the
+# same way ssh prints them. Both already in the tree (same versions).
+sha2 = "0.10"
+base64 = "0.22"
 
 # macOS: install an applicationShouldTerminate: delegate hook so dock/menu
 # Quit can be intercepted (tao doesn't implement it). objc2 is already in the

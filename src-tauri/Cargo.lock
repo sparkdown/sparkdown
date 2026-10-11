@@ -3291,6 +3291,7 @@ dependencies = [
 name = "sparkdown"
 version = "0.3.1"
 dependencies = [
+ "base64 0.22.1",
  "interprocess",
  "minisign",
  "minisign-verify",
@@ -3301,6 +3302,7 @@ dependencies = [
  "portable-pty",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
