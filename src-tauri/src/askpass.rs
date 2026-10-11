@@ -656,6 +656,12 @@ mod tests {
         assert!(!b.take_cancelled());
         let dir = b.dir.clone();
         drop(b);
+        // The serving thread may hold the last reference for a moment after
+        // replying; the endpoint goes when that one drops.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while dir.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(!dir.exists(), "endpoint dir removed on drop");
     }
 
