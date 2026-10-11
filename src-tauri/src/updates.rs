@@ -24,7 +24,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
@@ -356,17 +356,11 @@ fn download(
         return Err(format!("refusing a non-HTTPS update URL: {url}"));
     }
     let _ = fs::remove_file(out);
-    let mut cmd = Command::new(curl_program());
+    let mut cmd = crate::proc::command(curl_program());
     cmd.args(curl_args(url, out, max_time_secs, max_bytes))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
     let mut child = cmd.spawn().map_err(|e| format!("cannot run curl: {e}"))?;
     let deadline = Instant::now() + Duration::from_secs(max_time_secs + 15);
     let mut last = 0;
@@ -855,7 +849,7 @@ fn install_staged(
             // bsdtar refuses absolute paths and `..` members by default; the
             // archive is also signature-verified at this point. Downloads by
             // curl carry no quarantine attribute, so nothing to clear.
-            let status = Command::new("/usr/bin/tar")
+            let status = crate::proc::command("/usr/bin/tar")
                 .arg("-xzf")
                 .arg(file)
                 .arg("-C")
@@ -869,7 +863,7 @@ fn install_staged(
             let new_app = find_extracted_app(&out)?;
             swap_into_place(target, &new_app).map_err(|e| e.to_string())?;
             // Nudge Launch Services to re-read the new Info.plist.
-            let _ = Command::new("/usr/bin/touch").arg(target).status();
+            let _ = crate::proc::command("/usr/bin/touch").arg(target).status();
             Ok(())
         }
         InstallKind::AppImage => {
@@ -931,7 +925,7 @@ fn spawn_relaunch(kind: InstallKind, target: &Path) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
     let args =
         relaunch_args(std::process::id(), kind, target).ok_or("cannot relaunch this install")?;
-    let mut cmd = Command::new("/bin/sh");
+    let mut cmd = crate::proc::command("/bin/sh");
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1311,7 +1305,7 @@ mod tests {
         )
         .unwrap();
         args.push(marker.as_os_str().to_owned());
-        let status = Command::new("/bin/sh").args(args).status().unwrap();
+        let status = crate::proc::command("/bin/sh").args(args).status().unwrap();
         assert!(status.success());
         assert!(marker.exists());
     }
@@ -1331,7 +1325,7 @@ mod tests {
         fs::write(src.join("SparkDown.app/Contents/MacOS/sparkdown"), "new").unwrap();
         let staging = create_staging(&target).unwrap();
         let tgz = staging.join("download");
-        let ok = Command::new("/usr/bin/tar")
+        let ok = crate::proc::command("/usr/bin/tar")
             .arg("-czf")
             .arg(&tgz)
             .arg("-C")
@@ -1621,7 +1615,7 @@ mod tests {
         let src = dir.join(format!("build-{version}"));
         make_bundle(&src, version);
         let tgz = dir.join(format!("SparkDown_{version}.app.tar.gz"));
-        let ok = Command::new("tar")
+        let ok = crate::proc::command("tar")
             .arg("-czf")
             .arg(&tgz)
             .arg("-C")
@@ -1678,7 +1672,7 @@ mod tests {
 
         fn assert_original_intact(&self) {
             assert_eq!(bundle_version(&self.target), "1.0.0");
-            let out = Command::new(self.target.join("Contents/MacOS/sparkdown"))
+            let out = crate::proc::command(self.target.join("Contents/MacOS/sparkdown"))
                 .output()
                 .unwrap();
             assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "1.0.0");
@@ -1714,7 +1708,7 @@ mod tests {
 
         install_and_clean(InstallKind::App, &f.target, &staging, &file).unwrap();
         assert_eq!(bundle_version(&f.target), "2.0.0");
-        let out = Command::new(f.target.join("Contents/MacOS/sparkdown"))
+        let out = crate::proc::command(f.target.join("Contents/MacOS/sparkdown"))
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "2.0.0");
@@ -1803,7 +1797,7 @@ mod tests {
         let src = f.tgz.with_file_name("junk");
         fs::create_dir_all(&src).unwrap();
         fs::write(src.join("README"), "no app here").unwrap();
-        let ok = Command::new("tar")
+        let ok = crate::proc::command("tar")
             .arg("-czf")
             .arg(&f.tgz)
             .arg("-C")
@@ -1895,7 +1889,7 @@ mod tests {
         }
 
         fn runs_as(&self) -> String {
-            let out = Command::new(&self.target).output().unwrap();
+            let out = crate::proc::command(&self.target).output().unwrap();
             String::from_utf8_lossy(&out.stdout).trim().to_owned()
         }
 

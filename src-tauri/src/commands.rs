@@ -306,7 +306,7 @@ fn copy_file_macos(path: &str) -> Result<(), AppError> {
         )));
     }
 
-    let status = std::process::Command::new("osascript")
+    let status = crate::proc::command("osascript")
         .arg("-e")
         .arg("on run argv")
         .arg("-e")
@@ -326,7 +326,7 @@ fn copy_file_macos(path: &str) -> Result<(), AppError> {
 #[cfg(target_os = "macos")]
 fn set_clipboard_text(text: &str) -> Result<(), AppError> {
     use std::io::Write;
-    let mut child = std::process::Command::new("pbcopy")
+    let mut child = crate::proc::command("pbcopy")
         .stdin(std::process::Stdio::piped())
         .spawn()?;
     child
@@ -574,17 +574,17 @@ pub(crate) fn validate_external_url(raw: &str) -> Result<String, AppError> {
 pub fn open_external(url: String) -> Result<(), AppError> {
     let url = validate_external_url(&url)?;
     #[cfg(target_os = "macos")]
-    let mut cmd = std::process::Command::new("open");
+    let mut cmd = crate::proc::command("open");
     #[cfg(target_os = "windows")]
     let mut cmd = {
         // url.dll's FileProtocolHandler = ShellExecute on the URL, with no
         // cmd.exe parsing (cmd /c start would interpret & and ^).
-        let mut c = std::process::Command::new("rundll32.exe");
+        let mut c = crate::proc::command("rundll32.exe");
         c.arg("url.dll,FileProtocolHandler");
         c
     };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let mut cmd = std::process::Command::new("xdg-open");
+    let mut cmd = crate::proc::command("xdg-open");
     let mut child = cmd
         .arg(&url)
         .stdin(std::process::Stdio::null())

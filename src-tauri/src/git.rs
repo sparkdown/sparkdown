@@ -71,7 +71,7 @@ fn git_command_with(root: &Path, safe_dirs: &[String]) -> Result<Command, String
     let root_path = root
         .canonicalize()
         .map_err(|e| format!("invalid root: {e}"))?;
-    let mut cmd = Command::new(git_bin());
+    let mut cmd = crate::proc::command(git_bin());
     cmd.current_dir(&root_path);
     // Drop only GIT_* vars (they can point config/hooks/pagers at attacker
     // input); keep PATH, HOME, etc. so git and its helpers resolve normally.
@@ -547,10 +547,9 @@ mod tests {
     #[test]
     fn git_status_top_level_uses_symlink_spelling() {
         use std::fs;
-        use std::process::Command;
 
         let git = git_bin();
-        if Command::new(&git)
+        if crate::proc::command(&git)
             .arg("--version")
             .status()
             .map(|s| !s.success())
@@ -568,7 +567,7 @@ mod tests {
         let real = base.join("real");
         fs::create_dir_all(real.join("sub/deep")).unwrap();
         let run = |args: &[&str]| {
-            let ok = Command::new(&git)
+            let ok = crate::proc::command(&git)
                 .current_dir(&real)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -766,12 +765,11 @@ mod tests {
     #[test]
     fn hardened_git_neutralises_malicious_local_filter() {
         use std::fs;
-        use std::process::Command;
         use std::sync::atomic::{AtomicU32, Ordering};
 
         let git = git_bin();
         // Skip gracefully if git isn't runnable in this environment.
-        if Command::new(&git)
+        if crate::proc::command(&git)
             .arg("--version")
             .status()
             .map(|s| !s.success())
@@ -788,7 +786,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let run = |args: &[&str]| {
-            let ok = Command::new(&git)
+            let ok = crate::proc::command(&git)
                 .current_dir(&dir)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -824,7 +822,7 @@ mod tests {
         // creates the marker (it must clean the working file to diff it) —
         // proving the attack is real and the test below isn't vacuous.
         let _ = fs::remove_file(&marker);
-        let _ = Command::new(&git)
+        let _ = crate::proc::command(&git)
             .current_dir(&dir)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -889,10 +887,9 @@ mod tests {
     #[test]
     fn hardened_git_honours_user_safe_directory_only() {
         use std::fs;
-        use std::process::Command;
 
         let git = git_bin();
-        if Command::new(&git)
+        if crate::proc::command(&git)
             .arg("--version")
             .status()
             .map(|s| !s.success())
@@ -905,7 +902,7 @@ mod tests {
         let repo = base.join("repo");
         fs::create_dir_all(&repo).unwrap();
         let repo = repo.canonicalize().unwrap();
-        let ok = Command::new(&git)
+        let ok = crate::proc::command(&git)
             .current_dir(&repo)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -925,7 +922,7 @@ mod tests {
         )
         .unwrap();
         let probe = |args: &[&str]| -> Option<String> {
-            let out = Command::new(&git)
+            let out = crate::proc::command(&git)
                 .current_dir(&base)
                 .env("GIT_CONFIG_GLOBAL", &global)
                 // `--system` reads the system file even with NOSYSTEM set
