@@ -252,18 +252,132 @@ pub(crate) fn ssh_argv(host: &str) -> Vec<String> {
 }
 
 pub(crate) fn validate_host_alias(host: &str) -> Result<(), String> {
-    if host.is_empty()
-        || host.len() > 128
-        // A leading '-' would let the alias be parsed as an ssh(1) flag
-        // instead of a destination (e.g. `-G`), so reject it outright.
-        || host.starts_with('-')
-        || !host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' || c == '@')
-    {
-        return Err("Invalid SSH host alias.".into());
+    parse_destination(host).map(|_| ())
+}
+
+/// A connect target: a `~/.ssh/config` alias, or a typed `[user@]host[:port]`
+/// (#22). IPv6 goes in brackets: `user@[::1]:2222`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Destination {
+    pub user: Option<String>,
+    pub host: String,
+    pub port: Option<u16>,
+}
+
+impl Destination {
+    /// The `[user@]host` operand handed to ssh (IPv6 without brackets, which
+    /// ssh accepts as a destination).
+    pub fn ssh_target(&self) -> String {
+        match &self.user {
+            Some(u) => format!("{u}@{}", self.host),
+            None => self.host.clone(),
+        }
     }
-    Ok(())
+}
+
+fn is_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_'
+}
+
+/// Strictly parse a host alias or `[user@]host[:port]`. Everything else is
+/// rejected: a leading '-' (would be parsed as an ssh option, e.g. `-G`,
+/// `-oProxyCommand=`), whitespace, control characters, shell
+/// metacharacters, a second '@', an empty part, a port outside 1-65535.
+/// The result only ever reaches ssh as separate argv entries (never a shell
+/// string), so it cannot inject options or commands.
+pub(crate) fn parse_destination(input: &str) -> Result<Destination, String> {
+    let bad = || {
+        Err::<Destination, String>(format!(
+            "Invalid SSH host '{}'. Use a ~/.ssh/config host or user@host[:port].",
+            input.escape_debug()
+        ))
+    };
+    if input.is_empty() || input.len() > 255 || input.starts_with('-') {
+        return bad();
+    }
+    if !input
+        .chars()
+        .all(|c| is_name_char(c) || matches!(c, '@' | ':' | '[' | ']'))
+    {
+        return bad();
+    }
+    let (user, rest) = match input.split_once('@') {
+        Some((u, r)) => (Some(u), r),
+        None => (None, input),
+    };
+    if let Some(u) = user {
+        if u.is_empty() || u.len() > 64 || u.starts_with('-') || !u.chars().all(is_name_char) {
+            return bad();
+        }
+    }
+    let (host, port) = if let Some(after) = rest.strip_prefix('[') {
+        let Some((v6, tail)) = after.split_once(']') else {
+            return bad();
+        };
+        if v6.is_empty()
+            || !v6.contains(':')
+            || !v6
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        {
+            return bad();
+        }
+        let port = match tail {
+            "" => None,
+            t => match t.strip_prefix(':') {
+                Some(p) => Some(p),
+                None => return bad(),
+            },
+        };
+        (v6, port)
+    } else {
+        if rest.contains('[') || rest.contains(']') {
+            return bad();
+        }
+        match rest.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (rest, None),
+        }
+    };
+    if host.is_empty()
+        || host.len() > 253
+        || host.starts_with('-')
+        || host.starts_with('.')
+        || (!host.contains(':') && !host.chars().all(is_name_char))
+    {
+        return bad();
+    }
+    let port = match port {
+        None => None,
+        Some(p) => {
+            if p.is_empty() || p.len() > 5 || !p.chars().all(|c| c.is_ascii_digit()) {
+                return bad();
+            }
+            match p.parse::<u16>() {
+                Ok(n) if n > 0 => Some(n),
+                _ => return bad(),
+            }
+        }
+    };
+    Ok(Destination {
+        user: user.map(str::to_string),
+        host: host.to_string(),
+        port,
+    })
+}
+
+/// The ssh argv for a destination: `["-p", "2222", "user@host"]` with a
+/// port, else `["user@host"]` / `["alias"]`. ssh's normal config, keys and
+/// agent still apply (a typed host also matches `Host` blocks).
+pub(crate) fn destination_args(host: &str) -> Result<Vec<String>, String> {
+    let d = parse_destination(host)?;
+    let mut v = Vec::new();
+    if let Some(p) = d.port {
+        v.push("-p".into());
+        v.push(p.to_string());
+    }
+    v.push(d.ssh_target());
+    Ok(v)
 }
 
 /// Reject empty / control-char paths. Used for the raw connect-dialog input,
@@ -375,9 +489,13 @@ pub(crate) fn close_mux(host: &str) {
     if opts.is_empty() {
         return;
     }
+    let Ok(dest) = destination_args(host) else {
+        return;
+    };
     let _ = crate::proc::command("ssh")
         .args(&opts)
-        .args(["-O", "exit", host])
+        .args(["-O", "exit"])
+        .args(&dest)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -624,7 +742,7 @@ fn run_with_deadline(
 }
 
 fn ssh_exec(host: &str, remote_cmd: &str, stdin: Option<&[u8]>) -> Result<SshResult, String> {
-    validate_host_alias(host)?;
+    let dest = destination_args(host)?;
     // Single choke point: hand the script to `/bin/sh`, never the user's login
     // shell. ssh passes the command string to the remote login shell, which
     // may be fish/csh/tcsh and would choke on the POSIX `( … )`, `$?`,
@@ -647,10 +765,9 @@ fn ssh_exec(host: &str, remote_cmd: &str, stdin: Option<&[u8]>) -> Result<SshRes
         "-o",
         "PubkeyAuthentication=yes",
         "-T",
-        host,
-        "--",
-        &sh_arg,
     ]);
+    cmd.args(&dest);
+    cmd.args(["--", &sh_arg]);
     let timeout = if stdin.is_some() {
         SSH_WRITE_TIMEOUT
     } else {
