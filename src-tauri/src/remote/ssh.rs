@@ -884,8 +884,11 @@ pub(crate) fn ssh_git(root: &str, args: &[&str]) -> Result<String, String> {
 /// keeps the blob stable across readdir order.
 ///
 /// No GNU-only `-printf`: the struct lines use `-exec printf` (a byte-exact
-/// replacement for `%p`) and the content lines use `-exec sh -c` with
-/// `stat -c` (GNU) falling back to `stat -f` (BSD/macOS). The exact mtime
+/// replacement for `%p`) and the content lines use one batched `stat -c`
+/// (GNU) or `stat -f` (BSD/macOS) per `-exec … {} +` group. Never one
+/// process per file: on a home-sized tree (~170k files) a per-file
+/// `stat` took 2.5 minutes, every poll hit the 30 s SSH timeout, and no
+/// change ever reached the explorer or Changes (#28). The exact mtime
 /// format is irrelevant — the content section is only ever compared for
 /// equality between two polls of the *same* host, never parsed.
 pub fn watch_fingerprint_script(root: &str) -> String {
@@ -897,8 +900,13 @@ pub fn watch_fingerprint_script(root: &str) -> String {
          printf '%s\\n' '__SD_CONTENT__'; \
          env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
            git -c core.fsmonitor=false -c diff.external= -C {root} status --ignore-submodules=all --porcelain -z --untracked-files=all 2>/dev/null; \
-         find -H {root} \\( -name .git -o -name node_modules -o -name target -o -name dist \\) -prune \
-         -o -type f -exec sh -c 'for f do if m=$(stat -c \"%Y %s\" \"$f\" 2>/dev/null); then printf \"%s %s\\n\" \"$m\" \"$f\"; elif m=$(stat -f \"%m %z\" \"$f\" 2>/dev/null); then printf \"%s %s\\n\" \"$m\" \"$f\"; fi; done' sh {{}} + 2>/dev/null | LC_ALL=C sort",
+         if stat -c %Y / >/dev/null 2>&1; then \
+           find -H {root} \\( -name .git -o -name node_modules -o -name target -o -name dist \\) -prune \
+           -o -type f -exec stat -c '%Y %s %n' {{}} + 2>/dev/null; \
+         else \
+           find -H {root} \\( -name .git -o -name node_modules -o -name target -o -name dist \\) -prune \
+           -o -type f -exec stat -f '%m %z %N' {{}} + 2>/dev/null; \
+         fi | LC_ALL=C sort",
         root = root
     )
 }
