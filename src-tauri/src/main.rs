@@ -33,6 +33,113 @@ use tauri::{Emitter, Manager, State, Wry};
 #[derive(Default)]
 pub struct PendingFiles {
     pub paths: Arc<Mutex<Vec<String>>>,
+    /// The frontend has taken the startup queue (`get_pending_files`), so
+    /// later arrivals go to it as an `open-paths` event instead (#51).
+    /// Only read or written under the `paths` lock.
+    pub frontend_took: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Event for paths a second `sparkdown <path>…` launch forwarded (#51).
+const OPEN_PATHS_EVENT: &str = "open-paths";
+
+/// Paths a second `sparkdown …` launch passed (#51), resolved against that
+/// launch's working directory (not ours). Flags are skipped; `--version`,
+/// `--help`, `--mcp-stdio` and the askpass helper never get here (they exit
+/// in `main` before the single-instance plugin starts).
+fn forwarded_paths(argv: &[String], cwd: &str) -> Vec<String> {
+    argv.iter()
+        .skip(1)
+        .filter(|a| !a.is_empty() && !a.starts_with('-'))
+        .map(|a| {
+            let p = std::path::Path::new(a);
+            let joined = if p.is_absolute() || cwd.is_empty() {
+                p.to_path_buf()
+            } else {
+                std::path::Path::new(cwd).join(p)
+            };
+            // `sparkdown .` → `<cwd>`, not `<cwd>/.`.
+            std::path::absolute(&joined)
+                .unwrap_or(joined)
+                .to_string_lossy()
+                .trim_end_matches(['/', '\\'])
+                .to_string()
+        })
+        .map(|p| {
+            if p.is_empty() {
+                "/".to_string()
+            } else if p.ends_with(':') {
+                format!("{p}\\") // `C:` alone would mean "the cwd on C:"
+            } else {
+                p
+            }
+        })
+        .collect()
+}
+
+/// A second launch (#51): bring the window forward and open its paths here.
+fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, cwd: String) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    let paths = forwarded_paths(&argv, &cwd);
+    eprintln!("another launch handed over {} path(s)", paths.len());
+    if paths.is_empty() {
+        return;
+    }
+    let state = app.state::<PendingFiles>();
+    let Ok(mut queue) = state.paths.lock() else {
+        return;
+    };
+    if state
+        .frontend_took
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        drop(queue);
+        let _ = app.emit_to(
+            "main",
+            OPEN_PATHS_EVENT,
+            serde_json::json!({ "paths": paths }),
+        );
+    } else {
+        // The frontend has not started yet: it takes these with the CLI's.
+        for p in paths {
+            if queue.len() < MAX_PENDING_FILES {
+                queue.push(p);
+            }
+        }
+    }
+}
+
+/// Linux: the single-instance plugin talks D-Bus and panics on a malformed
+/// `DBUS_SESSION_BUS_ADDRESS` (with `panic = "abort"`, a crash at start).
+/// Use it only when that variable is unset (the plugin then tries the
+/// standard socket, and simply runs without single-instance if there is no
+/// bus) or names a known transport.
+fn single_instance_supported() -> bool {
+    if !cfg!(target_os = "linux") {
+        return true;
+    }
+    match std::env::var("DBUS_SESSION_BUS_ADDRESS") {
+        Err(_) => true,
+        Ok(v) => dbus_address_looks_valid(&v),
+    }
+}
+
+fn dbus_address_looks_valid(v: &str) -> bool {
+    let first = v.split(';').next().unwrap_or("").trim();
+    [
+        "unix:",
+        "tcp:",
+        "nonce-tcp:",
+        "unixexec:",
+        "launchd:",
+        "autolaunch:",
+        "vsock:",
+    ]
+    .iter()
+    .any(|t| first.starts_with(t) && first.len() > t.len())
 }
 
 /// Holds the HTML document currently being previewed with scripts enabled.
@@ -110,7 +217,7 @@ fn cli_info(first_arg: Option<&str>) -> Option<String> {
         "--help" | "-h" => Some(format!(
             "SparkDown {version}: a Markdown editor and agent cockpit.\n\n\
              Usage:\n  \
-             sparkdown [FILE|FOLDER]...   open files or a folder in the app\n  \
+             sparkdown [FILE|FOLDER]...   open files or a folder in the app\n                               (in the open window, if SparkDown is running)\n  \
              sparkdown --mcp-stdio        run the stdio MCP bridge for agent CLIs\n  \
              sparkdown --version, -V      print the version and exit\n  \
              sparkdown --help, -h         print this help and exit\n"
@@ -165,7 +272,17 @@ fn main() {
         return;
     }
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // #51: one SparkDown per user. A second `sparkdown <folder>` hands its
+    // args and cwd to the running window and exits. Registered first, as the
+    // plugin asks, so the second process exits before any other setup (MCP
+    // socket, terminals, window).
+    if single_instance_supported() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
+            on_second_instance(app, argv, cwd)
+        }));
+    }
+    builder
         .manage(PendingFiles::default())
         .manage(HtmlPreview::default())
         .manage(commands::WriteRateLimiter::default())
@@ -489,6 +606,55 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn second_launch_paths_resolve_against_its_own_cwd() {
+        // #51: `sparkdown .` / `sparkdown notes` from another directory.
+        #[cfg(unix)]
+        {
+            let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            assert_eq!(
+                super::forwarded_paths(&argv(&["sparkdown", "."]), "/home/u/proj"),
+                vec!["/home/u/proj"]
+            );
+            assert_eq!(
+                super::forwarded_paths(&argv(&["sparkdown", "notes", "a.md"]), "/home/u"),
+                vec!["/home/u/notes", "/home/u/a.md"]
+            );
+            assert_eq!(
+                super::forwarded_paths(&argv(&["/usr/bin/sparkdown", "/tmp/x/"]), "/home/u"),
+                vec!["/tmp/x"]
+            );
+            // Flags are not paths; a bare launch forwards nothing.
+            assert!(super::forwarded_paths(&argv(&["sparkdown", "--foo"]), "/h").is_empty());
+            assert!(super::forwarded_paths(&argv(&["sparkdown"]), "/h").is_empty());
+            assert_eq!(
+                super::forwarded_paths(&argv(&["sparkdown", "/"]), "/h"),
+                vec!["/"]
+            );
+        }
+        #[cfg(windows)]
+        {
+            let argv = vec!["sparkdown.exe".to_string(), "notes".to_string()];
+            assert_eq!(
+                super::forwarded_paths(&argv, r"C:\Users\u"),
+                vec![r"C:\Users\u\notes".to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn dbus_address_guard() {
+        assert!(super::dbus_address_looks_valid(
+            "unix:path=/run/user/1000/bus"
+        ));
+        assert!(super::dbus_address_looks_valid(
+            "unix:abstract=/tmp/dbus-x,guid=1;tcp:host=x"
+        ));
+        assert!(!super::dbus_address_looks_valid(""));
+        assert!(!super::dbus_address_looks_valid("garbage"));
+        assert!(!super::dbus_address_looks_valid("unix:"));
+    }
+
     #[test]
     fn version_and_help_flags_print_instead_of_opening_the_app() {
         let v = super::cli_info(Some("--version")).unwrap();

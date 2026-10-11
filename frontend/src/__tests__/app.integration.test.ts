@@ -378,6 +378,19 @@ describe('App integration', () => {
       ).toBe(true);
     });
 
+    it('a second launch\'s folder and file open in this window (#51)', async () => {
+      vfs.set('/elsewhere/b.md', '# B');
+      directories.add('/projects/other');
+      await startApp();
+      expect(tabTitles()).toEqual([]);
+      emitTauriEvent('open-paths', { paths: ['/projects/other', '/elsewhere/b.md'] });
+      await flush();
+      expect(tabTitles()).toEqual(['b.md']);
+      expect(
+        invokeCalls.some((c) => c.cmd === 'list_directory' && c.args?.path === '/projects/other'),
+      ).toBe(true);
+    });
+
     it('the file prompt\'s New File button creates Untitled', async () => {
       directories.add('/projects/notes');
       setPendingFiles(['/projects/notes']);

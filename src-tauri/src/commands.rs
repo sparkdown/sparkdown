@@ -493,7 +493,14 @@ pub fn get_pending_files(state: State<'_, PendingFiles>) -> Vec<String> {
     state
         .paths
         .lock()
-        .map(|mut paths| std::mem::take(&mut *paths))
+        .map(|mut paths| {
+            // Under the lock: a second launch's paths either land in this
+            // batch or come later as an `open-paths` event, never neither (#51).
+            state
+                .frontend_took
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            std::mem::take(&mut *paths)
+        })
         .unwrap_or_default()
 }
 
