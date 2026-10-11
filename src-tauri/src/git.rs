@@ -21,6 +21,12 @@ pub struct GitChange {
     pub status: String,
     /// Whether the path is staged (informational; the diff shows working tree).
     pub staged: bool,
+    /// A directory, not a file: git lists an untracked nested repository
+    /// (a folder with its own `.git`) as `?? proj/` without descending into
+    /// it (#47). `path` is given without the trailing slash. Never opened
+    /// as a file tab.
+    #[serde(default)]
+    pub is_dir: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -396,10 +402,17 @@ pub(crate) fn parse_porcelain(raw: &str) -> Vec<GitChange> {
         if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
             let _ = parts.next(); // consume the paired old/source-path field
         }
+        // A trailing separator marks a directory entry (nested repo, #47).
+        let is_dir = path.ends_with('/');
+        let path = path.trim_end_matches('/');
+        if path.is_empty() {
+            continue;
+        }
         changes.push(GitChange {
             path: path.to_string(),
             status: map_status_code(code).to_string(),
             staged,
+            is_dir,
         });
     }
     changes
@@ -718,6 +731,68 @@ mod tests {
         assert_eq!(changes[1].status, "untracked");
         assert_eq!(changes[2].status, "added");
         assert!(changes[2].staged);
+    }
+
+    #[test]
+    fn nested_repo_is_a_directory_entry() {
+        // #47: git lists an untracked nested repo as "?? proj/" (it does not
+        // descend into it). It must come back as a directory, path without
+        // the slash, so the UI never opens it as a file tab.
+        let raw = "?? proj/\0?? notes.md\0?? a/b/inner/\0";
+        let changes = parse_porcelain(raw);
+        assert_eq!(changes.len(), 3);
+        assert_eq!(changes[0].path, "proj");
+        assert!(changes[0].is_dir);
+        assert_eq!(changes[0].status, "untracked");
+        assert_eq!(changes[1].path, "notes.md");
+        assert!(!changes[1].is_dir);
+        assert_eq!(changes[2].path, "a/b/inner");
+        assert!(changes[2].is_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_git_reports_untracked_nested_repo_as_dir() {
+        use std::fs;
+        let git = git_bin();
+        let base =
+            std::env::temp_dir().join(format!("sparkdown_git_nested_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("proj")).unwrap();
+        let base = base.canonicalize().unwrap();
+        let run = |dir: &std::path::Path, args: &[&str]| {
+            let ok = crate::proc::command(&git)
+                .current_dir(dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            assert!(ok, "setup: git {args:?} failed");
+        };
+        run(&base, &["init", "-q"]);
+        run(&base.join("proj"), &["init", "-q"]);
+        fs::write(base.join("proj/inside.md"), "x\n").unwrap();
+        fs::write(base.join("top.md"), "x\n").unwrap();
+        let status = git_status_impl(base.to_string_lossy().into_owned());
+        let _ = fs::remove_dir_all(&base);
+        let status = status.unwrap();
+        let proj = status.changes.iter().find(|c| c.path == "proj");
+        assert!(
+            proj.is_some_and(|c| c.is_dir),
+            "{:?}",
+            status
+                .changes
+                .iter()
+                .map(|c| (&c.path, c.is_dir))
+                .collect::<Vec<_>>()
+        );
+        assert!(status
+            .changes
+            .iter()
+            .any(|c| c.path == "top.md" && !c.is_dir));
+        assert!(!status.changes.iter().any(|c| c.path.contains("inside.md")));
     }
 
     #[test]

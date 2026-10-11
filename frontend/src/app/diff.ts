@@ -304,7 +304,9 @@ export class DiffController {
     if (status !== 'deleted' && !existing) {
       try {
         content = await api.readFile(abs);
-      } catch {
+      } catch (e) {
+        // A folder (e.g. a nested repo) never opens as a tab (#47).
+        if (/is a directory/i.test(String(e))) return false;
         // Unreadable (e.g. binary or vanished) — open empty; the diff still renders.
       }
     }
