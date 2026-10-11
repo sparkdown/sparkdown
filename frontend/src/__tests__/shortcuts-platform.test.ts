@@ -213,32 +213,6 @@ describe('shortcut key matching', () => {
     expect(terminalPassesToApp(k('o', 'KeyO', { altKey: true }), true)).toBe(false);
   });
 
-  it('Close Tab (Ctrl+W, Super+W) leaves a focused terminal for the app on Windows/Linux (#30)', () => {
-    const k = (mods: Partial<KeyboardEvent>, key = 'w', code = 'KeyW') => ({
-      key, code, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...mods,
-    });
-    expect(terminalPassesToApp(k({ ctrlKey: true }), false)).toBe(true);
-    expect(terminalPassesToApp(k({ metaKey: true }), false)).toBe(true);
-    // Non-Latin layout: the physical W key still counts.
-    expect(terminalPassesToApp(k({ ctrlKey: true }, 'ц'), false)).toBe(true);
-    // Pane close (Ctrl+Shift+W) is handled by the pane keys; other combos stay.
-    expect(terminalPassesToApp(k({ ctrlKey: true, shiftKey: true }, 'W'), false)).toBe(false);
-    expect(terminalPassesToApp(k({ ctrlKey: true, altKey: true }), false)).toBe(false);
-    expect(terminalPassesToApp(k({ ctrlKey: true, metaKey: true }), false)).toBe(false);
-    expect(terminalPassesToApp(k({}), false)).toBe(false);
-    // macOS: ⌘W comes from the native File → Close Tab accelerator.
-    expect(terminalPassesToApp(k({ metaKey: true }), true)).toBe(false);
-  });
-
-  it('Ctrl+W and Super+W emit Close Tab on Linux (#30)', () => {
-    setPlatform('Linux x86_64');
-    const { spy } = manager();
-    const close = spy(ACTIONS.CLOSE_TAB);
-    press({ key: 'w', code: 'KeyW', ctrlKey: true });
-    press({ key: 'w', code: 'KeyW', metaKey: true });
-    expect(close).toHaveBeenCalledTimes(2);
-  });
-
   it('Ctrl+Alt+O and Ctrl+Shift+` work on Linux too', () => {
     setPlatform('Linux x86_64');
     const { spy } = manager();

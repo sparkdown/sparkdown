@@ -319,6 +319,7 @@ fn main() {
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_close,
+            terminal::terminal_busy,
             terminal::shell_name,
             terminal::terminal_launch_shell,
             terminal::tmux_sessions,

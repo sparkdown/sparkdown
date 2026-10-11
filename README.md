@@ -88,6 +88,8 @@ When a terminal pane has focus (elsewhere, the editor keeps `⌘D` and `⌘[` / 
 | Close pane | `⌘W` | `Ctrl+Shift+W` |
 | Next / previous pane | `⌘]` / `⌘[` | `Ctrl+Shift+]` / `Ctrl+Shift+[` |
 
+On Windows / Linux, plain `Ctrl+W` in a focused terminal goes to the shell (delete word); it closes the editor tab only when the editor has focus. Closing a pane asks first when a program other than the idle shell is running in it (local terminals; a remote pane closes without asking).
+
 In the Changes list: `↑`/`↓` (or `j`/`k`) move, `Space` toggles reviewed, `Enter` opens the diff, `⇧Enter` opens the file in the editor.
 
 ## Install

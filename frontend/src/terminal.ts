@@ -1,6 +1,7 @@
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { ask } from '@tauri-apps/plugin-dialog';
 import { api, type RemoteSession } from './api';
 import { shortcutFor, terminalPaneAction, terminalPassesToApp, type TerminalPaneAction } from './shortcuts';
 import { ACTIONS } from './event-names';
@@ -765,6 +766,8 @@ export class TerminalManager {
   private tree: LayoutNode | null = null;
   /** The pane that has (or last had) keyboard focus. */
   private focusedId: string | null = null;
+  /** Panes whose close confirmation is open (one dialog per pane). */
+  private confirmingClose = new Set<string>();
   private seq = 0;
   private host: HTMLElement;
   private cwd: string | null = null;
@@ -1184,9 +1187,53 @@ export class TerminalManager {
     return this.addTerminal({ split: { dir } });
   }
 
-  /** Close the focused pane. */
+  /** Close the focused pane (shortcut / menu), asking first if busy. */
   closeFocused(): void {
-    if (this.focusedId) this.closeTerminal(this.focusedId);
+    if (this.focusedId) void this.requestClose(this.focusedId);
+  }
+
+  /**
+   * A user-initiated close (× button, close-pane shortcut, menu): when the
+   * pane runs something besides its idle shell (an agent, a build, vim),
+   * ask before killing it (#43). An idle shell, an exited or failed pane,
+   * or an unknown state (remote shell, probe error) closes at once.
+   * Resolves true when the pane was closed.
+   */
+  async requestClose(id: string): Promise<boolean> {
+    const pane = this.panes.get(id);
+    if (!pane) return false;
+    if (this.confirmingClose.has(id)) return false;
+    let busy: string | null = null;
+    if (pane.isRunning()) {
+      try {
+        busy = await api.terminalBusy(pane.id);
+      } catch {
+        busy = null;
+      }
+    }
+    if (busy) {
+      this.confirmingClose.add(id);
+      let ok = false;
+      try {
+        ok = await ask(`“${busy}” is still running in this terminal.\n\nClose the terminal and stop it?`, {
+          title: 'Close Terminal',
+          kind: 'warning',
+          okLabel: 'Close',
+          cancelLabel: 'Cancel',
+        });
+      } catch {
+        ok = false;
+      } finally {
+        this.confirmingClose.delete(id);
+      }
+      if (!ok) {
+        if (this.panes.has(id)) this.activate(id);
+        return false;
+      }
+    }
+    if (!this.panes.has(id)) return false;
+    this.closeTerminal(id);
+    return true;
   }
 
   /** Move focus `delta` panes along reading order (wraps). */
@@ -1240,7 +1287,7 @@ export class TerminalManager {
         void this.splitFocused('column');
         break;
       case 'close-pane':
-        this.closeTerminal(id);
+        void this.requestClose(id);
         break;
       case 'focus-next':
         this.focusNeighbor(1);
@@ -1282,7 +1329,7 @@ export class TerminalManager {
         void this.addTerminal({ split: { dir: 'column', target: id } });
         break;
       case 'close':
-        this.closeTerminal(id);
+        void this.requestClose(id);
         break;
       case 'terminals-only':
         this.onTerminalsOnly?.();

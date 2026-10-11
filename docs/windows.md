@@ -129,7 +129,10 @@ Get-FileHash .\SparkDown_0.3.1_x64-setup.exe -Algorithm SHA256
 - Keys: `Ctrl` replaces `⌘` and `Alt` replaces `⌥` in the
   [README shortcuts](../README.md#keyboard-shortcuts).
 - **Terminal**: it runs PowerShell through ConPTY. It uses PowerShell 7
-  (`pwsh.exe`) if it is on `PATH`, else Windows PowerShell 5.1.
+  (`pwsh.exe`) if it is on `PATH`, else Windows PowerShell 5.1. With a
+  terminal focused, `Ctrl+W` goes to the shell and `Ctrl+Shift+W` closes
+  the pane. Closing a pane asks first when the shell has started a program
+  that is still running (any child process of the shell).
 - **Agent chips** (Claude Code, Codex, opencode, Gemini, Antigravity, Kiro,
   Grok, Cursor): a chip appears when the agent is on `PATH` as an `.exe`,
   an npm shim (`.cmd` / `.ps1`) or a Store alias (`PATHEXT` lookup). The

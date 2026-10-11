@@ -2,6 +2,7 @@ import { trapFocus, type ModalHandle } from './modal';
 import { ACTIONS } from './event-names';
 import { formatShortcut, shortcutFor, terminalPaneShortcut } from './shortcuts';
 import { viewShortcutLabel } from './activity-bar';
+import { isMacOS } from './utils';
 
 const mod = (key: string) => formatShortcut(`CmdOrCtrl+${key}`);
 
@@ -59,9 +60,11 @@ function shortcutSections(): Array<{ section: string; items: Array<[string, stri
       items: [
         [terminalPaneShortcut('split-right'), 'Split Right'],
         [terminalPaneShortcut('split-down'), 'Split Down'],
-        [terminalPaneShortcut('close-pane'), 'Close Pane'],
+        [terminalPaneShortcut('close-pane'), 'Close Pane (asks if a program is running)'],
         [terminalPaneShortcut('focus-next'), 'Next Pane'],
         [terminalPaneShortcut('focus-prev'), 'Previous Pane'],
+        // #42: on Windows/Linux plain Ctrl+W stays with the shell.
+        ...(isMacOS() ? [] : [['Ctrl+W', 'Delete Word (in the shell)'] as [string, string]]),
       ],
     },
     {

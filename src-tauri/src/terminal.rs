@@ -230,6 +230,13 @@ pub struct Terminal {
     /// promptly (and the old pty doesn't leak) instead of lingering until the
     /// shell happens to exit on its own.
     killer: Box<dyn ChildKiller + Send + Sync>,
+    /// The spawned process (the shell, or the local tmux client / ssh).
+    shell_pid: Option<u32>,
+    /// Local tmux session this pane attaches to (the pty child is then the
+    /// tmux client, so its foreground says nothing about the pane).
+    tmux_session: Option<String>,
+    /// Remote terminal: the pty child is ssh; the remote shell is not visible.
+    remote: bool,
 }
 
 /// All open terminals, keyed by frontend id.
@@ -559,6 +566,7 @@ pub fn terminal_start(
     // lives in the map so a replacing `terminal_start` can kill this spawn; the
     // tmux watchdog gets its own to force-exit a lingering LOCAL client.
     let map_killer = child.clone_killer();
+    let shell_pid = child.process_id();
     // Skip the watchdog for remote tmux: `mode` is also "tmux" there, but the
     // session lives on the remote server while `tmux_session_exists` polls the
     // LOCAL one — so it would either do nothing useful or, worse, kill the
@@ -689,6 +697,13 @@ pub fn terminal_start(
                 controller,
                 silenced,
                 killer: map_killer,
+                shell_pid,
+                tmux_session: if mode == "tmux" && !is_remote {
+                    session.clone()
+                } else {
+                    None
+                },
+                remote: is_remote,
             },
         );
     Ok(mode.to_string())
@@ -907,6 +922,186 @@ pub fn terminal_resize(
     Ok(())
 }
 
+/// What runs in terminal `id` besides its idle shell, by name, or None when
+/// the shell is idle (#43). The frontend asks before closing a busy pane.
+///
+/// - Unix: the pty's foreground process group (tcgetpgrp on the controller)
+///   vs the shell pid: a running command is its own foreground job.
+/// - Local tmux: the pty child is the tmux client, so ask tmux for the
+///   active pane's foreground command (`pane_current_command`) vs its shell.
+/// - Windows (ConPTY): whether the shell has child processes (Toolhelp32).
+/// - Remote (ssh): the remote shell is not visible from here: None.
+#[tauri::command]
+pub async fn terminal_busy(
+    state: tauri::State<'_, TerminalState>,
+    id: String,
+) -> Result<Option<String>, String> {
+    let probe = {
+        let guard = state.0.lock().map_err(|_| "terminal state poisoned")?;
+        let Some(t) = guard.get(&id) else {
+            return Ok(None);
+        };
+        if t.remote {
+            return Ok(None);
+        }
+        BusyProbe {
+            shell_pid: t.shell_pid,
+            tmux_session: t.tmux_session.clone(),
+            #[cfg(unix)]
+            fg_pgrp: t.controller.process_group_leader(),
+        }
+    };
+    tauri::async_runtime::spawn_blocking(move || Ok(probe.run()))
+        .await
+        .map_err(|e| format!("busy check failed: {e}"))?
+}
+
+/// The facts [`terminal_busy`] reads under the lock; probed off it.
+struct BusyProbe {
+    shell_pid: Option<u32>,
+    tmux_session: Option<String>,
+    #[cfg(unix)]
+    fg_pgrp: Option<i32>,
+}
+
+impl BusyProbe {
+    fn run(&self) -> Option<String> {
+        if let Some(session) = &self.tmux_session {
+            return tmux_busy_command(session);
+        }
+        let shell = self.shell_pid?;
+        #[cfg(unix)]
+        {
+            let fg = foreground_job(shell, self.fg_pgrp)?;
+            Some(process_name(fg).unwrap_or_else(|| "A program".into()))
+        }
+        #[cfg(windows)]
+        {
+            let procs = windows_process_table();
+            first_child_name(shell, &procs)
+        }
+    }
+}
+
+/// The foreground process group, when it is not the shell's own (#43).
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn foreground_job(shell_pid: u32, fg_pgrp: Option<i32>) -> Option<u32> {
+    match fg_pgrp {
+        Some(p) if p > 0 && p as u32 != shell_pid => Some(p as u32),
+        _ => None,
+    }
+}
+
+/// tmux pane: busy when its foreground command is not its shell. Login
+/// shells may show as `-zsh`; names compare without that dash and any path.
+pub(crate) fn tmux_busy(current_command: &str, shell_name: &str) -> Option<String> {
+    let norm = |s: &str| {
+        let s = s.trim();
+        let s = s.rsplit('/').next().unwrap_or(s);
+        s.trim_start_matches('-').to_string()
+    };
+    let current = norm(current_command);
+    if current.is_empty() || current == norm(shell_name) {
+        None
+    } else {
+        Some(current)
+    }
+}
+
+/// Ask tmux what the active pane of `session` runs. Blocking.
+fn tmux_busy_command(session: &str) -> Option<String> {
+    let tmux = tmux_path()?;
+    let out = crate::proc::command(tmux)
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            &format!("={session}:"),
+            "#{pane_current_command}\t#{pane_pid}",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (current, pid) = text.trim().split_once('\t')?;
+    let shell = pid.trim().parse::<u32>().ok().and_then(process_name)?;
+    tmux_busy(current, &shell)
+}
+
+/// Short name of process `pid` (`claude`, `node`, `vim`). Blocking.
+#[cfg_attr(windows, allow(dead_code))]
+fn process_name(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+        let comm = comm.trim();
+        (!comm.is_empty()).then(|| comm.to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let out = crate::proc::command("ps")
+            .args(["-o", "comm=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let name = String::from_utf8_lossy(&out.stdout);
+        let name = name.trim();
+        let name = name.rsplit(['/', '\\']).next().unwrap_or(name);
+        (!name.is_empty()).then(|| name.to_string())
+    }
+}
+
+/// The first child of `parent` in a process table of (pid, parent pid,
+/// exe name), without its `.exe`. Pure, so it is unit-tested everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn first_child_name(parent: u32, procs: &[(u32, u32, String)]) -> Option<String> {
+    procs
+        .iter()
+        .find(|(pid, ppid, _)| *ppid == parent && *pid != parent)
+        .map(|(_, _, name)| {
+            let lower = name.to_ascii_lowercase();
+            match lower.strip_suffix(".exe") {
+                Some(_) => name[..name.len() - 4].to_string(),
+                None => name.clone(),
+            }
+        })
+}
+
+/// Every process as (pid, parent pid, exe name), from a Toolhelp32 snapshot.
+#[cfg(windows)]
+fn windows_process_table() -> Vec<(u32, u32, String)> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    let mut out = Vec::new();
+    // SAFETY: plain Win32 calls; the entry struct is zeroed with its size
+    // set as the API requires, and the snapshot handle is closed below.
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return out;
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut ok = Process32FirstW(snap, &mut entry) != 0;
+        while ok {
+            let len = entry
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+            out.push((entry.th32ProcessID, entry.th32ParentProcessID, name));
+            ok = Process32NextW(snap, &mut entry) != 0;
+        }
+        CloseHandle(snap);
+    }
+    out
+}
+
 /// Close terminal `id`: drop its pty (which kills the shell) and forget it.
 #[tauri::command]
 pub fn terminal_close(state: tauri::State<'_, TerminalState>, id: String) -> Result<(), String> {
@@ -927,6 +1122,181 @@ pub fn shell_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn foreground_job_is_busy_only_when_not_the_shell() {
+        use super::foreground_job;
+        assert_eq!(foreground_job(100, Some(100)), None);
+        assert_eq!(foreground_job(100, Some(4242)), Some(4242));
+        assert_eq!(foreground_job(100, None), None);
+        assert_eq!(foreground_job(100, Some(0)), None);
+        assert_eq!(foreground_job(100, Some(-1)), None);
+    }
+
+    #[test]
+    fn tmux_busy_compares_the_pane_command_with_its_shell() {
+        use super::tmux_busy;
+        assert_eq!(tmux_busy("zsh", "zsh"), None);
+        assert_eq!(tmux_busy("-zsh", "zsh"), None);
+        assert_eq!(tmux_busy("zsh\n", "/usr/bin/zsh"), None);
+        assert_eq!(tmux_busy("", "zsh"), None);
+        assert_eq!(tmux_busy("claude", "zsh").as_deref(), Some("claude"));
+        assert_eq!(tmux_busy("vim", "-bash").as_deref(), Some("vim"));
+    }
+
+    #[test]
+    fn first_child_name_finds_the_shells_child() {
+        use super::first_child_name;
+        let procs = vec![
+            (4, 0, "System".to_string()),
+            (10, 4, "pwsh.exe".to_string()),
+            (11, 1, "conhost.exe".to_string()),
+            (12, 10, "node.EXE".to_string()),
+        ];
+        assert_eq!(first_child_name(10, &procs).as_deref(), Some("node"));
+        assert_eq!(first_child_name(12, &procs), None);
+        // Idle shell: no children.
+        let idle = vec![
+            (10, 4, "pwsh.exe".to_string()),
+            (11, 1, "conhost.exe".to_string()),
+        ];
+        assert_eq!(first_child_name(10, &idle), None);
+    }
+
+    /// #43 with tmux: the active pane's foreground command decides.
+    #[cfg(unix)]
+    #[test]
+    fn tmux_pane_busy_follows_its_foreground_command() {
+        use super::{tmux_busy_command, tmux_path};
+        use std::time::{Duration, Instant};
+        let Some(tmux) = tmux_path() else { return };
+        let name = format!("sd-busy-test-{}", std::process::id());
+        let run = |args: &[&str]| {
+            crate::proc::command(&tmux)
+                .args(args)
+                .env_remove("TMUX")
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        if !run(&["new-session", "-d", "-s", &name, "/bin/sh"]) {
+            eprintln!("tmux test skipped: no usable tmux server");
+            return;
+        }
+        let wait = |want: Option<&str>| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let got = tmux_busy_command(&name);
+                if got.as_deref() == want {
+                    return;
+                }
+                assert!(Instant::now() < deadline, "want {want:?}, got {got:?}");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        };
+        wait(None);
+        run(&["send-keys", "-t", &format!("={name}:"), "sleep 30", "Enter"]);
+        wait(Some("sleep"));
+        run(&["kill-session", "-t", &format!("={name}")]);
+    }
+
+    /// #43: an agent chip's launch (`bash -lic <wrapper>`) runs the command
+    /// as its own foreground job too, so closing that pane asks.
+    #[cfg(unix)]
+    #[test]
+    fn real_pty_launch_wrapper_command_is_a_foreground_job() {
+        use super::{foreground_job, launch_wrapper};
+        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+        use std::time::{Duration, Instant};
+        if !std::path::Path::new("/bin/bash").exists() {
+            return;
+        }
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("/bin/bash");
+        cmd.arg("-lic");
+        cmd.arg(launch_wrapper("bash"));
+        cmd.env("SPARKDOWN_LAUNCH", "sleep 30");
+        cmd.env("SHELL", "/bin/bash");
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let controller = pair.master;
+        let mut reader = controller.try_clone_reader().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while matches!(std::io::Read::read(&mut reader, &mut buf), Ok(n) if n > 0) {}
+        });
+        let shell = child.process_id().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while foreground_job(shell, controller.process_group_leader()).is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "launched command never became busy"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = child.kill();
+    }
+
+    /// #43 on a real pty: an interactive bash is idle at its prompt, busy
+    /// while `sleep` runs (its own foreground job), idle again after ^C.
+    #[cfg(unix)]
+    #[test]
+    fn real_pty_foreground_job_follows_the_running_command() {
+        use super::{foreground_job, process_name};
+        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+        use std::io::Write;
+        use std::time::{Duration, Instant};
+        if !std::path::Path::new("/bin/bash").exists() {
+            return;
+        }
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("/bin/bash");
+        cmd.args(["--norc", "--noprofile", "-i"]);
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let controller = pair.master;
+        let mut reader = controller.try_clone_reader().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while matches!(std::io::Read::read(&mut reader, &mut buf), Ok(n) if n > 0) {}
+        });
+        let mut writer = controller.take_writer().unwrap();
+        let shell = child.process_id().unwrap();
+        let wait_for = |want_busy: bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let fg = foreground_job(shell, controller.process_group_leader());
+                if fg.is_some() == want_busy {
+                    return fg;
+                }
+                assert!(Instant::now() < deadline, "busy={want_busy} never seen");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        wait_for(false);
+        writer.write_all(b"sleep 30\n").unwrap();
+        let fg = wait_for(true).unwrap();
+        #[cfg(target_os = "linux")]
+        assert_eq!(process_name(fg).as_deref(), Some("sleep"));
+        let _ = fg;
+        writer.write_all(b"\x03").unwrap();
+        wait_for(false);
+        let _ = child.kill();
+    }
+
     use super::{
         decode_pty_utf8, default_shell, launch_shell_family, local_shell_command,
         tmux_force_detach_on_destroy, tmux_hide_status_line, tmux_session_exists,

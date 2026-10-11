@@ -76,6 +76,8 @@ export const api = {
   terminalResize: (id: string, cols: number, rows: number) =>
     invoke<void>('terminal_resize', { id, cols, rows }),
   terminalClose: (id: string) => invoke<void>('terminal_close', { id }),
+  /** #43: what runs in the pane besides its idle shell (null = idle / unknown). */
+  terminalBusy: (id: string) => invoke<string | null>('terminal_busy', { id }),
   shellName: () => invoke<string>('shell_name'),
   /** Which shell syntax a chip's launch line needs right now. */
   launchShell: () => invoke<LaunchShell>('terminal_launch_shell'),
