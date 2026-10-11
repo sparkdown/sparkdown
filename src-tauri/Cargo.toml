@@ -34,6 +34,9 @@ minisign-verify = "0.2"
 # same way ssh prints them. Both already in the tree (same versions).
 sha2 = "0.10"
 base64 = "0.22"
+# In-app SSH key passphrase (#27): the passphrase lives only in buffers that
+# are wiped on drop. Tiny, no dependencies.
+zeroize = "1"
 
 # macOS: install an applicationShouldTerminate: delegate hook so dock/menu
 # Quit can be intercepted (tao doesn't implement it). objc2 is already in the

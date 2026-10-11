@@ -413,3 +413,23 @@
   margin: 0 0 12px;
   word-break: break-all;
 }
+
+/* #27: SSH key passphrase prompt (above the Open Remote dialog). */
+.askpass-overlay {
+  z-index: 10000;
+}
+
+.askpass-dialog {
+  width: min(440px, calc(100vw - 32px));
+}
+
+.askpass-key {
+  display: block;
+  margin: 0 0 12px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-all;
+}

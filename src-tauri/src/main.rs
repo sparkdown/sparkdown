@@ -1,6 +1,7 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod askpass;
 mod commands;
 mod config;
 mod context;
@@ -136,6 +137,13 @@ fn attach_parent_console() {
 }
 
 fn main() {
+    // ssh started us as its SSH_ASKPASS helper (#27): answer one key
+    // passphrase prompt from the running app over the private IPC, then exit.
+    // Before everything else: no window, no MCP, no single-instance logic.
+    if askpass::is_helper_invocation() {
+        std::process::exit(askpass::helper_main());
+    }
+
     // `--version` / `--help`: print and exit before any window, single-instance
     // or MCP logic runs (#33).
     let first = std::env::args().nth(1);
@@ -338,6 +346,7 @@ fn main() {
             context::detect_agents,
             remote::ssh_config_hosts,
             remote::remote_connect,
+            askpass::askpass_answer,
             remote::hostkey::remote_hostkey_scan,
             remote::hostkey::remote_hostkey_trust,
             remote::hostkey::remote_hostkey_forget,
