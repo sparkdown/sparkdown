@@ -13,7 +13,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import { invoke } from '@tauri-apps/api/core';
 import type { AppConfig } from '../api';
-import { SettingsDialog, mcpStatusText } from '../settings-dialog';
+import { SettingsDialog, mcpStatusText, MCP_ACTION_BACKSTOP_MS } from '../settings-dialog';
 
 const overlays = () => document.querySelectorAll('.settings-overlay');
 
@@ -205,6 +205,70 @@ describe('SettingsDialog → Agents MCP rows', () => {
     dialog.toggle({ config, onChange: () => {} });
     await flush();
     expect(document.querySelector('.settings-mcp-ask-again')).toBeNull();
+    dialog.close();
+  });
+});
+
+describe('agent MCP row actions (#49)', () => {
+  const mocked = invoke as unknown as ReturnType<typeof vi.fn>;
+  let addResult: () => Promise<unknown>;
+
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="app"></div>';
+    addResult = () => Promise.resolve('ok');
+    mocked.mockImplementation(async (cmd: string) => {
+      if (cmd === 'detect_agents') return [{ id: 'claude', label: 'Claude Code', bin: 'claude', found: true }];
+      if (cmd === 'mcp_shim_command') return { program: '/usr/bin/sparkdown', args: [] };
+      if (cmd === 'mcp_agent_status')
+        return { installed: true, command: '/gone/sparkdown', stale: 'missing' };
+      if (cmd === 'mcp_install_agent') return addResult();
+      throw new Error(`unmocked ${cmd}`);
+    });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    document.body.innerHTML = '';
+  });
+
+  const settle = async () => {
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  };
+  const open = async () => {
+    const dialog = new SettingsDialog();
+    dialog.toggle({ config: { mcp_install_prompt_dismissed: [] } as unknown as AppConfig, onChange: () => {} });
+    await settle();
+    await new Promise((r) => setTimeout(r, 0));
+    await settle();
+    const repair = document.querySelector<HTMLButtonElement>('.settings-mcp-repair')!;
+    const desc = repair.parentElement!.querySelector<HTMLElement>('.settings-row-desc')!;
+    return { dialog, repair, desc };
+  };
+
+  it('a failed Repair shows the CLI error and the button reads Repair again', async () => {
+    addResult = () => Promise.reject('`claude mcp add` failed (exit code 1):\nError: not logged in');
+    const { dialog, repair, desc } = await open();
+    expect(repair.hidden).toBe(false);
+    repair.click();
+    expect(repair.textContent).toBe('Repairing…');
+    await settle();
+    expect(repair.textContent).toBe('Repair');
+    expect(repair.disabled).toBe(false);
+    expect(desc.textContent).toContain('exit code 1');
+    expect(desc.textContent).toContain('Error: not logged in');
+    expect(desc.classList.contains('settings-row-error')).toBe(true);
+    dialog.close();
+  });
+
+  it('a Repair that never answers is ended by the backstop', async () => {
+    const { dialog, repair, desc } = await open();
+    vi.useFakeTimers();
+    addResult = () => new Promise(() => {});
+    repair.click();
+    expect(repair.textContent).toBe('Repairing…');
+    await vi.advanceTimersByTimeAsync(MCP_ACTION_BACKSTOP_MS + 10);
+    expect(repair.textContent).toBe('Repair');
+    expect(repair.disabled).toBe(false);
+    expect(desc.textContent).toContain('did not answer');
     dialog.close();
   });
 });

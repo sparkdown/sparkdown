@@ -21,8 +21,8 @@ mod ssh;
 pub use ssh::display_home_path;
 use ssh::{
     classify_remote_watch_delta, close_mux, load_ssh_hosts, map_ssh_failure, mux_options,
-    shell_quote, ssh_git, ssh_run, ssh_run_bytes, ssh_run_stdin, validate_host_alias,
-    validate_remote_input, validate_remote_path, watch_fingerprint_script,
+    shell_quote, ssh_git, ssh_run, ssh_run_bytes, ssh_run_status, ssh_run_stdin,
+    validate_host_alias, validate_remote_input, validate_remote_path, watch_fingerprint_script,
 };
 pub use ssh::{RemoteSession, SshHost};
 
@@ -1229,11 +1229,57 @@ pub fn mcp_forward_stop(session: &RemoteSession) {
 
 /// Run `cmd` in the remote user's interactive login shell (so agent binaries
 /// on a profile-only PATH resolve). Used for `mcp add` / `mcp remove`.
-pub fn run_in_login_shell(cmd: &str) -> Result<String, String> {
+/// Marker the remote watchdog prints when it stopped the agent CLI.
+const CLI_TIMEOUT_MARK: &str = "__SD_CLI_TIMEOUT__";
+
+/// Run an agent CLI command line on the remote host (#49): not in an
+/// interactive shell (that prints job-control noise without a tty), with
+/// `bin` resolved on the login, then the interactive, shell's PATH, stdin
+/// closed, and a watchdog that stops it after `timeout`. Returns how it
+/// ended, with its own stderr and exit code.
+pub fn run_agent_cli(
+    cmd_line: &str,
+    bin: &str,
+    timeout: std::time::Duration,
+) -> Result<crate::mcp::CliOutcome, String> {
     let session = current_session().ok_or_else(|| "no remote session".to_string())?;
-    ssh_run(
+    let (code, stdout, stderr) = ssh_run_status(
         &session.host,
-        &format!("cd /tmp && ${{SHELL:-/bin/sh}} -lic {}", shell_quote(cmd)),
+        &remote_agent_cli_script(cmd_line, bin, timeout.as_secs()),
+    )?;
+    if stderr.contains(CLI_TIMEOUT_MARK) {
+        return Ok(crate::mcp::CliOutcome::TimedOut);
+    }
+    Ok(crate::mcp::CliOutcome::Exited {
+        code: Some(code),
+        stdout,
+        stderr,
+    })
+}
+
+/// POSIX sh for [`run_agent_cli`]. The PATH probes discard their stderr
+/// and take PATH after a marker, so rc output cannot corrupt it. With
+/// `setsid` (Linux) the CLI gets its own process group and the watchdog
+/// kills the whole group; without it (macOS), the CLI and its children.
+pub(crate) fn remote_agent_cli_script(cmd_line: &str, bin: &str, secs: u64) -> String {
+    let bin = shell_quote(bin);
+    format!(
+        "cd /tmp 2>/dev/null || cd\n\
+         sd_probe() {{ \"${{SHELL:-/bin/sh}}\" \"$1\" 'printf \"\\n__SD_PATH__%s\\n\" \"$PATH\"' </dev/null 2>/dev/null | sed -n 's/^__SD_PATH__//p' | tail -n 1; }}\n\
+         for sd_m in -lc -lic; do\n\
+         command -v {bin} >/dev/null 2>&1 && break\n\
+         sd_p=$(sd_probe $sd_m); [ -n \"$sd_p\" ] && PATH=$sd_p && export PATH\n\
+         done\n\
+         sd_t=\"${{TMPDIR:-/tmp}}/.sparkdown-cli-$$\"; rm -f \"$sd_t\"\n\
+         if command -v setsid >/dev/null 2>&1; then sd_g=1; setsid {cmd_line} </dev/null & else sd_g=; {cmd_line} </dev/null & fi\n\
+         sd_c=$!\n\
+         sd_kill() {{ if [ -n \"$sd_g\" ]; then kill -$1 -$sd_c; else pkill -$1 -P $sd_c; kill -$1 $sd_c; fi; }} 2>/dev/null\n\
+         ( sleep {secs}; : > \"$sd_t\"; sd_kill TERM; sleep 2; sd_kill KILL ) </dev/null >/dev/null 2>&1 &\n\
+         sd_w=$!\n\
+         wait $sd_c; sd_s=$?\n\
+         kill $sd_w 2>/dev/null\n\
+         if [ -e \"$sd_t\" ]; then rm -f \"$sd_t\"; echo {CLI_TIMEOUT_MARK} >&2; exit 124; fi\n\
+         exit $sd_s"
     )
 }
 
@@ -2084,6 +2130,55 @@ Host *.example.com
             parse_read_payload("__SD_OK__\ncafé\n".as_bytes(), "/p").unwrap(),
             "café\n"
         );
+    }
+
+    /// #49: the remote agent-CLI script, run by a local /bin/sh with a
+    /// fake agent: success, failure (own stderr + code, no noise), and a
+    /// hang stopped by the watchdog.
+    #[cfg(unix)]
+    #[test]
+    fn remote_agent_cli_script_runs_times_out_and_reports() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("sd-remote-cli-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let agent = dir.join("fakeagent");
+        std::fs::write(
+            &agent,
+            "#!/bin/sh\ncase \"$1\" in ok) echo added;; fail) echo 'Error: bad config' >&2; exit 3;; hang) sleep 60;; esac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let run = |arg: &str, secs: u64| {
+            let script = remote_agent_cli_script(&format!("fakeagent {arg}"), "fakeagent", secs);
+            let out = crate::proc::command("/bin/sh")
+                .args(["-c", &script])
+                .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
+                .env("SHELL", "/bin/sh")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            (
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )
+        };
+        let (code, out, _) = run("ok", 20);
+        assert_eq!(code, Some(0));
+        assert_eq!(out.trim(), "added");
+        let (code, _, err) = run("fail", 20);
+        assert_eq!(code, Some(3));
+        assert_eq!(err.trim(), "Error: bad config");
+        let t0 = std::time::Instant::now();
+        let (_, _, err) = run("hang", 1);
+        assert!(err.contains(CLI_TIMEOUT_MARK), "{err}");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            t0.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

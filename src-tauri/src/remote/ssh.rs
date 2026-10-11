@@ -1000,6 +1000,20 @@ fn ssh_exec(host: &str, remote_cmd: &str, stdin: Option<&[u8]>) -> Result<SshRes
     })
 }
 
+/// Run `remote_cmd` and return (exit status, stdout, stderr) even when the
+/// command fails, so a caller can show the command's own error and code.
+/// Only an ssh failure (status 255) is an Err.
+pub(crate) fn ssh_run_status(
+    host: &str,
+    remote_cmd: &str,
+) -> Result<(i32, String, String), String> {
+    let result = ssh_exec(host, remote_cmd, None)?;
+    if result.status == 255 {
+        return Err(map_ssh_failure(host, &result.failure_text()));
+    }
+    Ok((result.status, result.stdout_lossy(), result.stderr))
+}
+
 pub(crate) fn ssh_run(host: &str, remote_cmd: &str) -> Result<String, String> {
     ssh_run_stdin(host, remote_cmd, None)
 }

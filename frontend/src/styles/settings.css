@@ -295,3 +295,10 @@
 .settings-mcp-repair[hidden] {
   display: none;
 }
+
+/* An agent CLI's own error (#49): keep its line breaks, mark it as an error. */
+.settings-row-desc.settings-row-error {
+  color: var(--syn-invalid, #d9534f);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
