@@ -192,6 +192,9 @@ fn serve_request<S: Read + Write>(stream: &mut S, broker: &Broker) {
     };
     // Defense in depth: the helper classified too, but never trust it.
     let Some(key) = classify_prompt(prompt) else {
+        broker
+            .refused
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         return reply_no(stream);
     };
     match broker.passphrase_for(&key) {
@@ -278,6 +281,19 @@ pub type Provider = Arc<dyn Fn(&str) -> Option<Zeroizing<String>> + Send + Sync>
 /// time it was handed out (inside the retry window a re-ask means "wrong").
 type CachedPass = (Zeroizing<String>, Option<Instant>);
 
+/// What happened with askpass during one connect attempt (#50).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Outcome {
+    /// An askpass endpoint was up, so ssh could ask for a key passphrase.
+    pub ready: bool,
+    /// The user dismissed the passphrase prompt.
+    pub cancelled: bool,
+    /// A passphrase was handed to ssh.
+    pub answered: bool,
+    /// ssh's askpass request was refused (not a key passphrase prompt).
+    pub refused: bool,
+}
+
 /// One remote connection's askpass endpoint, token and passphrase cache.
 pub struct Broker {
     endpoint: PathBuf,
@@ -289,6 +305,8 @@ pub struct Broker {
     cancelled: std::sync::atomic::AtomicBool,
     /// A passphrase was handed to ssh during this connection.
     answered: std::sync::atomic::AtomicBool,
+    /// A helper request with a valid token was refused (not a key prompt).
+    refused: std::sync::atomic::AtomicBool,
     stop: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(unix)]
     dir: PathBuf,
@@ -328,6 +346,7 @@ impl Broker {
             cache: Mutex::new(HashMap::new()),
             cancelled: std::sync::atomic::AtomicBool::new(false),
             answered: std::sync::atomic::AtomicBool::new(false),
+            refused: std::sync::atomic::AtomicBool::new(false),
             stop: stop.clone(),
             #[cfg(unix)]
             dir,
@@ -380,6 +399,22 @@ impl Broker {
     pub fn take_answered(&self) -> bool {
         self.answered
             .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Whether ssh's askpass request was refused since the last call.
+    pub fn take_refused(&self) -> bool {
+        self.refused
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Everything a failed connect needs to word its error (#50); resets.
+    pub fn take_outcome(&self) -> Outcome {
+        Outcome {
+            ready: true,
+            cancelled: self.take_cancelled(),
+            answered: self.take_answered(),
+            refused: self.take_refused(),
+        }
     }
 
     fn passphrase_for(&self, key: &str) -> Option<Zeroizing<String>> {
@@ -623,6 +658,10 @@ mod tests {
             );
         }
         assert!(asked.lock().unwrap().is_empty());
+        // #50: the refusal is recorded for the connect error, once.
+        let o = b.take_outcome();
+        assert!(o.ready && o.refused && !o.answered && !o.cancelled, "{o:?}");
+        assert!(!b.take_outcome().refused);
     }
 
     #[cfg(unix)]

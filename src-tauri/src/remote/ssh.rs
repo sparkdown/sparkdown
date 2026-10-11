@@ -495,7 +495,10 @@ pub(crate) fn needs_agent_message(key: &str) -> String {
 
 /// After a key refusal, look for the likely cause: a passphrase-protected
 /// identity file that no reachable agent holds (BatchMode can't ask for the
-/// passphrase). Returns the refined message, or `msg` unchanged.
+/// passphrase). Returns the refined message, or `msg` unchanged. Connects
+/// use `passphrase_outcome_message` (#50); this is the no-askpass case
+/// the live tests check.
+#[cfg(test)]
 pub(crate) fn refine_key_refusal(host: &str, msg: String) -> String {
     if !is_key_refusal(host, &msg) {
         return msg;
@@ -504,6 +507,54 @@ pub(crate) fn refine_key_refusal(host: &str, msg: String) -> String {
         Some(key) => needs_agent_message(&key),
         None => msg,
     }
+}
+
+/// The keys ssh would have offered `host` (#50): the identity files from
+/// `ssh -G` that exist, shown with `~`, then a count of ssh-agent keys.
+pub(crate) fn tried_keys(host: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Ok(dest) = destination_args(host) {
+        if let Ok(out) = crate::proc::command("ssh")
+            .arg("-G")
+            .args(&dest)
+            .stdin(Stdio::null())
+            .output()
+        {
+            let home = home_dir();
+            for key in identity_files(&String::from_utf8_lossy(&out.stdout), &home) {
+                if key.is_file() {
+                    keys.push(
+                        key.strip_prefix(&home)
+                            .map(|r| format!("~/{}", r.display()))
+                            .unwrap_or_else(|_| key.display().to_string()),
+                    );
+                }
+            }
+        }
+    }
+    match agent_fingerprints().map(|l| l.len()).unwrap_or(0) {
+        0 => {}
+        1 => keys.push("1 key in ssh-agent".into()),
+        n => keys.push(format!("{n} keys in ssh-agent")),
+    }
+    keys
+}
+
+/// The server refused every key it was offered (#50): not a passphrase or
+/// agent problem. Names the keys tried when known.
+pub(crate) fn key_rejected_message(host: &str, tried: &[String]) -> String {
+    if tried.is_empty() {
+        return format!(
+            "Not connected to '{host}': the server did not accept any SSH key, and no key was found to offer. \
+             Add an IdentityFile for this host in ~/.ssh/config, or load a key in ssh-agent."
+        );
+    }
+    format!(
+        "Not connected to '{host}': the server rejected your SSH key (tried: {}). \
+         Check that the matching public key is in ~/.ssh/authorized_keys for that account on the server, \
+         and that the account is allowed to log in.",
+        tried.join(", ")
+    )
 }
 
 /// `identityfile` entries of `ssh -G` output, `~`/`%d` expanded.
@@ -567,7 +618,7 @@ fn agent_fingerprints() -> Option<Vec<String>> {
 
 /// The first passphrase-protected identity for `host` that no agent holds,
 /// shown with `~` for the home dir.
-fn encrypted_key_without_agent(host: &str) -> Option<String> {
+pub(crate) fn encrypted_key_without_agent(host: &str) -> Option<String> {
     let dest = destination_args(host).ok()?;
     let out = crate::proc::command("ssh")
         .arg("-G")

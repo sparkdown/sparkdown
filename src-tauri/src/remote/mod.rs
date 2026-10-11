@@ -349,9 +349,17 @@ pub async fn remote_connect(
         });
         crate::askpass::set_current(broker.clone());
         let result = connect_with(&hosts, &host, &path, ssh_run).map_err(|e| {
-            let cancelled = broker.as_ref().is_some_and(|b| b.take_cancelled());
-            let answered = broker.as_ref().is_some_and(|b| b.take_answered());
-            passphrase_outcome_message(&host, e, cancelled, answered)
+            let outcome = broker
+                .as_ref()
+                .map(|b| b.take_outcome())
+                .unwrap_or_default();
+            passphrase_outcome_message(
+                &host,
+                e,
+                outcome,
+                || ssh::encrypted_key_without_agent(&host),
+                || ssh::tried_keys(&host),
+            )
         });
         if result.is_err() {
             // The live session (if any) keeps its own endpoint.
@@ -373,23 +381,41 @@ pub async fn remote_connect(
     .map_err(|e| format!("connect task failed: {e}"))?
 }
 
-/// The connect error after an askpass round: cancelled prompt, refused
-/// passphrase, or (askpass never ran) the agent hint from #25.
+/// The connect error after an askpass round (#25, #27, #50):
+/// - the prompt was cancelled: say no passphrase was entered;
+/// - a passphrase was given and the key still refused: wrong passphrase;
+/// - askpass could not run (no endpoint) or was refused, and a
+///   passphrase-locked key no agent holds is configured: the agent hint;
+/// - otherwise the server rejected the key: say so, naming the keys tried.
+///
+/// `needs_agent` and `tried` probe the local ssh setup only when needed.
 pub(crate) fn passphrase_outcome_message(
     host: &str,
     err: String,
-    cancelled: bool,
-    answered: bool,
+    outcome: crate::askpass::Outcome,
+    needs_agent: impl FnOnce() -> Option<String>,
+    tried: impl FnOnce() -> Vec<String>,
 ) -> String {
-    if cancelled {
+    if outcome.cancelled {
         return format!("Not connected to '{host}': no passphrase was entered for your SSH key.");
     }
-    if answered && ssh::is_key_refusal(host, &err) {
+    if !ssh::is_key_refusal(host, &err) {
+        return err;
+    }
+    if outcome.answered {
         return format!(
             "Not connected to '{host}': the key passphrase was wrong, or the server did not accept the key."
         );
     }
-    ssh::refine_key_refusal(host, err)
+    // With a working askpass, ssh would have asked for the passphrase had
+    // the server accepted the public key; it didn't ask, so the server
+    // rejected the key before any passphrase was needed.
+    if !outcome.ready || outcome.refused {
+        if let Some(key) = needs_agent() {
+            return ssh::needs_agent_message(&key);
+        }
+    }
+    ssh::key_rejected_message(host, &tried())
 }
 
 /// Tear down the active session synchronously. Serialized against connect via
@@ -1815,12 +1841,7 @@ Host *.example.com
         let broker = crate::askpass::Broker::start(provider, helper.clone()).unwrap();
         crate::askpass::set_current(Some(broker.clone()));
         let err = connect_with(&hosts, &alias, "~", ssh_run).unwrap_err();
-        let msg = passphrase_outcome_message(
-            &alias,
-            err,
-            broker.take_cancelled(),
-            broker.take_answered(),
-        );
+        let msg = passphrase_outcome_message(&alias, err, broker.take_outcome(), || None, Vec::new);
         assert!(msg.contains("passphrase was wrong"), "{msg}");
         assert!(!asked.lock().unwrap().is_empty());
         assert!(asked.lock().unwrap().iter().all(|k| !k.is_empty()));
@@ -1849,13 +1870,79 @@ Host *.example.com
 
     #[test]
     fn passphrase_outcome_messages() {
+        use crate::askpass::Outcome;
         let refused = "Host 'h' requires a password or rejected the SSH key. x".to_string();
-        let m = passphrase_outcome_message("h", refused.clone(), true, true);
+        let ready = Outcome {
+            ready: true,
+            ..Outcome::default()
+        };
+        let locked = || Some("~/.ssh/id_ed25519".to_string());
+        let keys = || {
+            vec![
+                "~/.ssh/id_ed25519".to_string(),
+                "1 key in ssh-agent".to_string(),
+            ]
+        };
+        let m = passphrase_outcome_message(
+            "h",
+            refused.clone(),
+            Outcome {
+                cancelled: true,
+                ..ready
+            },
+            locked,
+            keys,
+        );
         assert!(m.contains("no passphrase was entered"), "{m}");
-        let m = passphrase_outcome_message("h", refused, false, true);
+        let m = passphrase_outcome_message(
+            "h",
+            refused.clone(),
+            Outcome {
+                answered: true,
+                ..ready
+            },
+            locked,
+            keys,
+        );
         assert!(m.contains("passphrase was wrong"), "{m}");
-        // Other failures pass through untouched.
-        let m = passphrase_outcome_message("h", "Could not reach 'h'".into(), false, true);
+        // #50: askpass was up and never asked: the server rejected the key
+        // outright (a locked key is NOT an agent problem then).
+        let m = passphrase_outcome_message("h", refused.clone(), ready, locked, keys);
+        assert!(!m.contains("SSH agent"), "{m}");
+        assert!(m.contains("the server rejected your SSH key"), "{m}");
+        assert!(
+            m.contains("tried: ~/.ssh/id_ed25519, 1 key in ssh-agent"),
+            "{m}"
+        );
+        // Askpass could not run: a locked key without an agent → agent hint.
+        let m = passphrase_outcome_message("h", refused.clone(), Outcome::default(), locked, keys);
+        assert!(m.starts_with(ssh::ERR_KEY_NEEDS_AGENT), "{m}");
+        // Askpass refused the request: same hint.
+        let m = passphrase_outcome_message(
+            "h",
+            refused.clone(),
+            Outcome {
+                refused: true,
+                ..ready
+            },
+            locked,
+            keys,
+        );
+        assert!(m.starts_with(ssh::ERR_KEY_NEEDS_AGENT), "{m}");
+        // No askpass and no locked key: the server rejected the key.
+        let m = passphrase_outcome_message("h", refused.clone(), Outcome::default(), || None, keys);
+        assert!(m.contains("the server rejected your SSH key"), "{m}");
+        // Nothing to offer.
+        let m = passphrase_outcome_message("h", refused, ready, || None, Vec::new);
+        assert!(m.contains("no key was found"), "{m}");
+        // Other failures pass through untouched, without probing.
+        let m = passphrase_outcome_message(
+            "h",
+            "Could not reach 'h'".into(),
+            ready,
+            || panic!("no probe"),
+            || panic!("no probe"),
+        );
         assert_eq!(m, "Could not reach 'h'");
     }
 
