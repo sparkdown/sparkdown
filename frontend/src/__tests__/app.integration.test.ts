@@ -1011,6 +1011,24 @@ describe('App integration', () => {
       expect(tabTitles()).not.toContain('r.md');
     });
 
+    it('saving a remote file refreshes Changes without waiting for the watcher (#28)', async () => {
+      remoteVfs.set('/home/u/proj/r.md', 'remote');
+      const app = await startWithRemote();
+      await app.openFolder(REMOTE_ROOT);
+      await openPath('/home/u/proj/r.md');
+      await editActive('remote edit');
+      // Let the open/connect refreshes settle first.
+      await new Promise((r) => setTimeout(r, 800));
+      const statusCalls = () => invokeCalls.filter((c) => c.cmd === 'git_status').length;
+      const before = statusCalls();
+
+      expect(await app.save()).toBe(true);
+      expect(remoteVfs.get('/home/u/proj/r.md')).toBe('remote edit');
+      // No watcher event is emitted in this test: only the save can refresh.
+      await new Promise((r) => setTimeout(r, 800));
+      expect(statusCalls()).toBeGreaterThan(before);
+    });
+
     it('save refuses to write a tab whose origin is not the active session', async () => {
       vfs.set('/docs/local.md', 'local');
       const app = await startWithRemote();

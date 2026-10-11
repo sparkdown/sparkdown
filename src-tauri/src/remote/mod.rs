@@ -1494,6 +1494,11 @@ Host *.example.com
         assert!(watch.contains("__SD_STRUCT__"));
         assert!(watch.contains("__SD_CONTENT__"));
         assert!(watch.contains("LC_ALL=C sort"));
+        // #28: one batched stat per find group, never a process per file
+        // (minutes on a home-sized tree, past the SSH timeout).
+        assert!(watch.contains("-exec stat -c '%Y %s %n' {} +"), "{watch}");
+        assert!(watch.contains("-exec stat -f '%m %z %N' {} +"), "{watch}");
+        assert!(!watch.contains("for f do"), "{watch}");
         let argv = ssh_argv("dev");
         assert_eq!(argv[0], "ssh");
         assert!(argv.contains(&"dev".to_string()));
@@ -1608,6 +1613,35 @@ Host *.example.com
         disconnect_now();
         let err = connect_with(&[], "-oProxyCommand=x", "/", |_, _| Ok("/".into())).unwrap_err();
         assert!(err.contains("Invalid SSH host"), "{err}");
+    }
+
+    /// Live check (#28): a save over ssh must move the watch fingerprint
+    /// (so the UI refreshes Changes) and show up in remote git status.
+    /// `SPARKDOWN_SSH_TEST_DEST=me@127.0.0.1:2223 SPARKDOWN_SSH_TEST_REPO=/abs/repo
+    /// cargo test live_remote_save -- --ignored`; the repo needs a committed `a.md`.
+    #[test]
+    #[ignore]
+    fn live_remote_save_shows_in_changes() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dest = std::env::var("SPARKDOWN_SSH_TEST_DEST").expect("SPARKDOWN_SSH_TEST_DEST");
+        let repo = std::env::var("SPARKDOWN_SSH_TEST_REPO").expect("SPARKDOWN_SSH_TEST_REPO");
+        let s = connect_with(&[], &dest, &repo, ssh_run).unwrap();
+        let script = watch_fingerprint_script(&s.path);
+        let before = ssh_run(&dest, &script).unwrap();
+        let status0 = git_status(&s.path).unwrap();
+        assert!(status0.is_repo, "not a repo");
+        let file = format!("{}/a.md", s.path);
+        write_file(&file, "edited over ssh\n").unwrap();
+        let after = ssh_run(&dest, &script).unwrap();
+        let kind = classify_remote_watch_delta(&before, &after);
+        let status1 = git_status(&s.path).unwrap();
+        disconnect_now();
+        assert_eq!(kind, Some("modify"));
+        assert!(
+            status1.changes.iter().any(|c| c.path.ends_with("a.md")),
+            "changes: {:?}",
+            status1.changes.iter().map(|c| &c.path).collect::<Vec<_>>()
+        );
     }
 
     /// Live check against a real sshd (#22), e.g.

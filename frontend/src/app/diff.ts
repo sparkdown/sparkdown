@@ -178,6 +178,21 @@ export class DiffController {
     else void this.changesView?.refreshCount();
   }
 
+  /**
+   * A tab was saved. A save is a known change on the active machine: refresh
+   * Changes (and an open diff of that file) now instead of waiting for the
+   * watcher. The remote watcher is a poll, so on a large or slow host its
+   * tick can arrive late or not at all (#28).
+   */
+  onTabSaved(tab: Tab): void {
+    if (tab.origin !== this.ctx.tabs.getOrigin()) return;
+    this.refreshSoon();
+    const active = this.ctx.tabs.activeTab();
+    if (active && active.id === tab.id && active.viewMode === 'diff') {
+      void this.showDiffForTab(active);
+    }
+  }
+
   /** Keep the Changes list live if it's showing; otherwise just the badge. */
   refreshSoon(): void {
     if (this.changesMode) this.debouncedChangesRefresh();

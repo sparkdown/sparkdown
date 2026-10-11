@@ -393,6 +393,7 @@ export class App {
     });
 
     this.bus.on(EVENTS.TAB_SAVED, (data) => {
+      this.diff.onTabSaved(data.tab);
       this.syncTreeOpenFiles();
       this.statusbar.updateModified(false);
       this.statusbar.setActiveFile(data.tab.path, data.tab.title);
