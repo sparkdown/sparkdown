@@ -85,6 +85,14 @@ sparkdown
 a dropped directory; shipped in #40). The plugin's **Open folder** relies on
 this; **Open SparkDown** launches the app with no path.
 
+### Test builds (no release)
+
+Actions → **Linux package** → Run workflow (on `main`) builds the AppImage,
+the `.deb` and a pacman package made from that `.deb` with the PKGBUILD
+below (local source, `pkgver` like `0.3.1.r42.gabc1234`). They are workflow
+artifacts only, never attached to a Release. Download `sparkdown-arch`,
+unzip it, and install with `sudo pacman -U ./sparkdown-bin-*.pkg.tar.zst`.
+
 ### AUR (`sparkdown-bin`)
 
 A PKGBUILD is in `packaging/aur/sparkdown-bin/`. It is **not published to
