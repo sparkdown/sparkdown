@@ -98,7 +98,57 @@ pub(crate) fn is_allowed_navigation(url: &tauri::Url) -> bool {
     }
 }
 
+/// What `sparkdown <first arg>` should print and exit with, for the flags that
+/// must never open a window (#33): `--version`/`-V` and `--help`/`-h`. Only
+/// the first argument counts, so a file that happens to be named `--help`
+/// later on the command line still opens.
+fn cli_info(first_arg: Option<&str>) -> Option<String> {
+    let version = env!("CARGO_PKG_VERSION");
+    match first_arg? {
+        "--version" | "-V" => Some(format!("SparkDown {version}\n")),
+        "--help" | "-h" => Some(format!(
+            "SparkDown {version}: a Markdown editor and agent cockpit.\n\n\
+             Usage:\n  \
+             sparkdown [FILE|FOLDER]...   open files or a folder in the app\n  \
+             sparkdown --mcp-stdio        run the stdio MCP bridge for agent CLIs\n  \
+             sparkdown --version, -V      print the version and exit\n  \
+             sparkdown --help, -h         print this help and exit\n"
+        )),
+        _ => None,
+    }
+}
+
+/// Release Windows builds use the GUI subsystem, which starts with no
+/// console: attach to the parent's (the terminal that ran us) so `--version`
+/// output shows there. Redirected output (a pipe or file) works without it.
+#[cfg(windows)]
+fn attach_parent_console() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    // SAFETY: plain Win32 call with a constant argument; failure (no parent
+    // console) just leaves output unattached.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
 fn main() {
+    // `--version` / `--help`: print and exit before any window, single-instance
+    // or MCP logic runs (#33).
+    let first = std::env::args().nth(1);
+    if let Some(text) = cli_info(first.as_deref()) {
+        #[cfg(windows)]
+        attach_parent_console();
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        let _ = out.write_all(text.as_bytes());
+        let _ = out.flush();
+        return;
+    }
+
     // Agent MCP shim: when launched as `sparkdown --mcp-stdio` (by an agent
     // CLI that registered us as a stdio MCP server), act as that bridge and
     // never start the GUI. Must run before the Tauri builder.
@@ -425,6 +475,28 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn version_and_help_flags_print_instead_of_opening_the_app() {
+        let v = super::cli_info(Some("--version")).unwrap();
+        assert_eq!(v, format!("SparkDown {}\n", env!("CARGO_PKG_VERSION")));
+        assert_eq!(super::cli_info(Some("-V")), Some(v));
+        let help = super::cli_info(Some("--help")).unwrap();
+        assert!(
+            help.contains("--mcp-stdio") && help.contains("--version"),
+            "{help}"
+        );
+        assert_eq!(super::cli_info(Some("-h")), Some(help));
+        // Anything else (files, folders, the MCP flag, nothing) is not ours.
+        for other in [
+            None,
+            Some("notes.md"),
+            Some("--mcp-stdio"),
+            Some("-psn_0_1"),
+        ] {
+            assert_eq!(super::cli_info(other), None, "{other:?}");
+        }
+    }
+
     use super::is_allowed_navigation;
 
     fn allowed(u: &str) -> bool {
