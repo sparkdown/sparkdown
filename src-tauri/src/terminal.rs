@@ -1261,8 +1261,19 @@ mod tests {
         let target = format!("={name}:");
         run(&["send-keys", "-t", &target, agent.to_str().unwrap(), "Enter"]);
         let got = wait(true);
+        // Between fork and exec the new job is still named "bash": busy is
+        // already right, the name settles a moment later (CI flake).
         #[cfg(target_os = "linux")]
-        assert_eq!(got.as_deref(), Some("agent.sh"));
+        {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut got = got;
+            while got.as_deref() != Some("agent.sh") && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+                got = tmux_busy_command(&name);
+            }
+            assert_eq!(got.as_deref(), Some("agent.sh"));
+        }
+        #[cfg(not(target_os = "linux"))]
         let _ = got;
         run(&["send-keys", "-t", &target, "C-c", ""]);
         wait(false);
@@ -1324,8 +1335,17 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(50));
         };
+        // The name settles at exec, a moment after the job takes the tty.
         #[cfg(target_os = "linux")]
-        assert_eq!(super::process_name(fg).as_deref(), Some("agent.sh"));
+        {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while super::process_name(fg).as_deref() != Some("agent.sh")
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert_eq!(super::process_name(fg).as_deref(), Some("agent.sh"));
+        }
         let _ = fg;
         let _ = child.kill();
         let _ = std::fs::remove_dir_all(&dir);
