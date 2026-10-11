@@ -375,7 +375,7 @@ pub(crate) fn close_mux(host: &str) {
     if opts.is_empty() {
         return;
     }
-    let _ = Command::new("ssh")
+    let _ = crate::proc::command("ssh")
         .args(&opts)
         .args(["-O", "exit", host])
         .stdout(Stdio::null())
@@ -631,7 +631,7 @@ fn ssh_exec(host: &str, remote_cmd: &str, stdin: Option<&[u8]>) -> Result<SshRes
     // `${VAR:-x}` constructs every remote command uses. `exec` replaces the
     // login shell so exit status still propagates.
     let sh_arg = format!("exec /bin/sh -c {}", shell_quote(&wrap_marked(remote_cmd)));
-    let mut cmd = Command::new("ssh");
+    let mut cmd = crate::proc::command("ssh");
     cmd.args(mux_options());
     cmd.args([
         "-o",
@@ -825,7 +825,7 @@ mod exec_tests {
     #[test]
     fn stdin_write_is_covered_by_the_deadline() {
         // `exec`: like ssh, the direct child is the one holding the pipes.
-        let mut cmd = Command::new("sh");
+        let mut cmd = crate::proc::command("sh");
         cmd.args(["-c", "exec sleep 30"]);
         let payload = vec![b'x'; 5 * 1024 * 1024];
         let start = Instant::now();
@@ -842,7 +842,7 @@ mod exec_tests {
     /// threads must be detached after one shared grace period, not hang.
     #[test]
     fn inherited_pipes_do_not_block_past_the_grace() {
-        let mut cmd = Command::new("sh");
+        let mut cmd = crate::proc::command("sh");
         cmd.args(["-c", "sleep 30; :"]);
         let payload = vec![b'x'; 5 * 1024 * 1024];
         let start = Instant::now();
@@ -854,7 +854,7 @@ mod exec_tests {
 
     #[test]
     fn large_stdin_round_trips_before_the_deadline() {
-        let mut cmd = Command::new("sh");
+        let mut cmd = crate::proc::command("sh");
         cmd.args(["-c", "wc -c | tr -d ' '"]);
         let payload = vec![b'y'; 5 * 1024 * 1024];
         let out = run_with_deadline(cmd, Some(&payload), Duration::from_secs(30)).unwrap();
@@ -865,7 +865,7 @@ mod exec_tests {
 
     #[test]
     fn early_exit_reports_the_stdin_error() {
-        let mut cmd = Command::new("sh");
+        let mut cmd = crate::proc::command("sh");
         cmd.args(["-c", "exit 3"]);
         let payload = vec![b'z'; 5 * 1024 * 1024];
         let out = run_with_deadline(cmd, Some(&payload), Duration::from_secs(30)).unwrap();

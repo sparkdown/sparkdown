@@ -13,6 +13,7 @@ mod mcp;
 mod mcp_stdio;
 mod meat;
 mod menu;
+mod proc;
 mod remote;
 mod review;
 mod search;

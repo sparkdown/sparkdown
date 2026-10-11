@@ -117,7 +117,7 @@ jobs:
           # The smoke tests' fake agent CLIs are node scripts behind
           # npm-style .cmd / .ps1 shims, like the real agents.
           node-version: "22.22.2"
-      - name: Windows tests (terminal, context, mcp)
+      - name: Windows tests (terminal, context, mcp, proc)
         # The modules with Windows-only behavior: the named-pipe MCP
         # transport (per-user DACL, first-instance flag), PATH + PATHEXT agent
         # detection, and agent launch. The smoke tests run every agent-chip
@@ -125,10 +125,11 @@ jobs:
         # real ConPTY in pwsh 7 and Windows PowerShell 5.1 against npm-style
         # fake agents, and `mcp add` through .cmd / .ps1 shims, and check
         # what arrived. SPARKDOWN_WIN_SMOKE turns "node or pwsh missing" from
-        # a skip into a failure.
+        # a skip into a failure. proc:: checks the CREATE_NO_WINDOW spawn
+        # helper (#15) on Windows.
         env:
           SPARKDOWN_WIN_SMOKE: "1"
-        run: "cargo test -- terminal:: context:: mcp:: --show-output"
+        run: "cargo test -- terminal:: context:: mcp:: proc:: --show-output"
       - name: Parse scripts/package-windows.ps1
         # Syntax check only (seconds), in both PowerShell 7 and Windows
         # PowerShell 5.1. The full build runs in windows-package.yml.

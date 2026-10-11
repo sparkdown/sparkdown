@@ -610,12 +610,11 @@ mod tests {
         let _session = crate::remote::TEST_SESSION_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        use std::process::Command;
         let dir = std::env::temp_dir().join(format!("sd-review-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            Command::new("git")
+            crate::proc::command("git")
                 .current_dir(&dir)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -680,7 +679,7 @@ mod tests {
         ];
         let (tracked, hashed, untracked) = remote_plan(&remote_changes);
         let script = remote_stats_script(&root, tracked, &hashed, &untracked, q);
-        if let Ok(out) = Command::new("sh").arg("-c").arg(&script).output() {
+        if let Ok(out) = crate::proc::command("sh").arg("-c").arg(&script).output() {
             assert!(
                 out.status.success(),
                 "{}",
