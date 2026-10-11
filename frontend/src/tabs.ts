@@ -101,6 +101,9 @@ export class TabManager {
   }
 
   openTab(path: string | null, content: string): void {
+    // #47: a path ending in a separator names a folder; it never becomes a
+    // file tab (the backend also refuses to read or save a directory).
+    if (path && /[\\/]$/.test(path)) return;
     if (path) {
       // Only a tab of the active machine may capture the open: a kept dirty
       // tab from another machine with the same path is a different file.

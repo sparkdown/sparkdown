@@ -27,6 +27,14 @@ describe('TabManager', () => {
     document.body.innerHTML = '';
   });
 
+  it('never opens a folder path as a file tab (#47)', () => {
+    const { tabs } = setup();
+    tabs.openTab('/home/u/proj/', '');
+    tabs.openTab('C:\\Users\\u\\proj\\', '');
+    expect(tabs.activeTab()).toBeFalsy();
+    expect(tabs.findByPath('/home/u/proj/')).toBeFalsy();
+  });
+
   it('opens a tab, makes it active, and renders a tab element', () => {
     const { tabs, container } = setup();
     tabs.openTab('/a/notes.md', 'hello');

@@ -195,6 +195,12 @@ fn read_local_file(path: &str) -> Result<(String, PathBuf), AppError> {
     let safe_path = validate_path(path)?;
 
     let metadata = fs::metadata(&safe_path)?;
+    // #47: a directory never opens as a file tab, whatever path led here.
+    if metadata.is_dir() {
+        return Err(AppError::InvalidPath(format!(
+            "Path is a directory: {path}"
+        )));
+    }
     if metadata.len() > MAX_FILE_SIZE {
         return Err(AppError::FileTooLarge {
             size_mb: metadata.len() / 1024 / 1024,
@@ -370,6 +376,12 @@ fn write_file_impl(path: &str, content: &str) -> Result<(), AppError> {
     // validate_write_path already requires the parent directory to exist (it
     // errors otherwise), so no create_dir_all is needed here.
     let safe_path = validate_write_path(path)?;
+    // #47: never "save" over a directory (a folder that ended up in a tab).
+    if safe_path.is_dir() {
+        return Err(AppError::InvalidPath(format!(
+            "Path is a directory: {path}"
+        )));
+    }
 
     // Temp file + fsync + rename: a crash mid-save never truncates the file.
     Ok(crate::fsio::write_atomic(&safe_path, content.as_bytes())?)
@@ -871,6 +883,26 @@ mod tests {
         assert_eq!(result.unwrap().0, "small content");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_and_write_refuse_a_directory() {
+        // #47: a folder can never be read into, or saved from, a file tab.
+        let dir =
+            std::env::temp_dir().join(format!("sparkdown_test_dir_tab_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("proj")).unwrap();
+        let p = dir.join("proj");
+        let ps = p.to_str().unwrap();
+        let read = read_local_file(ps);
+        let write = write_file_impl(ps, "x");
+        let still_dir = p.is_dir();
+        let _ = fs::remove_dir_all(&dir);
+        let read = read.err().map(|e| e.to_string()).unwrap_or_default();
+        let write = write.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(read.contains("is a directory"), "{read}");
+        assert!(write.contains("is a directory"), "{write}");
+        assert!(still_dir);
     }
 
     #[test]

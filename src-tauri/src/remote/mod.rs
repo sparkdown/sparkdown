@@ -497,6 +497,12 @@ fn parse_read_payload(raw: &[u8], path: &str) -> Result<String, AppError> {
 pub fn write_file(path: &str, content: &str) -> Result<(), AppError> {
     let session = current_session().ok_or_else(|| AppError::Other("no remote session".into()))?;
     validate_remote_path(path).map_err(AppError::Other)?;
+    // #47: a trailing separator names a directory; never write to one.
+    if path.ends_with('/') {
+        return Err(AppError::InvalidPath(format!(
+            "Path is a directory: {path}"
+        )));
+    }
     let parent = Path::new(path)
         .parent()
         .and_then(|p| p.to_str())
@@ -550,6 +556,7 @@ pub(crate) fn remote_write_script(path: &str, parent: &str, len: usize) -> Strin
         "(\n\
          f={path}\n\
          N={len}\n\
+         if [ -d \"$f\" ]; then echo \"sparkdown: $f is a directory\" >&2; exit 1; fi\n\
          mkdir -p -- {parent} || exit 1\n\
          n=0\n\
          while [ -L \"$f\" ] && [ \"$n\" -lt 40 ]; do\n\
@@ -2092,6 +2099,13 @@ Host *.example.com
         assert!(s.starts_with("(\n") && s.ends_with("\n)"), "{s}");
         assert!(s.contains("f='/home/u/it'\\''s.md'\n"), "{s}");
         assert!(s.contains("N=1234\n"), "{s}");
+        // #47: a directory target fails before anything is staged.
+        assert!(
+            s.contains(
+                "if [ -d \"$f\" ]; then echo \"sparkdown: $f is a directory\" >&2; exit 1; fi"
+            ),
+            "{s}"
+        );
         assert!(s.contains("mkdir -p -- '/home/u' || exit 1"), "{s}");
         assert!(s.contains(".sparkdown-tmp-$$"), "{s}");
         assert!(s.contains("(umask 0; cp -- \"$f\" \"$t\")"), "{s}");

@@ -527,3 +527,13 @@
   color: var(--text-subtle);
   font-style: italic;
 }
+
+/* Untracked nested repo (#47): a folder row, not a file. Not selectable. */
+.change-row-folder {
+  cursor: default;
+  opacity: 0.75;
+}
+
+.change-row-folder:hover {
+  background: transparent;
+}

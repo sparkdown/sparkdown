@@ -65,6 +65,8 @@ export class ChangesView {
   private repoRoot: string | null = null;
   private onOpen: (path: string, status: GitChange['status'], how: OpenHow) => void;
   private lastChanges: GitChange[] = [];
+  /** Untracked nested repos (folders, #47): listed, never opened or queued. */
+  private nestedRepos: GitChange[] = [];
   private stats = new Map<string, ChangeStat>();
   /** path → fingerprint of the current change (review key). */
   private prints = new Map<string, string>();
@@ -151,9 +153,10 @@ export class ChangesView {
     }
     const repoRoot = status.top_level ?? root;
     let stats: ChangeStat[] | null = null;
-    if (status.changes.length > 0) {
+    const files = status.changes.filter((c) => !c.is_dir);
+    if (files.length > 0) {
       try {
-        stats = await api.gitChangeStats(repoRoot, status.changes);
+        stats = await api.gitChangeStats(repoRoot, files);
       } catch {
         stats = null; // counts unknown; keep the old fingerprints
       }
@@ -177,6 +180,10 @@ export class ChangesView {
     stats: ChangeStat[] | null,
   ): void {
     this.repoRoot = repoRoot;
+    // A folder entry (untracked nested repo) is not a file: it never joins
+    // the review queue, the counts, or a tab (#47).
+    this.nestedRepos = changes.filter((c) => c.is_dir);
+    changes = changes.filter((c) => !c.is_dir);
     this.lastChanges = changes;
     const prevPrints = this.prints;
     this.stats = new Map();
@@ -432,7 +439,7 @@ export class ChangesView {
       case 'no-repo':
         return this.renderEmpty('This folder is not a git repository.');
       default:
-        if (this.lastChanges.length === 0)
+        if (this.lastChanges.length === 0 && this.nestedRepos.length === 0)
           return this.renderEmpty('No changes. Working tree is clean.');
         this.renderList();
     }
@@ -447,7 +454,7 @@ export class ChangesView {
     const { meat, noise } = this.groups();
     const queue = meat.length > 0 ? meat : noise;
     const reviewed = queue.filter((c) => this.isReviewed(c.path)).length;
-    const parts: string[] = [this.renderSummary(queue, reviewed)];
+    const parts: string[] = queue.length > 0 ? [this.renderSummary(queue, reviewed)] : [];
 
     if (meat.length > 0) {
       const left = meat.length - meat.filter((c) => this.isReviewed(c.path)).length;
@@ -475,6 +482,12 @@ export class ChangesView {
           `<div class="changes-noise-group">${noise.map((c) => this.renderRow(c, true)).join('')}</div>`,
         );
       }
+    }
+    if (this.nestedRepos.length > 0) {
+      parts.push(
+        `<div class="changes-group-h">Nested repositories <span class="changes-group-count">${this.nestedRepos.length}</span></div>`,
+      );
+      parts.push(this.nestedRepos.map((c) => this.renderFolderRow(c)).join(''));
     }
     this.listEl.innerHTML = parts.join('');
     this.syncSelection();
@@ -517,6 +530,24 @@ export class ChangesView {
       `<small class="changes-review-sub">${escapeHtml(sub)}</small>` +
       `<div class="changes-meter" role="progressbar" aria-label="Reviewed files" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${reviewed}">${meter}</div>` +
       `<div class="changes-keys" aria-hidden="true"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>Space</kbd> reviewed</span><span><kbd>↩</kbd> open</span></div>` +
+      `</div>`
+    );
+  }
+
+  /** An untracked nested repo: a folder row like git's own `?? proj/`. It
+   *  has no data-path, so it is not selectable and never opens a tab. */
+  private renderFolderRow(c: GitChange): string {
+    const name = c.path.split('/').pop() ?? c.path;
+    const dir = c.path.slice(0, c.path.length - name.length).replace(/\/$/, '');
+    const title = `${c.path}/ is a separate git repository (untracked here). Open it as its own folder to review its changes.`;
+    return (
+      `<div class="change-row change-row-folder" aria-disabled="true" title="${escapeHtml(title)}">` +
+      `<span class="change-check"></span>` +
+      `<span class="change-badge change-${c.status}">${STATUS_LETTER[c.status]}</span>` +
+      `<span class="change-file"><b class="change-name">${escapeHtml(name)}/</b>` +
+      (dir ? `<em class="change-dir">${escapeHtml(dir)}</em>` : '') +
+      `</span>` +
+      `<span class="change-counts"><span class="change-bin">repo</span></span>` +
       `</div>`
     );
   }

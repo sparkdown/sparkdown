@@ -223,6 +223,9 @@ export interface GitChange {
   path: string;
   status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked';
   staged: boolean;
+  /** A folder, not a file: an untracked nested git repo (`?? proj/`).
+   *  Shown as a folder row, never opened as a tab (#47). */
+  is_dir?: boolean;
 }
 
 /** Mirror of `GitBranchStatus` in src-tauri/src/git.rs. */
