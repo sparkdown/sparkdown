@@ -35,6 +35,13 @@ describe('terminal actions', () => {
     expect(tabs.closeCurrent).not.toHaveBeenCalled();
   });
 
+  it('Ctrl+W / Super+W (shortcut) closes the focused terminal pane like its × button (#30)', () => {
+    const { bus, cockpit, tabs } = targets(true);
+    bus.emit(ACTIONS.CLOSE_TAB);
+    expect(cockpit.closeTerminalPane).toHaveBeenCalledTimes(1);
+    expect(tabs.closeCurrent).not.toHaveBeenCalled();
+  });
+
   it('⌘W closes the document tab otherwise (menu and shortcut)', () => {
     const { bus, cockpit, tabs, fire } = targets(false);
     fire(MENU.CLOSE_TAB);

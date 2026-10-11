@@ -361,9 +361,14 @@ describe('TerminalManager split grid', () => {
     terms.all[1].keyHandler!(keydown({ key: 'W', ctrlKey: true, shiftKey: true }));
     expect(mgr.order).toEqual(['term-1']);
 
-    // Plain Ctrl+D / Ctrl+W stay with the shell.
+    // Plain Ctrl+D stays with the shell.
     expect(term.keyHandler!(keydown({ key: 'd', ctrlKey: true }))).toBe(true);
-    expect(term.keyHandler!(keydown({ key: 'w', ctrlKey: true }))).toBe(true);
+    // Plain Ctrl+W (Close Tab) skips xterm, unprevented, so the app's
+    // shortcut handler closes the focused pane (#30).
+    const w = keydown({ key: 'w', ctrlKey: true });
+    expect(term.keyHandler!(w)).toBe(false);
+    expect(w.preventDefault).not.toHaveBeenCalled();
+    expect(w.stopPropagation).not.toHaveBeenCalled();
     expect(mgr.count).toBe(1);
   });
 
