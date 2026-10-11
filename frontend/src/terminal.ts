@@ -2,7 +2,8 @@ import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { api, type RemoteSession } from './api';
-import { terminalPaneAction, type TerminalPaneAction } from './shortcuts';
+import { shortcutFor, terminalPaneAction, terminalPassesToApp, type TerminalPaneAction } from './shortcuts';
+import { ACTIONS } from './event-names';
 import { attachResizeDrag } from './resize-drag';
 import { isMacOS } from './utils';
 import { showMcpInstallPrompt } from './mcp-install-prompt';
@@ -151,6 +152,9 @@ export class TerminalPane {
         this.onAction?.(pane);
         return false;
       }
+      // App shortcuts that must work from a focused terminal (Ctrl+` on
+      // Windows/Linux): skip xterm so the keydown reaches ShortcutManager.
+      if (terminalPassesToApp(e, isMacOS())) return false;
       return true;
     });
   }
@@ -736,6 +740,9 @@ const SPLIT_RIGHT_ICON =
 const SPLIT_DOWN_ICON =
   '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M3 12h18"/></svg>';
 
+const TERMINALS_ONLY_ICON =
+  '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>';
+
 const MAC = isMacOS();
 const KEYS = MAC
   ? { right: '⌘D', down: '⌘⇧D', close: '⌘W' }
@@ -791,6 +798,15 @@ export class TerminalManager {
 
   setOnEmpty(cb: () => void): void {
     this.onEmpty = cb;
+  }
+
+  /** Pane-header "Terminals only" button (#21): the visible way into the
+   *  layout where the terminal fills the center column (the title bar stays
+   *  minimal; also View → Terminals Only, the palette, Ctrl+Shift+`). */
+  private onTerminalsOnly: (() => void) | null = null;
+
+  setOnTerminalsOnly(cb: () => void): void {
+    this.onTerminalsOnly = cb;
   }
 
   /** Where the layout is persisted (the cockpit wires AppConfig here). */
@@ -1268,6 +1284,9 @@ export class TerminalManager {
       case 'close':
         this.closeTerminal(id);
         break;
+      case 'terminals-only':
+        this.onTerminalsOnly?.();
+        break;
     }
   }
 
@@ -1293,6 +1312,7 @@ export class TerminalManager {
         <span class="terminal-pane-agents"></span>
         <button class="terminal-pane-btn" data-act="split-right" aria-label="Split right">${SPLIT_RIGHT_ICON}</button>
         <button class="terminal-pane-btn" data-act="split-down" aria-label="Split down">${SPLIT_DOWN_ICON}</button>
+        <button class="terminal-pane-btn" data-act="terminals-only" aria-label="Terminals only" title="Terminals only (${shortcutFor(ACTIONS.TOGGLE_TERMINALS_ONLY)})">${TERMINALS_ONLY_ICON}</button>
         <button class="terminal-pane-btn terminal-pane-close" data-act="close" aria-label="Close terminal" title="Close terminal (${KEYS.close})">×</button>
       </div>
       <div class="terminal-pane-body"><div class="terminal-pane-host"></div></div>`;

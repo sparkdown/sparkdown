@@ -51,6 +51,8 @@ const MAC_GLYPHS: Record<string, string> = {
 const KEY_NAMES: Record<string, string> = {
   Right: '→', Left: '←', Up: '↑', Down: '↓', Enter: '↩', Space: 'Space',
 };
+/** Windows/Linux spell Enter out; the arrows read the same everywhere. */
+const KEY_NAMES_OTHER: Record<string, string> = { ...KEY_NAMES, Enter: 'Enter' };
 
 /** Tauri accelerator → label: macOS glyphs ("⌘⌥O"), elsewhere words
  *  ("Ctrl+Alt+O"). Modifier order follows the accelerator. */
@@ -61,10 +63,91 @@ export function formatShortcut(accel: string, mac = isMacOS()): string {
     parts.splice(parts.length - 2, 2, '+');
   }
   const key = parts.pop() ?? '';
-  const keyLabel = KEY_NAMES[key] ?? (key.length === 1 ? key.toUpperCase() : key);
+  const names = mac ? KEY_NAMES : KEY_NAMES_OTHER;
+  const keyLabel = names[key] ?? (key.length === 1 ? key.toUpperCase() : key);
   if (mac) return parts.map((m) => MAC_GLYPHS[m] ?? m).join('') + keyLabel;
   const words = parts.map((m) => (m === 'CmdOrCtrl' || m === 'Cmd' || m === 'Command' ? 'Ctrl' : m === 'Option' ? 'Alt' : m));
   return [...words, keyLabel].join('+');
+}
+
+/** Physical key (KeyboardEvent.code) → the US-layout character it carries. */
+const CODE_CHARS: Record<string, string> = {
+  Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']',
+  Backslash: '\\', Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/',
+};
+
+/**
+ * The key a shortcut matches on, lower-cased ("o", "`", ",", "arrowright").
+ *
+ * `e.key` when it is a plain printable ASCII character, so remapped layouts
+ * (AZERTY, Dvorak) keep their letters. Otherwise the physical `e.code`:
+ * on Windows, Ctrl+Alt is AltGr, so on US-International or ABNT2 Ctrl+Alt+O
+ * reports key "ó", and the backtick is a dead key ("Dead"). Matching on
+ * e.key alone made Ctrl+Alt+O and Ctrl+` do nothing there (#16).
+ */
+export function shortcutKey(e: Pick<KeyboardEvent, 'key' | 'code'>): string {
+  if (/^[\x21-\x7e]$/.test(e.key)) return e.key.toLowerCase();
+  const code = e.code ?? '';
+  const letter = /^Key([A-Z])$/.exec(code);
+  if (letter) return letter[1].toLowerCase();
+  const digit = /^Digit([0-9])$/.exec(code);
+  if (digit) return digit[1];
+  return CODE_CHARS[code] ?? e.key.toLowerCase();
+}
+
+/** The terminal-toggle key: the key left of 1 (Backquote), whatever it
+ *  types on this layout (` on US, a dead key on US-International, ~ with
+ *  Shift). */
+export function isBacktickKey(e: Pick<KeyboardEvent, 'key' | 'code'>): boolean {
+  return e.code === 'Backquote' || e.key === '`' || e.key === '~';
+}
+
+/**
+ * Whether a key pressed inside a terminal pane should skip the shell and
+ * reach the app's shortcut handler. Windows/Linux only: there the app
+ * shortcuts are JS keydown handlers, and xterm.js would otherwise consume
+ * them (Ctrl+` becomes NUL, Ctrl+Alt+O becomes ESC ^O) and cancel the
+ * event, so with a terminal focused they did nothing (#16, #21). On macOS
+ * the native menu catches them before the web view does.
+ *
+ * Only app-level keys a shell has no real use for pass: the terminal
+ * toggles (Ctrl+` / Ctrl+Shift+`), Open Folder (Ctrl+Alt+O), Open Remote
+ * (Ctrl+Shift+O), Command Palette (Ctrl+Shift+P), Shortcuts
+ * (Ctrl+Shift+H), Settings (Ctrl+,) and tab switching (Ctrl+Alt+←/→).
+ * Plain Ctrl+letter, the clipboard (Ctrl+Shift+C/V) and the pane keys
+ * (Ctrl+Shift+D/E/W/[/]) stay with the terminal.
+ */
+export function terminalPassesToApp(
+  e: Pick<KeyboardEvent, 'key' | 'code' | 'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey'>,
+  mac: boolean,
+): boolean {
+  if (mac || !e.ctrlKey || e.metaKey) return false;
+  if (isBacktickKey(e)) return !e.altKey;
+  const key = shortcutKey(e);
+  if (e.altKey) {
+    if (e.shiftKey) return false;
+    return key === 'o' || key === 'arrowleft' || key === 'arrowright';
+  }
+  if (e.shiftKey) return key === 'o' || key === 'p' || key === 'h';
+  return key === ',';
+}
+
+/**
+ * Render shortcut labels baked into static HTML for this platform.
+ * `data-shortcut="<action>"` sets the element's text to that action's
+ * shortcut; `data-shortcut-title="Bold ({action:bold})"` sets its tooltip,
+ * with each `{<action>}` replaced. Labels come from KEYBINDINGS, so Windows
+ * and Linux read "Ctrl+B" and macOS reads "⌘B".
+ */
+export function applyShortcutLabels(root: ParentNode = document, mac = isMacOS()): void {
+  for (const el of root.querySelectorAll<HTMLElement>('[data-shortcut]')) {
+    const label = shortcutFor(el.dataset.shortcut ?? '', mac);
+    if (label) el.textContent = label;
+  }
+  for (const el of root.querySelectorAll<HTMLElement>('[data-shortcut-title]')) {
+    const template = el.dataset.shortcutTitle ?? '';
+    el.title = template.replace(/\{([a-z]+:[a-z-]+)\}/g, (_, action: string) => shortcutFor(action, mac));
+  }
 }
 
 export class ShortcutManager {
@@ -88,7 +171,7 @@ export class ShortcutManager {
     const mod = e.metaKey || e.ctrlKey;
     if (!mod) return;
 
-    const key = e.key.toLowerCase();
+    const key = shortcutKey(e);
     // Formatting uses the platform's primary accelerator only — Cmd on macOS,
     // Ctrl elsewhere. On macOS, Ctrl+B / Ctrl+I are editor cursor motions, not
     // formatting, so they must not italicize/bolden. (The pane/menu shortcuts
@@ -125,14 +208,15 @@ export class ShortcutManager {
       this.bus.emit(ACTIONS.PREV_TAB);
       return;
     }
-    // Menu accelerator is Ctrl+` on every platform (not Cmd).
-    if (e.key === '`' && !e.shiftKey) {
+    // Menu accelerator is Ctrl+` on every platform (not Cmd). Matched on the
+    // physical key too: ` is a dead key on some layouts, and Shift+` is ~.
+    if (isBacktickKey(e) && !e.shiftKey) {
       e.preventDefault();
       this.bus.emit(ACTIONS.TOGGLE_TERMINAL);
       return;
     }
     // Terminals-only layout. Ctrl+Shift+` on every platform.
-    if (e.key === '`' && e.shiftKey) {
+    if (isBacktickKey(e) && e.shiftKey) {
       e.preventDefault();
       this.bus.emit(ACTIONS.TOGGLE_TERMINALS_ONLY);
       return;
@@ -174,10 +258,10 @@ export class ShortcutManager {
       // Mirrors View → Go to File... / Command Palette... (menu.rs).
       e.preventDefault();
       this.bus.emit(e.shiftKey ? ACTIONS.COMMAND_PALETTE : ACTIONS.QUICK_OPEN);
-    } else if (viewForDigit(e.key) && !e.shiftKey && !e.altKey) {
+    } else if (viewForDigit(key) && !e.shiftKey && !e.altKey) {
       // Mirrors View → Edit / Split / Preview / Diff (CmdOrCtrl+1–4).
       e.preventDefault();
-      this.bus.emit(ACTIONS.SET_VIEW_MODE, { mode: viewForDigit(e.key)! });
+      this.bus.emit(ACTIONS.SET_VIEW_MODE, { mode: viewForDigit(key)! });
     } else if (key === 'w' && e.shiftKey) {
       e.preventDefault();
       this.bus.emit(ACTIONS.TOGGLE_WRAP);
