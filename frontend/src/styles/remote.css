@@ -79,10 +79,61 @@
   font: inherit;
   font-size: 13px;
   color: var(--fg);
-  background: var(--bg-secondary);
+  background-color: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm, 6px);
   padding: 8px 10px;
+}
+
+/* Native form controls (the select's popup, its options) follow the theme.
+   Without this WebKitGTK draws a light native select with faint text in the
+   dark theme (#23). */
+[data-theme='dark'] .remote-dialog {
+  color-scheme: dark;
+}
+[data-theme='light'] .remote-dialog {
+  color-scheme: light;
+}
+
+/* Draw the select ourselves (same tokens as the text input) instead of the
+   platform widget, with a small chevron. */
+.remote-field select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 30px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+    linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 16px) 50%,
+    calc(100% - 11px) 50%;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+
+.remote-field select option {
+  color: var(--fg);
+  background-color: var(--bg-secondary);
+}
+
+.remote-field select option:disabled {
+  color: var(--text-muted);
+}
+
+.remote-field select:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.remote-field select:focus,
+.remote-field input:focus {
+  outline: none;
+  border-color: var(--accent, var(--fg));
+}
+
+.remote-field.hidden {
+  display: none;
 }
 
 .remote-error {
