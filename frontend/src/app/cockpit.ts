@@ -150,6 +150,7 @@ export class CockpitController {
             );
             // Split layout per workspace, persisted in AppConfig and
             // restored (tmux reattach) by restoreOrCreate.
+            mgr.setOnTerminalsOnly(() => void this.toggleTerminalsOnly());
             mgr.setLayoutStore({
               load: (key) => this.ctx.config.terminal_layouts?.[key],
               save: (key, layout) => this.saveLayout(key, layout),
@@ -221,9 +222,9 @@ export class CockpitController {
       document,
       workspaceLayoutFromConfig(this.terminalsOnly),
     );
-    document
-      .getElementById('btn-terminals-only')
-      ?.classList.toggle('off', !this.terminalsOnly);
+    const btn = document.getElementById('btn-terminals-only');
+    btn?.classList.toggle('off', !this.terminalsOnly);
+    btn?.setAttribute('aria-pressed', String(this.terminalsOnly));
   }
 
   /** Store (or, when the grid emptied, drop) one workspace's layout. */

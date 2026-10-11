@@ -280,6 +280,18 @@ describe('TerminalManager split grid', () => {
     expect(mgr.active()?.id).toBe('term-2');
   });
 
+  it('header "Terminals only" button asks the app to toggle the layout (#21)', async () => {
+    const { mgr, host } = makeManager();
+    const only = vi.fn();
+    mgr.setOnTerminalsOnly(only);
+    await mgr.addTerminal();
+    const b = btn(host, 'term-1', 'terminals-only');
+    expect(b.title).toMatch(/^Terminals only \((Ctrl\+Shift\+`|⌃⇧`)\)$/);
+    b.click();
+    expect(only).toHaveBeenCalledTimes(1);
+    expect(mgr.count).toBe(1);
+  });
+
   it('max 4 panes: split buttons disabled with a tooltip, extra splits refused', async () => {
     const { mgr, host } = makeManager();
     await mgr.addTerminal();

@@ -176,7 +176,7 @@ describe('shortcut key matching', () => {
 
   it('a focused terminal hands Ctrl+` (and Ctrl+Shift+`) to the app on Windows/Linux only', () => {
     const k = (init: Partial<KeyboardEvent>) => ({
-      key: '`', code: 'Backquote', metaKey: false, ctrlKey: false, altKey: false, ...init,
+      key: '`', code: 'Backquote', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...init,
     });
     expect(terminalPassesToApp(k({ ctrlKey: true }), false)).toBe(true);
     expect(terminalPassesToApp(k({ ctrlKey: true, key: 'Dead' }), false)).toBe(true);
@@ -187,5 +187,40 @@ describe('shortcut key matching', () => {
     expect(terminalPassesToApp(k({}), false)).toBe(false);
     expect(terminalPassesToApp(k({ ctrlKey: true, key: 'c', code: 'KeyC' }), false)).toBe(false);
     expect(terminalPassesToApp(k({ ctrlKey: true, altKey: true }), false)).toBe(false);
+  });
+
+  it('a focused terminal hands app shortcuts (Ctrl+Alt+O, Ctrl+Shift+`) to the app, keeps shell keys (#16, #21)', () => {
+    const k = (key: string, code: string, mods: Partial<KeyboardEvent>) => ({
+      key, code, metaKey: false, ctrlKey: true, altKey: false, shiftKey: false, ...mods,
+    });
+    for (const mac of [false]) {
+      expect(terminalPassesToApp(k('o', 'KeyO', { altKey: true }), mac)).toBe(true);
+      expect(terminalPassesToApp(k('ó', 'KeyO', { altKey: true }), mac)).toBe(true);
+      expect(terminalPassesToApp(k('~', 'Backquote', { shiftKey: true }), mac)).toBe(true);
+      expect(terminalPassesToApp(k('O', 'KeyO', { shiftKey: true }), mac)).toBe(true);
+      expect(terminalPassesToApp(k('P', 'KeyP', { shiftKey: true }), mac)).toBe(true);
+      expect(terminalPassesToApp(k('ArrowRight', 'ArrowRight', { altKey: true }), mac)).toBe(true);
+      // Shell / pane / clipboard keys stay in the terminal.
+      for (const [key, code, mods] of [
+        ['o', 'KeyO', {}], ['r', 'KeyR', {}], ['d', 'KeyD', {}], ['p', 'KeyP', {}],
+        ['C', 'KeyC', { shiftKey: true }], ['V', 'KeyV', { shiftKey: true }],
+        ['D', 'KeyD', { shiftKey: true }], ['E', 'KeyE', { shiftKey: true }],
+        ['W', 'KeyW', { shiftKey: true }], ['b', 'KeyB', { altKey: true }],
+      ] as const) {
+        expect(terminalPassesToApp(k(key, code, mods), mac), `${key} ${JSON.stringify(mods)}`).toBe(false);
+      }
+    }
+    expect(terminalPassesToApp(k('o', 'KeyO', { altKey: true }), true)).toBe(false);
+  });
+
+  it('Ctrl+Alt+O and Ctrl+Shift+` work on Linux too', () => {
+    setPlatform('Linux x86_64');
+    const { spy } = manager();
+    const folder = spy(ACTIONS.OPEN_FOLDER);
+    const only = spy(ACTIONS.TOGGLE_TERMINALS_ONLY);
+    press({ key: 'o', code: 'KeyO', ctrlKey: true, altKey: true });
+    press({ key: '~', code: 'Backquote', ctrlKey: true, shiftKey: true });
+    expect(folder).toHaveBeenCalledTimes(1);
+    expect(only).toHaveBeenCalledTimes(1);
   });
 });

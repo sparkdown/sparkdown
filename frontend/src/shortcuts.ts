@@ -104,17 +104,32 @@ export function isBacktickKey(e: Pick<KeyboardEvent, 'key' | 'code'>): boolean {
 
 /**
  * Whether a key pressed inside a terminal pane should skip the shell and
- * reach the app's shortcut handler. Windows/Linux only: there the terminal
- * toggles (Ctrl+` and Ctrl+Shift+`) are JS shortcuts, and xterm.js would
- * otherwise turn Ctrl+` into a NUL byte and cancel the event (#16). On
- * macOS the native View menu catches them before the web view does.
+ * reach the app's shortcut handler. Windows/Linux only: there the app
+ * shortcuts are JS keydown handlers, and xterm.js would otherwise consume
+ * them (Ctrl+` becomes NUL, Ctrl+Alt+O becomes ESC ^O) and cancel the
+ * event, so with a terminal focused they did nothing (#16, #21). On macOS
+ * the native menu catches them before the web view does.
+ *
+ * Only app-level keys a shell has no real use for pass: the terminal
+ * toggles (Ctrl+` / Ctrl+Shift+`), Open Folder (Ctrl+Alt+O), Open Remote
+ * (Ctrl+Shift+O), Command Palette (Ctrl+Shift+P), Shortcuts
+ * (Ctrl+Shift+H), Settings (Ctrl+,) and tab switching (Ctrl+Alt+←/→).
+ * Plain Ctrl+letter, the clipboard (Ctrl+Shift+C/V) and the pane keys
+ * (Ctrl+Shift+D/E/W/[/]) stay with the terminal.
  */
 export function terminalPassesToApp(
-  e: Pick<KeyboardEvent, 'key' | 'code' | 'metaKey' | 'ctrlKey' | 'altKey'>,
+  e: Pick<KeyboardEvent, 'key' | 'code' | 'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey'>,
   mac: boolean,
 ): boolean {
-  if (mac) return false;
-  return e.ctrlKey && !e.metaKey && !e.altKey && isBacktickKey(e);
+  if (mac || !e.ctrlKey || e.metaKey) return false;
+  if (isBacktickKey(e)) return !e.altKey;
+  const key = shortcutKey(e);
+  if (e.altKey) {
+    if (e.shiftKey) return false;
+    return key === 'o' || key === 'arrowleft' || key === 'arrowright';
+  }
+  if (e.shiftKey) return key === 'o' || key === 'p' || key === 'h';
+  return key === ',';
 }
 
 /**
