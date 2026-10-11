@@ -23,6 +23,7 @@ import { api } from '../api';
 import {
   formatRemoteRecent,
   installRemoteSessions,
+  isValidTypedHost,
   isRemoteRecent,
   parseRemoteRecent,
   passwordOnlyMessage,
@@ -272,6 +273,58 @@ describe('remote sessions UI', () => {
     });
     expect(opened).toEqual([]);
     expect(invoke.mock.calls.some((c) => c[0] === 'remote_connect')).toBe(false);
+  });
+
+  it('a typed user@host:port connects without a ~/.ssh/config entry (#22)', async () => {
+    let connected: unknown = null;
+    invoke.mockImplementation(async (...args: unknown[]) => {
+      const cmd = args[0] as string;
+      if (cmd === 'ssh_config_hosts') return [];
+      if (cmd === 'remote_session') return connected;
+      if (cmd === 'remote_connect') {
+        const a = args[1] as { host: string; path: string };
+        connected = { host: a.host, path: '/home/me' };
+        return connected;
+      }
+      return null;
+    });
+    const remote = installRemoteSessions(app);
+    await remote.openDialog();
+    const go = document.querySelector('.remote-btn-primary') as HTMLButtonElement;
+    const typed = document.getElementById('remote-host-typed') as HTMLInputElement;
+    expect(go.disabled).toBe(true);
+    typed.value = 'me@127.0.0.1:2222';
+    typed.dispatchEvent(new Event('input'));
+    expect(go.disabled).toBe(false);
+    go.click();
+    await vi.waitFor(() => {
+      const call = invoke.mock.calls.find((c) => c[0] === 'remote_connect');
+      expect(call?.[1]).toMatchObject({ host: 'me@127.0.0.1:2222' });
+    });
+  });
+
+  it('a malformed typed host is refused before calling the backend', async () => {
+    const remote = installRemoteSessions(app);
+    await remote.openDialog();
+    const typed = document.getElementById('remote-host-typed') as HTMLInputElement;
+    typed.value = '-oProxyCommand=sh';
+    typed.dispatchEvent(new Event('input'));
+    (document.querySelector('.remote-btn-primary') as HTMLButtonElement).click();
+    await vi.waitFor(() => {
+      const err = document.querySelector('.remote-error') as HTMLElement;
+      expect(err.textContent).toContain('not a valid host');
+    });
+    expect(invoke.mock.calls.some((c) => c[0] === 'remote_connect')).toBe(false);
+  });
+
+  it('isValidTypedHost mirrors the backend parser', () => {
+    for (const ok of ['localhost', 'me@host', 'me@127.0.0.1:2222', 'host:22', 'me@[::1]:2200', '[fe80::1]', 'dev_box.lan']) {
+      expect(isValidTypedHost(ok), ok).toBe(true);
+    }
+    for (const bad of ['', '-G', '-oProxyCommand=sh', 'me@-x', 'ho st', 'host;id', '$(id)', '`id`', 'a@b@c',
+      '@host', 'me@', 'host:', 'host:0', 'host:65536', 'host:22:33', '::1', '[::1', '.hidden', 'host/x', 'host\n']) {
+      expect(isValidTypedHost(bad), bad).toBe(false);
+    }
   });
 
   it('unreachable / backend errors surface in the dialog', async () => {

@@ -72,12 +72,10 @@ pub fn connect_with(
     probe: impl Fn(&str, &str) -> Result<String, String>,
 ) -> Result<RemoteSession, String> {
     validate_host_alias(host)?;
-    let entry = hosts.iter().find(|h| h.alias == host).ok_or_else(|| {
-        format!(
-            "Host '{host}' is not in ~/.ssh/config. Add a Host entry there — SparkDown v1 only uses existing SSH config hosts and keys."
-        )
-    })?;
-    if entry.password_only {
+    // A ~/.ssh/config alias, or a typed `[user@]host[:port]` (#22) that ssh
+    // resolves with the user's normal config, keys and agent.
+    let entry = hosts.iter().find(|h| h.alias == host);
+    if entry.is_some_and(|e| e.password_only) {
         return Err(format!(
             "Host '{host}' is configured for password authentication. SparkDown v1 uses existing SSH keys only — add an IdentityFile (or load a key in ssh-agent) in ~/.ssh/config. There is no password prompt."
         ));
@@ -918,8 +916,10 @@ pub fn terminal_command(
         "PreferredAuthentications=publickey",
         "-o",
         "PubkeyAuthentication=yes",
-        &sess.host,
     ]);
+    for a in ssh::destination_args(&sess.host).ok()? {
+        cmd.arg(a);
+    }
     // Same contract as the local PTY (terminal.rs): an agent chip's command
     // runs as the shell's foreground process once the login shell is ready,
     // carried in $SPARKDOWN_LAUNCH so it needs no quoting into the wrapper.
@@ -1062,13 +1062,16 @@ pub(crate) fn forward_args(
     local_sock: &str,
     cancel: bool,
 ) -> Vec<String> {
-    vec![
+    let mut v = vec![
         "-O".into(),
         if cancel { "cancel" } else { "forward" }.into(),
         "-R".into(),
         format!("{remote_sock}:{local_sock}"),
-        host.into(),
-    ]
+    ];
+    // An invalid host never gets here (connect validated it); fall back to
+    // the raw string only for the unit test's plain alias.
+    v.extend(ssh::destination_args(host).unwrap_or_else(|_| vec![host.into()]));
+    v
 }
 
 /// Install the shim on the remote and reverse-forward the local MCP socket
@@ -1588,10 +1591,101 @@ Host *.example.com
     }
 
     #[test]
-    fn unknown_host_fails_clearly() {
+    fn typed_host_not_in_config_connects_through_ssh() {
+        // #22: a host typed in the dialog (not in ~/.ssh/config) goes to ssh,
+        // which applies the user's normal config, keys and agent.
         let _guard = TEST_LOCK.lock().unwrap();
-        let err = connect_with(&[], "nope", "/", |_, _| Ok("/".into())).unwrap_err();
-        assert!(err.contains("not in ~/.ssh/config"), "{err}");
+        let seen = std::sync::Mutex::new(Vec::new());
+        let s = connect_with(&[], "me@127.0.0.1:2222", "/", |h, _| {
+            seen.lock().unwrap().push(h.to_string());
+            Ok("/\n/home/me\n".into())
+        })
+        .unwrap();
+        assert_eq!(s.host, "me@127.0.0.1:2222");
+        assert_eq!(seen.lock().unwrap()[0], "me@127.0.0.1:2222");
+        let err = connect_with(&[], "-oProxyCommand=x", "/", |_, _| Ok("/".into())).unwrap_err();
+        assert!(err.contains("Invalid SSH host"), "{err}");
+    }
+
+    /// Live check against a real sshd (#22), e.g.
+    /// `SPARKDOWN_SSH_TEST_DEST=me@127.0.0.1:2223 cargo test live_typed_host -- --ignored`.
+    /// Needs a key the server accepts and the host in known_hosts.
+    #[test]
+    #[ignore]
+    fn live_typed_host_round_trip() {
+        let dest = std::env::var("SPARKDOWN_SSH_TEST_DEST").expect("SPARKDOWN_SSH_TEST_DEST");
+        let out = ssh_run(&dest, "printf typed-host-ok").unwrap();
+        assert_eq!(out.trim(), "typed-host-ok");
+        close_mux(&dest);
+    }
+
+    #[test]
+    fn destinations_parse_strictly() {
+        use super::ssh::{destination_args, parse_destination};
+        let ok = |s: &str| destination_args(s).unwrap();
+        assert_eq!(ok("myhost"), ["myhost"]);
+        assert_eq!(ok("dev_box.lan"), ["dev_box.lan"]);
+        assert_eq!(ok("localhost"), ["localhost"]);
+        assert_eq!(ok("me@host-1.example"), ["me@host-1.example"]);
+        assert_eq!(ok("me@127.0.0.1:2222"), ["-p", "2222", "me@127.0.0.1"]);
+        assert_eq!(ok("host:22"), ["-p", "22", "host"]);
+        assert_eq!(ok("me@[::1]:2200"), ["-p", "2200", "me@::1"]);
+        assert_eq!(ok("[fe80::1]"), ["fe80::1"]);
+        let d = parse_destination("a.b@c:65535").unwrap();
+        assert_eq!(
+            (d.user.as_deref(), d.host.as_str(), d.port),
+            (Some("a.b"), "c", Some(65535))
+        );
+        for bad in [
+            "",
+            "-G",
+            "-oProxyCommand=sh",
+            "me@-oProxyCommand=x",
+            "-p22 host",
+            "host -p 22",
+            " host",
+            "host ",
+            "ho st",
+            "host\t",
+            "host\n",
+            "host;id",
+            "host|id",
+            "host&",
+            "$(id)",
+            "`id`",
+            "host$HOME",
+            "me@host'",
+            "me@host\"",
+            "a@b@c",
+            "@host",
+            "me@",
+            "host:",
+            "host:0",
+            "host:65536",
+            "host:-1",
+            "host:+22",
+            "host:22:33",
+            "host:abc",
+            "[::1",
+            "::1",
+            "[host]",
+            "[::1]x",
+            "me@[::1]:",
+            "ho[st",
+            ".hidden",
+            "me@-host",
+            "-me@host",
+            "host/path",
+            "host,x",
+            "host*",
+            "host?",
+            "host=1",
+            "~host",
+            "x\u{0}y",
+        ] {
+            assert!(parse_destination(bad).is_err(), "should reject {bad:?}");
+        }
+        assert!(parse_destination(&"a".repeat(256)).is_err());
     }
 
     #[test]

@@ -40,7 +40,7 @@ SparkDown is local-first and works with any agent CLI. It never hosts your files
   | Cursor CLI, Antigravity (`agy`) | Install writes one `"sparkdown"` entry to `~/.cursor/mcp.json` / `~/.gemini/config/mcp_config.json` |
   | Any other agent CLI | The file-bridge reading prompt (`$SPARKDOWN_CONTEXT`) |
 - **Agent context bridge**: the older, file-based channel. Agents read what you are viewing from `$SPARKDOWN_CONTEXT` (an owner-only folder, written only while a terminal is open, removed on quit). Same off switch in Settings → Agents.
-- **Remote folders over SSH**: File → Open Remote Folder (`⌘⇧O`) picks a host from `~/.ssh/config`. The editor, Files, Changes, Search, the watcher and the terminals all run on the host through your existing SSH keys (no passwords, no cloud). Open and Save As use an in-app file picker that browses the host.
+- **Remote folders over SSH**: File → Open Remote Folder (`⌘⇧O` / `Ctrl+Alt+O`) picks a host from `~/.ssh/config` or takes a typed `user@host[:port]`. The editor, Files, Changes, Search, the watcher and the terminals all run on the host through your existing SSH keys (no passwords, no cloud). Open and Save As use an in-app file picker that browses the host.
 
 **Status bar**
 

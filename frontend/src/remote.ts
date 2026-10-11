@@ -62,6 +62,22 @@ export const REMOTE_RECENT_PREFIX = 'ssh://';
 
 export type RemoteRecent = { host: string; path: string };
 
+/**
+ * Client-side mirror of the backend's parse_destination (remote/ssh.rs), for
+ * instant feedback: `[user@]host[:port]`, IPv6 in brackets. The backend
+ * check is the authoritative one.
+ */
+export function isValidTypedHost(s: string): boolean {
+  if (s.length === 0 || s.length > 255) return false;
+  const m = /^(?:([A-Za-z0-9._][A-Za-z0-9._-]{0,63})@)?(?:\[([0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*)\]|([A-Za-z0-9_][A-Za-z0-9._-]*))(?::([0-9]{1,5}))?$/.exec(s);
+  if (!m) return false;
+  if (m[4] !== undefined) {
+    const port = Number(m[4]);
+    if (port < 1 || port > 65535) return false;
+  }
+  return (m[3] ?? m[2] ?? '').length <= 253;
+}
+
 export function formatRemoteRecent(host: string, path: string): string {
   const abs = path.startsWith('/') ? path : `/${path}`;
   return `${REMOTE_RECENT_PREFIX}${host}${abs}`;
@@ -342,7 +358,7 @@ export class RemoteSessions {
     const hint = document.createElement('p');
     hint.className = 'remote-lead';
     hint.textContent =
-      'Pick a host from ~/.ssh/config. Auth is your existing keys — SparkDown never prompts for a password and never hosts the files.';
+      'Pick a host from ~/.ssh/config or type one (user@host or user@host:port). Auth uses your SSH keys and agent; SparkDown never asks for the server password and never hosts the files.';
     dialog.appendChild(hint);
 
     const hostLabel = document.createElement('label');
@@ -373,6 +389,24 @@ export class RemoteSessions {
     hostLabel.appendChild(hostSelect);
     dialog.appendChild(hostLabel);
 
+    // #22: a host that isn't in ~/.ssh/config. Validated strictly by the
+    // backend (parse_destination) and handed to ssh as argv, so ssh's own
+    // config, keys and agent still apply.
+    const typedLabel = document.createElement('label');
+    typedLabel.className = 'remote-field';
+    typedLabel.textContent = hosts.length ? 'Or type a host' : 'Host';
+    const typedInput = document.createElement('input');
+    typedInput.id = 'remote-host-typed';
+    typedInput.type = 'text';
+    typedInput.placeholder = 'user@host or user@host:port';
+    typedInput.autocomplete = 'off';
+    typedInput.spellcheck = false;
+    typedInput.setAttribute('autocapitalize', 'off');
+    typedInput.setAttribute('aria-label', 'SSH host (user@host[:port])');
+    typedLabel.appendChild(typedInput);
+    dialog.appendChild(typedLabel);
+    if (hosts.length === 0) hostLabel.classList.add('hidden');
+
     const pathLabel = document.createElement('label');
     pathLabel.className = 'remote-field';
     pathLabel.textContent = 'Remote folder';
@@ -401,16 +435,26 @@ export class RemoteSessions {
     go.type = 'button';
     go.className = 'remote-btn remote-btn-primary';
     go.textContent = 'Connect';
-    go.disabled = hosts.length === 0;
+    const syncGo = () => {
+      go.disabled = hosts.length === 0 && typedInput.value.trim() === '';
+      hostSelect.disabled = hosts.length === 0 || typedInput.value.trim() !== '';
+    };
+    typedInput.addEventListener('input', syncGo);
+    syncGo();
     const showError = (msg: string) => {
       err.textContent = msg;
       err.classList.remove('hidden');
     };
     const submit = async (): Promise<void> => {
       err.classList.add('hidden');
-      const alias = hostSelect.value;
+      const typed = typedInput.value.trim();
+      if (typed && !isValidTypedHost(typed)) {
+        showError(`"${typed}" is not a valid host. Use user@host, host, or user@host:port.`);
+        return;
+      }
+      const alias = typed || hostSelect.value;
       if (!alias) {
-        showError('No SSH hosts found in ~/.ssh/config.');
+        showError('Type a host (user@host[:port]) or add one to ~/.ssh/config.');
         return;
       }
       const host = hosts.find((h) => h.alias === alias);
@@ -432,12 +476,14 @@ export class RemoteSessions {
       }
     };
     go.addEventListener('click', () => void submit());
-    pathInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        void submit();
-      }
-    });
+    for (const input of [pathInput, typedInput]) {
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          void submit();
+        }
+      });
+    }
     actions.append(cancel, go);
     dialog.appendChild(actions);
 
