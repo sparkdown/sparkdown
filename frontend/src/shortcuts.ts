@@ -114,21 +114,14 @@ export function isBacktickKey(e: Pick<KeyboardEvent, 'key' | 'code'>): boolean {
  * toggles (Ctrl+` / Ctrl+Shift+`), Open Folder (Ctrl+Alt+O), Open Remote
  * (Ctrl+Shift+O), Command Palette (Ctrl+Shift+P), Shortcuts
  * (Ctrl+Shift+H), Settings (Ctrl+,) and tab switching (Ctrl+Alt+←/→).
- * Close Tab (Ctrl+W, and Super+W on Linux) passes too, so it closes the
- * focused terminal like the pane's × button (#30); the shell's
- * delete-word stays on Alt+Backspace. Other Ctrl+letters, the clipboard
- * (Ctrl+Shift+C/V) and the pane keys (Ctrl+Shift+D/E/W/[/]) stay with the
- * terminal.
+ * Plain Ctrl+letter, the clipboard (Ctrl+Shift+C/V) and the pane keys
+ * (Ctrl+Shift+D/E/W/[/]) stay with the terminal.
  */
 export function terminalPassesToApp(
   e: Pick<KeyboardEvent, 'key' | 'code' | 'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey'>,
   mac: boolean,
 ): boolean {
-  if (mac) return false;
-  const plain = !e.altKey && !e.shiftKey;
-  // Close Tab: Ctrl+W, or Super+W (WebKitGTK reports Super as metaKey).
-  if (plain && e.ctrlKey !== e.metaKey && shortcutKey(e) === 'w') return true;
-  if (!e.ctrlKey || e.metaKey) return false;
+  if (mac || !e.ctrlKey || e.metaKey) return false;
   if (isBacktickKey(e)) return !e.altKey;
   const key = shortcutKey(e);
   if (e.altKey) {
@@ -304,8 +297,7 @@ export type TerminalPaneAction =
  *    (see app/actions.ts), so it is not mapped here.
  *  - Windows/Linux: Ctrl+Shift+D / Ctrl+Shift+E split right / down,
  *    Ctrl+Shift+W close pane, Ctrl+Shift+] / [ next / previous pane. Plain
- *    Ctrl+D stays EOF for the shell; plain Ctrl+W is Close Tab, which
- *    closes the focused pane (#30, see terminalPassesToApp).
+ *    Ctrl+D / Ctrl+W stay EOF / delete-word for the shell.
  *
  * ⌘⌥← / ⌘⌥→ already switch document tabs, so pane focus uses brackets (as
  * in iTerm2). Pure, so it is unit-tested without xterm.

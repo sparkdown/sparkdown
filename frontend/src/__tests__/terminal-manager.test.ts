@@ -21,6 +21,7 @@ const api = vi.hoisted(() => ({
     ): Promise<string> => (session ? 'tmux' : 'shell'),
   ),
   terminalClose: vi.fn(async (_id: string) => {}),
+  terminalBusy: vi.fn(async (_id: string) => null as string | null),
   terminalWrite: vi.fn(async (_id: string, _data: string) => {}),
   terminalResize: vi.fn(async (_id: string, _cols: number, _rows: number) => {}),
   tmuxSessions: vi.fn(async (_prefix: string) => [] as string[]),
@@ -72,6 +73,11 @@ const terms = vi.hoisted(() => ({
 const observers = vi.hoisted(() => ({ callbacks: [] as (() => void)[] }));
 
 vi.mock('../api', () => ({ api }));
+
+const dialog = vi.hoisted(() => ({
+  ask: vi.fn(async (_msg: string, _opts?: unknown) => true),
+}));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: dialog.ask }));
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: async (name: string, h: (e: { payload: unknown }) => void) => {
@@ -171,6 +177,9 @@ beforeEach(() => {
   api.shellName.mockImplementation(async () => 'bash');
   api.launchShell.mockImplementation(async () => 'posix');
   api.remoteSession.mockImplementation(async () => null);
+  api.terminalBusy.mockImplementation(async () => null);
+  dialog.ask.mockReset();
+  dialog.ask.mockImplementation(async () => true);
   window.ResizeObserver = class {
     constructor(cb: () => void) {
       observers.callbacks.push(cb);
@@ -273,6 +282,7 @@ describe('TerminalManager split grid', () => {
     expect(mgr.layout).toMatchObject({ type: 'split', dir: 'column' });
 
     btn(host, 'term-1', 'close').click();
+    await flush(); // the busy probe (#43) runs first
     expect(mgr.count).toBe(1);
     expect(mgr.layout).toEqual({ type: 'pane', id: 'term-2' });
     expect(api.terminalClose).toHaveBeenCalledWith('term-1');
@@ -317,6 +327,7 @@ describe('TerminalManager split grid', () => {
     expect(mgr.count).toBe(4);
     // Closing one re-enables splitting.
     mgr.closeFocused();
+    await flush();
     expect(btn(host, mgr.order[0], 'split-right').disabled).toBe(false);
   });
 
@@ -357,19 +368,96 @@ describe('TerminalManager split grid', () => {
     terms.all[1].keyHandler!(keydown({ key: '}', code: 'BracketRight', ctrlKey: true, shiftKey: true }));
     expect(mgr.active()?.id).toBe('term-1');
 
-    // Ctrl+Shift+W closes the pane the key was pressed in.
+    // Ctrl+Shift+W closes the pane the key was pressed in (idle shell: no ask).
     terms.all[1].keyHandler!(keydown({ key: 'W', ctrlKey: true, shiftKey: true }));
+    await flush();
     expect(mgr.order).toEqual(['term-1']);
+    expect(dialog.ask).not.toHaveBeenCalled();
 
-    // Plain Ctrl+D stays with the shell.
+    // Plain Ctrl+D / Ctrl+W stay with the shell (readline EOF / delete-word, #42).
     expect(term.keyHandler!(keydown({ key: 'd', ctrlKey: true }))).toBe(true);
-    // Plain Ctrl+W (Close Tab) skips xterm, unprevented, so the app's
-    // shortcut handler closes the focused pane (#30).
-    const w = keydown({ key: 'w', ctrlKey: true });
-    expect(term.keyHandler!(w)).toBe(false);
-    expect(w.preventDefault).not.toHaveBeenCalled();
-    expect(w.stopPropagation).not.toHaveBeenCalled();
+    const w = keydown({ key: 'w', code: 'KeyW', ctrlKey: true });
+    expect(term.keyHandler!(w)).toBe(true);
+    await flush();
     expect(mgr.count).toBe(1);
+  });
+
+  describe('closing a busy pane asks first (#43)', () => {
+    const closeBtn = (host: HTMLElement, id: string) =>
+      card(host, id).querySelector<HTMLButtonElement>('[data-act="close"]')!;
+
+    it('× on an idle shell closes at once, without a dialog', async () => {
+      const { mgr, host } = makeManager();
+      await mgr.addTerminal();
+      await mgr.addTerminal({ split: { dir: 'row' } });
+      closeBtn(host, 'term-2').click();
+      await flush();
+      expect(api.terminalBusy).toHaveBeenCalledWith('term-2');
+      expect(dialog.ask).not.toHaveBeenCalled();
+      expect(mgr.order).toEqual(['term-1']);
+    });
+
+    it('× on a busy pane asks; Cancel keeps it, Close kills it', async () => {
+      const { mgr, host } = makeManager();
+      await mgr.addTerminal();
+      await mgr.addTerminal({ split: { dir: 'row' } });
+      api.terminalBusy.mockImplementation(async () => 'claude');
+      dialog.ask.mockImplementation(async () => false);
+      closeBtn(host, 'term-2').click();
+      await flush();
+      expect(dialog.ask).toHaveBeenCalledTimes(1);
+      expect(String(dialog.ask.mock.calls[0][0])).toContain('“claude” is still running');
+      expect(mgr.order).toEqual(['term-1', 'term-2']);
+      expect(api.terminalClose).not.toHaveBeenCalled();
+
+      dialog.ask.mockImplementation(async () => true);
+      closeBtn(host, 'term-2').click();
+      await flush();
+      expect(mgr.order).toEqual(['term-1']);
+    });
+
+    it('the shortcut path (Ctrl+Shift+W, menu / ⌘W → closeFocused) asks the same way', async () => {
+      const { mgr } = makeManager();
+      await mgr.addTerminal();
+      await mgr.addTerminal({ split: { dir: 'row' } });
+      api.terminalBusy.mockImplementation(async () => 'vim');
+      dialog.ask.mockImplementation(async () => false);
+      terms.all[1].keyHandler!(keydown({ key: 'W', ctrlKey: true, shiftKey: true }));
+      await flush();
+      mgr.activate('term-2');
+      mgr.closeFocused();
+      await flush();
+      expect(dialog.ask).toHaveBeenCalledTimes(2);
+      expect(mgr.count).toBe(2);
+      dialog.ask.mockImplementation(async () => true);
+      mgr.closeFocused();
+      await flush();
+      expect(mgr.count).toBe(1);
+    });
+
+    it('a shell that exits by itself closes its pane without asking', async () => {
+      const { mgr } = makeManager();
+      await mgr.addTerminal();
+      await mgr.addTerminal({ split: { dir: 'row' } });
+      api.terminalBusy.mockImplementation(async () => 'claude');
+      bus.emit('terminal://exit', { id: 'term-2' });
+      await flush();
+      expect(dialog.ask).not.toHaveBeenCalled();
+      expect(mgr.order).toEqual(['term-1']);
+    });
+
+    it('a failed busy probe does not block closing', async () => {
+      const { mgr, host } = makeManager();
+      await mgr.addTerminal();
+      await mgr.addTerminal({ split: { dir: 'row' } });
+      api.terminalBusy.mockImplementation(async () => {
+        throw new Error('no such terminal');
+      });
+      closeBtn(host, 'term-2').click();
+      await flush();
+      expect(dialog.ask).not.toHaveBeenCalled();
+      expect(mgr.order).toEqual(['term-1']);
+    });
   });
 
   it('hasFocus() is true only while keyboard focus is inside a pane', async () => {
