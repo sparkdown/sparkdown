@@ -131,6 +131,20 @@ export class FileTree {
     this.spacer.appendChild(this.rowLayer);
     this.viewport.appendChild(this.spacer);
     this.viewport.addEventListener('scroll', () => this.renderViewport(), { passive: true });
+    // The virtualizer mounts only the rows that fit the viewport's height at
+    // render time. A tree rendered while the sidebar is hidden (or another
+    // activity view covers it) measures 0 and mounts only the overscan rows;
+    // re-window whenever the viewport's size changes so those rows appear
+    // without waiting for a click or a scroll (#29).
+    if (typeof ResizeObserver !== 'undefined') {
+      let lastHeight = -1;
+      new ResizeObserver(() => {
+        const h = this.viewport.clientHeight;
+        if (h === lastHeight) return;
+        lastHeight = h;
+        if (this.rootPath && this.rows.length) this.renderViewport();
+      }).observe(this.viewport);
+    }
 
     // Tab activation is not a disk change: apply the quiet current-file
     // class only. App may also call setCurrentPath; the setter is idempotent.
@@ -424,6 +438,8 @@ export class FileTree {
     if (this.visible === visible) return;
     this.visible = visible;
     this.sidebarEl.classList.toggle('hidden', !this.visible);
+    // Rows were windowed against a 0-height viewport while hidden (#29).
+    if (this.visible && this.rootPath && this.rows.length) this.renderViewport();
     this.bus.emit(EVENTS.SIDEBAR_TOGGLED, { visible: this.visible });
   }
 

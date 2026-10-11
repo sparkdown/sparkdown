@@ -130,8 +130,10 @@ export class WorkspaceController {
     this.deps.documents.closePristineUntitled();
     this.ctx.workspaceRoot = dir;
     this.deps.syncEmptyState();
-    await this.ctx.fileTree.setRoot(dir, true);
+    // Show the explorer before rendering it: a tree rendered into a hidden
+    // sidebar measures a 0-height viewport and mounts only a few rows (#29).
     this.ctx.fileTree.ensureVisible();
+    await this.ctx.fileTree.setRoot(dir, true);
     this.ctx.baseDir = dir;
     this.deps.panes.setBaseDir(dir);
     this.deps.cockpit.setCwd(dir);
