@@ -14,7 +14,7 @@
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 24px 28px;
-  max-width: 520px;
+  max-width: 560px;
   width: 90vw;
   max-height: 80vh;
   overflow-y: auto;
@@ -30,8 +30,9 @@
 
 .shortcuts-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  /* minmax(0, …): a long row wraps inside its column instead of widening it. */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 24px;
 }
 
 .shortcuts-section h3 {
@@ -47,12 +48,17 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
   padding: 3px 0;
 }
 
+/* #52: the description wraps; the key label never shrinks or overflows. */
 .shortcut-desc {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 12px;
   color: var(--fg);
+  overflow-wrap: break-word;
 }
 
 .shortcuts-dialog kbd {
@@ -65,6 +71,8 @@
   color: var(--fg-muted);
   min-width: 20px;
   text-align: center;
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .shortcuts-hint {

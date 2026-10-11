@@ -73,7 +73,7 @@ export class StatusBar {
     // Ln/Col → go to line; Wrap → toggle word wrap; agent tools → Settings.
     const mac = isMacOS();
     this.cursorEl.title = `Go to line (${mac ? '⌘⌥G' : 'Ctrl+Alt+G'})`;
-    this.wrapEl.title = `Toggle word wrap (${mac ? '⌘⇧W' : 'Ctrl+Shift+W'})`;
+    this.wrapEl.title = `Toggle word wrap (${mac ? '⌥Z' : 'Alt+Z'})`;
     this.cursorEl.addEventListener('click', () => this.bus.emit(ACTIONS.GOTO_LINE));
     this.wrapEl.addEventListener('click', () => this.bus.emit(ACTIONS.TOGGLE_WRAP));
     this.agentEl?.addEventListener('click', () => this.bus.emit(ACTIONS.SHOW_AGENT_SETTINGS));

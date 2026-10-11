@@ -144,8 +144,7 @@ export class TerminalPane {
         return false;
       }
       // Split-grid keys: handled here (terminal focus only) and kept away
-      // from both xterm and the document shortcuts (Ctrl+Shift+W would also
-      // toggle word wrap on Windows/Linux).
+      // from both xterm and the document shortcuts.
       const pane = terminalPaneAction(e, isMacOS());
       if (pane) {
         e.preventDefault();

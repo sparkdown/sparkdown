@@ -420,6 +420,42 @@ const CODES: &[&str] = &[
     ERR_KEY_NEEDS_AGENT,
 ];
 
+/// The known_hosts entry to pass to `ssh-keygen -R` for a changed key,
+/// shell-quoted when needed: `'[host]:port'` off port 22 (#52). Prefers the
+/// name ssh itself printed ("remove with: ssh-keygen ... -R ..."), then the
+/// resolved HostName/HostKeyAlias and Port, then the typed destination.
+pub(crate) fn changed_key_entry(
+    host: &str,
+    stderr: &str,
+    resolve: impl FnOnce() -> Option<(String, u16)>,
+) -> String {
+    let from_ssh = stderr.lines().find_map(|line| {
+        let (_, rest) = line.split_once("ssh-keygen ")?;
+        let (_, after) = rest.split_once("-R ")?;
+        let name = after
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .to_string();
+        (!name.is_empty() && !name.contains(char::is_whitespace)).then_some(name)
+    });
+    let name = from_ssh
+        .or_else(|| resolve().map(|(n, p)| super::hostkey::known_hosts_name(&n, p)))
+        .or_else(|| {
+            parse_destination(host)
+                .ok()
+                .map(|d| super::hostkey::known_hosts_name(&d.host, d.port.unwrap_or(22)))
+        })
+        .unwrap_or_else(|| host.to_string());
+    if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '%'))
+    {
+        name
+    } else {
+        format!("'{}'", name.replace('\'', ""))
+    }
+}
+
 /// Map ssh(1) failure text into the v1 user-facing errors.
 pub fn map_ssh_failure(host: &str, stderr: &str) -> String {
     // Already mapped (connect maps the probe's error again): keep the code.
@@ -430,11 +466,16 @@ pub fn map_ssh_failure(host: &str, stderr: &str) -> String {
     // Before the password check: this warning itself mentions "Password
     // authentication is disabled to avoid man-in-the-middle attacks".
     if s.contains("remote host identification has changed") {
+        let target = changed_key_entry(host, stderr, || {
+            super::hostkey::resolve(host)
+                .ok()
+                .map(|r| (r.host_key_alias.unwrap_or(r.hostname), r.port))
+        });
         return format!(
             "{ERR_HOSTKEY_CHANGED}WARNING: the host key for '{host}' has CHANGED since you last connected. \
              Someone may be intercepting the connection (a man-in-the-middle attack), or the server was reinstalled. \
              SparkDown will not connect and will not replace the key. Check with the server's administrator; \
-             only if the change is expected, remove the old key with `ssh-keygen -R <host>` and connect again."
+             only if the change is expected, remove the old key with `ssh-keygen -R {target}` and connect again."
         );
     }
     if s.contains("host key verification failed")

@@ -23,6 +23,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 import { listen } from '@tauri-apps/api/event';
 import {
+  INCORRECT_PASSPHRASE_HINT,
   ASKPASS_REQUEST,
   installAskpassPrompt,
   showPassphrasePrompt,
@@ -55,6 +56,26 @@ describe('askpass prompt (#27)', () => {
     expect(dialog.textContent).toContain('not the server password');
     expect(document.activeElement).toBe(input());
     expect(document.getElementById('app')!.hasAttribute('inert')).toBe(true);
+    (
+      document.querySelector('.askpass-dialog .remote-btn:not(.remote-btn-primary)') as HTMLElement
+    ).click();
+  });
+
+  it('says "Incorrect passphrase" only when ssh asks again (#52)', () => {
+    void showPassphrasePrompt({ id: 1, key: 'k' });
+    let hint = document.querySelector('.askpass-retry') as HTMLElement;
+    expect(hint.hidden).toBe(true);
+    expect(input().hasAttribute('aria-invalid')).toBe(false);
+    (
+      document.querySelector('.askpass-dialog .remote-btn:not(.remote-btn-primary)') as HTMLElement
+    ).click();
+
+    void showPassphrasePrompt({ id: 2, key: 'k', retry: true });
+    hint = document.querySelector('.askpass-retry') as HTMLElement;
+    expect(hint.hidden).toBe(false);
+    expect(hint.textContent).toBe(INCORRECT_PASSPHRASE_HINT);
+    expect(hint.textContent).toContain('Incorrect passphrase, try again');
+    expect(input().getAttribute('aria-invalid')).toBe('true');
     (
       document.querySelector('.askpass-dialog .remote-btn:not(.remote-btn-primary)') as HTMLElement
     ).click();

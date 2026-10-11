@@ -1746,6 +1746,47 @@ Host *.example.com
     }
 
     #[test]
+    fn changed_key_hint_names_the_known_hosts_entry_with_port() {
+        use ssh::changed_key_entry;
+        // #52: off port 22 the entry is "[host]:port", quoted for the shell.
+        let banner = "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n\
+            Offending ED25519 key in /home/u/.ssh/known_hosts:3\n  remove with:\n  \
+            ssh-keygen -f \"/home/u/.ssh/known_hosts\" -R \"[127.0.0.1]:2222\"\n\
+            Host key verification failed.";
+        assert_eq!(
+            changed_key_entry("dev", banner, || None),
+            "'[127.0.0.1]:2222'"
+        );
+        // OpenSSH 10's real wording (captured from a local sshd on 2299).
+        let real = "Offending ED25519 key in /tmp/kh:1\n  remove with:\n  \
+            ssh-keygen -f '/tmp/kh' -R '[127.0.0.1]:2299'\n\
+            Host key for [127.0.0.1]:2299 has changed and you have requested strict checking.";
+        assert_eq!(
+            changed_key_entry("dev", real, || None),
+            "'[127.0.0.1]:2299'"
+        );
+        // Older ssh without the suggestion: the resolved name and port.
+        let bare = "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!";
+        assert_eq!(
+            changed_key_entry("dev", bare, || Some(("10.0.0.5".into(), 2222))),
+            "'[10.0.0.5]:2222'"
+        );
+        assert_eq!(
+            changed_key_entry("dev", bare, || Some(("box.lan".into(), 22))),
+            "box.lan"
+        );
+        // ssh -G unavailable: the typed user@host:port.
+        assert_eq!(changed_key_entry("me@h:2200", bare, || None), "'[h]:2200'");
+        assert_eq!(changed_key_entry("me@h", bare, || None), "h");
+        // Port 22 suggestion from ssh: plain host.
+        let p22 = "remove with:\n  ssh-keygen -f '/k' -R 'h.example'";
+        assert_eq!(changed_key_entry("h", p22, || None), "h.example");
+        // The full message carries it.
+        let msg = map_ssh_failure("dev", banner);
+        assert!(msg.contains("`ssh-keygen -R '[127.0.0.1]:2222'`"), "{msg}");
+    }
+
+    #[test]
     fn key_refusal_message_names_the_agent_fix_and_docs() {
         let msg = ssh::needs_agent_message("~/.ssh/id_ed25519");
         assert!(msg.starts_with(ssh::ERR_KEY_NEEDS_AGENT));
@@ -1887,10 +1928,11 @@ Host *.example.com
         // agent hint, not a password prompt).
         let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let seen = asked.clone();
-        let provider: crate::askpass::Provider = std::sync::Arc::new(move |key: &str| {
-            seen.lock().unwrap().push(key.to_string());
-            Some(zeroize::Zeroizing::new("wrong".to_string()))
-        });
+        let provider: crate::askpass::Provider =
+            std::sync::Arc::new(move |key: &str, _retry: bool| {
+                seen.lock().unwrap().push(key.to_string());
+                Some(zeroize::Zeroizing::new("wrong".to_string()))
+            });
         let broker = crate::askpass::Broker::start(provider, helper.clone()).unwrap();
         crate::askpass::set_current(Some(broker.clone()));
         let err = connect_with(&hosts, &alias, "~", ssh_run).unwrap_err();
@@ -1903,10 +1945,11 @@ Host *.example.com
         // Right passphrase: connected over publickey, asked once.
         let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let seen = asked.clone();
-        let provider: crate::askpass::Provider = std::sync::Arc::new(move |key: &str| {
-            seen.lock().unwrap().push(key.to_string());
-            Some(zeroize::Zeroizing::new(pass.clone()))
-        });
+        let provider: crate::askpass::Provider =
+            std::sync::Arc::new(move |key: &str, _retry: bool| {
+                seen.lock().unwrap().push(key.to_string());
+                Some(zeroize::Zeroizing::new(pass.clone()))
+            });
         let broker = crate::askpass::Broker::start(provider, helper).unwrap();
         crate::askpass::set_current(Some(broker));
         let session = connect_with(&hosts, &alias, "~", ssh_run);

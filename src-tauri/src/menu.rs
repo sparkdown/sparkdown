@@ -159,7 +159,7 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
         .accelerator("CmdOrCtrl+Shift+B")
         .build(app)?;
     let toggle_word_wrap = MenuItemBuilder::with_id("toggle-word-wrap", "Toggle Word Wrap")
-        .accelerator("CmdOrCtrl+Shift+W")
+        .accelerator("Alt+Z")
         .build(app)?;
     let toggle_theme = MenuItemBuilder::with_id("toggle-theme", "Toggle Theme").build(app)?;
 

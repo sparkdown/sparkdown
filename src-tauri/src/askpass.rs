@@ -275,7 +275,9 @@ fn helper_request(ipc: &std::ffi::OsStr, token: &str, prompt: &str) -> Option<Ze
 // --- Broker (app side) -----------------------------------------------------------
 
 /// Asks the user for `key`'s passphrase (None = cancelled / timed out).
-pub type Provider = Arc<dyn Fn(&str) -> Option<Zeroizing<String>> + Send + Sync>;
+/// Asks the user for `key`'s passphrase. The flag is true when ssh asked
+/// again right after the last answer, i.e. that passphrase was wrong (#52).
+pub type Provider = Arc<dyn Fn(&str, bool) -> Option<Zeroizing<String>> + Send + Sync>;
 
 /// A key's cached passphrase and, while ssh may still be checking it, the
 /// time it was handed out (inside the retry window a re-ask means "wrong").
@@ -427,9 +429,10 @@ impl Broker {
     }
 
     fn lookup(&self, key: &str) -> Option<Zeroizing<String>> {
+        let mut retry = false;
         if let Ok(mut cache) = self.cache.lock() {
             if let Some((pass, answered)) = cache.get_mut(key) {
-                let retry = answered.is_some_and(|t| t.elapsed() < RETRY_WINDOW);
+                retry = answered.is_some_and(|t| t.elapsed() < RETRY_WINDOW);
                 if !retry {
                     *answered = Some(Instant::now());
                     return Some(Zeroizing::new(pass.as_str().to_string()));
@@ -438,7 +441,7 @@ impl Broker {
                 cache.remove(key);
             }
         }
-        let got = (self.provider)(key);
+        let got = (self.provider)(key, retry);
         match got {
             Some(pass) => {
                 if let Ok(mut cache) = self.cache.lock() {
@@ -514,6 +517,8 @@ pub struct AskpassRequest {
     pub id: u64,
     /// The key path from ssh's prompt, `~` for the home dir.
     pub key: String,
+    /// ssh asked again: the passphrase just given was wrong.
+    pub retry: bool,
 }
 
 /// How long the dialog may stay open before the request is refused.
@@ -522,7 +527,7 @@ const UI_TIMEOUT: Duration = Duration::from_secs(300);
 /// Provider that asks the user in the app's masked passphrase dialog.
 pub fn ui_provider(app: tauri::AppHandle) -> Provider {
     use tauri::Emitter;
-    Arc::new(move |key: &str| {
+    Arc::new(move |key: &str, retry: bool| {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::SeqCst);
@@ -530,7 +535,14 @@ pub fn ui_provider(app: tauri::AppHandle) -> Provider {
         pending().lock().ok()?.insert(id, tx);
         let shown = crate::remote::display_home_path(key);
         if app
-            .emit("askpass://request", AskpassRequest { id, key: shown })
+            .emit(
+                "askpass://request",
+                AskpassRequest {
+                    id,
+                    key: shown,
+                    retry,
+                },
+            )
             .is_err()
         {
             pending().lock().ok()?.remove(&id);
@@ -614,8 +626,10 @@ mod tests {
     fn test_broker(answer: Option<&'static str>) -> (Arc<Broker>, Arc<Mutex<Vec<String>>>) {
         let asked = Arc::new(Mutex::new(Vec::new()));
         let log = asked.clone();
-        let provider: Provider = Arc::new(move |key: &str| {
-            log.lock().unwrap().push(key.to_string());
+        let provider: Provider = Arc::new(move |key: &str, retry: bool| {
+            log.lock()
+                .unwrap()
+                .push(format!("{key}{}", if retry { " (retry)" } else { "" }));
             answer.map(|a| Zeroizing::new(a.to_string()))
         });
         (
@@ -672,7 +686,11 @@ mod tests {
         request(&mut connect(&b), &b.token, prompt).unwrap();
         // An immediate repeat is ssh retrying: ask the user again.
         request(&mut connect(&b), &b.token, prompt).unwrap();
-        assert_eq!(asked.lock().unwrap().len(), 2);
+        // #52: the second prompt is flagged so the dialog says "incorrect".
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec!["/k/id".to_string(), "/k/id (retry)".to_string()]
+        );
         // Later (a reconnect), the cached passphrase answers silently.
         if let Ok(mut c) = b.cache.lock() {
             c.get_mut("/k/id").unwrap().1 = None;

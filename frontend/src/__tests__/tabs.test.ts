@@ -305,6 +305,46 @@ describe('TabManager', () => {
     expect(document.querySelector('.tab-tip')).toBeNull();
   });
 
+  it('remote tabs: the whole filename in the tab, the host in the tooltip (#52)', () => {
+    document.body.innerHTML = '';
+    const bar = document.createElement('div');
+    document.body.appendChild(bar);
+    const tabs = new TabManager(new EventBus());
+    tabs.init(bar);
+    tabs.setOrigin('my-very-long-dev-host');
+    tabs.openTab('/home/u/proj/notes.md', '');
+    expect(tabs.activeTab()?.origin).toBe('my-very-long-dev-host');
+
+    const el = bar.querySelector('.tab') as HTMLElement;
+    const title = el.querySelector('.tab-title') as HTMLElement;
+    expect(title.textContent).toBe('notes.md');
+    // The host is not a visible flex item next to the title any more.
+    const host = el.querySelector('.tab-host') as HTMLElement;
+    expect(host.textContent).toBe('my-very-long-dev-host');
+    expect(el.classList.contains('tab-remote')).toBe(true);
+    expect((el.querySelector('.tab-remote-icon') as HTMLElement).hidden).toBe(false);
+
+    // Fits, but remote: the tooltip still names the host.
+    Object.defineProperty(title, 'scrollWidth', { configurable: true, get: () => 40 });
+    Object.defineProperty(title, 'clientWidth', { configurable: true, get: () => 40 });
+    title.dispatchEvent(new MouseEvent('mouseenter'));
+    expect(document.querySelector('.tab-tip')?.textContent).toBe('notes.md — my-very-long-dev-host');
+    title.dispatchEvent(new MouseEvent('mouseleave'));
+    expect(document.querySelector('.tab-tip')).toBeNull();
+  });
+
+  it('local tabs hide the remote glyph', () => {
+    document.body.innerHTML = '';
+    const bar = document.createElement('div');
+    document.body.appendChild(bar);
+    const tabs = new TabManager(new EventBus());
+    tabs.init(bar);
+    tabs.openTab('/a/local.md', '');
+    const el = bar.querySelector('.tab') as HTMLElement;
+    expect((el.querySelector('.tab-remote-icon') as HTMLElement).hidden).toBe(true);
+    expect((el.querySelector('.tab-host') as HTMLElement).hidden).toBe(true);
+  });
+
   it('does not show a label when the title fits', () => {
     document.body.innerHTML = '';
     const bar = document.createElement('div');
