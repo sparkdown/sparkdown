@@ -144,8 +144,8 @@ describe('Toggle Word Wrap is Alt+Z (#52)', () => {
     expect(press({ key: 'z', code: 'KeyZ', altKey: true, ctrlKey: true })).toEqual([]);
   });
 
-  it('macOS: the menu owns ⌥Z, so the document handler stays out', () => {
+  it("macOS: ⌥Z types 'Ω' on US, but the KeyZ code toggles wrap", () => {
     setPlatform('MacIntel');
-    expect(press({ key: 'Ω', code: 'KeyZ', altKey: true })).toEqual([]);
+    expect(press({ key: 'Ω', code: 'KeyZ', altKey: true })).toEqual([ACTIONS.TOGGLE_WRAP]);
   });
 });

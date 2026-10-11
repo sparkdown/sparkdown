@@ -85,14 +85,38 @@ const CODE_CHARS: Record<string, string> = {
  * reports key "ó", and the backtick is a dead key ("Dead"). Matching on
  * e.key alone made Ctrl+Alt+O and Ctrl+` do nothing there (#16).
  */
-export function shortcutKey(e: Pick<KeyboardEvent, 'key' | 'code'>): string {
-  if (/^[\x21-\x7e]$/.test(e.key)) return e.key.toLowerCase();
+export function shortcutKey(
+  e: Pick<KeyboardEvent, 'key' | 'code'> & { altKey?: boolean; keyCode?: number },
+): string {
   const code = e.code ?? '';
+  // macOS Option changes the character (⌥Z is "Ω" on US, ⌥L is "@" on
+  // German), so with Option held e.key is useless. WebKit's keyCode is the
+  // layout's unmodified key (Z on AZERTY too), the same fallback CodeMirror
+  // uses; else the physical e.code.
+  if (e.altKey && isMacOS()) {
+    const kc = e.keyCode ?? 0;
+    if (kc >= 65 && kc <= 90) return String.fromCharCode(kc + 32);
+    if (kc >= 48 && kc <= 57) return String.fromCharCode(kc);
+    const l = /^Key([A-Z])$/.exec(code);
+    if (l) return l[1].toLowerCase();
+    const d = /^Digit([0-9])$/.exec(code);
+    if (d) return d[1];
+  }
+  if (/^[\x21-\x7e]$/.test(e.key)) return e.key.toLowerCase();
   const letter = /^Key([A-Z])$/.exec(code);
   if (letter) return letter[1].toLowerCase();
   const digit = /^Digit([0-9])$/.exec(code);
   if (digit) return digit[1];
   return CODE_CHARS[code] ?? e.key.toLowerCase();
+}
+
+/** When the keydown handler last toggled wrap (ms since epoch). */
+let lastJsWrapToggle = 0;
+
+/** True when a View → Toggle Word Wrap menu event is the same ⌥Z press the
+ *  keydown handler already acted on (so wrap doesn't flip twice). */
+export function isWrapMenuEcho(now = Date.now()): boolean {
+  return now - lastJsWrapToggle < 250;
 }
 
 /** The terminal-toggle key: the key left of 1 (Backquote), whatever it
@@ -168,10 +192,12 @@ export class ShortcutManager {
     // wrapped/selected range).
     if (e.defaultPrevented) return;
 
-    // Toggle word wrap: Alt+Z (VS Code's key, #52). It used to be
-    // Ctrl+Shift+W, which is also Close Pane. macOS gets it from the menu.
+    // Toggle word wrap: Alt+Z / ⌥Z (VS Code's key, #52), matched by the
+    // physical key: on macOS ⌥Z reports key "Ω". Handled here on macOS too:
+    // an Option-only menu key equivalent is not guaranteed to reach the menu
+    // before the focused editor types "Ω". preventDefault marks it handled,
+    // and the menu's own echo (if any) is dropped by isWrapMenuEcho().
     if (
-      !isMacOS() &&
       e.altKey &&
       !e.ctrlKey &&
       !e.metaKey &&
@@ -179,6 +205,7 @@ export class ShortcutManager {
       shortcutKey(e) === 'z'
     ) {
       e.preventDefault();
+      lastJsWrapToggle = Date.now();
       this.bus.emit(ACTIONS.TOGGLE_WRAP);
       return;
     }

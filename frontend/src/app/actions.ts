@@ -12,6 +12,7 @@ import type { HtmlScriptsController } from './html-scripts';
 import type { LifecycleController } from './lifecycle';
 import type { Palette } from '../palette';
 import type { ViewModeController } from './view-mode';
+import { isWrapMenuEcho } from '../shortcuts';
 
 /** Everything a native-menu item or keyboard shortcut can trigger. */
 export interface ActionTargets {
@@ -77,7 +78,10 @@ export function registerMenuListeners(t: ActionTargets): void {
   reg(MENU.TOGGLE_TERMINAL, () => void t.cockpit.toggleTerminal());
   reg(MENU.TOGGLE_TERMINALS_ONLY, () => void t.cockpit.toggleTerminalsOnly());
   reg(MENU.TOGGLE_SIDEBAR, () => t.fileTree.toggle());
-  reg(MENU.TOGGLE_WORD_WRAP, () => t.editor.toggleWordWrap());
+  reg(MENU.TOGGLE_WORD_WRAP, () => {
+    // ⌥Z may arrive both as a keydown and as the menu's key equivalent.
+    if (!isWrapMenuEcho()) t.editor.toggleWordWrap();
+  });
   reg(MENU.TOGGLE_HTML_JS, () => t.htmlScripts.toggle(false));
   reg(MENU.EXPORT_HTML, () => t.exportHtml());
   reg(MENU.FIND, () => t.panes.openFind());
