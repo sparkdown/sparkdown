@@ -437,3 +437,63 @@ describe('FileTree: files-only tree (UI revamp phase 1)', () => {
     expect(tree.isShowHidden()).toBe(true);
   });
 });
+
+describe('FileTree viewport sizing (#29)', () => {
+  const many = Array.from({ length: 40 }, (_, i) => ({
+    name: `f${String(i).padStart(2, '0')}.md`,
+    path: `${ROOT}/f${String(i).padStart(2, '0')}.md`,
+    is_dir: false,
+  }));
+  let observers: Array<() => void> = [];
+
+  beforeEach(() => {
+    listDirectory.mockReset();
+    listDirectory.mockResolvedValue(many);
+    observers = [];
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(private cb: () => void) {
+          observers.push(() => this.cb());
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    document.body.innerHTML = '';
+  });
+
+  function setHeight(h: number) {
+    const viewport = document.getElementById('file-tree')!;
+    Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: h });
+  }
+
+  it('a tree rendered while hidden shows every row once the viewport gets its size', async () => {
+    const { tree } = mountTree();
+    setHeight(0); // sidebar hidden / another activity view in front
+    await tree.setRoot(ROOT);
+    const mountedHidden = document.querySelectorAll('.tree-item').length;
+    expect(mountedHidden).toBeLessThan(many.length);
+    expect(row(`${ROOT}/f30.md`)).toBeUndefined();
+
+    setHeight(40 * 24);
+    observers.forEach((fire) => fire());
+    expect(document.querySelectorAll('.tree-item').length).toBe(many.length);
+    expect(row(`${ROOT}/f39.md`)).toBeDefined();
+  });
+
+  it('showing the sidebar re-windows rows rendered while it was hidden', async () => {
+    const { tree } = mountTree();
+    tree.setVisible(false);
+    setHeight(0);
+    await tree.setRoot(ROOT);
+    expect(row(`${ROOT}/f39.md`)).toBeUndefined();
+    setHeight(40 * 24);
+    tree.setVisible(true);
+    expect(row(`${ROOT}/f39.md`)).toBeDefined();
+  });
+});
