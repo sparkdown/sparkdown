@@ -342,6 +342,7 @@ fn main() {
             mcp::mcp_install_agent,
             mcp::mcp_uninstall_agent,
             mcp::mcp_agent_installed,
+            mcp::mcp_agent_status,
             context::detect_agents,
             remote::ssh_config_hosts,
             remote::remote_connect,

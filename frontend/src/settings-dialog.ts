@@ -1,5 +1,5 @@
 import { api } from './api';
-import type { AppConfig } from './api';
+import type { AgentMcpStatus, AppConfig } from './api';
 import { trapFocus, type ModalHandle } from './modal';
 
 /**
@@ -278,9 +278,9 @@ async function populateMcpInstallers(container: HTMLElement, host: SettingsHost)
     const row = mcpInstallRow(agent.label, agent.bin, shim != null);
     container.appendChild(row.el);
     void api
-      .mcpAgentInstalled(agent.bin)
-      .then((v) => row.setInstalled(v))
-      .catch(() => row.setInstalled(false));
+      .mcpAgentStatus(agent.bin)
+      .then((st) => row.setStatus(st))
+      .catch(() => row.setStatus({ installed: false, command: null, stale: null }));
   }
   if (reset) container.appendChild(reset);
 }
@@ -317,13 +317,25 @@ function askAgainRow(
   return row;
 }
 
-/** One agent's install control: label, status, and a toggle button. Starts
- *  in a pending state until `setInstalled` is called. */
+/** Status line for an installed entry (#32: a stale path is not "Installed"). */
+export function mcpStatusText(st: AgentMcpStatus): string {
+  if (!st.installed) return 'Not installed';
+  if (st.stale === 'missing') {
+    return `Broken: points at ${st.command ?? 'a program'} which no longer exists. Repair to use this SparkDown.`;
+  }
+  if (st.stale === 'other') {
+    return `Installed, but points at another SparkDown (${st.command ?? '?'}). Repair to use this one.`;
+  }
+  return 'Installed';
+}
+
+/** One agent's install control: label, status, a toggle button and, for a
+ *  stale entry, Repair. Starts pending until `setStatus` is called. */
 function mcpInstallRow(
   label: string,
   bin: string,
   serverUp: boolean,
-): { el: HTMLElement; setInstalled: (v: boolean) => void } {
+): { el: HTMLElement; setStatus: (st: AgentMcpStatus) => void } {
   const row = document.createElement('div');
   row.className = 'settings-row';
   const text = document.createElement('div');
@@ -337,44 +349,63 @@ function mcpInstallRow(
 
   const btn = document.createElement('button');
   btn.className = 'settings-btn';
+  const repair = document.createElement('button');
+  repair.className = 'settings-btn settings-mcp-repair';
+  repair.textContent = 'Repair';
+  repair.hidden = true;
 
-  let state: boolean | null = null;
+  let state: AgentMcpStatus | null = null;
   const render = () => {
     if (state === null) {
       status.textContent = 'Checking…';
       btn.textContent = 'Install';
       btn.disabled = true;
+      repair.hidden = true;
       return;
     }
-    status.textContent = state ? 'Installed' : 'Not installed';
-    btn.textContent = state ? 'Remove' : 'Install';
+    status.textContent = mcpStatusText(state);
+    btn.textContent = state.installed ? 'Remove' : 'Install';
     btn.disabled = !serverUp;
+    repair.hidden = !(state.installed && state.stale);
+    repair.disabled = !serverUp;
     if (!serverUp) status.textContent = 'MCP server not running';
   };
   render();
 
-  btn.addEventListener('click', () => {
-    if (state === null) return;
-    const was = state;
+  const run = (action: Promise<string>, busy: string, after: AgentMcpStatus) => {
     btn.disabled = true;
-    btn.textContent = was ? 'Removing…' : 'Installing…';
-    const action = was ? api.mcpUninstallAgent(bin) : api.mcpInstallAgent(bin);
+    repair.disabled = true;
+    (repair.hidden ? btn : repair).textContent = busy;
     void action
       .then(() => {
-        state = !was;
+        state = after;
         render();
       })
       .catch((err) => {
         render();
         status.textContent = String(err);
       });
+  };
+  btn.addEventListener('click', () => {
+    if (state === null) return;
+    if (state.installed) {
+      repair.hidden = true;
+      run(api.mcpUninstallAgent(bin), 'Removing…', { installed: false, command: null, stale: null });
+    } else {
+      run(api.mcpInstallAgent(bin), 'Installing…', { installed: true, command: null, stale: null });
+    }
+  });
+  // Install replaces an existing entry with this SparkDown's path.
+  repair.addEventListener('click', () => {
+    if (state === null) return;
+    run(api.mcpInstallAgent(bin), 'Repairing…', { installed: true, command: null, stale: null });
   });
 
-  row.append(text, btn);
+  row.append(text, repair, btn);
   return {
     el: row,
-    setInstalled: (v: boolean) => {
-      state = v;
+    setStatus: (st: AgentMcpStatus) => {
+      state = st;
       render();
     },
   };

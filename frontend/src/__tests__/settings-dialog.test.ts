@@ -13,7 +13,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import { invoke } from '@tauri-apps/api/core';
 import type { AppConfig } from '../api';
-import { SettingsDialog } from '../settings-dialog';
+import { SettingsDialog, mcpStatusText } from '../settings-dialog';
 
 const overlays = () => document.querySelectorAll('.settings-overlay');
 
@@ -101,15 +101,20 @@ describe('SettingsDialog → Agents MCP rows', () => {
     { id: 'opencode', label: 'opencode', bin: 'opencode', found: true },
   ];
   let calls: Array<[string, unknown]>;
+  let statuses: Record<string, { installed: boolean; command: string | null; stale: string | null }>;
 
   beforeEach(() => {
     document.body.innerHTML = '<div id="app"></div>';
     calls = [];
+    statuses = {};
     vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
       calls.push([cmd, args]);
       if (cmd === 'detect_agents') return agents;
       if (cmd === 'mcp_shim_command') return { program: '/opt/sd', args: ['--mcp-stdio'] };
-      if (cmd === 'mcp_agent_installed') return false;
+      if (cmd === 'mcp_agent_status') {
+        const bin = (args as { bin: string }).bin;
+        return statuses[bin] ?? { installed: false, command: null, stale: null };
+      }
       if (cmd === 'mcp_install_agent') return 'Installed';
       throw new Error(`unmocked ${cmd}`);
     });
@@ -137,6 +142,44 @@ describe('SettingsDialog → Agents MCP rows', () => {
     expect(calls).toContainEqual(['mcp_install_agent', { bin: 'cursor-agent' }]);
     expect(cursorRow.textContent).toContain('Installed');
     dialog.close();
+  });
+
+  it('a stale entry (deleted binary) is not shown as Installed and Repair reinstalls it (#32)', async () => {
+    statuses['gemini'] = {
+      installed: true,
+      command: '/home/u/.local/bin/sparkdown',
+      stale: 'missing',
+    };
+    statuses['agy'] = { installed: true, command: '/opt/sd', stale: null };
+    const config = {} as AppConfig;
+    const dialog = new SettingsDialog();
+    dialog.toggle({ config, onChange: () => {} });
+    await flush();
+    const rows = [...document.querySelectorAll<HTMLElement>('.settings-mcp-list .settings-row')];
+    const gemini = rows.find((r) => r.textContent?.includes('Gemini'))!;
+    const agy = rows.find((r) => r.textContent?.includes('Antigravity'))!;
+    const desc = gemini.querySelector('.settings-row-desc')!;
+    expect(desc.textContent).toContain('Broken');
+    expect(desc.textContent).toContain('/home/u/.local/bin/sparkdown');
+    expect(desc.textContent).not.toBe('Installed');
+    const repair = gemini.querySelector<HTMLButtonElement>('.settings-mcp-repair')!;
+    expect(repair.hidden).toBe(false);
+    // A healthy entry has no Repair.
+    expect(agy.querySelector('.settings-row-desc')!.textContent).toBe('Installed');
+    expect(agy.querySelector<HTMLButtonElement>('.settings-mcp-repair')!.hidden).toBe(true);
+
+    repair.click();
+    await flush();
+    expect(calls).toContainEqual(['mcp_install_agent', { bin: 'gemini' }]);
+    expect(desc.textContent).toBe('Installed');
+    expect(repair.hidden).toBe(true);
+    dialog.close();
+  });
+
+  it('mcpStatusText words each state', () => {
+    expect(mcpStatusText({ installed: false, command: null, stale: null })).toBe('Not installed');
+    expect(mcpStatusText({ installed: true, command: '/x', stale: null })).toBe('Installed');
+    expect(mcpStatusText({ installed: true, command: '/x', stale: 'other' })).toContain('another SparkDown (/x)');
   });
 
   it('"Ask again when launching" clears the dismissed prompts', async () => {
