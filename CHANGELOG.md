@@ -5,6 +5,43 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
+## [0.4.0] — Unreleased
+
+One window per folder: several projects side by side in one app, each window
+with its own files, Changes, search, terminals, remote session and agents.
+Includes the 0.3.2 fixes. Release notes: [docs/release-notes-0.4.0.md](docs/release-notes-0.4.0.md).
+
+### New
+
+- **Multiple windows, one per folder.** Opening a folder that is already open focuses its window; an empty window is reused; otherwise a new window opens. (#78, #79, #80)
+- **New Window** (`Ctrl+Shift+N` / `⌘⇧N`), a **Window menu** listing every window, and window titles that show the folder (plus host for remote folders). (#81)
+- **Open in New Window**: `Ctrl`/`⌘`-click a recent folder, the "Open in new window" checkbox in Open Remote, the palette command, or `sparkdown --new-window <folder>`. A folder that is already open just focuses its window. (#84)
+- **Recent folders show where they are open** ("● open in window N") on the welcome screen and in new "Open recent" palette commands. (#84)
+- **Restart restores every window** with its folder, open files and terminal layout. Window positions are restored on macOS, Windows and X11; on Wayland only sizes. (#79)
+- **Agents follow their window.** Each window's terminals carry a routing token that is stable per folder, so an agent reaches its own window even after `cd` or a tmux reattach. New `sparkdown_list_windows` tool. (#82, #83)
+- **External agents** (not started in a SparkDown terminal) are off by default, behind Settings → Agents → External agents. When on, they must name a folder (`--folder` or `SPARKDOWN_FOLDER`) or get the focused window if only one is open. (#82)
+- **One quit prompt** lists the running terminals in every window and the windows with unsaved changes. (#81, #85)
+- `sparkdown <path>` in a terminal hands the path to the running app, which opens it in the right window. (#57)
+
+### Fixed
+
+- Windows: helper processes no longer flash a console window. (#18)
+- Windows/Linux shortcuts and labels, and Terminals Only in the menus. (#19)
+- Windows installer: upgrading over a pre-0.3.1 install uninstalls it first. (#20)
+- Remote: typed `user@host[:port]`, a themed host list, a first-connect host-key check, an in-app SSH key passphrase prompt, and a clear message when the server rejects your keys. (#26, #38, #39, #56)
+- Remote: saved edits reach Changes, and the tree shows every row when it was built while hidden. (#34, #35)
+- Terminal: `Ctrl+W` stays with the shell on Windows/Linux; `Ctrl+W`/`Super+W` close the pane where that applies, and closing a busy pane asks first, judged by the foreground process group (also in tmux). (#40, #44, #54)
+- Agent tools: `--mcp-stdio` exits when its parent dies; configs pointing at a missing SparkDown are detected and repaired; installs are non-interactive with a 20 s timeout and show the real error. (#37, #41, #55)
+- `sparkdown --version` and `--help` print and exit without opening a window. (#36)
+- Changes shows an untracked nested repository as a folder and never opens a directory as a tab. (#53)
+- Cosmetics: `Alt+Z` wrap, shortcut list overflow, port-aware keygen hint, askpass retry, remote tab titles. (#58)
+- macOS: `⌥Z` toggles word wrap by key code. (#59)
+- A shell is found when `$SHELL` is unset (zsh, then bash, then sh). (#85)
+
+### Notes
+
+- Linux binary is about 0.7 MB larger (+11.6%), from the D-Bus stack of the single-instance plugin (#57).
+
 ## [0.3.1] — 2026-10-04
 
 A new layout built around reviewing what your agent changed, signed
