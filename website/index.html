@@ -278,7 +278,7 @@
         </a>
         <a class="alt" href="https://github.com/sparkdown/sparkdown">Source on GitHub</a>
       </div>
-      <p class="facts line">For macOS on Apple Silicon and for Linux. About 4 MB installed on Mac. Free and open source (MIT).</p>
+      <p class="facts line">For macOS on Apple Silicon, Windows and Linux. 3.9 MB installed on Mac. Free and open source (MIT).</p>
     </div>
 
     <figure class="demo-fig">
@@ -371,11 +371,26 @@
     <section id="download" class="doc" aria-labelledby="download-h">
       <h2 class="line" data-md="##" id="download-h">Download</h2>
       <p class="line">Free and open source under the MIT license. Every release is on GitHub.</p>
+      <!-- Download links are pinned to v0.3.1 because asset names include the version. Update them at 0.4.0. -->
+      <div class="cta">
+        <a class="btn" href="https://github.com/sparkdown/sparkdown/releases/download/v0.3.1/SparkDown_0.3.1_aarch64.dmg">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M4 21h16"/></svg>
+          Download for macOS
+        </a>
+        <a class="alt" href="https://github.com/sparkdown/sparkdown/releases/download/v0.3.1/SparkDown_0.3.1_x64-setup.exe">Windows</a>
+        <a class="alt" href="https://github.com/sparkdown/sparkdown/releases/download/v0.3.1/SparkDown_0.3.1_amd64.deb">Linux .deb</a>
+        <a class="alt" href="https://github.com/sparkdown/sparkdown/releases/download/v0.3.1/SparkDown_0.3.1_amd64.AppImage">Linux AppImage</a>
+      </div>
       <div class="dl-grid">
         <div>
           <h3>macOS</h3>
-          <p>Apple Silicon, macOS 10.15 or later. A 3 MB disk image.</p>
+          <p>Apple Silicon, macOS 10.15 or later. 3.9 MB installed.</p>
           <p>Not notarized yet: on first launch, right-click the app and choose Open.</p>
+        </div>
+        <div>
+          <h3>Windows</h3>
+          <p>x64 installer (<code>setup.exe</code>).</p>
+          <p>Not signed yet: if SmartScreen warns you, choose More info, then Run anyway.</p>
         </div>
         <div>
           <h3>Linux</h3>
@@ -383,14 +398,7 @@
           <p>An AUR package is coming.</p>
         </div>
       </div>
-      <p class="line facts">Windows: a preview build is available. See <a href="https://github.com/sparkdown/sparkdown/blob/main/docs/windows.md">docs/windows.md</a> on GitHub.</p>
-      <div class="cta">
-        <a class="btn" href="https://github.com/sparkdown/sparkdown/releases/latest">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M4 21h16"/></svg>
-          Get the latest release
-        </a>
-        <a class="alt" href="https://github.com/sparkdown/sparkdown#build-from-source">Build from source</a>
-      </div>
+      <p class="line facts">Homebrew and winget packages are coming later. Every build is on the <a href="https://github.com/sparkdown/sparkdown/releases/latest">latest release page</a>, or <a href="https://github.com/sparkdown/sparkdown#build-from-source">build from source</a>.</p>
     </section>
   </main>
 
