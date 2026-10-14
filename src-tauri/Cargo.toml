@@ -21,7 +21,6 @@ serde = { version = "1", features = ["derive"] }
 # tree via tauri, so this adds no new crate.
 serde_json = { version = "1", features = ["preserve_order"] }
 tauri-plugin-drag = "2"
-tauri-plugin-window-state = "2"
 thiserror = "2"
 # Agent-cockpit (feat/agent-cockpit): embedded terminal + live file watching.
 portable-pty = "0.9"

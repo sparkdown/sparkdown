@@ -1,4 +1,4 @@
-use crate::config::{self, AppConfig};
+use crate::config::AppConfig;
 use crate::menu::AppMenuHandle;
 use crate::PendingFiles;
 use serde::{Deserialize, Serialize};
@@ -494,18 +494,32 @@ fn list_directory_impl(path: &str, include_hidden: bool) -> Result<Vec<FileEntry
     Ok(entries)
 }
 
-/// Load the persisted application configuration from the platform-specific
-/// app config directory. Returns defaults if the file doesn't exist yet.
+/// Load this window's view of the configuration: shared preferences plus
+/// its own session (open files, folder). See session.rs.
 #[tauri::command]
-pub fn load_config(app_handle: AppHandle) -> Result<AppConfig, AppError> {
-    config::load(&app_handle)
+pub fn load_config(
+    webview_window: tauri::WebviewWindow,
+    store: State<'_, crate::session::ConfigStore>,
+) -> Result<AppConfig, AppError> {
+    Ok(store.load_for(webview_window.label()))
 }
 
-/// Persist the application configuration to disk. Called by the frontend
-/// whenever a preference changes (debounced).
+/// Save this window's configuration (debounced by the frontend). The core
+/// merges it: only preferences this window changed are written, and its
+/// session goes to its own section.
 #[tauri::command]
-pub fn save_config(app_handle: AppHandle, config: AppConfig) -> Result<(), AppError> {
-    config::save(&app_handle, &config)
+pub fn save_config(
+    webview_window: tauri::WebviewWindow,
+    store: State<'_, crate::session::ConfigStore>,
+    config: AppConfig,
+) -> Result<(), AppError> {
+    let label = webview_window.label();
+    let folder = crate::windows::registry()
+        .get(label)
+        .and_then(|w| w.folder.clone().map(|f| (f, w.display.clone())));
+    store
+        .save_from(label, &config, folder)
+        .map_err(AppError::Config)
 }
 
 /// Returns and clears any file paths received via macOS "Open With" or CLI args
@@ -530,6 +544,7 @@ pub fn get_pending_files(state: State<'_, PendingFiles>) -> Vec<String> {
 /// unsaved-changes guard has run, so it is safe to exit immediately.
 #[tauri::command]
 pub fn quit(app_handle: AppHandle) {
+    crate::windows::set_quitting();
     crate::mcp::shutdown(); // remove the MCP socket file
     app_handle.exit(0);
 }

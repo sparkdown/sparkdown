@@ -3,7 +3,16 @@ import type { DefaultViewMode } from "./DefaultViewMode";
 import type { TerminalLayout } from "./TerminalLayout";
 import type { ThemeMode } from "./ThemeMode";
 
-export type AppConfig = { theme: ThemeMode, last_open_files: Array<string>, 
+export type AppConfig = { theme: ThemeMode, 
+/**
+ * This window's saved open files (window section, see session.rs).
+ */
+last_open_files: Array<string>, 
+/**
+ * The local folder this window reopens at launch (window section,
+ * read-only for the frontend; see session.rs).
+ */
+window_folder?: string | null, 
 /**
  * Recently opened folder roots (most-recent first), for the welcome
  * screen's quick-reopen. Capped by the frontend.

@@ -5,7 +5,6 @@
 
 use crate::commands::AppError;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
@@ -18,8 +17,14 @@ pub struct AppConfig {
     #[serde(default = "default_theme")]
     pub theme: ThemeMode,
 
+    /// This window's saved open files (window section, see session.rs).
     #[serde(default)]
     pub last_open_files: Vec<String>,
+
+    /// The local folder this window reopens at launch (window section,
+    /// read-only for the frontend; see session.rs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_folder: Option<String>,
 
     /// Recently opened folder roots (most-recent first), for the welcome
     /// screen's quick-reopen. Capped by the frontend.
@@ -206,6 +211,7 @@ impl Default for AppConfig {
         Self {
             theme: ThemeMode::System,
             last_open_files: vec![],
+            window_folder: None,
             recent_folders: vec![],
             terminal_visible: false,
             terminal_height: 200,
@@ -236,27 +242,6 @@ pub fn config_path(app_handle: &AppHandle) -> Result<PathBuf, AppError> {
         .app_config_dir()
         .map_err(|e| AppError::Config(e.to_string()))?;
     Ok(dir.join("config.json"))
-}
-
-/// Load config from disk, returning defaults if the file doesn't exist.
-pub fn load(app_handle: &AppHandle) -> Result<AppConfig, AppError> {
-    let path = config_path(app_handle)?;
-    let content = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(AppConfig::default()),
-        Err(e) => return Err(e.into()),
-    };
-    serde_json::from_str(&content).map_err(|e| AppError::Config(e.to_string()))
-}
-
-/// Persist config to disk as pretty-printed JSON.
-pub fn save(app_handle: &AppHandle, config: &AppConfig) -> Result<(), AppError> {
-    let path = config_path(app_handle)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let json = serde_json::to_string_pretty(config).map_err(|e| AppError::Config(e.to_string()))?;
-    Ok(fs::write(&path, json)?)
 }
 
 #[cfg(test)]

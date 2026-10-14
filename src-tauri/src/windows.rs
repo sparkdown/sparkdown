@@ -263,6 +263,11 @@ impl Registry {
     }
 
     /// The most recently focused window (or any, if none was focused yet).
+    /// `label`'s focus order (0 = never focused).
+    pub fn focus_seq(&self, label: &str) -> u64 {
+        self.windows.get(label).map(|w| w.focus_seq).unwrap_or(0)
+    }
+
     pub fn focused(&self) -> Option<String> {
         self.windows
             .iter()
@@ -473,6 +478,88 @@ mod tests {
         }
         assert_ne!(r1.key(), r3.key());
     }
+}
+
+// --- Lifecycle ---------------------------------------------------------------
+
+static QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The app is quitting: windows destroyed from now on keep their saved
+/// session (they are restored next launch) instead of being forgotten.
+pub fn set_quitting() {
+    QUITTING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn is_quitting() -> bool {
+    QUITTING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Create a window from the `tauri.conf.json` template under `label`,
+/// sized and placed from `geometry` (clamped to the monitors there are;
+/// position skipped on Wayland), and register it.
+pub fn create_window(
+    app: &tauri::AppHandle,
+    label: &str,
+    geometry: Option<crate::session::Geometry>,
+    focus: bool,
+) -> tauri::Result<tauri::WebviewWindow> {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window(label) {
+        return Ok(w);
+    }
+    let mut config = app
+        .config()
+        .app
+        .windows
+        .first()
+        .cloned()
+        .unwrap_or_default();
+    config.label = label.to_string();
+    config.create = true;
+    config.visible = false;
+    let window = tauri::WebviewWindowBuilder::from_config(app, &config)?.build()?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = window.set_decorations(false);
+    if let Some(g) = geometry {
+        let monitors: Vec<crate::session::Area> = window
+            .available_monitors()
+            .unwrap_or_default()
+            .iter()
+            .map(|m| {
+                let a = m.work_area();
+                crate::session::Area {
+                    x: a.position.x,
+                    y: a.position.y,
+                    width: a.size.width,
+                    height: a.size.height,
+                }
+            })
+            .collect();
+        let g = crate::session::clamp_geometry(g, &monitors);
+        let _ = window.set_size(tauri::PhysicalSize::new(g.width, g.height));
+        if crate::session::positions_supported() {
+            let _ = window.set_position(tauri::PhysicalPosition::new(g.x, g.y));
+        }
+        if g.maximized {
+            let _ = window.maximize();
+        }
+    }
+    registry().register(label);
+    let _ = window.show();
+    if focus {
+        let _ = window.set_focus();
+    }
+    Ok(window)
+}
+
+/// The window app-level events (menu, dock, forwarded paths) go to: the
+/// last focused one, else any.
+pub fn target_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    use tauri::Manager;
+    let focused = registry().focused();
+    focused
+        .and_then(|l| app.get_webview_window(&l))
+        .or_else(|| app.webview_windows().into_values().next())
 }
 
 // --- Commands ------------------------------------------------------------------
