@@ -227,6 +227,7 @@
     .dl-grid p { font-size: 16px; color: var(--ink-2); }
     .dl-grid p + p { margin-top: 6px; }
     #download .cta { margin-left: var(--gutter); margin-top: 32px; }
+    .dl-grid .copy { font: .78em var(--sans); color: var(--ink-2); background: none; border: 1px solid var(--rule); border-radius: 4px; padding: .05em .5em; cursor: pointer; }
 
     footer.doc { margin-top: 128px; padding-top: 28px; padding-bottom: 56px; border-top: 1px solid var(--rule); }
     footer .line { font-size: 15px; color: var(--muted); }
@@ -387,6 +388,7 @@
           <h3>macOS</h3>
           <p>Apple Silicon, macOS 10.15 or later. 3.9 MB installed.</p>
           <p>Not notarized yet: on first launch, right-click the app and choose Open.</p>
+          <p>Or with Homebrew: <code id="brew-cmd">brew install --cask sparkdown/tap/sparkdown</code> <button type="button" class="copy" data-umami-event="copy-brew" onclick="var t=document.getElementById('brew-cmd').textContent,b=this,d=function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy'},1500)};if(navigator.clipboard){navigator.clipboard.writeText(t).then(d)}else{var r=document.createRange();r.selectNodeContents(document.getElementById('brew-cmd'));var x=getSelection();x.removeAllRanges();x.addRange(r);document.execCommand('copy');x.removeAllRanges();d()}">Copy</button></p>
         </div>
         <div>
           <h3>Windows</h3>
@@ -399,7 +401,7 @@
           <p>An AUR package is coming.</p>
         </div>
       </div>
-      <p class="line facts">Homebrew and winget packages are coming later. Every build is on the <a href="https://github.com/sparkdown/sparkdown/releases/latest">latest release page</a>, or <a href="https://github.com/sparkdown/sparkdown#build-from-source">build from source</a>.</p>
+      <p class="line facts">A winget package is coming later. Every build is on the <a href="https://github.com/sparkdown/sparkdown/releases/latest">latest release page</a>, or <a href="https://github.com/sparkdown/sparkdown#build-from-source">build from source</a>.</p>
     </section>
   </main>
 
