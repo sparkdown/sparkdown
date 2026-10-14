@@ -137,6 +137,11 @@ impl FolderId {
             return false;
         };
         let norm = |s: &str| {
+            // A canonicalized cwd may carry the `\\?\` verbatim prefix.
+            let s = s
+                .strip_prefix(r"\\?\")
+                .filter(|r| !r.starts_with("UNC\\"))
+                .unwrap_or(s);
             let s = s.replace('\\', "/");
             let s = s.trim_end_matches('/').to_string();
             if cfg!(any(windows, target_os = "macos")) {
