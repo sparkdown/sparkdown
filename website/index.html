@@ -247,6 +247,7 @@
   <link rel="stylesheet" href="assets/demo.css" />
   <script>document.documentElement.classList.add('js');</script>
   <script src="assets/demo.js" defer></script>
+  <script defer src="https://cloud.umami.is/script.js" data-website-id="36c795bd-e010-4044-8507-8e9639da61aa"></script>
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
@@ -373,13 +374,13 @@
       <p class="line">Free and open source under the MIT license. Every release is on GitHub.</p>
       <!-- Download links are pinned to v0.3.1 because asset names include the version. Update them at 0.4.0. -->
       <div class="cta">
-        <a class="btn" href="https://github.com/sparkdown/sparkdown/releases/download/v0.3.1/SparkDown_0.3.1_aarch64.dmg" data-download-os="mac">
+        <a class="btn" href="https://github.com/sparkdown/sparkdown/releases/download/v0.3.1/SparkDown_0.3.1_aarch64.dmg" data-umami-event="download" data-umami-event-os="mac">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0 5-5m-5 5-5-5M4 21h16"/></svg>
           Download for macOS
         </a>
-        <a class="alt" href="https://github.com/sparkdown/sparkdown/releases/download/v0.3.1/SparkDown_0.3.1_x64-setup.exe" data-download-os="windows">Windows</a>
-        <a class="alt" href="https://github.com/sparkdown/sparkdown/releases/download/v0.3.1/SparkDown_0.3.1_amd64.deb" data-download-os="linux-deb">Linux .deb</a>
-        <a class="alt" href="https://github.com/sparkdown/sparkdown/releases/download/v0.3.1/SparkDown_0.3.1_amd64.AppImage" data-download-os="linux-appimage">Linux AppImage</a>
+        <a class="alt" href="https://github.com/sparkdown/sparkdown/releases/download/v0.3.1/SparkDown_0.3.1_x64-setup.exe" data-umami-event="download" data-umami-event-os="windows">Windows</a>
+        <a class="alt" href="https://github.com/sparkdown/sparkdown/releases/download/v0.3.1/SparkDown_0.3.1_amd64.deb" data-umami-event="download" data-umami-event-os="linux-deb">Linux .deb</a>
+        <a class="alt" href="https://github.com/sparkdown/sparkdown/releases/download/v0.3.1/SparkDown_0.3.1_amd64.AppImage" data-umami-event="download" data-umami-event-os="linux-appimage">Linux AppImage</a>
       </div>
       <div class="dl-grid">
         <div>
@@ -417,13 +418,6 @@
       };
       btns.forEach((b) => b.addEventListener('click', () => set(b.dataset.mode)));
     })();
-  </script>
-  <script>
-    // Download click events for Cloudflare Zaraz. Links stay direct; no redirect.
-    document.addEventListener('click', function (e) {
-      var a = e.target.closest && e.target.closest('a[data-download-os]');
-      if (a && window.zaraz) zaraz.track('download', { os: a.dataset.downloadOs });
-    });
   </script>
 </body>
 </html>
