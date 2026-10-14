@@ -25,10 +25,20 @@ pub fn run() {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
 
-    // Connected mode: a live socket named by the environment.
-    if let Some(sock) = connect_socket() {
-        bridge(sock);
-        return;
+    // Connected mode: a live socket named by the environment (a SparkDown
+    // terminal), or — for an external agent — the app's discoverable one.
+    // The hello tells the app which window this agent belongs to (#64).
+    let terminal = std::env::var_os(crate::mcp::SOCKET_ENV).is_some();
+    let sock = if terminal {
+        connect_socket()
+    } else {
+        connect_external()
+    };
+    if let Some(mut sock) = sock {
+        if say_hello(&mut sock, &hello(terminal)) {
+            bridge(sock);
+            return;
+        }
     }
 
     // Offline mode: valid server, no tools.
@@ -72,6 +82,75 @@ fn exit_when_orphaned() {
 
 #[cfg(not(unix))]
 fn exit_when_orphaned() {}
+
+/// What this shim tells the app about itself.
+fn hello(terminal: bool) -> serde_json::Value {
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let args: Vec<String> = std::env::args().collect();
+    let folder = args
+        .iter()
+        .position(|a| a == "--folder")
+        .and_then(|i| args.get(i + 1).cloned())
+        .or_else(|| env(crate::mcp::FOLDER_ENV));
+    json!({ "sparkdown_hello": {
+        "terminal": terminal,
+        "token": if terminal { env(crate::mcp::TOKEN_ENV) } else { None },
+        "cwd": std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
+        "folder": folder,
+    }})
+}
+
+/// Send the hello and read the app's one-line answer. False (go offline)
+/// when the app refuses this agent or does not answer.
+fn say_hello<S: std::io::Read + std::io::Write>(sock: &mut S, hello: &serde_json::Value) -> bool {
+    if writeln!(sock, "{hello}")
+        .and_then(|_| sock.flush())
+        .is_err()
+    {
+        return false;
+    }
+    // Byte at a time: nothing after the newline may be consumed here.
+    let mut line = Vec::new();
+    let mut b = [0u8; 1];
+    while line.len() < 4096 {
+        match sock.read(&mut b) {
+            Ok(1) if b[0] == b'\n' => break,
+            Ok(1) => line.push(b[0]),
+            _ => return false,
+        }
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&line) else {
+        return false;
+    };
+    let ok = v
+        .pointer("/sparkdown_ack/ok")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    if !ok {
+        if let Some(e) = v
+            .pointer("/sparkdown_ack/error")
+            .and_then(serde_json::Value::as_str)
+        {
+            eprintln!("sparkdown: {e}");
+        }
+    }
+    ok
+}
+
+/// External agent (not in a SparkDown terminal): the app's discoverable
+/// endpoint. The app refuses it unless the user opted in.
+#[cfg(unix)]
+fn connect_external() -> Option<std::os::unix::net::UnixStream> {
+    std::os::unix::net::UnixStream::connect(crate::mcp::mcp_socket_path()).ok()
+}
+
+#[cfg(windows)]
+fn connect_external() -> Option<interprocess::local_socket::Stream> {
+    use interprocess::local_socket::{prelude::*, GenericFilePath, Stream};
+    let path = crate::mcp::discoverable_pipe_path();
+    let name = path.as_os_str().to_fs_name::<GenericFilePath>().ok()?;
+    Stream::connect(name).ok()
+}
 
 /// Connect to `$SPARKDOWN_MCP` if it is a working SparkDown socket.
 #[cfg(unix)]

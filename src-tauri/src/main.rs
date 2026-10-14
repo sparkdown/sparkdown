@@ -122,6 +122,32 @@ fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, cwd: String) {
     }
 }
 
+/// Hand argv + cwd to a running SparkDown over its core socket. True when
+/// one took them.
+#[cfg(unix)]
+fn forward_to_running_core() -> bool {
+    use std::io::{Read, Write};
+    let Ok(mut s) = std::os::unix::net::UnixStream::connect(mcp::mcp_socket_path()) else {
+        return false;
+    };
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let argv: Vec<String> = std::env::args().collect();
+    let msg = serde_json::json!({ "sparkdown_forward": { "argv": argv, "cwd": cwd } });
+    if writeln!(s, "{msg}").is_err() {
+        return false;
+    }
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    let mut b = [0u8; 64];
+    matches!(s.read(&mut b), Ok(n) if n > 0)
+}
+
+#[cfg(not(unix))]
+fn forward_to_running_core() -> bool {
+    false
+}
+
 /// Linux: the single-instance plugin talks D-Bus and panics on a malformed
 /// `DBUS_SESSION_BUS_ADDRESS` (with `panic = "abort"`, a crash at start).
 /// Use it only when that variable is unset (the plugin then tries the
@@ -288,6 +314,13 @@ fn main() {
         return;
     }
 
+    // Fallback lock (decision 1): without the single-instance plugin (a
+    // malformed D-Bus address on Linux), a live core socket means SparkDown
+    // already runs: hand it our args and exit, never a second GUI process.
+    if !single_instance_supported() && forward_to_running_core() {
+        return;
+    }
+
     let mut builder = tauri::Builder::default();
     // #51: one SparkDown per user. A second `sparkdown <folder>` hands its
     // args and cwd to the running window and exits. Registered first, as the
@@ -428,9 +461,11 @@ fn main() {
 
             // One config writer in the core (#63); restore every window of
             // the last session (a 0.3.x config migrates to one window).
-            let store = session::ConfigStore::open(
-                config::config_path(&handle).map_err(|e| e.to_string())?,
-            );
+            let config_file = config::config_path(&handle).map_err(|e| e.to_string())?;
+            if let Some(dir) = config_file.parent() {
+                windows::init_token_secret(dir);
+            }
+            let store = session::ConfigStore::open(config_file);
             let plan = session::plan_restore(&store.stored());
             store.adopt(&plan);
             app.manage(store);
@@ -456,6 +491,10 @@ fn main() {
                 windows::registry().mark_focused(w.label());
             }
             lifecycle::refresh(&handle);
+
+            mcp::set_forward_handler(Box::new(|app, argv, cwd| {
+                on_second_instance(app, argv, cwd)
+            }));
 
             // In-app MCP server for agents in the terminal. Transport is a
             // per-user Unix domain socket (Windows: a per-launch named pipe),

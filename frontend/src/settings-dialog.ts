@@ -146,6 +146,23 @@ function buildSettingsOverlay(host: SettingsHost, close: () => void): HTMLElemen
     }),
   );
 
+  agents.appendChild(
+    toggleRow({
+      label: 'External agents',
+      desc:
+        'Also serve agents started outside SparkDown terminals. Such an ' +
+        'agent must name a folder (sparkdown --mcp-stdio --folder <path>, ' +
+        'or $SPARKDOWN_FOLDER) unless exactly one window is open. Off: ' +
+        'only agents in SparkDown terminals get the editor tools. On ' +
+        'Windows this takes effect after a restart.',
+      checked: host.config.mcp_external_agents ?? false,
+      onToggle: (value) => {
+        host.config.mcp_external_agents = value;
+        host.onChange();
+      },
+    }),
+  );
+
   // MCP install: register SparkDown as an MCP server in each found agent's
   // own config, so it needs no per-launch injection. Populated async.
   const mcpHeading = document.createElement('div');

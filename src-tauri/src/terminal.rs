@@ -476,6 +476,10 @@ pub fn terminal_start(
                         sock.to_string_lossy()
                     ));
                 }
+                if let Some(t) = crate::windows::token_for_current_window(cwd.as_deref()) {
+                    c.arg("-e");
+                    c.arg(format!("{}={t}", crate::mcp::TOKEN_ENV));
+                }
                 if let Some(cmd_str) = launch_cmd {
                     // `-e` seeds the env only when the session is CREATED
                     // (tmux ≥ 3.2); on reattach the agent is already running,
@@ -537,6 +541,10 @@ pub fn terminal_start(
         // shells can't reach a local socket, so they keep the file bridge.
         if let Some(sock) = crate::mcp::running_socket_path() {
             cmd.env(crate::mcp::SOCKET_ENV, sock);
+        }
+        // Which window's folder this terminal's agents act on (#64).
+        if let Some(t) = crate::windows::token_for_current_window(cwd.as_deref()) {
+            cmd.env(crate::mcp::TOKEN_ENV, t);
         }
     }
 

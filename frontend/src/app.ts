@@ -60,6 +60,7 @@ const DEFAULT_CONFIG: AppConfig = {
   last_update_check_ms: 0,
   terminal_layouts: {},
   mcp_install_prompt_dismissed: [],
+  mcp_external_agents: false,
 };
 
 /**
@@ -776,6 +777,7 @@ export class App {
         // Kept current by the cockpit (terminal split layout per workspace).
         terminal_layouts: this.config.terminal_layouts ?? {},
         mcp_install_prompt_dismissed: this.config.mcp_install_prompt_dismissed ?? [],
+        mcp_external_agents: this.config.mcp_external_agents ?? false,
       };
       await api.saveConfig(config);
       this.configSaveFailures = 0;

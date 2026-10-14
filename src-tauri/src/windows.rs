@@ -175,6 +175,84 @@ pub fn label_for_folder(folder: &FolderId) -> String {
     format!("w-{}", crate::context::workspace_key(&folder.key()))
 }
 
+// --- Agent routing tokens (#64) ------------------------------------------------
+
+static TOKEN_SECRET: OnceLock<String> = OnceLock::new();
+
+/// Load (or create, 0600) the per-install secret that keys routing tokens,
+/// so a token can't be computed from a folder path alone.
+pub fn init_token_secret(config_dir: &std::path::Path) {
+    let path = config_dir.join("agent-token.key");
+    let secret = std::fs::read_to_string(&path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.len() >= 32)
+        .unwrap_or_else(|| {
+            let s = random_hex();
+            let _ = std::fs::create_dir_all(config_dir);
+            let _ = write_private(&path, &s);
+            s
+        });
+    let _ = TOKEN_SECRET.set(secret);
+}
+
+fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(text.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, text)
+    }
+}
+
+/// 256 bits of OS-seeded randomness as hex.
+fn random_hex() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = String::new();
+    for i in 0..4u64 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(i ^ 0x9E37_79B9_7F4A_7C15);
+        out.push_str(&format!("{:016x}", h.finish()));
+    }
+    out
+}
+
+/// The routing token agents in a terminal of `folder`'s window carry
+/// (`$SPARKDOWN_MCP_TOKEN`). Stable per canonical folder across launches
+/// (decision 3), so tmux sessions that outlive a restart still route.
+pub fn folder_token(folder: &FolderId) -> String {
+    use sha2::{Digest, Sha256};
+    let secret = TOKEN_SECRET.get_or_init(random_hex);
+    let mut h = Sha256::new();
+    h.update(secret.as_bytes());
+    h.update([0u8]);
+    h.update(folder.key().as_bytes());
+    h.finalize()[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The routing token for terminals of the current window: its folder's,
+/// else (no folder yet) the terminal's local folder `cwd`.
+pub fn token_for_current_window(cwd: Option<&str>) -> Option<String> {
+    let label = current_label();
+    let folder = registry().get(&label).and_then(|w| w.folder.clone());
+    folder
+        .or_else(|| cwd.and_then(|c| local_folder_id(c).ok()))
+        .map(|f| folder_token(&f))
+}
+
 // --- Registry ----------------------------------------------------------------
 
 #[derive(Clone, Debug, Default)]
@@ -332,6 +410,14 @@ impl Registry {
             .collect();
         v.sort_by(|a, b| a.label.cmp(&b.label));
         v
+    }
+
+    /// The window whose folder's routing token is `token`.
+    pub fn window_for_token(&self, token: &str) -> Option<String> {
+        self.windows
+            .iter()
+            .find(|(_, w)| w.folder.as_ref().is_some_and(|f| folder_token(f) == token))
+            .map(|(l, _)| l.clone())
     }
 
     /// The window whose local folder contains `path` (deepest match wins).
