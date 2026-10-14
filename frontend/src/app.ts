@@ -34,6 +34,8 @@ import { registerMenuListeners, registerActionListeners, type ActionTargets } fr
 import { registerBuiltinCommands, type ViewMode } from './app/builtin-commands';
 import { Palette } from './palette';
 import { commands } from './commands';
+import { RecentFolderCommands } from './app/recent-folders';
+import { onWindowFocus } from './window-events';
 import { api, type AppConfig, type FsChange } from './api';
 import { ACTIONS, EVENTS } from './event-names';
 import { initPerfTrace, span } from './perf-trace';
@@ -210,14 +212,14 @@ export class App {
       cockpit: this.cockpit,
       search: this.searchView,
       syncEmptyState: () => this.welcome.sync(),
-      openFolder: (dir) => this.openFolder(dir),
+      openFolder: (dir, opts) => this.openFolder(dir, opts),
     });
     this.welcome = new WelcomeController(this.ctx, {
       openFolderDialog: () => this.openFolderDialog(),
       openFileDialog: () => this.openFileDialog(),
       quickOpen: () => this.bus.emit(ACTIONS.QUICK_OPEN),
       newFile: () => this.newFile(),
-      openFolder: (dir) => this.openFolder(dir),
+      openFolder: (dir, opts) => this.openFolder(dir, opts),
       hideDiffPane: () => this.diff.hideDiffPane(),
       refreshViewControl: () => this.viewMode.refreshControl(),
     });
@@ -529,10 +531,13 @@ export class App {
 
   /** Open a folder as the workspace. With a remote handler registered, the
    *  request (a local path or ssh://host/path) goes through it first. */
-  async openFolder(dir: string): Promise<void> {
+  async openFolder(dir: string, opts: { newWindow?: boolean } = {}): Promise<void> {
     // One window per folder (#62): focus the window that has it, or let a
-    // new window open it when this one is in use.
-    const route = await api.routeFolder(dir).catch(() => ({ action: 'here' as const }));
+    // new window open it when this one is in use. `newWindow` (#66) skips
+    // "this window is empty, use it".
+    const route = await api
+      .routeFolder(dir, !!opts.newWindow)
+      .catch(() => ({ action: 'here' as const }));
     if (route.action !== 'here') return;
     const openResolved = (path: string) => this.workspace.openFolder(path);
     return this.remoteHandler
@@ -553,7 +558,11 @@ export class App {
   /** Record `dir` at the front of the recent-folders list (see workspace.ts). */
   rememberRecentFolder(dir: string): void {
     this.workspace.rememberRecentFolder(dir);
+    this.refreshRecents();
   }
+
+  /** Re-mark recents as open/not open (#66); set in registerCommands. */
+  private refreshRecents: () => void = () => {};
 
   /** Remote sessions, before the backend switches machine: resolve dirty
    *  tabs (DocumentController.prepareOriginSwitch), then clear the agent
@@ -623,6 +632,19 @@ export class App {
   /** The built-in palette commands (app/builtin-commands.ts). */
   private registerCommands(): void {
     commands.register(...this.diff.reviewCommands());
+    // #66: "Open recent: …" commands, marked when open in a window. The
+    // marks follow other windows, so refresh whenever this one gains focus.
+    const recentCmds = new RecentFolderCommands(
+      commands,
+      () => this.ctx.config.recent_folders ?? [],
+      (spec) => this.openFolder(spec),
+    );
+    void recentCmds.refresh();
+    this.refreshRecents = () => {
+      void recentCmds.refresh();
+      this.welcome.refreshMarks();
+    };
+    void onWindowFocus(() => this.refreshRecents());
     registerBuiltinCommands(commands, {
       bus: this.bus,
       tabs: this.tabs,
@@ -637,6 +659,7 @@ export class App {
         }
       },
       openLinePrompt: () => this.palette.open('line'),
+      openFolderInNewWindow: () => void this.workspace.openFolderDialog({ newWindow: true }),
       toggleHtmlScripts: () => this.htmlScripts.toggle(false),
       checkForUpdates: () => void this.updates.check(true),
       terminal: {

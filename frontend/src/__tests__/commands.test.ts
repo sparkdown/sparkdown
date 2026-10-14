@@ -68,6 +68,7 @@ function targets(over: Partial<BuiltinCommandTargets> = {}) {
     setViewMode: vi.fn(),
     showSidebarView: vi.fn(),
     openLinePrompt: vi.fn(),
+    openFolderInNewWindow: vi.fn(),
     toggleHtmlScripts: vi.fn(),
     checkForUpdates: vi.fn(),
     terminal: { isVisible: () => false, split: vi.fn(), closePane: vi.fn(), focusPane: vi.fn() },

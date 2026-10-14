@@ -463,6 +463,15 @@ export class RemoteSessions {
     pathLabel.appendChild(pathInput);
     dialog.appendChild(pathLabel);
 
+    // #66: Open in New Window, even when this window is empty.
+    const newWinLabel = document.createElement('label');
+    newWinLabel.className = 'remote-check';
+    const newWin = document.createElement('input');
+    newWin.type = 'checkbox';
+    newWin.id = 'remote-new-window';
+    newWinLabel.append(newWin, document.createTextNode(' Open in new window'));
+    dialog.appendChild(newWinLabel);
+
     const err = document.createElement('p');
     err.className = 'remote-error hidden';
     err.setAttribute('role', 'alert');
@@ -526,9 +535,13 @@ export class RemoteSessions {
       // A `~`-relative path is only known after the connect; that case is
       // caught when the window reports its folder (windowSetRemoteFolder).
       const typedPath = pathInput.value.trim();
+      if (newWin.checked && !typedPath.startsWith('/')) {
+        showError('To open in a new window, give the absolute remote folder path (e.g. /home/me/project).');
+        return;
+      }
       const route = typedPath.startsWith('/')
         ? await api
-            .routeFolder(formatRemoteRecent(alias, typedPath))
+            .routeFolder(formatRemoteRecent(alias, typedPath), newWin.checked)
             .catch(() => ({ action: 'here' as const }))
         : ({ action: 'here' } as const);
       if (route.action !== 'here') {

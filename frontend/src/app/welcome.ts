@@ -3,6 +3,7 @@ import { ACTIONS } from '../event-names';
 import { shortcutFor } from '../shortcuts';
 import type { AppContext } from './context';
 import { syncEditorInput } from './editor-gate';
+import { markRecents, newWindowClickLabel, openInWindowText, wantsNewWindow } from './recent-folders';
 
 /** What the welcome screen's buttons and state changes reach. */
 export interface WelcomeDeps {
@@ -12,7 +13,7 @@ export interface WelcomeDeps {
   /** ⌘P: the palette's file finder. */
   quickOpen(): void;
   /** App.openFolder (recent entries may be ssh://host/path). */
-  openFolder(dir: string): Promise<void>;
+  openFolder(dir: string, opts?: { newWindow?: boolean }): Promise<void>;
   hideDiffPane(): void;
   /** No active tab: hide the title bar's view control. */
   refreshViewControl(): void;
@@ -42,7 +43,9 @@ export class WelcomeController {
       else if (action === 'new-file') this.deps.newFile();
       else if (action === 'quick-open') this.deps.quickOpen();
       const recent = target.closest<HTMLElement>('[data-recent]');
-      if (recent?.dataset.recent) void this.deps.openFolder(recent.dataset.recent);
+      // Ctrl/⌘-click (#66): Open in New Window.
+      if (recent?.dataset.recent)
+        void this.deps.openFolder(recent.dataset.recent, { newWindow: wantsNewWindow(e) });
     });
   }
 
@@ -130,7 +133,30 @@ export class WelcomeController {
         path.textContent = displayPath.replace(/^\/Users\/[^/]+/, '~');
       }
       row.append(name, path);
+      row.title = `Open (${newWindowClickLabel()}: open in a new window)`;
       list.appendChild(row);
     }
+    this.refreshMarks();
+  }
+
+  /** Mark recents open in some window: a dot plus "open in window N" (#66). */
+  refreshMarks(): void {
+    const list = document.getElementById('welcome-recent-list');
+    if (!list) return;
+    const rows = [...list.querySelectorAll<HTMLElement>('[data-recent]')];
+    const specs = rows.map((r) => r.dataset.recent ?? '');
+    void markRecents(specs).then((marks) => {
+      marks.forEach((m, i) => {
+        const row = rows[i];
+        if (!row?.isConnected) return;
+        row.querySelector('.welcome-recent-open')?.remove();
+        row.classList.toggle('is-open', m.window !== null);
+        if (m.window === null) return;
+        const badge = document.createElement('span');
+        badge.className = 'welcome-recent-open';
+        badge.textContent = `● ${openInWindowText(m.window)}`;
+        row.appendChild(badge);
+      });
+    });
   }
 }

@@ -31,3 +31,14 @@ export function listen<T>(event: string, handler: EventCallback<T>): Promise<Unl
     ? listenAny<T>(event, handler, { target: { kind: 'WebviewWindow', label } })
     : listenAny<T>(event, handler);
 }
+
+/** Run `fn` whenever this window gains focus. Resolves to an unlisten. */
+export async function onWindowFocus(fn: () => void): Promise<UnlistenFn> {
+  try {
+    return await getCurrentWebviewWindow().onFocusChanged(({ payload }) => {
+      if (payload) fn();
+    });
+  } catch {
+    return () => {}; // tests / no Tauri runtime
+  }
+}

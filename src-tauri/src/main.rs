@@ -46,6 +46,9 @@ pub struct PendingFiles {
 /// Event for paths a second `sparkdown <path>…` launch forwarded (#51).
 const OPEN_PATHS_EVENT: &str = "open-paths";
 
+/// CLI flag forcing folders into a new window (#66).
+const NEW_WINDOW_FLAG: &str = "--new-window";
+
 /// Paths a second `sparkdown …` launch passed (#51), resolved against that
 /// launch's working directory (not ours). Flags are skipped; `--version`,
 /// `--help`, `--mcp-stdio` and the askpass helper never get here (they exit
@@ -83,6 +86,8 @@ fn forwarded_paths(argv: &[String], cwd: &str) -> Vec<String> {
 /// A second launch (#51): bring the window forward and open its paths here.
 fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, cwd: String) {
     let paths = forwarded_paths(&argv, &cwd);
+    // `sparkdown --new-window <folder>` (#66).
+    let new_window = argv.iter().skip(1).any(|a| a == NEW_WINDOW_FLAG);
     eprintln!("another launch handed over {} path(s)", paths.len());
     if paths.is_empty() {
         if let Some(window) = windows::target_window(app) {
@@ -103,7 +108,7 @@ fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, cwd: String) {
         // focused window if empty, else a new window.
         let app = app.clone();
         std::thread::spawn(move || {
-            for (label, paths) in routing::route_forwarded(&app, &paths) {
+            for (label, paths) in routing::route_forwarded(&app, &paths, new_window) {
                 routing::focus(&app, &label);
                 let _ = app.emit_to(
                     label.as_str(),
@@ -213,7 +218,7 @@ fn push_pending<I: IntoIterator<Item = String>>(state: &State<'_, PendingFiles>,
 fn emit_open_file_paths(app: &tauri::AppHandle, paths: &[String]) {
     // Folders route like any Open Folder (#62); files go to the window
     // whose folder holds them.
-    for (label, paths) in routing::route_forwarded(app, paths) {
+    for (label, paths) in routing::route_forwarded(app, paths, false) {
         for path in paths {
             let _ = app.emit_to(
                 label.as_str(),
@@ -260,6 +265,7 @@ fn cli_info(first_arg: Option<&str>) -> Option<String> {
             "SparkDown {version}: a Markdown editor and agent cockpit.\n\n\
              Usage:\n  \
              sparkdown [FILE|FOLDER]...   open files or a folder in the app\n                               (in the open window, if SparkDown is running)\n  \
+             sparkdown --new-window FOLDER  open FOLDER in a new window (focuses it if already open)\n  \
              sparkdown --mcp-stdio        run the stdio MCP bridge for agent CLIs\n  \
              sparkdown --version, -V      print the version and exit\n  \
              sparkdown --help, -h         print this help and exit\n"
@@ -523,6 +529,7 @@ fn main() {
             windows::windows_list,
             routing::route_folder,
             routing::window_take_open,
+            routing::window_numbers_for,
             routing::window_set_remote_folder,
             lifecycle::quit_status,
             lifecycle::quit_prepare_others,
