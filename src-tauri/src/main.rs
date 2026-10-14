@@ -8,6 +8,7 @@ mod context;
 mod file_index;
 mod fsio;
 mod git;
+mod lifecycle;
 #[cfg(target_os = "macos")]
 mod macos_quit;
 mod mcp;
@@ -376,6 +377,7 @@ fn main() {
 
             let app_menu = menu::build_menu(&handle)?;
             app.manage(HtmlJsMenuItem(app_menu.allow_html_js));
+            app.manage(lifecycle::WindowMenu::new(app_menu.window_menu));
             // macOS: native menu bar (and traffic-light overlay title bar).
             // Windows/Linux: no in-window menu bar — the frontend pops this
             // menu from the toolbar app icon. Drop OS decorations so we draw
@@ -389,8 +391,29 @@ fn main() {
 
             app.on_menu_event(move |app_handle, event| {
                 let id = event.id().0.as_str();
-                if let Some(window) = windows::target_window(app_handle) {
-                    let _ = window.emit(&format!("menu:{}", id), ());
+                // Window-level actions are the core's (#65).
+                if id.starts_with(lifecycle::NEW_WINDOW_ID) {
+                    let app = app_handle.clone();
+                    std::thread::spawn(move || {
+                        let _ = lifecycle::new_window(&app);
+                    });
+                    return;
+                }
+                if let Some(label) = id.strip_prefix(lifecycle::FOCUS_PREFIX) {
+                    routing::focus(app_handle, label);
+                    return;
+                }
+                match windows::target_window(app_handle) {
+                    Some(window) => {
+                        let _ = window.emit(&format!("menu:{}", id), ());
+                    }
+                    // macOS with every window closed: Settings (or any
+                    // action) opens in a new empty window (#60 decision 7).
+                    None => {
+                        let app = app_handle.clone();
+                        let id = id.to_string();
+                        std::thread::spawn(move || lifecycle::menu_in_new_window(&app, &id));
+                    }
                 }
             });
 
@@ -432,6 +455,7 @@ fn main() {
                 let _ = w.set_focus();
                 windows::registry().mark_focused(w.label());
             }
+            lifecycle::refresh(&handle);
 
             // In-app MCP server for agents in the terminal. Transport is a
             // per-user Unix domain socket (Windows: a per-launch named pipe),
@@ -461,6 +485,12 @@ fn main() {
             routing::route_folder,
             routing::window_take_open,
             routing::window_set_remote_folder,
+            lifecycle::quit_status,
+            lifecycle::quit_prepare_others,
+            lifecycle::quit_prepare_reply,
+            lifecycle::window_close,
+            lifecycle::window_new,
+            lifecycle::window_take_menu,
             commands::read_file,
             commands::write_file,
             commands::append_crash_log,
@@ -600,6 +630,7 @@ fn main() {
                     app.state::<session::ConfigStore>().forget_window(label);
                 }
                 release_window(app, label);
+                lifecycle::refresh(app);
                 return;
             }
 
@@ -610,14 +641,7 @@ fn main() {
             } = &event
             {
                 api.prevent_close();
-                if let Some(window) = app.get_webview_window(label) {
-                    // macOS: hide to dock (after resolving unsaved changes).
-                    // Other platforms: closing the window means quit.
-                    #[cfg(target_os = "macos")]
-                    let _ = window.emit("close-requested", ());
-                    #[cfg(not(target_os = "macos"))]
-                    let _ = window.emit("exit-requested", ());
-                }
+                lifecycle::on_close_requested(app, label);
                 return;
             }
 
@@ -657,9 +681,17 @@ fn main() {
             } = event
             {
                 if !has_visible_windows {
-                    if let Some(window) = windows::target_window(app) {
-                        let _ = window.show();
-                        let _ = window.set_focus();
+                    match windows::target_window(app) {
+                        Some(window) => {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                        None => {
+                            let app = app.clone();
+                            std::thread::spawn(move || {
+                                let _ = lifecycle::new_window(&app);
+                            });
+                        }
                     }
                 }
                 return;

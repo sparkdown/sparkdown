@@ -15,6 +15,7 @@ import { viewForDigit } from './view-mode';
  */
 export const KEYBINDINGS: Partial<Record<ActionName, string>> = {
   [ACTIONS.NEW_FILE]: 'CmdOrCtrl+N',
+  [ACTIONS.NEW_WINDOW]: 'CmdOrCtrl+Shift+N',
   [ACTIONS.OPEN_FILE]: 'CmdOrCtrl+O',
   [ACTIONS.OPEN_FOLDER]: 'CmdOrCtrl+Alt+O',
   [ACTIONS.OPEN_REMOTE]: 'CmdOrCtrl+Shift+O',
@@ -266,7 +267,12 @@ export class ShortcutManager {
 
     if (isMacOS()) return;
 
-    if (key === 'n' && !e.shiftKey) {
+    if (key === 'n' && e.shiftKey && !e.altKey) {
+      // Mirrors Window → New Window (CmdOrCtrl+Shift+N) for the Win/Linux
+      // popup menu, whose accelerators don't fire.
+      e.preventDefault();
+      this.bus.emit(ACTIONS.NEW_WINDOW);
+    } else if (key === 'n' && !e.shiftKey) {
       e.preventDefault();
       this.bus.emit(ACTIONS.NEW_FILE);
     } else if (key === 't' && !e.shiftKey) {

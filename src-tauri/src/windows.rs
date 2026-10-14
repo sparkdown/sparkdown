@@ -570,6 +570,7 @@ pub fn target_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
 /// Errors with the label of another window that already has the folder.
 #[tauri::command]
 pub fn window_set_folder(
+    app: tauri::AppHandle,
     webview_window: tauri::WebviewWindow,
     folder: Option<FolderId>,
     display: Option<String>,
@@ -580,7 +581,9 @@ pub fn window_set_folder(
         }
         other => other,
     };
-    registry().set_folder(webview_window.label(), folder, display)
+    let r = registry().set_folder(webview_window.label(), folder, display);
+    crate::lifecycle::refresh(&app);
+    r
 }
 
 /// The frontend reports whether its window has unsaved tabs.

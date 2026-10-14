@@ -5,7 +5,7 @@
  * disables password auth). We show a masked field naming the key, send the
  * answer back once, and clear the field. Nothing is stored here.
  */
-import { listen } from '@tauri-apps/api/event';
+import { listen } from './window-events';
 import { api } from './api';
 import { trapFocus } from './modal';
 

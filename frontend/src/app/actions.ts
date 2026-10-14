@@ -1,3 +1,4 @@
+import { api } from '../api';
 import type { EventCallback } from '@tauri-apps/api/event';
 import type { EditorManager } from '../editor';
 import type { EventBus } from '../events';
@@ -116,6 +117,7 @@ export function registerActionListeners(t: ActionTargets): void {
   t.bus.on(ACTIONS.FIND, () => t.panes.openFind());
   // Ctrl+Q (Windows/Linux) must take the same guarded path as Cmd+Q.
   t.bus.on(ACTIONS.QUIT, () => void t.lifecycle.requestQuit());
+  t.bus.on(ACTIONS.NEW_WINDOW, () => void api.windowNew().catch(() => {}));
   t.bus.on(ACTIONS.BOLD, () => t.editor.wrapSelection('**', '**'));
   t.bus.on(ACTIONS.ITALIC, () => t.editor.wrapSelection('_', '_'));
   t.bus.on(ACTIONS.HEADING, () => t.editor.insertLinePrefix('## '));

@@ -139,6 +139,7 @@ pub fn route(app: &AppHandle, caller: Option<&str>, dir: &str) -> Result<Route, 
                 windows::registry().unregister(label);
                 return Err(format!("could not open a new window: {e}"));
             }
+            crate::lifecycle::refresh(app);
         }
     }
     Ok(route)
@@ -197,7 +198,9 @@ pub async fn window_set_remote_folder(
         };
         let f = remote_folder_id(&s.host, &s.path)?;
         let display = format!("{}:{}", s.host, s.path);
-        match windows::registry().set_folder(&label, Some(f), Some(display)) {
+        let r = windows::registry().set_folder(&label, Some(f), Some(display));
+        crate::lifecycle::refresh(&app);
+        match r {
             Ok(()) => Ok(None),
             Err(other) => {
                 focus(&app, &other);

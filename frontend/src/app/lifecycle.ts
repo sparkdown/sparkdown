@@ -1,4 +1,5 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { ask } from '@tauri-apps/plugin-dialog';
 import { api } from '../api';
 import type { AppContext } from './context';
 
@@ -33,8 +34,61 @@ export class LifecycleController {
    *   changes, then exit.
    */
   registerCloseGuard(): void {
-    this.ctx.listenTauri('close-requested', () => void this.handleCloseToTray());
+    this.ctx.listenTauri<{ mode?: 'hide' | 'close' } | null>('close-requested', (e) => {
+      if (e.payload?.mode === 'close') void this.closeThisWindow();
+      else void this.handleCloseToTray();
+    });
     this.ctx.listenTauri('exit-requested', () => void this.requestQuit());
+    // Another window is quitting the app (#65): resolve ours, then answer.
+    this.ctx.listenTauri<{ id: number }>('quit-prepare', (e) => void this.prepareForOtherQuit(e.payload.id));
+  }
+
+  /** Close only this window (others stay open): resolve its unsaved tabs
+   *  and its running terminals, save its session, then let the core close it. */
+  private async closeThisWindow(): Promise<void> {
+    if (this.quitting) return;
+    if (!(await this.deps.resolveUnsavedChanges())) return;
+    await this.deps.persistConfig();
+    this.quitting = true;
+    this.deps.destroy();
+    await this.deps.clearAgentContext();
+    await api.windowClose();
+  }
+
+  private async prepareForOtherQuit(id: number): Promise<void> {
+    let ok = false;
+    try {
+      ok = await this.deps.resolveUnsavedChanges();
+      if (ok) {
+        await this.deps.persistConfig();
+        await this.deps.clearAgentContext();
+      }
+    } finally {
+      await api.quitPrepareReply(id, ok).catch(() => {});
+    }
+  }
+
+  /** One confirm for every running terminal a quit would stop, across all
+   *  windows. True = go ahead. */
+  private async confirmBusyTerminals(): Promise<boolean> {
+    const busy = await api.quitStatus().catch(() => []);
+    if (busy.length === 0) return true;
+    const lines = busy
+      .slice(0, 8)
+      .map((b) => `• ${b.command} — ${b.window}`)
+      .join('\n');
+    const more = busy.length > 8 ? `\n…and ${busy.length - 8} more` : '';
+    const n = busy.length === 1 ? 'A terminal is' : `${busy.length} terminals are`;
+    try {
+      return await ask(`${n} still running:\n\n${lines}${more}\n\nQuit SparkDown and stop them?`, {
+        title: 'Quit SparkDown',
+        kind: 'warning',
+        okLabel: 'Quit',
+        cancelLabel: 'Cancel',
+      });
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -51,8 +105,11 @@ export class LifecycleController {
   /** Cmd+Q / dock Quit: prompt to save, then exit. A cancel aborts the quit. */
   async requestQuit(): Promise<void> {
     if (this.quitting) return;
+    if (!(await this.confirmBusyTerminals())) return;
     const proceed = await this.deps.resolveUnsavedChanges();
     if (!proceed) return; // save failed/cancelled — abort quit
+    // Every other window resolves its own unsaved tabs, in turn (#65).
+    if (!(await api.quitPrepareOthers().catch(() => true))) return;
     await this.exitNow();
   }
 
