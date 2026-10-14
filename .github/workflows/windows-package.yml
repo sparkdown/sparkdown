@@ -51,8 +51,9 @@ jobs:
         # The same script the owner runs on a Windows PC, so this job also
         # tests it: prerequisite checks, npm ci, tauri build, hashes. The
         # runner image has the VS Build Tools C++ workload, the Windows SDK and
-        # WebView2. Unsigned: no Authenticode certificate in CI. No updater
-        # key either — Windows updates are notify-only (src-tauri/src/updates.rs).
+        # WebView2. Unsigned: no Authenticode certificate in CI. No signing
+        # key in this step's environment (it runs npm and cargo build
+        # scripts); a later step signs the installer for the updater.
         shell: pwsh
         run: ./scripts/package-windows.ps1
       - name: Upgrade over a pre-0.3.1 install (#17)
@@ -96,10 +97,44 @@ jobs:
           if ($now -ne $dir) { throw "publisher key is '$now', expected '$dir'" }
           if (-not (Test-Path "$dir\uninstall.exe")) { throw "reinstall left no uninstall.exe" }
           Write-Host "OK: uninstalled the pre-0.3.1 layout and reinstalled; publisher key -> $now"
+      - name: Sign the installer for the auto-updater
+        # Produces <setup.exe>.sig, which scripts/release.sh reads from the
+        # Release to write latest.json's windows-x86_64 entry. Runs after the
+        # upgrade test (which only installs; it doesn't touch the file) so the
+        # signature covers the exact bytes uploaded. Secrets:
+        # TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD. Never
+        # on pull requests (PR code would run with the key). Without the key
+        # this only warns: the installer still builds and ships, and that
+        # release's latest.json has no Windows entry (decision 8, #60).
+        if: github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            Write-Host "::warning::TAURI_SIGNING_PRIVATE_KEY secret is not set; installer not signed (no Windows updater entry for this build)."
+            exit 0
+          }
+          if (Select-String -Quiet -Path src-tauri/updater-pubkey.txt -Pattern 'REPLACE_WITH_UPDATER_PUBLIC_KEY') {
+            Write-Host "::warning::src-tauri/updater-pubkey.txt is still the placeholder; installer not signed."
+            exit 0
+          }
+          $version = node -p 'require("./src-tauri/tauri.conf.json").version'
+          foreach ($f in Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe) {
+            & frontend/node_modules/.bin/tauri.cmd signer sign --app-version $version $f.FullName | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "signing $($f.Name) failed" }
+            Write-Host "Signed $($f.Name)"
+          }
+          python scripts/check-updater-sig.py (Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe.sig | ForEach-Object FullName)
+          if ($LASTEXITCODE -ne 0) { throw "signature check failed" }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sparkdown-windows
-          path: src-tauri/target/release/bundle/nsis/*-setup.exe
+          path: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/nsis/*-setup.exe.sig
           if-no-files-found: error
 
   release:
@@ -124,4 +159,6 @@ jobs:
       - name: Attach to GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          files: dist/**/*-setup.exe
+          files: |
+            dist/**/*-setup.exe
+            dist/**/*-setup.exe.sig

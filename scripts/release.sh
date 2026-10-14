@@ -19,14 +19,16 @@
 # password comes from TAURI_SIGNING_PRIVATE_KEY_PASSWORD, or a hidden prompt
 # (press Enter for a key without a password). Neither is ever echoed.
 #
-# latest.json covers two platforms built in two places: darwin-aarch64 (this
-# Mac) and linux-x86_64 (the AppImage, built + signed by the tag-triggered
-# .github/workflows/linux-package.yml). Only ONE writer exists, to avoid a
-# race: this script. After the Linux assets are attached, it downloads BOTH
-# .sig files from the release (the release is the source of truth), writes one
-# latest.json and uploads it with --clobber. If the Linux signature is missing
-# (CI secrets not set, or the workflow is slow), latest.json has only the
-# macOS entry; re-run later with --manifest-only to add Linux.
+# latest.json covers three platforms built in three places: darwin-aarch64
+# (this Mac), linux-x86_64 (the AppImage, built + signed by the tag-triggered
+# .github/workflows/linux-package.yml) and windows-x86_64 (the NSIS installer,
+# built + signed by .github/workflows/windows-package.yml). Only ONE writer
+# exists, to avoid a race: this script. After the CI assets are attached, it
+# downloads every .sig from the release (the release is the source of truth),
+# writes one latest.json and uploads it with --clobber. A platform whose
+# signature is missing (CI secrets not set, or a workflow is slow) is left
+# out, so without the CI key latest.json has only the macOS entry; re-run
+# later with --manifest-only to add the others.
 #
 # Each platform entry also carries `size` (bytes), read from the release's
 # asset list (`gh release view --json assets`), so the app can show a download
@@ -56,6 +58,7 @@ fi
 
 MAC_TGZ_ASSET="SparkDown_${VERSION}_aarch64.app.tar.gz"
 APPIMAGE_ASSET="SparkDown_${VERSION}_amd64.AppImage"
+WINDOWS_ASSET="SparkDown_${VERSION}_x64-setup.exe"
 
 # The public key compiled into the app (src-tauri/src/updates.rs).
 UPDATER_PUBKEY_FILE="src-tauri/updater-pubkey.txt"
@@ -85,7 +88,8 @@ publish_manifest() {
   local tmp
   tmp=$(mktemp -d)
   gh release download "v$VERSION" --repo "$REPO" --dir "$tmp" \
-    --pattern "$MAC_TGZ_ASSET.sig" --pattern "$APPIMAGE_ASSET.sig" 2>/dev/null || true
+    --pattern "$MAC_TGZ_ASSET.sig" --pattern "$APPIMAGE_ASSET.sig" \
+    --pattern "$WINDOWS_ASSET.sig" 2>/dev/null || true
   if [ ! -f "$tmp/$MAC_TGZ_ASSET.sig" ]; then
     echo "error: $MAC_TGZ_ASSET.sig is not on release v$VERSION; cannot write latest.json" >&2
     rm -rf "$tmp"
@@ -94,21 +98,24 @@ publish_manifest() {
   # Explicit `|| return`: this function is also called as `publish_manifest ||
   # warn`, where `set -e` does not apply inside it.
   check_sig_key "$tmp/$MAC_TGZ_ASSET.sig" || { rm -rf "$tmp"; return 1; }
-  if [ -f "$tmp/$APPIMAGE_ASSET.sig" ]; then
-    check_sig_key "$tmp/$APPIMAGE_ASSET.sig" || { rm -rf "$tmp"; return 1; }
-  else
-    echo "WARNING: $APPIMAGE_ASSET.sig not on the release; latest.json will be macOS-only." >&2
-    echo "         Once it is attached: bash scripts/release.sh $VERSION --manifest-only" >&2
-  fi
+  local asset
+  for asset in "$APPIMAGE_ASSET" "$WINDOWS_ASSET"; do
+    if [ -f "$tmp/$asset.sig" ]; then
+      check_sig_key "$tmp/$asset.sig" || { rm -rf "$tmp"; return 1; }
+    else
+      echo "WARNING: $asset.sig not on the release; latest.json will not list that platform." >&2
+      echo "         Once it is attached: bash scripts/release.sh $VERSION --manifest-only" >&2
+    fi
+  done
   # Asset sizes (bytes) as GitHub stores them. On failure the manifest is
   # written without sizes (the app then shows MB and skips the length check).
   gh release view "v$VERSION" --repo "$REPO" --json assets > "$tmp/assets.json" 2>/dev/null \
     || echo '{"assets":[]}' > "$tmp/assets.json"
   local notes="${NOTES:-See https://github.com/$REPO/releases/tag/v$VERSION}"
   python3 - "$tmp" "$VERSION" "$REPO" "$notes" "$MAC_TGZ_ASSET" "$APPIMAGE_ASSET" \
-    "${MAC_TGZ_LOCAL_SIZE:-}" <<'PY' || { rm -rf "$tmp"; return 1; }
+    "${MAC_TGZ_LOCAL_SIZE:-}" "$WINDOWS_ASSET" <<'PY' || { rm -rf "$tmp"; return 1; }
 import json, os, sys, datetime
-tmp, version, repo, notes, mac, appimage, mac_local = sys.argv[1:8]
+tmp, version, repo, notes, mac, appimage, mac_local, windows = sys.argv[1:9]
 base = f"https://github.com/{repo}/releases/download/v{version}"
 with open(os.path.join(tmp, "assets.json")) as f:
     sizes = {a["name"]: a.get("size") for a in json.load(f).get("assets", [])}
@@ -130,6 +137,8 @@ def entry(asset):
 platforms = {"darwin-aarch64": entry(mac)}
 if os.path.exists(os.path.join(tmp, appimage + ".sig")):
     platforms["linux-x86_64"] = entry(appimage)
+if os.path.exists(os.path.join(tmp, windows + ".sig")):
+    platforms["windows-x86_64"] = entry(windows)
 manifest = {
     "version": version,
     "notes": notes,
@@ -243,7 +252,9 @@ cp "$UPDATER_TGZ.sig" "$UPLOAD_DIR/$MAC_TGZ_ASSET.sig"
 echo "==> Committing, tagging v$VERSION, pushing"
 git add src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock \
         frontend/package.json frontend/package-lock.json
-git commit -m "Release v$VERSION"
+# The versions may already be bumped (the 0.4.0 prep landed them on main):
+# then there is nothing to commit and the tag goes on HEAD.
+git diff --cached --quiet || git commit -m "Release v$VERSION"
 git tag "v$VERSION"
 git push
 git push origin "v$VERSION"
@@ -261,6 +272,7 @@ rm -rf "$UPLOAD_DIR"
 # AppImage and attaches them to this release. Poll until they show up (or warn),
 # then refresh the AUR PKGBUILD from the published .deb.
 echo "==> Waiting for the Linux package workflow to attach .deb + AppImage"
+echo "    (the Windows package workflow attaches the installer + .sig in parallel)"
 DEADLINE=$(( $(date +%s) + 20 * 60 ))   # up to 20 minutes
 LINUX_READY=0
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
@@ -292,6 +304,23 @@ else
   echo "         Check the 'Linux package' workflow run, then once assets are up run:" >&2
   echo "           bash scripts/update-pkgbuild.sh $VERSION && git commit -am 'Update AUR PKGBUILD for v$VERSION' && git push" >&2
 fi
+
+# The Windows installer (+ .sig) comes from the Windows package workflow.
+echo "==> Waiting for the Windows package workflow to attach the installer"
+DEADLINE=$(( $(date +%s) + 25 * 60 ))   # a Windows build is slower
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+  ASSETS=$(gh release view "v$VERSION" --json assets --jq '.assets[].name' 2>/dev/null || true)
+  if printf '%s\n' "$ASSETS" | grep -qF "$WINDOWS_ASSET"; then
+    for _ in 1 2 3 4; do
+      printf '%s\n' "$ASSETS" | grep -qF "$WINDOWS_ASSET.sig" && break
+      sleep 15
+      ASSETS=$(gh release view "v$VERSION" --json assets --jq '.assets[].name' 2>/dev/null || true)
+    done
+    break
+  fi
+  echo "    ... not attached yet; checking again in 30s"
+  sleep 30
+done
 
 echo "==> Writing the auto-update manifest (latest.json)"
 publish_manifest || echo "WARNING: latest.json not published; fix, then: bash scripts/release.sh $VERSION --manifest-only" >&2
