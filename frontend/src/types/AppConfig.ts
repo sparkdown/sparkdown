@@ -91,4 +91,11 @@ terminal_layouts: { [key in string]: TerminalLayout },
  * MCP install prompt shown at agent launch. Settings → Agents clears it
  * ("Ask again when launching"). Empty by default.
  */
-mcp_install_prompt_dismissed: Array<string>, };
+mcp_install_prompt_dismissed: Array<string>, 
+/**
+ * Serve agents started outside SparkDown's terminals (#64, decision
+ * 2). Off by default; such an agent must name a folder unless exactly
+ * one window is open. On Windows this also opens a discoverable,
+ * user-only pipe (after a restart).
+ */
+mcp_external_agents: boolean, };

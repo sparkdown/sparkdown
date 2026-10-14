@@ -407,7 +407,15 @@ pub async fn remote_connect(
         // the local socket over the SSH control (mux) connection. Best effort
         // — when it fails (no mux, old sshd, no home) the remote keeps the
         // file bridge.
-        if let Some(local) = crate::mcp::running_socket_path() {
+        // The local end is this window's own socket (#64), so remote agents
+        // reach this window's folder only.
+        #[cfg(unix)]
+        let local = crate::mcp::running_socket_path()
+            .and_then(|_| crate::mcp::window_socket(&app, &label))
+            .map(|p| p.into_os_string());
+        #[cfg(not(unix))]
+        let local = crate::mcp::running_socket_path();
+        if let Some(local) = local {
             if let Err(e) = mcp_forward_start(&session, Path::new(&local)) {
                 eprintln!("remote MCP unavailable, using the file bridge: {e}");
             }
@@ -1075,6 +1083,13 @@ pub fn terminal_command(
         }
         if let Some(sock) = remote_mcp_socket() {
             f.push_str(&format!("export SPARKDOWN_MCP={}; ", shell_quote(&sock)));
+        }
+        if let Some(t) = crate::windows::token_for_current_window(None) {
+            f.push_str(&format!(
+                "export {}={}; ",
+                crate::mcp::TOKEN_ENV,
+                shell_quote(&t)
+            ));
         }
         f
     };

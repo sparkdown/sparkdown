@@ -124,6 +124,13 @@ pub struct AppConfig {
     /// ("Ask again when launching"). Empty by default.
     #[serde(default)]
     pub mcp_install_prompt_dismissed: Vec<String>,
+
+    /// Serve agents started outside SparkDown's terminals (#64, decision
+    /// 2). Off by default; such an agent must name a folder unless exactly
+    /// one window is open. On Windows this also opens a discoverable,
+    /// user-only pipe (after a restart).
+    #[serde(default)]
+    pub mcp_external_agents: bool,
 }
 
 /// One node of a persisted terminal split layout (see
@@ -231,6 +238,7 @@ impl Default for AppConfig {
             last_update_check_ms: 0,
             terminal_layouts: std::collections::HashMap::new(),
             mcp_install_prompt_dismissed: vec![],
+            mcp_external_agents: false,
         }
     }
 }

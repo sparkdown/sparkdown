@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// How long `edit_buffer` / `open_file` wait for the frontend to apply.
 const ROUNDTRIP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1245,6 +1245,10 @@ pub async fn mcp_agent_installed(webview_window: tauri::WebviewWindow, bin: Stri
 }
 /// Env var naming the socket; set in SparkDown terminals only.
 pub const SOCKET_ENV: &str = "SPARKDOWN_MCP";
+/// The routing token of a terminal's folder (#64, decision 3).
+pub const TOKEN_ENV: &str = "SPARKDOWN_MCP_TOKEN";
+/// The folder an external agent names (or `--folder <path>`).
+pub const FOLDER_ENV: &str = "SPARKDOWN_FOLDER";
 
 /// Path of the executable an agent config should point at. AppImage mounts
 /// under a fresh path every run, so prefer the `$APPIMAGE` file it exports.
@@ -1426,6 +1430,63 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// The local end of one window's remote MCP forward (#64): a socket of its
+/// own, so every connection on it belongs to that window. Unix only (remote
+/// MCP rides the SSH mux, which Windows lacks).
+#[cfg(unix)]
+pub fn window_socket(app: &AppHandle, label: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+    static SOCKS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+    let socks = SOCKS.get_or_init(Default::default);
+    if let Some(p) = socks.lock().ok()?.get(label) {
+        if p.exists() {
+            return Some(p.clone());
+        }
+    }
+    let path =
+        mcp_socket_path().with_file_name(format!("mcp-{}.sock", crate::windows::label_tag(label)));
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).ok()?;
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    socks.lock().ok()?.insert(label.to_string(), path.clone());
+    let app = app.clone();
+    let state = app.state::<Arc<McpState>>().inner().clone();
+    let label = label.to_string();
+    let _ = std::thread::Builder::new()
+        .name("sparkdown-mcp-window".into())
+        .spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let (app, state, label) = (app.clone(), state.clone(), label.clone());
+                std::thread::spawn(move || {
+                    let Ok(read_half) = stream.try_clone() else {
+                        return;
+                    };
+                    let mut conn = Conn {
+                        fixed: Some(label),
+                        ..Default::default()
+                    };
+                    serve_lines(read_half, stream, |msg| conn.handle(&app, &state, msg));
+                });
+            }
+        });
+    Some(path)
+}
+
+/// Windows: a stable, discoverable pipe for external agents, created only
+/// when Settings → Agents → External agents is on (decision 2). Same
+/// user-only DACL and first-instance guard as the secret pipe.
+#[cfg(windows)]
+pub fn discoverable_pipe_path() -> PathBuf {
+    let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".into());
+    let safe: String = user
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    PathBuf::from(format!(r"\\.\pipe\sparkdown-{safe}-mcp-external"))
+}
+
 /// Windows: serve on a per-user named pipe via `interprocess`. Same
 /// line protocol; `serve_client` gets the pipe's two halves.
 #[cfg(windows)]
@@ -1435,6 +1496,23 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
     let listener = create_pipe_listener(&path)?;
     let _ = SOCKET.set(path.clone());
     eprintln!("SparkDown MCP pipe: {}", path.display());
+    if externals_allowed(&app) {
+        let ext = discoverable_pipe_path();
+        match create_pipe_listener(&ext) {
+            Ok(l) => {
+                let (app, state) = (app.clone(), state.clone());
+                std::thread::spawn(move || {
+                    use interprocess::local_socket::traits::ListenerExt as _;
+                    for stream in l.incoming() {
+                        let Ok(stream) = stream else { continue };
+                        let (app, state) = (app.clone(), state.clone());
+                        std::thread::spawn(move || serve_client(stream, &app, &state));
+                    }
+                });
+            }
+            Err(e) => eprintln!("Warning: external-agent pipe unavailable: {e}"),
+        }
+    }
     std::thread::Builder::new()
         .name("sparkdown-mcp".into())
         .spawn(move || {
@@ -1553,9 +1631,8 @@ fn serve_client(
 ) {
     use interprocess::local_socket::traits::Stream as _;
     let (read_half, write_half) = stream.split();
-    serve_lines(read_half, write_half, |msg| {
-        dispatch_routed(app, state, msg)
-    });
+    let mut conn = Conn::default();
+    serve_lines(read_half, write_half, |msg| conn.handle(app, state, msg));
 }
 
 /// One client: newline-delimited JSON-RPC in, one line per response out.
@@ -1565,17 +1642,228 @@ fn serve_client(stream: std::os::unix::net::UnixStream, app: &AppHandle, state: 
     let Ok(read_half) = stream.try_clone() else {
         return;
     };
-    serve_lines(read_half, stream, |msg| dispatch_routed(app, state, msg));
+    let mut conn = Conn::default();
+    serve_lines(read_half, stream, |msg| conn.handle(app, state, msg));
 }
 
-/// Dispatch one message as the window this connection belongs to. Until
-/// per-connection routing (#64), that is the focused window.
-fn dispatch_routed(app: &AppHandle, state: &Arc<McpState>, msg: &Value) -> Option<Value> {
-    let label = crate::windows::registry()
-        .focused()
-        .unwrap_or_else(|| crate::windows::DEFAULT_LABEL.to_string());
-    let _scope = crate::windows::enter(&label);
+// --- Connection routing (#64) ----------------------------------------------------
+
+/// What a shim says about itself before the first JSON-RPC message
+/// (`{"sparkdown_hello": {...}}`). A client that sends none (an older shim,
+/// a remote bridge) is routed as a terminal without a token.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct Hello {
+    /// `$SPARKDOWN_MCP_TOKEN`: the routing token of the terminal's folder.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// The agent's working directory (the terminal's folder fallback).
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// External agents: the folder they name (`--folder` / `$SPARKDOWN_FOLDER`).
+    #[serde(default)]
+    pub folder: Option<String>,
+    /// Launched from a SparkDown terminal (`$SPARKDOWN_MCP` was set).
+    #[serde(default)]
+    pub terminal: bool,
+}
+
+/// One client connection's routing.
+#[derive(Default)]
+pub(crate) struct Conn {
+    hello: Option<Hello>,
+    /// A per-window socket (remote forward): always this window.
+    pub(crate) fixed: Option<String>,
+    started: bool,
+}
+
+/// Where a connection's tool calls go, given the open windows.
+pub fn resolve_route(
+    reg: &crate::windows::Registry,
+    hello: Option<&Hello>,
+    externals_allowed: bool,
+) -> Result<String, String> {
+    let list = || {
+        let rows: Vec<String> = reg
+            .summaries()
+            .into_iter()
+            .map(|w| {
+                let shown = w.display.clone().unwrap_or_else(|| "no folder".into());
+                format!("{shown} [{}]", w.label)
+            })
+            .collect();
+        if rows.is_empty() {
+            "No SparkDown window is open.".to_string()
+        } else {
+            format!("Open windows: {}.", rows.join("; "))
+        }
+    };
+    let single = || {
+        let labels = reg.labels();
+        (labels.len() == 1).then(|| labels[0].clone())
+    };
+    let default = Hello {
+        terminal: true,
+        ..Default::default()
+    };
+    let h = hello.unwrap_or(&default);
+    if h.terminal {
+        if let Some(t) = h.token.as_deref().filter(|t| !t.is_empty()) {
+            if let Some(l) = reg.window_for_token(t) {
+                return Ok(l);
+            }
+        }
+        // Fall back to the terminal's folder (decision 3).
+        if let Some(l) = h.cwd.as_deref().and_then(|c| reg.window_for_local_path(c)) {
+            return Ok(l);
+        }
+        return single().ok_or_else(|| {
+            format!(
+                "This terminal's folder is not open in SparkDown. {}",
+                list()
+            )
+        });
+    }
+    if !externals_allowed {
+        return Err("SparkDown does not serve agents outside its terminals. Turn on \"External agents\" in Settings → Agents to allow it.".into());
+    }
+    if let Some(f) = h.folder.as_deref().filter(|f| !f.is_empty()) {
+        let canon = crate::windows::local_folder_id(f)
+            .ok()
+            .and_then(|id| match id {
+                crate::windows::FolderId::Local { path } => Some(path),
+                _ => None,
+            })
+            .unwrap_or_else(|| f.to_string());
+        return reg
+            .window_for_local_path(&canon)
+            .ok_or_else(|| format!("{f} is not open in SparkDown. {}", list()));
+    }
+    single().ok_or_else(|| {
+        format!(
+            "Several SparkDown windows are open; name one with --folder <path> (or $SPARKDOWN_FOLDER). {}",
+            list()
+        )
+    })
+}
+
+/// Settings → Agents → External agents (off by default, decision 2).
+fn externals_allowed(app: &AppHandle) -> bool {
+    app.try_state::<crate::session::ConfigStore>()
+        .and_then(|s| {
+            s.stored()
+                .prefs
+                .get("mcp_external_agents")
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or(false)
+}
+
+/// A second GUI launch forwarded over the socket (the fallback lock when
+/// the single-instance plugin is not in use, decision 1).
+type ForwardFn = dyn Fn(&AppHandle, Vec<String>, String) + Send + Sync;
+static ON_FORWARD: OnceLock<Box<ForwardFn>> = OnceLock::new();
+
+pub fn set_forward_handler(f: Box<ForwardFn>) {
+    let _ = ON_FORWARD.set(f);
+}
+
+impl Conn {
+    pub(crate) fn handle(
+        &mut self,
+        app: &AppHandle,
+        state: &Arc<McpState>,
+        msg: &Value,
+    ) -> Option<Value> {
+        let first = !self.started;
+        self.started = true;
+        if first {
+            if let Some(h) = msg.get("sparkdown_hello") {
+                let hello: Hello = serde_json::from_value(h.clone()).unwrap_or_default();
+                let r = {
+                    let reg = crate::windows::registry();
+                    resolve_route(&reg, Some(&hello), externals_allowed(app))
+                };
+                // Refuse an external agent outright when they are off; any
+                // other routing problem is reported per tool call (a window
+                // may open later).
+                let refused = !hello.terminal && !externals_allowed(app);
+                self.hello = Some(hello);
+                return Some(match (refused, r) {
+                    (true, Err(e)) => json!({ "sparkdown_ack": { "ok": false, "error": e } }),
+                    _ => json!({ "sparkdown_ack": { "ok": true } }),
+                });
+            }
+            if let Some(f) = msg.get("sparkdown_forward") {
+                let argv: Vec<String> = f
+                    .get("argv")
+                    .and_then(|a| serde_json::from_value(a.clone()).ok())
+                    .unwrap_or_default();
+                let cwd = f
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(h) = ON_FORWARD.get() {
+                    h(app, argv, cwd);
+                }
+                return Some(json!({ "sparkdown_ack": { "ok": true } }));
+            }
+        }
+        let route = match &self.fixed {
+            Some(l) => Ok(l.clone()),
+            None => {
+                let reg = crate::windows::registry();
+                resolve_route(&reg, self.hello.as_ref(), externals_allowed(app))
+            }
+        };
+        match route {
+            Ok(label) => {
+                let _scope = crate::windows::enter(&label);
+                dispatch(app, state, msg)
+            }
+            Err(e) => dispatch_unrouted(app, state, msg, &e),
+        }
+    }
+}
+
+/// A connection with no window: everything but tool calls works; tool
+/// calls (except listing windows) answer the routing error.
+fn dispatch_unrouted(
+    app: &AppHandle,
+    state: &Arc<McpState>,
+    msg: &Value,
+    err: &str,
+) -> Option<Value> {
+    let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+    let name = msg
+        .pointer("/params/name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if method == "tools/call" && name != "sparkdown_list_windows" {
+        let id = msg.get("id").cloned()?;
+        return Some(rpc_result(
+            id,
+            json!({ "content": [{ "type": "text", "text": err }], "isError": true }),
+        ));
+    }
+    let _scope = crate::windows::enter("");
     dispatch(app, state, msg)
+}
+
+/// The windows an agent can reach (the `sparkdown_list_windows` tool).
+fn list_windows_result() -> Value {
+    let rows: Vec<Value> = crate::windows::registry()
+        .summaries()
+        .into_iter()
+        .map(|w| {
+            json!({
+                "window": w.label,
+                "folder": w.display,
+                "focused": w.focused,
+            })
+        })
+        .collect();
+    text_result(serde_json::to_string_pretty(&json!({ "windows": rows })).unwrap_or_default())
 }
 
 /// Transport-agnostic line loop: read newline-delimited JSON-RPC from
@@ -1746,6 +2034,11 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["path"], "additionalProperties": false
             }
+        },
+        {
+            "name": "sparkdown_list_windows",
+            "description": "The SparkDown windows that are open: each window's id, its folder (local path, or host:path for a remote folder) and whether it is focused. Your tools act on the window of the folder you were started in.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }
     ])
 }
@@ -1764,6 +2057,9 @@ fn call_tool(app: &AppHandle, state: &Arc<McpState>, params: &Value) -> Result<V
         .and_then(Value::as_str)
         .ok_or("missing tool name")?;
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    if name == "sparkdown_list_windows" {
+        return Ok(list_windows_result());
+    }
     let snap = state.snapshot_of(&crate::windows::current_label());
     if let Some(result) = snapshot_tool(&snap, name, &args) {
         return Ok(result);
@@ -2137,6 +2433,120 @@ fn roundtrip(
 mod tests {
     use super::*;
 
+    fn two_windows() -> (
+        crate::windows::Registry,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let base = std::env::temp_dir()
+            .join(format!("sd-route-{}", std::process::id()))
+            .canonicalize()
+            .unwrap_or_else(|_| {
+                let p = std::env::temp_dir().join(format!("sd-route-{}", std::process::id()));
+                std::fs::create_dir_all(&p).unwrap();
+                p.canonicalize().unwrap()
+            });
+        let (a, b) = (base.join("a"), base.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let mut reg = crate::windows::Registry::default();
+        for (l, d) in [("w-a", &a), ("w-b", &b)] {
+            reg.register(l);
+            let id = crate::windows::local_folder_id(d.to_str().unwrap()).unwrap();
+            reg.set_folder(l, Some(id), Some(d.to_string_lossy().to_string()))
+                .unwrap();
+        }
+        (reg, a, b)
+    }
+
+    fn token_of(p: &std::path::Path) -> String {
+        crate::windows::folder_token(&crate::windows::local_folder_id(p.to_str().unwrap()).unwrap())
+    }
+
+    #[test]
+    fn terminal_agents_route_by_token_then_by_their_folder() {
+        let (reg, a, b) = two_windows();
+        let h = |token: Option<String>, cwd: Option<&std::path::Path>| Hello {
+            terminal: true,
+            token,
+            cwd: cwd.map(|p| p.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        // The token wins even when the agent cd'd elsewhere.
+        assert_eq!(
+            resolve_route(&reg, Some(&h(Some(token_of(&b)), Some(&a))), false).unwrap(),
+            "w-b"
+        );
+        // Unknown / missing token: the terminal's folder.
+        assert_eq!(
+            resolve_route(
+                &reg,
+                Some(&h(Some("nope".into()), Some(&a.join("sub")))),
+                false
+            )
+            .unwrap(),
+            "w-a"
+        );
+        assert_eq!(
+            resolve_route(&reg, Some(&h(None, Some(&b))), false).unwrap(),
+            "w-b"
+        );
+        // Neither, with two windows: an error that lists them.
+        let e = resolve_route(
+            &reg,
+            Some(&h(None, Some(std::path::Path::new("/elsewhere")))),
+            false,
+        )
+        .unwrap_err();
+        assert!(e.contains("[w-a]") && e.contains("[w-b]"), "{e}");
+        // Tokens are stable for a folder and differ between folders.
+        assert_eq!(token_of(&a), token_of(&a));
+        assert_ne!(token_of(&a), token_of(&b));
+    }
+
+    #[test]
+    fn external_agents_are_off_by_default_and_must_name_a_folder() {
+        let (reg, a, _b) = two_windows();
+        let ext = |folder: Option<&std::path::Path>| Hello {
+            terminal: false,
+            folder: folder.map(|p| p.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let off = resolve_route(&reg, Some(&ext(Some(&a))), false).unwrap_err();
+        assert!(off.contains("External agents"), "{off}");
+        assert_eq!(
+            resolve_route(&reg, Some(&ext(Some(&a))), true).unwrap(),
+            "w-a"
+        );
+        let unnamed = resolve_route(&reg, Some(&ext(None)), true).unwrap_err();
+        assert!(
+            unnamed.contains("--folder") && unnamed.contains("[w-a]"),
+            "{unnamed}"
+        );
+        let missing =
+            resolve_route(&reg, Some(&ext(Some(std::path::Path::new("/nope")))), true).unwrap_err();
+        assert!(missing.contains("not open"), "{missing}");
+        // Exactly one window: an unnamed external agent gets it.
+        let mut one = crate::windows::Registry::default();
+        one.register("w-only");
+        assert_eq!(
+            resolve_route(&one, Some(&ext(None)), true).unwrap(),
+            "w-only"
+        );
+        // A client with no hello (old shim / remote bridge) is a terminal.
+        assert_eq!(resolve_route(&one, None, false).unwrap(), "w-only");
+    }
+
+    #[test]
+    fn list_windows_is_a_tool() {
+        let tools = tool_definitions();
+        assert!(tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "sparkdown_list_windows"));
+    }
+
     #[test]
     fn snapshots_are_isolated_per_window() {
         let state = McpState::new();
@@ -2236,7 +2646,8 @@ mod tests {
                 "sparkdown_edit_buffer",
                 "sparkdown_open_file",
                 "sparkdown_list_changes",
-                "sparkdown_read_diff"
+                "sparkdown_read_diff",
+                "sparkdown_list_windows"
             ]
         );
         for t in tools.as_array().unwrap() {
