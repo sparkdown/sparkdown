@@ -218,6 +218,11 @@ export class RemoteSessions {
     const after = await api.remoteSession().catch(() => null);
     if (after && after.path === dir) {
       this.app.rememberRecentFolder(formatRemoteRecent(after.host, after.path));
+      // Record the canonical remote folder (#62). Another window already
+      // had it (found only now, e.g. via a symlink): it was focused, so
+      // this window steps back.
+      const other = await api.windowSetRemoteFolder().catch(() => null);
+      if (other) await this.disconnect();
     }
   }
 
@@ -514,6 +519,20 @@ export class RemoteSessions {
       const host = hosts.find((h) => h.alias === alias);
       if (host?.password_only) {
         showError(passwordOnlyMessage(alias));
+        return;
+      }
+      // One window per folder (#62): if it is open elsewhere that window
+      // is focused; if this window is in use a new window connects.
+      // A `~`-relative path is only known after the connect; that case is
+      // caught when the window reports its folder (windowSetRemoteFolder).
+      const typedPath = pathInput.value.trim();
+      const route = typedPath.startsWith('/')
+        ? await api
+            .routeFolder(formatRemoteRecent(alias, typedPath))
+            .catch(() => ({ action: 'here' as const }))
+        : ({ action: 'here' } as const);
+      if (route.action !== 'here') {
+        this.closeDialog();
         return;
       }
       go.disabled = true;

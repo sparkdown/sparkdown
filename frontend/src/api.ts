@@ -17,6 +17,11 @@ export type WindowFolder =
   | { kind: 'local'; path: string }
   | { kind: 'remote'; user: string; hostname: string; port: number; path: string };
 
+export type FolderRoute =
+  | { action: 'here' }
+  | { action: 'focused'; label: string }
+  | { action: 'new'; label: string };
+
 export interface FileEntry {
   name: string;
   path: string;
@@ -31,6 +36,14 @@ export const api = {
   windowSetFolder: (folder: WindowFolder | null, display: string | null) =>
     invoke<void>('window_set_folder', { folder, display }),
   windowSetDirty: (dirty: boolean) => invoke<void>('window_set_dirty', { dirty }),
+  /** Open Folder routing (#62): where `dir` (local, on this window's
+   *  session, or ssh://host/path) opens. `here` = this window opens it. */
+  routeFolder: (dir: string) => invoke<FolderRoute>('route_folder', { dir }),
+  /** The folder this (new) window was created to open, once. */
+  windowTakeOpen: () => invoke<string | null>('window_take_open'),
+  /** Record this window's remote folder after a connect; the label of the
+   *  window that already has it (now focused), or null. */
+  windowSetRemoteFolder: () => invoke<string | null>('window_set_remote_folder'),
   readFile: (path: string) => invoke<string>('read_file', { path }),
   writeFile: (path: string, content: string) =>
     invoke<void>('write_file', { path, content }),

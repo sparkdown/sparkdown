@@ -17,6 +17,7 @@ mod menu;
 mod proc;
 mod remote;
 mod review;
+mod routing;
 mod search;
 mod session;
 mod terminal;
@@ -80,14 +81,12 @@ fn forwarded_paths(argv: &[String], cwd: &str) -> Vec<String> {
 
 /// A second launch (#51): bring the window forward and open its paths here.
 fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, cwd: String) {
-    if let Some(window) = windows::target_window(app) {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
     let paths = forwarded_paths(&argv, &cwd);
     eprintln!("another launch handed over {} path(s)", paths.len());
     if paths.is_empty() {
+        if let Some(window) = windows::target_window(app) {
+            routing::focus(app, window.label());
+        }
         return;
     }
     let state = app.state::<PendingFiles>();
@@ -99,14 +98,19 @@ fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, cwd: String) {
         .load(std::sync::atomic::Ordering::SeqCst)
     {
         drop(queue);
-        let target = windows::target_window(app)
-            .map(|w| w.label().to_string())
-            .unwrap_or_else(|| windows::DEFAULT_LABEL.to_string());
-        let _ = app.emit_to(
-            target.as_str(),
-            OPEN_PATHS_EVENT,
-            serde_json::json!({ "paths": paths }),
-        );
+        // Folders route (#62): focus the window that has it, else the
+        // focused window if empty, else a new window.
+        let app = app.clone();
+        std::thread::spawn(move || {
+            for (label, paths) in routing::route_forwarded(&app, &paths) {
+                routing::focus(&app, &label);
+                let _ = app.emit_to(
+                    label.as_str(),
+                    OPEN_PATHS_EVENT,
+                    serde_json::json!({ "paths": paths }),
+                );
+            }
+        });
     } else {
         // The frontend has not started yet: it takes these with the CLI's.
         for p in paths {
@@ -180,9 +184,15 @@ fn push_pending<I: IntoIterator<Item = String>>(state: &State<'_, PendingFiles>,
 
 #[cfg(target_os = "macos")]
 fn emit_open_file_paths(app: &tauri::AppHandle, paths: &[String]) {
-    if let Some(window) = windows::target_window(app) {
+    // Folders route like any Open Folder (#62); files go to the window
+    // whose folder holds them.
+    for (label, paths) in routing::route_forwarded(app, paths) {
         for path in paths {
-            let _ = window.emit("open-file-path", serde_json::json!({ "path": path }));
+            let _ = app.emit_to(
+                label.as_str(),
+                "open-file-path",
+                serde_json::json!({ "path": path }),
+            );
         }
     }
 }
@@ -448,6 +458,9 @@ fn main() {
             windows::window_set_folder,
             windows::window_set_dirty,
             windows::windows_list,
+            routing::route_folder,
+            routing::window_take_open,
+            routing::window_set_remote_folder,
             commands::read_file,
             commands::write_file,
             commands::append_crash_log,

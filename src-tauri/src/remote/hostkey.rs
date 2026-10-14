@@ -75,6 +75,8 @@ const KEY_TYPES: &[&str] = &[
 /// The parts of `ssh -G` output the scan needs.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ResolvedHost {
+    /// `ssh -G` user (empty when ssh did not print one).
+    pub user: String,
     pub hostname: String,
     pub port: u16,
     pub host_key_alias: Option<String>,
@@ -97,6 +99,7 @@ pub(crate) fn parse_ssh_g(out: &str) -> ResolvedHost {
         let v = v.trim();
         match k {
             "hostname" => r.hostname = v.to_string(),
+            "user" => r.user = v.to_string(),
             "port" => r.port = v.parse().unwrap_or(22),
             "hostkeyalias" if v != "none" => r.host_key_alias = Some(v.to_string()),
             "userknownhostsfile" => {

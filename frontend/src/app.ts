@@ -267,8 +267,14 @@ export class App {
     // CLI / "Open With" paths can be files or folders. Folders become the
     // sidebar root (same as a dropped directory); files open as tabs.
     // Session restore is files-only, so it stays on openFilesInOrder.
+    // A window opened by Open Folder routing (#62) opens its folder.
+    const routed = await api.windowTakeOpen().catch(() => null);
+    if (routed) {
+      this.welcome.hide();
+      await this.openFolder(routed);
+    }
     // Session restore (#63): this window's folder, then its open files.
-    const folder = this.config.window_folder;
+    const folder = routed ? null : this.config.window_folder;
     if (folder && (await api.isDirectory(folder).catch(() => false))) {
       await this.workspace.openFolder(folder);
     }
@@ -276,7 +282,7 @@ export class App {
       await this.workspace.openDroppedPaths(pendingFiles);
     } else if (this.config.last_open_files.length > 0) {
       await this.documents.openFilesInOrder(this.config.last_open_files);
-    } else if (!folder) {
+    } else if (!folder && !routed) {
       // Nothing to restore → the welcome screen (an invitation to act),
       // rather than a blank Untitled buffer.
       this.welcome.show();
@@ -515,7 +521,11 @@ export class App {
 
   /** Open a folder as the workspace. With a remote handler registered, the
    *  request (a local path or ssh://host/path) goes through it first. */
-  openFolder(dir: string): Promise<void> {
+  async openFolder(dir: string): Promise<void> {
+    // One window per folder (#62): focus the window that has it, or let a
+    // new window open it when this one is in use.
+    const route = await api.routeFolder(dir).catch(() => ({ action: 'here' as const }));
+    if (route.action !== 'here') return;
     const openResolved = (path: string) => this.workspace.openFolder(path);
     return this.remoteHandler
       ? this.remoteHandler.openFolder(dir, openResolved)
