@@ -23,6 +23,7 @@ mod updates;
 mod watcher;
 #[cfg(all(test, windows))]
 mod win_test_agents;
+mod windows;
 
 use std::sync::{Arc, Mutex};
 use tauri::menu::CheckMenuItem;
@@ -287,7 +288,7 @@ fn main() {
         .manage(HtmlPreview::default())
         .manage(commands::WriteRateLimiter::default())
         .manage(terminal::TerminalState::default())
-        .manage(watcher::WatcherState::default())
+        .manage(watcher::WatcherStates::default())
         .manage(Arc::new(mcp::McpState::default()))
         .manage(updates::UpdateState::default())
         .register_uri_scheme_protocol("htmlpreview", |ctx, _request| {
@@ -392,6 +393,11 @@ fn main() {
             #[cfg(target_os = "macos")]
             macos_quit::install(&handle);
 
+            // Register every window the config created (today: "main").
+            for label in handle.webview_windows().keys() {
+                windows::registry().register(label);
+            }
+
             // In-app MCP server for agents in the terminal. Transport is a
             // per-user Unix domain socket (Windows: a per-launch named pipe),
             // not a network port — filesystem permissions are the access
@@ -414,6 +420,9 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            windows::window_set_folder,
+            windows::window_set_dirty,
+            windows::windows_list,
             commands::read_file,
             commands::write_file,
             commands::append_crash_log,
@@ -513,6 +522,28 @@ fn main() {
                 return;
             }
 
+            // Per-window bookkeeping (#61): focus order for routing, and
+            // teardown of a destroyed window's terminals, remote session,
+            // watcher and MCP snapshot.
+            if let tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Focused(true),
+                ..
+            } = &event
+            {
+                windows::registry().mark_focused(label);
+                return;
+            }
+            if let tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } = &event
+            {
+                release_window(app, label);
+                return;
+            }
+
             if let tauri::RunEvent::WindowEvent {
                 event: tauri::WindowEvent::CloseRequested { api, .. },
                 ..
@@ -602,6 +633,22 @@ fn main() {
                 push_pending(&app.state::<PendingFiles>(), paths);
             }
         });
+}
+
+/// Free everything a closed window owned. Runs off the event loop: closing
+/// terminals and the SSH session can block.
+fn release_window(app: &tauri::AppHandle, label: &str) {
+    windows::registry().unregister(label);
+    app.state::<Arc<mcp::McpState>>().release_window(label);
+    let app = app.clone();
+    let label = label.to_string();
+    std::thread::spawn(move || {
+        app.state::<terminal::TerminalState>()
+            .release_window(&label);
+        app.state::<watcher::WatcherStates>().release_window(&label);
+        remote::release_window(&label);
+        askpass::release_window(&label);
+    });
 }
 
 #[cfg(test)]

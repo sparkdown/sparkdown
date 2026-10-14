@@ -35,7 +35,7 @@ use notify::{
     RecursiveMode,
 };
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,6 +60,26 @@ pub struct WatcherState {
     /// is still current, so a slow scan of an old folder can never replace
     /// the new folder's watcher or undo a watch_stop.
     generation: Arc<AtomicU64>,
+}
+
+/// Every window's watcher (#61), keyed by window label. Managed by Tauri.
+#[derive(Default)]
+pub struct WatcherStates(Mutex<HashMap<String, Arc<WatcherState>>>);
+
+impl WatcherStates {
+    fn for_label(&self, label: &str) -> Arc<WatcherState> {
+        lock(&self.0).entry(label.to_string()).or_default().clone()
+    }
+
+    /// Stop and forget a window's watcher (the window closed).
+    pub fn release_window(&self, label: &str) {
+        let gone = lock(&self.0).remove(label);
+        if let Some(state) = gone {
+            stop_session(&state);
+        }
+        let _scope = crate::windows::enter(label);
+        crate::remote::watch_stop();
+    }
 }
 
 /// One filesystem change, flattened for the frontend. Access events (open,
@@ -401,9 +421,13 @@ fn run_session(
 #[tauri::command]
 pub fn watch_start(
     app: AppHandle,
-    state: tauri::State<'_, WatcherState>,
+    webview_window: tauri::WebviewWindow,
+    states: tauri::State<'_, WatcherStates>,
     root: String,
 ) -> Result<(), String> {
+    let label = webview_window.label().to_string();
+    let _scope = crate::windows::enter(&label);
+    let state = states.for_label(&label);
     if crate::remote::is_active() {
         // The remote poller replaces the local notify session: a local file
         // event must not refresh (or re-sync tabs of) the remote workspace.
@@ -427,16 +451,20 @@ pub fn watch_start(
             c.path = respell_under(&c.path, &canonical, &spelled);
         }
         crate::file_index::invalidate_for_kinds(changes.iter().map(|c| c.kind.as_str()));
-        let _ = app.emit("watcher://changes", changes);
+        let _ = app.emit_to(label.as_str(), "watcher://changes", changes);
     });
     Ok(())
 }
 
 /// Stop watching (drops the watcher).
 #[tauri::command]
-pub fn watch_stop(state: tauri::State<'_, WatcherState>) -> Result<(), String> {
+pub fn watch_stop(
+    webview_window: tauri::WebviewWindow,
+    states: tauri::State<'_, WatcherStates>,
+) -> Result<(), String> {
+    let _scope = crate::windows::enter(webview_window.label());
     crate::remote::watch_stop();
-    stop_session(&state);
+    stop_session(&states.for_label(webview_window.label()));
     Ok(())
 }
 

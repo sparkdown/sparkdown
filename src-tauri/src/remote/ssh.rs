@@ -719,10 +719,24 @@ pub(crate) fn mux_options() -> Vec<String> {
         // OpenSSH option name — cannot be renamed here.
         "ControlMaster=auto".into(),
         "-o".into(),
-        format!("ControlPath={}/%C", dir.display()),
+        // One control connection per window (#60 decision 6): two windows
+        // on the same host must not share (or close) each other's mux.
+        format!("ControlPath={}/{}", dir.display(), control_name()),
         "-o".into(),
         "ControlPersist=600".into(),
     ]
+}
+
+/// `%C` (ssh's hash of host/port/user), prefixed per window. The unscoped
+/// default keeps the plain `%C` used before multi-window.
+#[cfg(unix)]
+fn control_name() -> String {
+    let label = crate::windows::current_label();
+    if label == crate::windows::DEFAULT_LABEL {
+        "%C".into()
+    } else {
+        format!("{}-%C", crate::windows::label_tag(&label))
+    }
 }
 
 #[cfg(not(unix))]

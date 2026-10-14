@@ -100,17 +100,35 @@ pub struct RoundtripReply {
 }
 
 pub struct McpState {
-    pub snapshot: Mutex<Snapshot>,
-    pending: Mutex<HashMap<u64, Sender<RoundtripReply>>>,
+    /// Each window's editor snapshot, keyed by window label (#61).
+    snapshots: Mutex<HashMap<String, Snapshot>>,
+    /// Round trips waiting for a window's `mcp_reply`: id → (window, reply).
+    pending: Mutex<HashMap<u64, (String, Sender<RoundtripReply>)>>,
     next_id: Mutex<u64>,
 }
 
 impl McpState {
     pub fn new() -> Self {
         Self {
-            snapshot: Mutex::new(Snapshot::default()),
+            snapshots: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
+        }
+    }
+
+    /// Window `label`'s snapshot (the default before its first publish).
+    pub fn snapshot_of(&self, label: &str) -> Snapshot {
+        self.snapshots
+            .lock()
+            .ok()
+            .and_then(|g| g.get(label).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Forget a closed window's snapshot.
+    pub fn release_window(&self, label: &str) {
+        if let Ok(mut g) = self.snapshots.lock() {
+            g.remove(label);
         }
     }
 }
@@ -126,8 +144,17 @@ impl Default for McpState {
 /// Frontend pushes the current editor state. Called on every debounced
 /// change; cheap (in-memory clone).
 #[tauri::command]
-pub fn mcp_publish(state: tauri::State<'_, Arc<McpState>>, mut snapshot: Snapshot) {
-    if let Ok(mut g) = state.snapshot.lock() {
+pub fn mcp_publish(
+    webview_window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<McpState>>,
+    snapshot: Snapshot,
+) {
+    publish_for(&state, webview_window.label(), snapshot);
+}
+
+fn publish_for(state: &McpState, label: &str, mut snapshot: Snapshot) {
+    if let Ok(mut all) = state.snapshots.lock() {
+        let g = all.entry(label.to_string()).or_default();
         // The frontend omits (sends `content: None`) a tab whose text is
         // unchanged since the last publish, so a cursor move doesn't re-ship
         // every open buffer. Carry the previous text forward, matched by path,
@@ -166,12 +193,20 @@ pub(crate) fn cap_tab_buffers(tabs: &mut [TabInfo]) {
 
 /// Frontend answers a pending `edit_buffer` / `open_file` round trip.
 #[tauri::command]
-pub fn mcp_reply(state: tauri::State<'_, Arc<McpState>>, reply: RoundtripReply) {
-    let tx = state
-        .pending
-        .lock()
-        .ok()
-        .and_then(|mut p| p.remove(&reply.id));
+pub fn mcp_reply(
+    webview_window: tauri::WebviewWindow,
+    state: tauri::State<'_, Arc<McpState>>,
+    reply: RoundtripReply,
+) {
+    // Only the window that was asked may answer.
+    let label = webview_window.label();
+    let tx = state.pending.lock().ok().and_then(|mut p| {
+        if p.get(&reply.id).is_some_and(|(asked, _)| asked == label) {
+            p.remove(&reply.id).map(|(_, tx)| tx)
+        } else {
+            None
+        }
+    });
     if let Some(tx) = tx {
         let _ = tx.send(reply);
     }
@@ -199,7 +234,8 @@ pub fn mcp_server_running() -> bool {
 }
 
 #[tauri::command]
-pub fn mcp_shim_command() -> Option<ShimCommand> {
+pub fn mcp_shim_command(webview_window: tauri::WebviewWindow) -> Option<ShimCommand> {
+    let _scope = crate::windows::enter(webview_window.label());
     if !is_running() {
         return None;
     }
@@ -946,7 +982,10 @@ pub(crate) fn marked_path(stdout: &str) -> Option<String> {
 /// Errors carry the CLI's own message.
 // Async: the CLI call runs on Tauri's worker pool so the window never freezes.
 #[tauri::command]
-pub async fn mcp_install_agent(bin: String) -> Result<String, String> {
+pub async fn mcp_install_agent(
+    webview_window: tauri::WebviewWindow,
+    bin: String,
+) -> Result<String, String> {
     let (exe, remote) = shim_for_target()?;
     if !remote && !std::path::Path::new(&exe).is_file() {
         // The running binary was removed or replaced (#32): writing its old
@@ -963,7 +1002,7 @@ pub async fn mcp_install_agent(bin: String) -> Result<String, String> {
         } else {
             vec![SHIM_FLAG.to_string()]
         };
-        return tauri::async_runtime::spawn_blocking(move || {
+        return crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
             json_install(agent, &exe, &args, remote)
         })
         .await
@@ -973,7 +1012,7 @@ pub async fn mcp_install_agent(bin: String) -> Result<String, String> {
     let (add, remove) = agent_mcp_commands(&bin, &exe)
         .ok_or_else(|| format!("{bin} has no MCP install command SparkDown knows"))?;
     let agent = bin.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
         // Repair (#32): an existing entry (maybe pointing at a deleted
         // binary) is removed first, since most `mcp add` refuse to replace.
         // Each CLI call is stopped after CLI_TIMEOUT (#49); the best-effort
@@ -990,21 +1029,28 @@ pub async fn mcp_install_agent(bin: String) -> Result<String, String> {
 
 /// Remove SparkDown from `bin`'s MCP config.
 #[tauri::command]
-pub async fn mcp_uninstall_agent(bin: String) -> Result<String, String> {
+pub async fn mcp_uninstall_agent(
+    webview_window: tauri::WebviewWindow,
+    bin: String,
+) -> Result<String, String> {
     // Removal needs no shim path; do not fail just because the forward is down.
     let remote = crate::remote::is_active();
     if let Some(agent) = json_file_agent(&bin) {
-        return tauri::async_runtime::spawn_blocking(move || json_uninstall(agent, remote))
-            .await
-            .map_err(|e| format!("uninstall task failed: {e}"))?
-            .map(|_| format!("Removed the SparkDown MCP server from {bin}."));
+        return crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+            json_uninstall(agent, remote)
+        })
+        .await
+        .map_err(|e| format!("uninstall task failed: {e}"))?
+        .map(|_| format!("Removed the SparkDown MCP server from {bin}."));
     }
     let (_add, remove) = agent_mcp_commands(&bin, "")
         .ok_or_else(|| format!("{bin} has no MCP config SparkDown manages"))?;
-    tauri::async_runtime::spawn_blocking(move || run_agent_cli(&remove, remote, CLI_TIMEOUT))
-        .await
-        .map_err(|e| format!("uninstall task failed: {e}"))?
-        .map(|_| format!("Removed the SparkDown MCP server from {bin}."))
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        run_agent_cli(&remove, remote, CLI_TIMEOUT)
+    })
+    .await
+    .map_err(|e| format!("uninstall task failed: {e}"))?
+    .map(|_| format!("Removed the SparkDown MCP server from {bin}."))
 }
 
 /// Format of an agent's user-scope MCP config file.
@@ -1174,14 +1220,16 @@ fn agent_status_blocking(bin: &str) -> AgentMcpStatus {
 
 /// Settings status for one agent: installed, and stale (#32).
 #[tauri::command]
-pub async fn mcp_agent_status(bin: String) -> AgentMcpStatus {
-    tauri::async_runtime::spawn_blocking(move || agent_status_blocking(&bin))
-        .await
-        .unwrap_or(AgentMcpStatus {
-            installed: false,
-            command: None,
-            stale: None,
-        })
+pub async fn mcp_agent_status(webview_window: tauri::WebviewWindow, bin: String) -> AgentMcpStatus {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        agent_status_blocking(&bin)
+    })
+    .await
+    .unwrap_or(AgentMcpStatus {
+        installed: false,
+        command: None,
+        stale: None,
+    })
 }
 
 /// Whether `bin`'s user-scope MCP config already lists our server. Reads the
@@ -1191,8 +1239,8 @@ pub async fn mcp_agent_status(bin: String) -> AgentMcpStatus {
 /// An entry whose program no longer exists counts as NOT installed (#32):
 /// the agent cannot start it, so the launch flow offers to (re)install.
 #[tauri::command]
-pub async fn mcp_agent_installed(bin: String) -> bool {
-    let st = mcp_agent_status(bin).await;
+pub async fn mcp_agent_installed(webview_window: tauri::WebviewWindow, bin: String) -> bool {
+    let st = mcp_agent_status(webview_window, bin).await;
     st.installed && st.stale != Some(StaleCommand::Missing)
 }
 /// Env var naming the socket; set in SparkDown terminals only.
@@ -1505,7 +1553,9 @@ fn serve_client(
 ) {
     use interprocess::local_socket::traits::Stream as _;
     let (read_half, write_half) = stream.split();
-    serve_lines(read_half, write_half, |msg| dispatch(app, state, msg));
+    serve_lines(read_half, write_half, |msg| {
+        dispatch_routed(app, state, msg)
+    });
 }
 
 /// One client: newline-delimited JSON-RPC in, one line per response out.
@@ -1515,7 +1565,17 @@ fn serve_client(stream: std::os::unix::net::UnixStream, app: &AppHandle, state: 
     let Ok(read_half) = stream.try_clone() else {
         return;
     };
-    serve_lines(read_half, stream, |msg| dispatch(app, state, msg));
+    serve_lines(read_half, stream, |msg| dispatch_routed(app, state, msg));
+}
+
+/// Dispatch one message as the window this connection belongs to. Until
+/// per-connection routing (#64), that is the focused window.
+fn dispatch_routed(app: &AppHandle, state: &Arc<McpState>, msg: &Value) -> Option<Value> {
+    let label = crate::windows::registry()
+        .focused()
+        .unwrap_or_else(|| crate::windows::DEFAULT_LABEL.to_string());
+    let _scope = crate::windows::enter(&label);
+    dispatch(app, state, msg)
 }
 
 /// Transport-agnostic line loop: read newline-delimited JSON-RPC from
@@ -1704,11 +1764,7 @@ fn call_tool(app: &AppHandle, state: &Arc<McpState>, params: &Value) -> Result<V
         .and_then(Value::as_str)
         .ok_or("missing tool name")?;
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
-    let snap = state
-        .snapshot
-        .lock()
-        .map(|g| g.clone())
-        .map_err(|_| "state poisoned".to_string())?;
+    let snap = state.snapshot_of(&crate::windows::current_label());
     if let Some(result) = snapshot_tool(&snap, name, &args) {
         return Ok(result);
     }
@@ -2055,15 +2111,17 @@ fn roundtrip(
         id
     };
     let (tx, rx) = channel();
+    let label = crate::windows::current_label();
     state
         .pending
         .lock()
         .map_err(|_| "state poisoned")?
-        .insert(id, tx);
+        .insert(id, (label.clone(), tx));
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("id".into(), json!(id));
     }
-    app.emit(event, payload).map_err(|e| e.to_string())?;
+    app.emit_to(label.as_str(), event, payload)
+        .map_err(|e| e.to_string())?;
     let out = rx
         .recv_timeout(ROUNDTRIP_TIMEOUT)
         .map_err(|_| "SparkDown did not apply the change in time.".to_string());
@@ -2078,6 +2136,42 @@ fn roundtrip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshots_are_isolated_per_window() {
+        let state = McpState::new();
+        let mut a = snap();
+        a.workspace_root = Some("/a".into());
+        let mut b = snap();
+        b.workspace_root = Some("/b".into());
+        b.tabs[0].content = Some("b text".into());
+        publish_for(&state, "w-a", a);
+        publish_for(&state, "w-b", b);
+        assert_eq!(
+            state.snapshot_of("w-a").workspace_root.as_deref(),
+            Some("/a")
+        );
+        assert_eq!(
+            state.snapshot_of("w-b").workspace_root.as_deref(),
+            Some("/b")
+        );
+        // Carry-forward of omitted text only looks at the same window.
+        let mut again = snap();
+        again.workspace_root = Some("/b".into());
+        again.tabs[0].content = None;
+        publish_for(&state, "w-b", again);
+        assert_eq!(
+            state.snapshot_of("w-b").tabs[0].content.as_deref(),
+            Some("b text")
+        );
+        assert_eq!(
+            state.snapshot_of("w-a").tabs[0].content.as_deref(),
+            Some("live text")
+        );
+        state.release_window("w-a");
+        assert!(state.snapshot_of("w-a").workspace_root.is_none());
+        assert!(state.snapshot_of("other").tabs.is_empty());
+    }
 
     fn snap() -> Snapshot {
         Snapshot {

@@ -316,6 +316,7 @@ fn split_grep_line(line: &str, skip: usize) -> Option<(&str, u32, &str)> {
 /// the host.
 #[tauri::command]
 pub async fn search_in_files(
+    webview_window: tauri::WebviewWindow,
     root: String,
     query: String,
     case_sensitive: Option<bool>,
@@ -324,7 +325,7 @@ pub async fn search_in_files(
     validate_query(&query)?;
     let case_sensitive = case_sensitive.unwrap_or(false);
     let include_hidden = include_hidden.unwrap_or(false);
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
         if crate::remote::is_active() {
             let raw = crate::remote::search_in_files(
                 &root,

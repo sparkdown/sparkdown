@@ -28,6 +28,7 @@ export interface AgentContextDeps {
 export class AgentContextBridge {
   // Debounced hard — this writes files, and per-keystroke frequency is
   // unnecessary for agents.
+  private reportedDirty = false;
   private debouncedPublish = debounce(() => void this.publish(), 800);
   // Path → hash of the tab content last shipped to the MCP snapshot, so an
   // unchanged buffer isn't re-serialized over IPC on every cursor move.
@@ -108,6 +109,12 @@ export class AgentContextBridge {
    * a synthetic name and become readable via their shadow path.
    */
   async publish(): Promise<void> {
+    // Unsaved tabs make a window non-empty for Open Folder routing (#61).
+    const dirty = this.ctx.tabs.getAllTabs().some((t) => t.modified);
+    if (dirty !== this.reportedDirty) {
+      this.reportedDirty = dirty;
+      void api.windowSetDirty(dirty).catch(() => {});
+    }
     if (this.switchingOrigin) return;
     const root = this.ctx.fileTree.getRoot() ?? this.ctx.baseDir;
     if (!root) return;
