@@ -130,11 +130,12 @@ fn list_uncached(root: &str, include_hidden: bool, remote: bool) -> Result<FileL
 /// change. Runs off the main thread (the remote path is a blocking ssh call).
 #[tauri::command]
 pub async fn list_workspace_files(
+    webview_window: tauri::WebviewWindow,
     root: String,
     include_hidden: Option<bool>,
 ) -> Result<FileListing, AppError> {
     let include_hidden = include_hidden.unwrap_or(false);
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
         let host = crate::remote::current_session().map(|s| s.host);
         let key = CacheKey {
             host: host.clone(),

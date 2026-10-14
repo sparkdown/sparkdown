@@ -486,25 +486,39 @@ impl Drop for Broker {
 
 // --- Session broker + UI provider -------------------------------------------------
 
-fn session_broker() -> &'static Mutex<Option<Arc<Broker>>> {
-    static B: std::sync::OnceLock<Mutex<Option<Arc<Broker>>>> = std::sync::OnceLock::new();
-    B.get_or_init(|| Mutex::new(None))
+/// The askpass broker of each window's SSH session (#60 decision 6: one
+/// session per window), keyed by window label.
+fn session_brokers() -> std::sync::MutexGuard<'static, HashMap<String, Arc<Broker>>> {
+    static B: std::sync::OnceLock<Mutex<HashMap<String, Arc<Broker>>>> = std::sync::OnceLock::new();
+    B.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
-/// The broker SparkDown's ssh calls use, if a connect set one up.
+/// The broker the current window's ssh calls use, if its connect set one up.
 pub fn current() -> Option<Arc<Broker>> {
-    session_broker().lock().ok()?.clone()
+    session_brokers()
+        .get(&crate::windows::current_label())
+        .cloned()
 }
 
-/// Replace the session broker (None = tear down: endpoint closed, cache wiped).
+/// Replace the current window's broker (None = tear down: endpoint closed,
+/// cache wiped).
 pub fn set_current(b: Option<Arc<Broker>>) {
-    if let Ok(mut g) = session_broker().lock() {
-        *g = b;
-    }
+    let label = crate::windows::current_label();
+    let old = {
+        let mut g = session_brokers();
+        match b {
+            Some(b) => g.insert(label, b),
+            None => g.remove(&label),
+        }
+    };
+    // Dropped outside the lock (Drop wakes and joins the endpoint).
+    drop(old);
 }
 
-/// Pending UI prompts: request id → where the answer goes.
-type Pending = HashMap<u64, std::sync::mpsc::Sender<Option<Zeroizing<String>>>>;
+/// Pending UI prompts: request id → (asking window, where the answer goes).
+type Pending = HashMap<u64, (String, std::sync::mpsc::Sender<Option<Zeroizing<String>>>)>;
 
 fn pending() -> &'static Mutex<Pending> {
     static P: std::sync::OnceLock<Mutex<Pending>> = std::sync::OnceLock::new();
@@ -524,18 +538,20 @@ pub struct AskpassRequest {
 /// How long the dialog may stay open before the request is refused.
 const UI_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Provider that asks the user in the app's masked passphrase dialog.
-pub fn ui_provider(app: tauri::AppHandle) -> Provider {
+/// Provider that asks the user in the masked passphrase dialog of the
+/// connecting window only (`label`, #60 decision 6).
+pub fn ui_provider(app: tauri::AppHandle, label: String) -> Provider {
     use tauri::Emitter;
     Arc::new(move |key: &str, retry: bool| {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = std::sync::mpsc::channel();
-        pending().lock().ok()?.insert(id, tx);
+        pending().lock().ok()?.insert(id, (label.clone(), tx));
         let shown = crate::remote::display_home_path(key);
         if app
-            .emit(
+            .emit_to(
+                label.as_str(),
                 "askpass://request",
                 AskpassRequest {
                     id,
@@ -560,9 +576,37 @@ pub fn ui_provider(app: tauri::AppHandle) -> Provider {
 /// moved into a wiping buffer at once; serde's own copy of the IPC message
 /// is outside our control (documented in docs/remote-ssh.md).
 #[tauri::command]
-pub fn askpass_answer(id: u64, passphrase: Option<String>) {
-    let answer = passphrase.map(Zeroizing::new);
-    let tx = pending().lock().ok().and_then(|mut p| p.remove(&id));
+pub fn askpass_answer(webview_window: tauri::WebviewWindow, id: u64, passphrase: Option<String>) {
+    answer_from(webview_window.label(), id, passphrase.map(Zeroizing::new));
+}
+
+/// Deliver an answer, but only from the window that was asked.
+/// Drop a closed window's broker and cancel any prompt it still had open.
+pub fn release_window(label: &str) {
+    let old = session_brokers().remove(label);
+    drop(old);
+    let stale: Vec<u64> = pending()
+        .lock()
+        .map(|p| {
+            p.iter()
+                .filter(|(_, (l, _))| l == label)
+                .map(|(id, _)| *id)
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in stale {
+        answer_from(label, id, None);
+    }
+}
+
+fn answer_from(label: &str, id: u64, answer: Option<Zeroizing<String>>) {
+    let tx = pending().lock().ok().and_then(|mut p| {
+        if p.get(&id).is_some_and(|(asked, _)| asked == label) {
+            p.remove(&id).map(|(_, tx)| tx)
+        } else {
+            None
+        }
+    });
     if let Some(tx) = tx {
         let _ = tx.send(answer);
     }
@@ -571,6 +615,37 @@ pub fn askpass_answer(id: u64, passphrase: Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_asking_window_can_answer() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        pending()
+            .lock()
+            .unwrap()
+            .insert(9_000_001, ("w-a".into(), tx));
+        answer_from("w-b", 9_000_001, Some(Zeroizing::new("x".into())));
+        assert!(rx.try_recv().is_err(), "another window's answer is ignored");
+        answer_from("w-a", 9_000_001, Some(Zeroizing::new("pw".into())));
+        assert_eq!(rx.try_recv().unwrap().unwrap().as_str(), "pw");
+    }
+
+    #[test]
+    fn brokers_are_per_window() {
+        let provider: Provider = Arc::new(|_k: &str, _r: bool| None);
+        let b = Broker::start(provider, PathBuf::from("/nonexistent-helper")).unwrap();
+        {
+            let _s = crate::windows::enter("w-broker-a");
+            set_current(Some(b));
+            assert!(current().is_some());
+        }
+        {
+            let _s = crate::windows::enter("w-broker-b");
+            assert!(current().is_none(), "window b has no session");
+        }
+        let _s = crate::windows::enter("w-broker-a");
+        set_current(None);
+        assert!(current().is_none());
+    }
 
     #[test]
     fn classifier_accepts_only_key_passphrase_prompts() {

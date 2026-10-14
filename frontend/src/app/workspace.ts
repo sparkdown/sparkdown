@@ -101,6 +101,7 @@ export class WorkspaceController {
     if (lastDir) {
       this.ctx.fileTree.ensureVisible();
       this.ctx.workspaceRoot = lastDir;
+      this.reportFolder(lastDir);
       this.deps.syncEmptyState();
       void this.ctx.fileTree.setRoot(lastDir, true);
       this.deps.diff.setRoot(lastDir);
@@ -109,6 +110,16 @@ export class WorkspaceController {
       this.deps.search.setRoot(lastDir);
       void this.ensureWatching(lastDir);
     }
+  }
+
+  /** Tell the core which folder this window shows (#61 registry). Remote
+   *  folders are reported with their canonical ssh identity by the connect
+   *  flow, so only local ones are reported here. */
+  private reportFolder(dir: string | null): void {
+    if (dir && this.ctx.tabs.getOrigin()) return;
+    void api
+      .windowSetFolder(dir ? { kind: 'local', path: dir } : null, dir)
+      .catch(() => {});
   }
 
   /**
@@ -129,6 +140,7 @@ export class WorkspaceController {
   async openFolder(dir: string): Promise<void> {
     this.deps.documents.closePristineUntitled();
     this.ctx.workspaceRoot = dir;
+    this.reportFolder(dir);
     this.deps.syncEmptyState();
     // Show the explorer before rendering it: a tree rendered into a hidden
     // sidebar measures a 0-height viewport and mounts only a few rows (#29).
@@ -158,6 +170,7 @@ export class WorkspaceController {
     this.watched = null;
     this.pendingFsChanges.clear();
     this.ctx.workspaceRoot = null;
+    this.reportFolder(null);
     this.ctx.baseDir = null;
     this.ctx.fileTree.clear();
     this.deps.diff.setRoot(null);

@@ -260,10 +260,15 @@ fn map_status_code(code: &str) -> &'static str {
 /// local `git status` on a huge tree — would freeze the UI. The frontend
 /// already `invoke`s this asynchronously.
 #[tauri::command]
-pub async fn git_status(root: String) -> Result<GitStatus, String> {
-    tauri::async_runtime::spawn_blocking(move || git_status_impl(root))
-        .await
-        .map_err(|e| format!("git_status task failed: {e}"))?
+pub async fn git_status(
+    webview_window: tauri::WebviewWindow,
+    root: String,
+) -> Result<GitStatus, String> {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        git_status_impl(root)
+    })
+    .await
+    .map_err(|e| format!("git_status task failed: {e}"))?
 }
 
 /// Synchronous body of [`git_status`]. Split out so in-process callers (the
@@ -492,10 +497,15 @@ pub(crate) fn branch_status_from(
 ///
 /// `async` + `spawn_blocking` for the same reason as [`git_status`].
 #[tauri::command]
-pub async fn git_branch_status(root: String) -> Result<GitBranchStatus, String> {
-    tauri::async_runtime::spawn_blocking(move || git_branch_status_impl(root))
-        .await
-        .map_err(|e| format!("git_branch_status task failed: {e}"))?
+pub async fn git_branch_status(
+    webview_window: tauri::WebviewWindow,
+    root: String,
+) -> Result<GitBranchStatus, String> {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        git_branch_status_impl(root)
+    })
+    .await
+    .map_err(|e| format!("git_branch_status task failed: {e}"))?
 }
 
 pub(crate) fn git_branch_status_impl(root: String) -> Result<GitBranchStatus, String> {
@@ -1069,10 +1079,17 @@ mod tests {
 /// `async` + `spawn_blocking`: keeps the blocking git (or remote ssh) call off
 /// the Tauri 2 main thread so the UI cannot freeze while a diff is computed.
 #[tauri::command]
-pub async fn git_diff_file(root: String, path: String, untracked: bool) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || git_diff_file_impl(root, path, untracked))
-        .await
-        .map_err(|e| format!("git_diff_file task failed: {e}"))?
+pub async fn git_diff_file(
+    webview_window: tauri::WebviewWindow,
+    root: String,
+    path: String,
+    untracked: bool,
+) -> Result<String, String> {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        git_diff_file_impl(root, path, untracked)
+    })
+    .await
+    .map_err(|e| format!("git_diff_file task failed: {e}"))?
 }
 
 /// Synchronous body of [`git_diff_file`], reused by in-process callers (MCP

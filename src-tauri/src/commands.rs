@@ -173,8 +173,12 @@ fn validate_write_path(path: &str) -> Result<PathBuf, AppError> {
 /// ssh round trip would freeze the UI — potentially for minutes on a
 /// half-open connection. The frontend already `invoke`s this asynchronously.
 #[tauri::command]
-pub async fn read_file(app: AppHandle, path: String) -> Result<String, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
+pub async fn read_file(
+    webview_window: tauri::WebviewWindow,
+    app: AppHandle,
+    path: String,
+) -> Result<String, AppError> {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
         if crate::remote::is_active() {
             return crate::remote::read_file(&path);
         }
@@ -265,11 +269,13 @@ fn chrono_date_utc() -> String {
 /// Whether `path` points at a directory. Used to route OS drag-and-drop:
 /// dropped directories become the sidebar root, files open as tabs.
 #[tauri::command]
-pub async fn is_directory(path: String) -> bool {
+pub async fn is_directory(webview_window: tauri::WebviewWindow, path: String) -> bool {
     // Off the main thread: on a remote session this is a blocking ssh call.
-    tauri::async_runtime::spawn_blocking(move || is_directory_impl(&path))
-        .await
-        .unwrap_or(false)
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        is_directory_impl(&path)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 fn is_directory_impl(path: &str) -> bool {
@@ -356,6 +362,7 @@ fn set_clipboard_text(_text: &str) -> Result<(), AppError> {
 /// saves. The replace is atomic (see fsio.rs).
 #[tauri::command]
 pub async fn write_file(
+    webview_window: tauri::WebviewWindow,
     limiter: State<'_, WriteRateLimiter>,
     path: String,
     content: String,
@@ -364,9 +371,11 @@ pub async fn write_file(
     // write (local atomic replace, or a remote ssh round trip) goes to the
     // blocking pool so a remote save can't freeze the main thread.
     limiter.check(Path::new(&path))?;
-    tauri::async_runtime::spawn_blocking(move || write_file_impl(&path, &content))
-        .await
-        .map_err(|e| AppError::Other(format!("write task failed: {e}")))?
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        write_file_impl(&path, &content)
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("write task failed: {e}")))?
 }
 
 fn write_file_impl(path: &str, content: &str) -> Result<(), AppError> {
@@ -392,13 +401,14 @@ fn write_file_impl(path: &str, content: &str) -> Result<(), AppError> {
 /// (dot-prefixed) unless `include_hidden` is true. Detects circular symlinks.
 #[tauri::command]
 pub async fn list_directory(
+    webview_window: tauri::WebviewWindow,
     app: AppHandle,
     path: String,
     include_hidden: Option<bool>,
 ) -> Result<Vec<FileEntry>, AppError> {
     let include_hidden = include_hidden.unwrap_or(false);
     // Off the main thread: on a remote session this is a blocking ssh call.
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
         if crate::remote::is_active() {
             return crate::remote::list_directory(&path, include_hidden);
         }
@@ -696,10 +706,11 @@ pub async fn allow_preview_assets(
 /// Image extensions only, capped at [`crate::remote::MAX_REMOTE_IMAGE_BYTES`].
 #[tauri::command]
 pub async fn remote_read_image(
+    webview_window: tauri::WebviewWindow,
     host: String,
     path: String,
 ) -> Result<tauri::ipc::Response, AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
         let session = crate::remote::current_session()
             .ok_or_else(|| AppError::Other("no remote session".into()))?;
         if session.host != host {

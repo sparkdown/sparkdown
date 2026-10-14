@@ -12,6 +12,11 @@ export interface AgentMcpStatus {
   stale: 'missing' | 'other' | null;
 }
 
+/** Canonical folder identity (windows.rs FolderId). */
+export type WindowFolder =
+  | { kind: 'local'; path: string }
+  | { kind: 'remote'; user: string; hostname: string; port: number; path: string };
+
 export interface FileEntry {
   name: string;
   path: string;
@@ -22,6 +27,10 @@ export interface FileEntry {
 let watchRoot: string | null = null;
 
 export const api = {
+  /** Multi-window registry (#61): this window's folder and unsaved state. */
+  windowSetFolder: (folder: WindowFolder | null, display: string | null) =>
+    invoke<void>('window_set_folder', { folder, display }),
+  windowSetDirty: (dirty: boolean) => invoke<void>('window_set_dirty', { dirty }),
   readFile: (path: string) => invoke<string>('read_file', { path }),
   writeFile: (path: string, content: string) =>
     invoke<void>('write_file', { path, content }),

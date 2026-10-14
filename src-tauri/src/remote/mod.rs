@@ -9,10 +9,11 @@ use crate::commands::{AppError, FileEntry};
 use crate::file_index::FileListing;
 use crate::git::{branch_status_from, parse_porcelain, GitBranchStatus, GitStatus};
 use portable_pty::CommandBuilder;
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
@@ -26,44 +27,72 @@ use ssh::{
 };
 pub use ssh::{RemoteSession, SshHost};
 
-static SESSION: OnceLock<Mutex<Option<RemoteSession>>> = OnceLock::new();
-static WATCH_STOP: OnceLock<AtomicBool> = OnceLock::new();
-static WATCH_GENERATION: OnceLock<AtomicU64> = OnceLock::new();
+/// One SSH session per window (#60 decision 6), keyed by window label. Every
+/// lookup goes through the caller's window scope (`crate::windows`).
+static SESSIONS: OnceLock<Mutex<HashMap<String, RemoteSession>>> = OnceLock::new();
+/// Per-window watch stop flags and generations (remote polling watcher).
+static WATCH_STOP: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+static WATCH_GENERATION: OnceLock<Mutex<HashMap<String, Arc<AtomicU64>>>> = OnceLock::new();
 /// Serializes the whole connect (probe + forward setup) and disconnect
-/// sequences against each other. connect runs on a worker thread and
-/// disconnect/shutdown on another; without one lock a disconnect landing
+/// sequences against each other, per window. connect runs on a worker thread
+/// and disconnect/shutdown on another; without one lock a disconnect landing
 /// mid-`mcp_forward_start`, or two overlapping connects, leak the SSH control
 /// (mux) connection and its `-R` forward.
-static LIFECYCLE: OnceLock<Mutex<()>> = OnceLock::new();
+static LIFECYCLE: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 
-fn session_lock() -> &'static Mutex<Option<RemoteSession>> {
-    SESSION.get_or_init(|| Mutex::new(None))
+fn sessions() -> std::sync::MutexGuard<'static, HashMap<String, RemoteSession>> {
+    SESSIONS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
-fn lifecycle_lock() -> &'static Mutex<()> {
-    LIFECYCLE.get_or_init(|| Mutex::new(()))
+fn per_label<T: Default>(cell: &'static OnceLock<Mutex<HashMap<String, Arc<T>>>>) -> Arc<T> {
+    let label = crate::windows::current_label();
+    cell.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(label)
+        .or_default()
+        .clone()
 }
 
-fn watch_stop_flag() -> &'static AtomicBool {
-    WATCH_STOP.get_or_init(|| AtomicBool::new(true))
+fn lifecycle_lock() -> Arc<Mutex<()>> {
+    per_label(&LIFECYCLE)
 }
 
-fn watch_generation() -> &'static AtomicU64 {
-    WATCH_GENERATION.get_or_init(|| AtomicU64::new(0))
+fn watch_stop_flag() -> Arc<AtomicBool> {
+    per_label(&WATCH_STOP)
+}
+
+fn watch_generation() -> Arc<AtomicU64> {
+    per_label(&WATCH_GENERATION)
 }
 
 pub fn is_active() -> bool {
-    session_lock().lock().map(|g| g.is_some()).unwrap_or(false)
+    sessions().contains_key(&crate::windows::current_label())
 }
 
 pub fn current_session() -> Option<RemoteSession> {
-    session_lock().lock().ok().and_then(|g| g.clone())
+    sessions().get(&crate::windows::current_label()).cloned()
 }
 
 fn set_session(session: Option<RemoteSession>) {
-    if let Ok(mut g) = session_lock().lock() {
-        *g = session;
+    let label = crate::windows::current_label();
+    let mut g = sessions();
+    match session {
+        Some(s) => {
+            g.insert(label, s);
+        }
+        None => {
+            g.remove(&label);
+        }
     }
+}
+
+/// Labels of windows with a live session (shutdown releases them all).
+fn session_labels() -> Vec<String> {
+    sessions().keys().cloned().collect()
 }
 
 /// Preflight + store. `probe` is `ssh host 'cd path && pwd -P'` in production.
@@ -328,14 +357,18 @@ pub fn ssh_config_hosts() -> Result<Vec<SshHost>, String> {
 #[tauri::command]
 pub async fn remote_connect(
     app: tauri::AppHandle,
+    webview_window: tauri::WebviewWindow,
     host: String,
     path: String,
 ) -> Result<RemoteSession, String> {
+    let label = webview_window.label().to_string();
     tauri::async_runtime::spawn_blocking(move || {
+        let _scope = crate::windows::enter(&label);
         // Held across the whole connect (probe + forward setup) so a disconnect
         // or a second connect can't interleave and orphan the SSH control
         // (mux) connection or its forward.
-        let _guard = lifecycle_lock()
+        let lifecycle = lifecycle_lock();
+        let _guard = lifecycle
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let hosts = load_ssh_hosts()?;
@@ -345,7 +378,11 @@ pub async fn remote_connect(
         // the fallback.
         let previous = crate::askpass::current();
         let broker = std::env::current_exe().ok().and_then(|exe| {
-            crate::askpass::Broker::start(crate::askpass::ui_provider(app.clone()), exe).ok()
+            crate::askpass::Broker::start(
+                crate::askpass::ui_provider(app.clone(), label.clone()),
+                exe,
+            )
+            .ok()
         });
         crate::askpass::set_current(broker.clone());
         let result = connect_with(&hosts, &host, &path, ssh_run).map_err(|e| {
@@ -422,7 +459,8 @@ pub(crate) fn passphrase_outcome_message(
 /// the lifecycle lock. Shared by the async command, the tests, and
 /// [`shutdown`].
 fn disconnect_now() {
-    let _guard = lifecycle_lock()
+    let lifecycle = lifecycle_lock();
+    let _guard = lifecycle
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     watch_stop();
@@ -442,10 +480,16 @@ fn disconnect_now() {
 // 2, so on a half-open control (mux) connection those calls would freeze the
 // UI for minutes.
 #[tauri::command]
-pub async fn remote_disconnect() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(disconnect_now)
-        .await
-        .map_err(|e| format!("disconnect task failed: {e}"))
+pub async fn remote_disconnect(webview_window: tauri::WebviewWindow) -> Result<(), String> {
+    crate::windows::blocking(webview_window.label().to_string(), disconnect_now).await
+}
+
+/// Release one window's session (the window closed). Synchronous.
+pub fn release_window(label: &str) {
+    let _scope = crate::windows::enter(label);
+    if is_active() || crate::askpass::current().is_some() {
+        disconnect_now();
+    }
 }
 
 /// App-exit / crash-safe teardown hook. The ControlPersist control (mux)
@@ -454,11 +498,16 @@ pub async fn remote_disconnect() -> Result<(), String> {
 /// remote MCP is silently offline (see [`mcp_forward_start`]). main.rs calls
 /// this on `RunEvent::Exit`. Best effort and synchronous.
 pub fn shutdown() {
+    for label in session_labels() {
+        release_window(&label);
+    }
+    // Unscoped leftovers (tests, or a session made before scoping).
     disconnect_now();
 }
 
 #[tauri::command]
-pub fn remote_session() -> Option<RemoteSession> {
+pub fn remote_session(webview_window: tauri::WebviewWindow) -> Option<RemoteSession> {
+    let _scope = crate::windows::enter(webview_window.label());
     current_session()
 }
 
@@ -927,7 +976,9 @@ pub fn watch_start(app: AppHandle, root: &str) -> Result<(), String> {
     let host = session.host;
     let root = root.to_string();
     let script = watch_fingerprint_script(&root);
+    let label = crate::windows::current_label();
     std::thread::spawn(move || {
+        let _scope = crate::windows::enter(&label);
         let mut last = String::new();
         loop {
             if watch_stop_flag().load(Ordering::SeqCst)
@@ -942,7 +993,8 @@ pub fn watch_start(app: AppHandle, root: &str) -> Result<(), String> {
                     // Changes without wiping the file tree scroll position.
                     if let Some(kind) = classify_remote_watch_delta(&last, &fp) {
                         crate::file_index::invalidate_for_kinds([kind]);
-                        let _ = app.emit(
+                        let _ = app.emit_to(
+                            label.as_str(),
                             "watcher://changes",
                             vec![crate::watcher::FsChange {
                                 path: root.clone(),
@@ -1106,15 +1158,49 @@ pub fn terminal_command(
 /// server; it bridges to the forwarded socket (see the file's header).
 pub(crate) const REMOTE_SHIM_SCRIPT: &str = include_str!("mcp_shim.sh");
 
-static REMOTE_MCP: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+/// Live reverse-forward socket per window (label → remote socket path).
+static REMOTE_MCP: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
-fn remote_mcp_lock() -> &'static Mutex<Option<String>> {
-    REMOTE_MCP.get_or_init(|| Mutex::new(None))
+/// The current window's slot, behind a guard that reads/writes it like the
+/// old single `Option`.
+struct RemoteMcpSlot {
+    label: String,
+    map: std::sync::MutexGuard<'static, HashMap<String, String>>,
 }
 
-/// The remote socket path while the reverse forward is live, else None.
+impl RemoteMcpSlot {
+    fn take(&mut self) -> Option<String> {
+        self.map.remove(&self.label)
+    }
+    fn set(&mut self, v: Option<String>) {
+        match v {
+            Some(v) => {
+                self.map.insert(self.label.clone(), v);
+            }
+            None => {
+                self.map.remove(&self.label);
+            }
+        }
+    }
+    fn get(&self) -> Option<String> {
+        self.map.get(&self.label).cloned()
+    }
+}
+
+fn remote_mcp_slot() -> RemoteMcpSlot {
+    RemoteMcpSlot {
+        label: crate::windows::current_label(),
+        map: REMOTE_MCP
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    }
+}
+
+/// The current window's remote socket path while its reverse forward is
+/// live, else None.
 pub fn remote_mcp_socket() -> Option<String> {
-    remote_mcp_lock().lock().ok()?.clone()
+    remote_mcp_slot().get()
 }
 
 fn remote_cache_dir(session: &RemoteSession) -> String {
@@ -1123,7 +1209,17 @@ fn remote_cache_dir(session: &RemoteSession) -> String {
 
 /// Where the forwarded socket lands on the remote (per-user, 0700 dir).
 pub fn remote_mcp_socket_path(session: &RemoteSession) -> String {
-    format!("{}/mcp.sock", remote_cache_dir(session))
+    // One forward per window (#61): windows on the same host get their own.
+    let label = crate::windows::current_label();
+    if label == crate::windows::DEFAULT_LABEL {
+        format!("{}/mcp.sock", remote_cache_dir(session))
+    } else {
+        format!(
+            "{}/mcp-{}.sock",
+            remote_cache_dir(session),
+            crate::windows::label_tag(&label)
+        )
+    }
 }
 
 /// The shim script's path on the remote — what agent configs point at.
@@ -1228,15 +1324,13 @@ pub fn mcp_forward_start(session: &RemoteSession, local_sock: &Path) -> Result<S
                 .into(),
         );
     }
-    if let Ok(mut g) = remote_mcp_lock().lock() {
-        *g = Some(sock.clone());
-    }
+    remote_mcp_slot().set(Some(sock.clone()));
     Ok(sock)
 }
 
 /// Cancel the forward and remove the socket + shim on the remote. Best effort.
 pub fn mcp_forward_stop(session: &RemoteSession) {
-    let Some(sock) = remote_mcp_lock().lock().ok().and_then(|mut g| g.take()) else {
+    let Some(sock) = remote_mcp_slot().take() else {
         return;
     };
     if let Some(local) = crate::mcp::running_socket_path() {
@@ -3062,7 +3156,7 @@ Host *.example.com
         let argv = format!("{:?}", cmd.get_argv());
         assert!(!argv.contains("SPARKDOWN_MCP"), "{argv}");
 
-        *remote_mcp_lock().lock().unwrap() = Some("/local/home/u/.cache/sparkdown/mcp.sock".into());
+        remote_mcp_slot().set(Some("/local/home/u/.cache/sparkdown/mcp.sock".into()));
         let (cmd, _) = terminal_command(Some("/proj"), None, Some("claude")).unwrap();
         let argv = format!("{:?}", cmd.get_argv());
         assert!(
@@ -3070,7 +3164,7 @@ Host *.example.com
             "{argv}"
         );
         assert!(argv.contains("export SPARKDOWN_CONTEXT="), "{argv}");
-        *remote_mcp_lock().lock().unwrap() = None;
+        remote_mcp_slot().set(None);
         disconnect_now();
     }
     /// Live end-to-end check of phase 4 against a real host. Ignored by
@@ -3355,14 +3449,16 @@ pub(crate) fn remote_mkdir_script(path: &str) -> String {
 /// spawn_blocking: it is an SSH round trip, so it must not block the main
 /// thread.
 #[tauri::command]
-pub async fn remote_create_dir(path: String) -> Result<(), String> {
+pub async fn remote_create_dir(
+    webview_window: tauri::WebviewWindow,
+    path: String,
+) -> Result<(), String> {
     validate_remote_path(&path)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::windows::blocking(webview_window.label().to_string(), move || {
         let session = current_session().ok_or_else(|| "no remote session".to_string())?;
         ssh_run(&session.host, &remote_mkdir_script(&path)).map(|_| ())
     })
-    .await
-    .map_err(|e| format!("create folder task failed: {e}"))?
+    .await?
 }
 
 #[cfg(test)]
@@ -3383,7 +3479,7 @@ mod mkdir_tests {
 
     #[test]
     fn remote_create_dir_rejects_relative_and_control_paths() {
-        let run = |p: &str| tauri::async_runtime::block_on(remote_create_dir(p.to_string()));
+        let run = |p: &str| validate_remote_path(p);
         assert!(run("rel/dir").unwrap_err().contains("absolute"));
         assert!(run("/bad\npath").is_err());
     }

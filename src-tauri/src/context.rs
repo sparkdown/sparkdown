@@ -114,11 +114,12 @@ const CONTEXT_README: &str = "SparkDown agent context.\n\
 /// command would run this on the main thread and could freeze the UI.
 #[tauri::command]
 pub async fn agent_context_update(
+    webview_window: tauri::WebviewWindow,
     root: String,
     context_json: String,
     buffers: Vec<ShadowBuffer>,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
         agent_context_update_impl(root, context_json, buffers)
     })
     .await
@@ -181,10 +182,15 @@ fn agent_context_update_impl(
 /// even locally `remove_dir_all` can block on many files. Keep it off Tauri
 /// 2's main thread.
 #[tauri::command]
-pub async fn agent_context_clear(root: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || agent_context_clear_impl(root))
-        .await
-        .map_err(|e| format!("agent_context_clear task failed: {e}"))?
+pub async fn agent_context_clear(
+    webview_window: tauri::WebviewWindow,
+    root: String,
+) -> Result<(), String> {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        agent_context_clear_impl(root)
+    })
+    .await
+    .map_err(|e| format!("agent_context_clear task failed: {e}"))?
 }
 
 fn agent_context_clear_impl(root: String) -> Result<(), String> {
@@ -451,7 +457,8 @@ fn is_executable(_p: &Path) -> bool {
 // Async so the shell probes run on Tauri's worker pool, never blocking the
 // UI thread (each interactive-shell check can take ~100ms+).
 #[tauri::command]
-pub async fn detect_agents() -> Vec<AgentCli> {
+pub async fn detect_agents(webview_window: tauri::WebviewWindow) -> Vec<AgentCli> {
+    let _scope = crate::windows::enter(webview_window.label());
     let known: [(&str, &str, &str); 8] = [
         ("claude", "Claude Code", "claude"),
         ("codex", "Codex", "codex"),

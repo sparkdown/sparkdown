@@ -163,12 +163,15 @@ const NUMSTAT_ARGS: [&str; 8] = [
 
 #[tauri::command]
 pub async fn git_change_stats(
+    webview_window: tauri::WebviewWindow,
     root: String,
     changes: Vec<ChangeRef>,
 ) -> Result<Vec<ChangeStat>, String> {
-    tauri::async_runtime::spawn_blocking(move || git_change_stats_impl(&root, changes))
-        .await
-        .map_err(|e| format!("git_change_stats task failed: {e}"))?
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        git_change_stats_impl(&root, changes)
+    })
+    .await
+    .map_err(|e| format!("git_change_stats task failed: {e}"))?
 }
 
 fn sanitize(changes: Vec<ChangeRef>) -> Vec<ChangeRef> {

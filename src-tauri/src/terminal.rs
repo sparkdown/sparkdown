@@ -126,7 +126,8 @@ pub(crate) fn launch_shell_family(windows: bool, remote: bool) -> &'static str {
 /// Which syntax the frontend must use for an agent launch line right now
 /// (see [`launch_shell_family`]).
 #[tauri::command]
-pub fn terminal_launch_shell() -> &'static str {
+pub fn terminal_launch_shell(webview_window: tauri::WebviewWindow) -> &'static str {
+    let _scope = crate::windows::enter(webview_window.label());
     launch_shell_family(cfg!(windows), crate::remote::is_active())
 }
 
@@ -243,6 +244,36 @@ pub struct Terminal {
 #[derive(Default)]
 pub struct TerminalState(pub Arc<Mutex<HashMap<String, Terminal>>>);
 
+/// Core map key of window `label`'s terminal `id` (ids repeat across
+/// windows: each starts at `term-1`).
+pub(crate) fn term_key(label: &str, id: &str) -> String {
+    format!("{label}/{id}")
+}
+
+impl TerminalState {
+    /// Close every terminal of a window (the window closed). Dropping the
+    /// entries drops their writers/controllers; killing ends the shells.
+    pub fn release_window(&self, label: &str) {
+        let prefix = format!("{label}/");
+        let gone: Vec<Terminal> = match self.0.lock() {
+            Ok(mut g) => {
+                let keys: Vec<String> = g
+                    .keys()
+                    .filter(|k| k.starts_with(&prefix))
+                    .cloned()
+                    .collect();
+                keys.into_iter().filter_map(|k| g.remove(&k)).collect()
+            }
+            Err(_) => return,
+        };
+        for mut t in gone {
+            t.silenced.store(true, Ordering::SeqCst);
+            // A tmux client is only detached (its session survives, as on quit).
+            let _ = t.killer.kill();
+        }
+    }
+}
+
 /// Payload for the `terminal://data` event: which terminal, and its output.
 #[derive(Serialize, Clone)]
 struct TermData {
@@ -338,6 +369,7 @@ fn tmux_hide_status_line(cmd: &mut CommandBuilder, session: &str) {
 #[allow(clippy::too_many_arguments)] // Tauri command: params map to one JS call.
 pub fn terminal_start(
     app: AppHandle,
+    webview_window: tauri::WebviewWindow,
     state: tauri::State<'_, TerminalState>,
     id: String,
     cwd: Option<String>,
@@ -352,8 +384,12 @@ pub fn terminal_start(
     // stale `terminal://exit` that would close the new tab, can't bleed the old
     // pty's output into it, and the old pty doesn't leak. `insert` below then
     // drops the old controller/sender, unblocking those threads to exit.
+    let label = webview_window.label().to_string();
+    let _scope = crate::windows::enter(&label);
+    // Ids are per window (`term-N`); the core map keys them by window too.
+    let key = term_key(&label, &id);
     if let Ok(mut guard) = state.0.lock() {
-        if let Some(old) = guard.get_mut(&id) {
+        if let Some(old) = guard.get_mut(&key) {
             old.silenced.store(true, Ordering::SeqCst);
             let _ = old.killer.kill();
         }
@@ -549,6 +585,7 @@ pub fn terminal_start(
     let emit_exit: Arc<dyn Fn() + Send + Sync> = {
         let app = app_for_thread.clone();
         let id = id_for_thread.clone();
+        let label = label.clone();
         let flag = exit_emitted.clone();
         let silenced = silenced.clone();
         Arc::new(move || {
@@ -558,7 +595,11 @@ pub fn terminal_start(
             if flag.swap(true, Ordering::SeqCst) {
                 return;
             }
-            let _ = app.emit("terminal://exit", TermExit { id: id.clone() });
+            let _ = app.emit_to(
+                label.as_str(),
+                "terminal://exit",
+                TermExit { id: id.clone() },
+            );
         })
     };
 
@@ -635,12 +676,14 @@ pub fn terminal_start(
 
     {
         let silenced = silenced.clone();
+        let label = label.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             let mut pending: Vec<u8> = Vec::new();
             let emit = |text: String| {
                 if !text.is_empty() && !silenced.load(Ordering::SeqCst) {
-                    let _ = app_for_thread.emit(
+                    let _ = app_for_thread.emit_to(
+                        label.as_str(),
                         "terminal://data",
                         TermData {
                             id: id_for_thread.clone(),
@@ -691,7 +734,7 @@ pub fn terminal_start(
         .lock()
         .map_err(|_| "terminal state poisoned")?
         .insert(
-            id,
+            key,
             Terminal {
                 input_tx,
                 controller,
@@ -770,10 +813,12 @@ fn decode_pty_utf8(pending: &mut Vec<u8>, flush: bool) -> String {
 /// `#[tauri::command]` would run on Tauri 2's main thread and could freeze
 /// the UI on a half-open SSH connection.
 #[tauri::command]
-pub async fn tmux_sessions(prefix: String) -> Vec<String> {
-    tauri::async_runtime::spawn_blocking(move || tmux_sessions_impl(prefix))
-        .await
-        .unwrap_or_default()
+pub async fn tmux_sessions(webview_window: tauri::WebviewWindow, prefix: String) -> Vec<String> {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        tmux_sessions_impl(prefix)
+    })
+    .await
+    .unwrap_or_default()
 }
 
 fn tmux_sessions_impl(prefix: String) -> Vec<String> {
@@ -827,11 +872,17 @@ pub(crate) fn validate_own_session(session: &str) -> Result<(), String> {
 /// `async` + `spawn_blocking`: the ssh (or local `tmux send-keys`) round trip
 /// stays off Tauri 2's main thread — same rationale as [`tmux_sessions`].
 #[tauri::command]
-pub async fn tmux_send_keys(session: String, text: String) -> Result<(), String> {
+pub async fn tmux_send_keys(
+    webview_window: tauri::WebviewWindow,
+    session: String,
+    text: String,
+) -> Result<(), String> {
     validate_own_session(&session)?;
-    tauri::async_runtime::spawn_blocking(move || tmux_send_keys_impl(&session, &text))
-        .await
-        .map_err(|e| format!("tmux_send_keys task failed: {e}"))?
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        tmux_send_keys_impl(&session, &text)
+    })
+    .await
+    .map_err(|e| format!("tmux_send_keys task failed: {e}"))?
 }
 
 fn tmux_send_keys_impl(session: &str, text: &str) -> Result<(), String> {
@@ -857,11 +908,16 @@ fn tmux_send_keys_impl(session: &str, text: &str) -> Result<(), String> {
 /// `async` + `spawn_blocking`: same reasoning as [`tmux_sessions`] — keeps a
 /// half-open SSH from freezing the Tauri 2 main thread.
 #[tauri::command]
-pub async fn tmux_kill_session(session: String) -> Result<(), String> {
+pub async fn tmux_kill_session(
+    webview_window: tauri::WebviewWindow,
+    session: String,
+) -> Result<(), String> {
     validate_own_session(&session)?;
-    tauri::async_runtime::spawn_blocking(move || tmux_kill_session_impl(&session))
-        .await
-        .map_err(|e| format!("tmux_kill_session task failed: {e}"))?
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        tmux_kill_session_impl(&session)
+    })
+    .await
+    .map_err(|e| format!("tmux_kill_session task failed: {e}"))?
 }
 
 fn tmux_kill_session_impl(session: &str) -> Result<(), String> {
@@ -883,10 +939,12 @@ fn tmux_kill_session_impl(session: &str) -> Result<(), String> {
 /// Forward user input (keystrokes) to terminal `id`.
 #[tauri::command]
 pub fn terminal_write(
+    webview_window: tauri::WebviewWindow,
     state: tauri::State<'_, TerminalState>,
     id: String,
     data: String,
 ) -> Result<(), String> {
+    let id = term_key(webview_window.label(), &id);
     // Hand the bytes to this terminal's writer thread and return immediately.
     // The map lock is held only for the channel send (never for the pty write),
     // so a paste into a program that isn't reading its input can't stall the
@@ -903,11 +961,13 @@ pub fn terminal_write(
 /// Resize terminal `id`'s pty grid.
 #[tauri::command]
 pub fn terminal_resize(
+    webview_window: tauri::WebviewWindow,
     state: tauri::State<'_, TerminalState>,
     id: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    let id = term_key(webview_window.label(), &id);
     let guard = state.0.lock().map_err(|_| "terminal state poisoned")?;
     if let Some(term) = guard.get(&id) {
         term.controller
@@ -934,9 +994,11 @@ pub fn terminal_resize(
 /// - Remote (ssh): the remote shell is not visible from here: None.
 #[tauri::command]
 pub async fn terminal_busy(
+    webview_window: tauri::WebviewWindow,
     state: tauri::State<'_, TerminalState>,
     id: String,
 ) -> Result<Option<String>, String> {
+    let id = term_key(webview_window.label(), &id);
     let probe = {
         let guard = state.0.lock().map_err(|_| "terminal state poisoned")?;
         let Some(t) = guard.get(&id) else {
@@ -952,7 +1014,7 @@ pub async fn terminal_busy(
             fg_pgrp: t.controller.process_group_leader(),
         }
     };
-    tauri::async_runtime::spawn_blocking(move || Ok(probe.run()))
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || Ok(probe.run()))
         .await
         .map_err(|e| format!("busy check failed: {e}"))?
 }
@@ -1135,7 +1197,12 @@ fn windows_process_table() -> Vec<(u32, u32, String)> {
 
 /// Close terminal `id`: drop its pty (which kills the shell) and forget it.
 #[tauri::command]
-pub fn terminal_close(state: tauri::State<'_, TerminalState>, id: String) -> Result<(), String> {
+pub fn terminal_close(
+    webview_window: tauri::WebviewWindow,
+    state: tauri::State<'_, TerminalState>,
+    id: String,
+) -> Result<(), String> {
+    let id = term_key(webview_window.label(), &id);
     state
         .0
         .lock()
@@ -1147,7 +1214,8 @@ pub fn terminal_close(state: tauri::State<'_, TerminalState>, id: String) -> Res
 /// Basename of the user's login shell ("zsh", "bash", "powershell") — used as
 /// the default tab name for terminals opened with "+".
 #[tauri::command]
-pub fn shell_name() -> String {
+pub fn shell_name(webview_window: tauri::WebviewWindow) -> String {
+    let _scope = crate::windows::enter(webview_window.label());
     default_shell().name
 }
 
