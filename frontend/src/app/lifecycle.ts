@@ -1,6 +1,6 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ask } from '@tauri-apps/plugin-dialog';
-import { api } from '../api';
+import { api, type QuitStatus } from '../api';
 import type { AppContext } from './context';
 
 /** What the quit flow needs from the App. */
@@ -69,18 +69,15 @@ export class LifecycleController {
   }
 
   /** One confirm for every running terminal a quit would stop, across all
-   *  windows. True = go ahead. */
+   *  windows, also listing the windows with unsaved changes (#68): one
+   *  prompt shows everything the quit touches. True = go ahead (the save
+   *  prompts for unsaved files follow). */
   private async confirmBusyTerminals(): Promise<boolean> {
-    const busy = await api.quitStatus().catch(() => []);
-    if (busy.length === 0) return true;
-    const lines = busy
-      .slice(0, 8)
-      .map((b) => `• ${b.command} — ${b.window}`)
-      .join('\n');
-    const more = busy.length > 8 ? `\n…and ${busy.length - 8} more` : '';
-    const n = busy.length === 1 ? 'A terminal is' : `${busy.length} terminals are`;
+    const status = await api.quitStatus().catch(() => ({ busy: [], unsaved: [] }));
+    const text = quitConfirmText(status);
+    if (!text) return true;
     try {
-      return await ask(`${n} still running:\n\n${lines}${more}\n\nQuit SparkDown and stop them?`, {
+      return await ask(text, {
         title: 'Quit SparkDown',
         kind: 'warning',
         okLabel: 'Quit',
@@ -134,4 +131,24 @@ export class LifecycleController {
     await this.deps.persistConfig();
     await this.deps.clearAgentContext();
   }
+}
+
+/** The quit confirm's text, or null when no terminal is running (unsaved
+ *  files alone get the usual save prompts). */
+export function quitConfirmText(status: QuitStatus): string | null {
+  const { busy, unsaved } = status;
+  if (busy.length === 0) return null;
+  const lines = busy
+    .slice(0, 8)
+    .map((b) => `• ${b.command} — ${b.window}`)
+    .join('\n');
+  const more = busy.length > 8 ? `\n…and ${busy.length - 8} more` : '';
+  const n = busy.length === 1 ? 'A terminal is' : `${busy.length} terminals are`;
+  const dirty = unsaved.length
+    ? `\n\nUnsaved changes (you will be asked to save them):\n${unsaved
+        .slice(0, 8)
+        .map((w) => `• ${w}`)
+        .join('\n')}`
+    : '';
+  return `${n} still running:\n\n${lines}${more}${dirty}\n\nQuit SparkDown and stop them?`;
 }

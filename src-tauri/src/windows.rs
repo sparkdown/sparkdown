@@ -15,7 +15,6 @@
 
 // Folder routing (#62) and MCP routing (#64) consume the rest of the
 // registry; remove this once they land.
-#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -306,14 +305,6 @@ impl Registry {
 
     pub fn contains(&self, label: &str) -> bool {
         self.windows.contains_key(label)
-    }
-
-    pub fn len(&self) -> usize {
-        self.windows.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.windows.is_empty()
     }
 
     pub fn get(&self, label: &str) -> Option<&WindowEntry> {

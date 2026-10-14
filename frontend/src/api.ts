@@ -31,6 +31,13 @@ export interface FileEntry {
 /** Absolute path currently watched, so watchStart can no-op for nested roots. */
 let watchRoot: string | null = null;
 
+/** What a quit would cost across windows (#65/#68). */
+export interface QuitStatus {
+  busy: { window: string; command: string }[];
+  /** Windows with unsaved changes. */
+  unsaved: string[];
+}
+
 export const api = {
   /** Multi-window registry (#61): this window's folder and unsaved state. */
   windowSetFolder: (folder: WindowFolder | null, display: string | null) =>
@@ -51,7 +58,7 @@ export const api = {
   windowClose: () => invoke<void>('window_close'),
   windowTakeMenu: () => invoke<string | null>('window_take_menu'),
   /** Running non-tmux terminals in every window (what a quit stops). */
-  quitStatus: () => invoke<{ window: string; command: string }[]>('quit_status'),
+  quitStatus: () => invoke<QuitStatus>('quit_status'),
   /** Every other window resolves unsaved tabs and saves; false = cancelled. */
   quitPrepareOthers: () => invoke<boolean>('quit_prepare_others'),
   quitPrepareReply: (id: number, ok: boolean) => invoke<void>('quit_prepare_reply', { id, ok }),

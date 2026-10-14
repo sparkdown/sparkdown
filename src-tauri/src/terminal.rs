@@ -178,7 +178,10 @@ fn default_shell() -> ShellLaunch {
     }
     #[cfg(not(windows))]
     {
-        let program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let program = std::env::var("SHELL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(fallback_shell);
         let name = program
             .rsplit('/')
             .next()
@@ -1255,6 +1258,17 @@ pub fn terminal_close(
 pub fn shell_name(webview_window: tauri::WebviewWindow) -> String {
     let _scope = crate::windows::enter(webview_window.label());
     default_shell().name
+}
+
+/// `$SHELL` unset (some desktop launchers): the first of zsh, bash, sh
+/// that exists, so a box without zsh still gets a shell.
+#[cfg(not(windows))]
+fn fallback_shell() -> String {
+    ["/bin/zsh", "/usr/bin/zsh", "/bin/bash", "/usr/bin/bash"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .unwrap_or("/bin/sh")
+        .to_string()
 }
 
 #[cfg(test)]

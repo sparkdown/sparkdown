@@ -186,25 +186,51 @@ pub struct BusyTerminal {
     pub command: String,
 }
 
-/// Running terminals across every window that a quit would stop.
+/// What a quit would cost, across every window (#65/#68): running
+/// terminals it would stop and windows with unsaved changes. One confirm
+/// lists both.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct QuitStatus {
+    pub busy: Vec<BusyTerminal>,
+    /// Display names of windows with unsaved changes.
+    pub unsaved: Vec<String>,
+}
+
+fn window_name(s: &windows::WindowSummary) -> String {
+    let t = title_for(s.folder.as_ref(), s.display.as_deref());
+    let t = t.trim_end_matches(" — SparkDown");
+    if t == "SparkDown" {
+        "Untitled window".to_string()
+    } else {
+        t.to_string()
+    }
+}
+
 #[tauri::command]
-pub async fn quit_status(app: AppHandle) -> Result<Vec<BusyTerminal>, String> {
+pub async fn quit_status(app: AppHandle) -> Result<QuitStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let names: HashMap<String, String> = windows::registry()
-            .summaries()
-            .into_iter()
-            .map(|s| {
-                let t = title_for(s.folder.as_ref(), s.display.as_deref());
-                (s.label, t.trim_end_matches(" — SparkDown").to_string())
-            })
-            .collect();
-        crate::terminal::busy_on_quit(&app.state::<crate::terminal::TerminalState>())
+        let (names, unsaved) = {
+            let reg = windows::registry();
+            let rows = reg.summaries();
+            let names: HashMap<String, String> = rows
+                .iter()
+                .map(|s| (s.label.clone(), window_name(s)))
+                .collect();
+            let unsaved: Vec<String> = rows
+                .iter()
+                .filter(|s| reg.get(&s.label).is_some_and(|w| w.dirty))
+                .map(window_name)
+                .collect();
+            (names, unsaved)
+        };
+        let busy = crate::terminal::busy_on_quit(&app.state::<crate::terminal::TerminalState>())
             .into_iter()
             .map(|(label, command)| BusyTerminal {
                 window: names.get(&label).cloned().unwrap_or(label),
                 command,
             })
-            .collect()
+            .collect();
+        QuitStatus { busy, unsaved }
     })
     .await
     .map_err(|e| e.to_string())
