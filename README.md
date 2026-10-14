@@ -222,7 +222,7 @@ src-tauri/                  # Rust backend (Tauri)
   tauri.conf.json           # Window, bundle, CSP, file associations
   updater-pubkey.txt        # Updater public key (compiled in)
 
-scripts/                    # install-linux.sh, package-macos.sh, package-windows.ps1, release.sh, setup-updater-key.sh, update-pkgbuild.sh
+scripts/                    # install-linux.sh, package-macos.sh, package-windows.ps1, release.sh, setup-updater-key.sh, update-pkgbuild.sh, bump-cask.sh
 packaging/                  # Linux .desktop file, AUR PKGBUILD
 docs/                       # Platform notes + release notes
 website/                    # Landing page (static HTML)
