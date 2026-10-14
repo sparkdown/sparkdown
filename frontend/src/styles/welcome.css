@@ -213,3 +213,11 @@
   justify-content: center;
   gap: 8px;
 }
+
+/* #66: a recent folder open in some window. */
+.welcome-recent-open {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--accent, #4a9eff);
+  white-space: nowrap;
+}

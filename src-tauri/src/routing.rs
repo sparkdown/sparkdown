@@ -32,7 +32,20 @@ pub enum Route {
 }
 
 /// The routing rule, on the registry alone.
+#[cfg(test)]
 pub fn decide(reg: &Registry, caller: Option<&str>, folder: &FolderId) -> Route {
+    decide_with(reg, caller, folder, false)
+}
+
+/// `decide`, optionally forcing a new window (#66 "Open in New Window"):
+/// an empty caller is skipped, but a folder that is already open still
+/// just focuses its window (one folder, one window).
+pub fn decide_with(
+    reg: &Registry,
+    caller: Option<&str>,
+    folder: &FolderId,
+    new_window: bool,
+) -> Route {
     if let Some(open_in) = reg.find_folder(folder) {
         return if caller == Some(open_in.as_str()) {
             Route::Here
@@ -40,7 +53,7 @@ pub fn decide(reg: &Registry, caller: Option<&str>, folder: &FolderId) -> Route 
             Route::Focused(open_in)
         };
     }
-    if let Some(c) = caller {
+    if let Some(c) = caller.filter(|_| !new_window) {
         if reg.is_empty_window(c) {
             return Route::Here;
         }
@@ -117,11 +130,16 @@ fn folder_for(caller: Option<&str>, dir: &str) -> Result<(FolderId, String, Stri
 }
 
 /// Route `dir` for `caller` and carry the route out (focus or create).
-pub fn route(app: &AppHandle, caller: Option<&str>, dir: &str) -> Result<Route, String> {
+pub fn route(
+    app: &AppHandle,
+    caller: Option<&str>,
+    dir: &str,
+    new_window: bool,
+) -> Result<Route, String> {
     let (folder, spec, display) = folder_for(caller, dir)?;
     let route = {
         let mut reg = windows::registry();
-        let r = decide(&reg, caller, &folder);
+        let r = decide_with(&reg, caller, &folder, new_window);
         if let Route::New(label) = &r {
             // Claim the folder now so a second request focuses this window.
             reg.register(label);
@@ -164,13 +182,42 @@ pub async fn route_folder(
     app: AppHandle,
     webview_window: tauri::WebviewWindow,
     dir: String,
+    new_window: Option<bool>,
 ) -> Result<Route, String> {
     let label = webview_window.label().to_string();
+    let new_window = new_window.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
-        Ok(route(&app, Some(&label), &dir).unwrap_or(Route::Here))
+        Ok(route(&app, Some(&label), &dir, new_window).unwrap_or(Route::Here))
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// For each recent-folder spec (a local path or `ssh://host/path`), the
+/// 1-based number of the window that has it open (Window menu order), or
+/// null (#66: recents mark open folders).
+#[tauri::command]
+pub async fn window_numbers_for(specs: Vec<String>) -> Result<Vec<Option<usize>>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let ids: Vec<Option<FolderId>> = specs
+            .iter()
+            .map(|s| folder_for(None, s).ok().map(|(f, _, _)| f))
+            .collect();
+        let reg = windows::registry();
+        Ok(numbers_for(&reg, &ids))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn numbers_for(reg: &Registry, ids: &[Option<FolderId>]) -> Vec<Option<usize>> {
+    let order: Vec<String> = reg.summaries().into_iter().map(|w| w.label).collect();
+    ids.iter()
+        .map(|id| {
+            let label = reg.find_folder(id.as_ref()?)?;
+            order.iter().position(|l| *l == label).map(|i| i + 1)
+        })
+        .collect()
 }
 
 /// The folder a window created by a `new` route should open (once).
@@ -216,13 +263,17 @@ pub async fn window_set_remote_folder(
 /// (focus / the focused window if empty / new window); files go to the
 /// window whose folder contains them, else the focused one. Returns the
 /// paths each window should open itself.
-pub fn route_forwarded(app: &AppHandle, paths: &[String]) -> HashMap<String, Vec<String>> {
+pub fn route_forwarded(
+    app: &AppHandle,
+    paths: &[String],
+    new_window: bool,
+) -> HashMap<String, Vec<String>> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
     let focused = windows::registry().focused();
     for p in paths {
         let is_dir = std::path::Path::new(p).is_dir();
         if is_dir {
-            match route(app, focused.as_deref(), p) {
+            match route(app, focused.as_deref(), p, new_window) {
                 Ok(Route::Here) => {
                     if let Some(f) = &focused {
                         // Claim it now so a second folder in the same
@@ -262,6 +313,21 @@ mod tests {
     }
 
     #[test]
+    fn recents_get_the_number_of_the_window_that_has_them() {
+        let mut reg = Registry::default();
+        for l in ["w-1", "w-2"] {
+            reg.register(l);
+        }
+        reg.set_folder("w-2", Some(local("/two")), None).unwrap();
+        let order: Vec<String> = reg.summaries().into_iter().map(|w| w.label).collect();
+        let n = order.iter().position(|l| l == "w-2").unwrap() + 1;
+        assert_eq!(
+            numbers_for(&reg, &[Some(local("/two")), Some(local("/nope")), None]),
+            vec![Some(n), None, None]
+        );
+    }
+
+    #[test]
     fn open_folder_routing_rule() {
         let mut reg = Registry::default();
         reg.register("w-a");
@@ -289,6 +355,20 @@ mod tests {
         ));
         // No caller (a forwarded path with no window focused): new window.
         assert!(matches!(decide(&reg, None, &local("/c")), Route::New(_)));
+        // #66: a forced new window skips the empty caller, but an open
+        // folder still only focuses its window.
+        assert!(matches!(
+            decide_with(&reg, Some("w-empty"), &local("/c"), true),
+            Route::New(_)
+        ));
+        assert_eq!(
+            decide_with(&reg, Some("w-empty"), &local("/a"), true),
+            Route::Focused("w-a".into())
+        );
+        assert_eq!(
+            decide_with(&reg, Some("w-a"), &local("/a"), true),
+            Route::Here
+        );
     }
 
     #[test]

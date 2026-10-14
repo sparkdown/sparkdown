@@ -31,7 +31,7 @@ export interface WorkspaceDeps {
   /** Empty state when no tab is open, editor otherwise (after a root change). */
   syncEmptyState(): void;
   /** App.openFolder: routes through the remote handler when one is set. */
-  openFolder(dir: string): Promise<void>;
+  openFolder(dir: string, opts?: { newWindow?: boolean }): Promise<void>;
 }
 
 /**
@@ -127,9 +127,9 @@ export class WorkspaceController {
    * start watching it, without needing to open a file first. This is the
    * cockpit entry point — "open the folder my agent is working in."
    */
-  async openFolderDialog(): Promise<void> {
+  async openFolderDialog(opts: { newWindow?: boolean } = {}): Promise<void> {
     const dir = await open({ directory: true, multiple: false });
-    if (typeof dir === 'string') await this.deps.openFolder(dir);
+    if (typeof dir === 'string') await this.deps.openFolder(dir, opts);
   }
 
   /**

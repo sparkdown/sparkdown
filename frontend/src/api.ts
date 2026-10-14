@@ -38,7 +38,10 @@ export const api = {
   windowSetDirty: (dirty: boolean) => invoke<void>('window_set_dirty', { dirty }),
   /** Open Folder routing (#62): where `dir` (local, on this window's
    *  session, or ssh://host/path) opens. `here` = this window opens it. */
-  routeFolder: (dir: string) => invoke<FolderRoute>('route_folder', { dir }),
+  routeFolder: (dir: string, newWindow = false) =>
+    invoke<FolderRoute>('route_folder', { dir, newWindow }),
+  /** #66: for each recent spec, the number of the window that has it open. */
+  windowNumbersFor: (specs: string[]) => invoke<Array<number | null>>('window_numbers_for', { specs }),
   /** The folder this (new) window was created to open, once. */
   windowTakeOpen: () => invoke<string | null>('window_take_open'),
   /** Record this window's remote folder after a connect; the label of the

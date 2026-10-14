@@ -18,6 +18,8 @@ export interface BuiltinCommandTargets {
   setViewMode(mode: ViewMode): void;
   showSidebarView(view: SidebarView): void;
   openLinePrompt(): void;
+  /** #66: Open Folder, forcing a new window. */
+  openFolderInNewWindow(): void;
   toggleHtmlScripts(): void;
   checkForUpdates(): void;
   /** The terminal split grid (CockpitController). */
@@ -204,6 +206,12 @@ export function registerBuiltinCommands(reg: CommandRegistry, t: BuiltinCommandT
       run: () => t.checkForUpdates(),
     },
     act('window.new', 'Window: New window', ACTIONS.NEW_WINDOW),
+    {
+      id: 'window.openFolder',
+      title: 'Window: Open folder in new window…',
+      keywords: 'open folder new window',
+      run: () => t.openFolderInNewWindow(),
+    },
     act('app.quit', 'App: Quit', ACTIONS.QUIT),
   );
 }
