@@ -35,7 +35,7 @@ extern "C-unwind" fn application_should_terminate(
     _sender: *mut AnyObject,
 ) -> usize {
     if let Some(app) = APP_HANDLE.get() {
-        if let Some(window) = app.get_webview_window("main") {
+        if let Some(window) = crate::windows::target_window(app) {
             let _ = window.show();
             let _ = window.set_focus();
             let _ = window.emit("exit-requested", ());

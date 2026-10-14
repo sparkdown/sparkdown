@@ -12,6 +12,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "SparkDown",
         "width": 1200,
         "height": 800,

@@ -267,11 +267,16 @@ export class App {
     // CLI / "Open With" paths can be files or folders. Folders become the
     // sidebar root (same as a dropped directory); files open as tabs.
     // Session restore is files-only, so it stays on openFilesInOrder.
+    // Session restore (#63): this window's folder, then its open files.
+    const folder = this.config.window_folder;
+    if (folder && (await api.isDirectory(folder).catch(() => false))) {
+      await this.workspace.openFolder(folder);
+    }
     if (pendingFiles.length > 0) {
       await this.workspace.openDroppedPaths(pendingFiles);
     } else if (this.config.last_open_files.length > 0) {
       await this.documents.openFilesInOrder(this.config.last_open_files);
-    } else {
+    } else if (!folder) {
       // Nothing to restore → the welcome screen (an invitation to act),
       // rather than a blank Untitled buffer.
       this.welcome.show();

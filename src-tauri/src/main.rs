@@ -18,6 +18,7 @@ mod proc;
 mod remote;
 mod review;
 mod search;
+mod session;
 mod terminal;
 mod updates;
 mod watcher;
@@ -79,7 +80,7 @@ fn forwarded_paths(argv: &[String], cwd: &str) -> Vec<String> {
 
 /// A second launch (#51): bring the window forward and open its paths here.
 fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, cwd: String) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = windows::target_window(app) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
@@ -98,8 +99,11 @@ fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, cwd: String) {
         .load(std::sync::atomic::Ordering::SeqCst)
     {
         drop(queue);
+        let target = windows::target_window(app)
+            .map(|w| w.label().to_string())
+            .unwrap_or_else(|| windows::DEFAULT_LABEL.to_string());
         let _ = app.emit_to(
-            "main",
+            target.as_str(),
             OPEN_PATHS_EVENT,
             serde_json::json!({ "paths": paths }),
         );
@@ -176,7 +180,7 @@ fn push_pending<I: IntoIterator<Item = String>>(state: &State<'_, PendingFiles>,
 
 #[cfg(target_os = "macos")]
 fn emit_open_file_paths(app: &tauri::AppHandle, paths: &[String]) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = windows::target_window(app) {
         for path in paths {
             let _ = window.emit("open-file-path", serde_json::json!({ "path": path }));
         }
@@ -346,7 +350,6 @@ fn main() {
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_drag::init())
-        .plugin(tauri_plugin_window_state::Builder::new().build())
         .plugin(
             tauri::plugin::Builder::<Wry>::new("navigation-guard")
                 .on_navigation(|_webview, url| {
@@ -372,14 +375,11 @@ fn main() {
             #[cfg(not(target_os = "macos"))]
             {
                 app.manage(menu::AppMenuHandle(app_menu.menu));
-                if let Some(window) = handle.get_webview_window("main") {
-                    let _ = window.set_decorations(false);
-                }
             }
 
             app.on_menu_event(move |app_handle, event| {
                 let id = event.id().0.as_str();
-                if let Some(window) = app_handle.get_webview_window("main") {
+                if let Some(window) = windows::target_window(app_handle) {
                     let _ = window.emit(&format!("menu:{}", id), ());
                 }
             });
@@ -393,9 +393,34 @@ fn main() {
             #[cfg(target_os = "macos")]
             macos_quit::install(&handle);
 
-            // Register every window the config created (today: "main").
-            for label in handle.webview_windows().keys() {
-                windows::registry().register(label);
+            // One config writer in the core (#63); restore every window of
+            // the last session (a 0.3.x config migrates to one window).
+            let store = session::ConfigStore::open(
+                config::config_path(&handle).map_err(|e| e.to_string())?,
+            );
+            let plan = session::plan_restore(&store.stored());
+            store.adopt(&plan);
+            app.manage(store);
+            for p in &plan {
+                if let Some(f) = &p.session.folder {
+                    let _ = windows::registry().set_folder(
+                        &p.label,
+                        Some(f.clone()),
+                        p.session.display.clone(),
+                    );
+                }
+                if let Err(e) = windows::create_window(&handle, &p.label, p.session.geometry, false)
+                {
+                    eprintln!("Warning: could not restore window {}: {e}", p.label);
+                }
+            }
+            if let Some(w) = plan
+                .iter()
+                .find(|p| p.focus)
+                .and_then(|p| handle.get_webview_window(&p.label))
+            {
+                let _ = w.set_focus();
+                windows::registry().mark_focused(w.label());
             }
 
             // In-app MCP server for agents in the terminal. Transport is a
@@ -413,7 +438,7 @@ fn main() {
             // Open the Web Inspector automatically in dev builds. Compiled out
             // of release (open_devtools is debug-only).
             #[cfg(debug_assertions)]
-            if let Some(window) = handle.get_webview_window("main") {
+            if let Some(window) = windows::target_window(&handle) {
                 window.open_devtools();
             }
 
@@ -517,6 +542,8 @@ fn main() {
             // them ~10 minutes, leaving the next launch's MCP forward silently
             // offline).
             if let tauri::RunEvent::Exit = &event {
+                windows::set_quitting();
+                let _ = app.state::<session::ConfigStore>().flush();
                 remote::shutdown();
                 mcp::shutdown();
                 return;
@@ -531,7 +558,21 @@ fn main() {
                 ..
             } = &event
             {
-                windows::registry().mark_focused(label);
+                let seq = {
+                    let mut r = windows::registry();
+                    r.mark_focused(label);
+                    r.focus_seq(label)
+                };
+                app.state::<session::ConfigStore>().note_focus(label, seq);
+                return;
+            }
+            if let tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_),
+                ..
+            } = &event
+            {
+                note_geometry(app, label);
                 return;
             }
             if let tauri::RunEvent::WindowEvent {
@@ -540,17 +581,23 @@ fn main() {
                 ..
             } = &event
             {
+                // A window the user closed is not restored; on quit every
+                // window keeps its section.
+                if !windows::is_quitting() {
+                    app.state::<session::ConfigStore>().forget_window(label);
+                }
                 release_window(app, label);
                 return;
             }
 
             if let tauri::RunEvent::WindowEvent {
+                label,
                 event: tauri::WindowEvent::CloseRequested { api, .. },
                 ..
             } = &event
             {
                 api.prevent_close();
-                if let Some(window) = app.get_webview_window("main") {
+                if let Some(window) = app.get_webview_window(label) {
                     // macOS: hide to dock (after resolving unsaved changes).
                     // Other platforms: closing the window means quit.
                     #[cfg(target_os = "macos")]
@@ -569,9 +616,12 @@ fn main() {
             // reach here — it Exits directly — which is why close-to-dock above
             // resolves unsaved work up front.)
             if let tauri::RunEvent::ExitRequested { code, api, .. } = &event {
+                if code.is_some() {
+                    windows::set_quitting();
+                }
                 if code.is_none() {
                     api.prevent_exit();
-                    if let Some(window) = app.get_webview_window("main") {
+                    if let Some(window) = windows::target_window(app) {
                         let _ = window.show();
                         let _ = window.set_focus();
                         let _ = window.emit("exit-requested", ());
@@ -594,7 +644,7 @@ fn main() {
             } = event
             {
                 if !has_visible_windows {
-                    if let Some(window) = app.get_webview_window("main") {
+                    if let Some(window) = windows::target_window(app) {
                         let _ = window.show();
                         let _ = window.set_focus();
                     }
@@ -624,7 +674,7 @@ fn main() {
                 }
 
                 // Re-show the window in case it was hidden (macOS close-to-dock).
-                if let Some(window) = app.get_webview_window("main") {
+                if let Some(window) = windows::target_window(app) {
                     let _ = window.show();
                     let _ = window.set_focus();
                 }
@@ -633,6 +683,35 @@ fn main() {
                 push_pending(&app.state::<PendingFiles>(), paths);
             }
         });
+}
+
+/// Remember a window's outer geometry for the next launch (in memory; the
+/// next save or the quit writes it).
+fn note_geometry(app: &tauri::AppHandle, label: &str) {
+    let Some(w) = app.get_webview_window(label) else {
+        return;
+    };
+    let maximized = w.is_maximized().unwrap_or(false);
+    if maximized || w.is_minimized().unwrap_or(false) {
+        // Keep the restored size; just flag maximized.
+        if maximized {
+            app.state::<session::ConfigStore>().note_maximized(label);
+        }
+        return;
+    }
+    let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) else {
+        return;
+    };
+    app.state::<session::ConfigStore>().note_geometry(
+        label,
+        session::Geometry {
+            x: pos.x,
+            y: pos.y,
+            width: size.width,
+            height: size.height,
+            maximized: false,
+        },
+    );
 }
 
 /// Free everything a closed window owned. Runs off the event loop: closing
