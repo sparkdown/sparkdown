@@ -203,6 +203,7 @@ export function registerBuiltinCommands(reg: CommandRegistry, t: BuiltinCommandT
       title: 'Help: Check for updates…',
       run: () => t.checkForUpdates(),
     },
+    act('window.new', 'Window: New window', ACTIONS.NEW_WINDOW),
     act('app.quit', 'App: Quit', ACTIONS.QUIT),
   );
 }

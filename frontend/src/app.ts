@@ -1,4 +1,4 @@
-import { listen } from '@tauri-apps/api/event';
+import { listen } from './window-events';
 import { message } from '@tauri-apps/plugin-dialog';
 import { EditorManager } from './editor';
 import { Toolbar } from './toolbar';
@@ -267,6 +267,13 @@ export class App {
     // CLI / "Open With" paths can be files or folders. Folders become the
     // sidebar root (same as a dropped directory); files open as tabs.
     // Session restore is files-only, so it stays on openFilesInOrder.
+    // A menu action queued for this new window (macOS with no window open).
+    const queuedMenu = await api.windowTakeMenu().catch(() => null);
+    if (queuedMenu) {
+      void import('@tauri-apps/api/webviewWindow').then(({ getCurrentWebviewWindow }) =>
+        getCurrentWebviewWindow().emitTo(getCurrentWebviewWindow().label, `menu:${queuedMenu}`),
+      );
+    }
     // A window opened by Open Folder routing (#62) opens its folder.
     const routed = await api.windowTakeOpen().catch(() => null);
     if (routed) {

@@ -35,6 +35,7 @@ export type EventMap = {
   [ACTIONS.EXPORT_HTML]: void;
   [ACTIONS.FIND]: void;
   [ACTIONS.QUIT]: void;
+  [ACTIONS.NEW_WINDOW]: void;
   [ACTIONS.BOLD]: void;
   [ACTIONS.ITALIC]: void;
   [ACTIONS.HEADING]: void;

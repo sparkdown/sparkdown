@@ -73,6 +73,7 @@ export const ACTIONS = {
   EXPORT_HTML: 'action:export-html',
   FIND: 'action:find',
   QUIT: 'action:quit',
+  NEW_WINDOW: 'action:new-window',
   BOLD: 'action:bold',
   ITALIC: 'action:italic',
   HEADING: 'action:heading',

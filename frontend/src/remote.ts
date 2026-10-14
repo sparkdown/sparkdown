@@ -5,7 +5,7 @@
  * UI + a RemoteHandler that App.openFolder routes through (see
  * App.setRemoteHandler) — it does not rewrite the editor.
  */
-import { listen } from '@tauri-apps/api/event';
+import { listen } from './window-events';
 import { message } from '@tauri-apps/plugin-dialog';
 import { api, type HostKeyScan, type RemoteSession, type SshHost } from './api';
 import { MENU } from './event-names';

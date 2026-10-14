@@ -1019,6 +1019,36 @@ pub async fn terminal_busy(
         .map_err(|e| format!("busy check failed: {e}"))?
 }
 
+/// Terminals that would be killed by a quit, with what runs in them, across
+/// every window: (window label, command). tmux-backed terminals are left
+/// out (their sessions survive a quit) as are remote ones (not visible).
+/// Blocking.
+pub fn busy_on_quit(state: &TerminalState) -> Vec<(String, String)> {
+    let probes: Vec<(String, BusyProbe)> = match state.0.lock() {
+        Ok(g) => g
+            .iter()
+            .filter(|(_, t)| !t.remote && t.tmux_session.is_none())
+            .map(|(k, t)| {
+                let label = k.split_once('/').map(|(l, _)| l).unwrap_or("").to_string();
+                (
+                    label,
+                    BusyProbe {
+                        shell_pid: t.shell_pid,
+                        tmux_session: None,
+                        #[cfg(unix)]
+                        fg_pgrp: t.controller.process_group_leader(),
+                    },
+                )
+            })
+            .collect(),
+        Err(_) => return vec![],
+    };
+    probes
+        .into_iter()
+        .filter_map(|(label, p)| p.run().map(|cmd| (label, cmd)))
+        .collect()
+}
+
 /// The facts [`terminal_busy`] reads under the lock; probed off it.
 struct BusyProbe {
     shell_pid: Option<u32>,

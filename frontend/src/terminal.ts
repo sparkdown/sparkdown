@@ -1,6 +1,6 @@
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { listen, type UnlistenFn } from './window-events';
 import { ask } from '@tauri-apps/plugin-dialog';
 import { api, type RemoteSession } from './api';
 import { shortcutFor, terminalPaneAction, terminalPassesToApp, type TerminalPaneAction } from './shortcuts';

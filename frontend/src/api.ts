@@ -43,6 +43,15 @@ export const api = {
   windowTakeOpen: () => invoke<string | null>('window_take_open'),
   /** Record this window's remote folder after a connect; the label of the
    *  window that already has it (now focused), or null. */
+  /** Window lifecycle (#65). */
+  windowNew: () => invoke<void>('window_new'),
+  windowClose: () => invoke<void>('window_close'),
+  windowTakeMenu: () => invoke<string | null>('window_take_menu'),
+  /** Running non-tmux terminals in every window (what a quit stops). */
+  quitStatus: () => invoke<{ window: string; command: string }[]>('quit_status'),
+  /** Every other window resolves unsaved tabs and saves; false = cancelled. */
+  quitPrepareOthers: () => invoke<boolean>('quit_prepare_others'),
+  quitPrepareReply: (id: number, ok: boolean) => invoke<void>('quit_prepare_reply', { id, ok }),
   windowSetRemoteFolder: () => invoke<string | null>('window_set_remote_folder'),
   readFile: (path: string) => invoke<string>('read_file', { path }),
   writeFile: (path: string, content: string) =>

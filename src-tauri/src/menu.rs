@@ -8,6 +8,8 @@ use tauri::{
 /// floating button (not just the menu).
 pub struct AppMenu {
     pub menu: tauri::menu::Menu<Wry>,
+    /// The Window submenu; its window list is rebuilt by lifecycle.rs.
+    pub window_menu: tauri::menu::Submenu<Wry>,
     pub allow_html_js: CheckMenuItem<Wry>,
 }
 
@@ -74,8 +76,14 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
         .accelerator("CmdOrCtrl+W")
         .build(app)?;
 
+    let file_new_window = MenuItemBuilder::with_id(
+        format!("{}-file", crate::lifecycle::NEW_WINDOW_ID),
+        "New Window",
+    )
+    .build(app)?;
     let file_menu = SubmenuBuilder::new(app, "File")
         .item(&new_file)
+        .item(&file_new_window)
         .item(&new_tab)
         .item(&open_folder)
         .item(&open_remote)
@@ -205,11 +213,19 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
         .item(&MenuItemBuilder::with_id("terminal-focus-prev", "Focus Previous Pane").build(app)?)
         .build()?;
 
+    // Multi-window (#65): New Window, then the open windows (appended by
+    // lifecycle::refresh after the last separator).
+    let new_window = MenuItemBuilder::with_id(crate::lifecycle::NEW_WINDOW_ID, "New Window")
+        .accelerator("CmdOrCtrl+Shift+N")
+        .build(app)?;
     let window_menu = SubmenuBuilder::new(app, "Window")
+        .item(&new_window)
+        .separator()
         .minimize()
         .maximize()
         .separator()
         .close_window()
+        .separator()
         .build()?;
 
     // NOTE: macOS reserves Cmd+? (Cmd+Shift+/) for the Help menu's search
@@ -238,6 +254,7 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
 
     Ok(AppMenu {
         menu,
+        window_menu,
         allow_html_js,
     })
 }
