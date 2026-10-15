@@ -177,6 +177,89 @@ pub fn on_close_requested(app: &AppHandle, label: &str) {
     drop(window);
 }
 
+/// What a dock click / Reopen does (#89, macOS).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReopenAction {
+    /// A window is visible: AppKit brings it forward.
+    Nothing,
+    /// Show the hidden window(s): the last window's red X hides it.
+    ShowHidden,
+    /// No window at all: bring back the last closed window's session.
+    RestoreClosed,
+    /// Nothing to restore: a new empty window.
+    NewEmpty,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn reopen_action(has_visible: bool, hidden: usize, has_closed: bool) -> ReopenAction {
+    if has_visible {
+        ReopenAction::Nothing
+    } else if hidden > 0 {
+        ReopenAction::ShowHidden
+    } else if has_closed {
+        ReopenAction::RestoreClosed
+    } else {
+        ReopenAction::NewEmpty
+    }
+}
+
+/// macOS dock click / `RunEvent::Reopen` (#89): show hidden windows, else
+/// restore the last closed window, else open an empty one. Blocking.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn reopen(app: &AppHandle, has_visible: bool) {
+    let all = app.webview_windows();
+    let hidden: Vec<_> = all
+        .values()
+        .filter(|w| !w.is_visible().unwrap_or(true))
+        .cloned()
+        .collect();
+    let live: Vec<String> = all.keys().cloned().collect();
+    let store = app.try_state::<crate::session::ConfigStore>();
+    let has_closed = store.as_ref().is_some_and(|s| s.has_closed());
+    match reopen_action(has_visible, hidden.len(), has_closed) {
+        ReopenAction::Nothing => {}
+        ReopenAction::ShowHidden => {
+            for w in &hidden {
+                let _ = w.show();
+            }
+            if let Some(w) = hidden.first() {
+                let _ = w.set_focus();
+            }
+            refresh(app);
+        }
+        ReopenAction::RestoreClosed | ReopenAction::NewEmpty => {
+            let restored = store.and_then(|s| s.reopen_last_closed(&live));
+            match restored {
+                Some((label, session)) => {
+                    if let Some(f) = session.folder.clone() {
+                        let mut reg = windows::registry();
+                        reg.register(&label);
+                        if let Err(other) = reg.set_folder(&label, Some(f), session.display.clone())
+                        {
+                            // Its folder is open again elsewhere: one
+                            // folder, one window.
+                            reg.unregister(&label);
+                            drop(reg);
+                            crate::routing::focus(app, &other);
+                            return;
+                        }
+                    }
+                    if windows::create_window(app, &label, session.geometry, true).is_ok() {
+                        refresh(app);
+                    } else {
+                        windows::registry().unregister(&label);
+                        let _ = new_window(app);
+                    }
+                }
+                None => {
+                    let _ = new_window(app);
+                }
+            }
+        }
+    }
+}
+
 // --- Quit ----------------------------------------------------------------------
 
 /// Where the app is in a quit (#88). One quit flow at a time, owned by one
@@ -465,6 +548,42 @@ pub fn window_take_menu(webview_window: tauri::WebviewWindow) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn red_close_closes_only_that_window_until_the_last() {
+        // #89: with other windows open, the red X closes just this one.
+        assert_eq!(close_action(3, true), CloseAction::Close);
+        assert_eq!(close_action(2, false), CloseAction::Close);
+        assert_eq!(close_action(1, false), CloseAction::Quit);
+    }
+
+    #[test]
+    fn reopen_shows_hidden_then_restores_closed_then_opens_empty() {
+        use ReopenAction::*;
+        assert_eq!(reopen_action(true, 1, true), Nothing);
+        assert_eq!(reopen_action(false, 1, true), ShowHidden);
+        assert_eq!(reopen_action(false, 0, true), RestoreClosed);
+        assert_eq!(reopen_action(false, 0, false), NewEmpty);
+    }
+
+    /// The macOS model end to end, on the pure pieces (#89): three windows;
+    /// red X on one closes only it; red X on the last of the others hides
+    /// it; a dock click shows it; with every window gone a dock click
+    /// restores the last closed one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_close_and_reopen_state_machine() {
+        let mac = cfg!(target_os = "macos");
+        let mut visible = 3usize;
+        assert_eq!(close_action(visible, mac), CloseAction::Close);
+        visible -= 1;
+        assert_eq!(close_action(visible, mac), CloseAction::Close);
+        visible -= 1;
+        // Last visible window: hide to the dock, never quit.
+        assert_eq!(close_action(visible, mac), CloseAction::Hide);
+        assert_eq!(reopen_action(false, 1, true), ReopenAction::ShowHidden);
+        assert_eq!(reopen_action(false, 0, true), ReopenAction::RestoreClosed);
+    }
 
     #[test]
     fn quit_gate_runs_one_flow_and_only_the_owner_exits() {

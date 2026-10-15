@@ -365,8 +365,14 @@ pub fn positions_supported() -> bool {
 
 // --- The store -------------------------------------------------------------------
 
+/// Closed windows kept for Reopen (#89).
+const MAX_CLOSED: usize = 10;
+
 struct Inner {
     stored: Stored,
+    /// Sessions of windows the user closed this run, newest last (#89):
+    /// a dock click with no window open brings the last one back.
+    closed: Vec<(String, WindowSession)>,
     /// Preferences each window last loaded or saved (the merge base).
     given: HashMap<String, Map<String, Value>>,
 }
@@ -396,6 +402,7 @@ impl ConfigStore {
             inner: Mutex::new(Inner {
                 stored,
                 given: HashMap::new(),
+                closed: Vec::new(),
             }),
         };
         if text.is_some_and(|t| !t.contains("\"version\"")) {
@@ -480,14 +487,43 @@ impl ConfigStore {
         }
     }
 
-    /// The user closed a window (not a quit): it is not restored.
+    /// The user closed a window (not a quit): it is not restored at the
+    /// next launch, but kept in memory for Reopen (#89).
     pub fn forget_window(&self, label: &str) {
         {
             let mut g = self.lock();
-            g.stored.windows.remove(label);
+            if let Some(w) = g.stored.windows.remove(label) {
+                g.closed.retain(|(l, _)| l != label);
+                g.closed.push((label.to_string(), w));
+                let n = g.closed.len();
+                if n > MAX_CLOSED {
+                    g.closed.drain(..n - MAX_CLOSED);
+                }
+            }
             g.given.remove(label);
         }
         let _ = self.write();
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn has_closed(&self) -> bool {
+        !self.lock().closed.is_empty()
+    }
+
+    /// Put the most recently closed window's session back, so a window
+    /// created with that label restores its folder and files (#89).
+    /// Skips sessions whose label is in `live` (already open again).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn reopen_last_closed(&self, live: &[String]) -> Option<(String, WindowSession)> {
+        let mut g = self.lock();
+        while let Some((label, w)) = g.closed.pop() {
+            if live.contains(&label) {
+                continue;
+            }
+            g.stored.windows.insert(label.clone(), w.clone());
+            return Some((label, w));
+        }
+        None
     }
 
     pub fn flush(&self) -> Result<(), String> {
@@ -521,6 +557,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn closed_windows_can_be_reopened_newest_first() {
+        let dir = std::env::temp_dir().join(format!("sd-closed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = ConfigStore::open(dir.join("config.json"));
+        let w = |p: &str| WindowSession {
+            folder: Some(crate::windows::FolderId::Local { path: p.into() }),
+            ..Default::default()
+        };
+        {
+            let mut g = store.lock();
+            g.stored.windows.insert("w-a".into(), w("/a"));
+            g.stored.windows.insert("w-b".into(), w("/b"));
+        }
+        assert!(!store.has_closed());
+        store.forget_window("w-a");
+        store.forget_window("w-b");
+        assert!(store.has_closed());
+        // Not restored at the next launch...
+        assert!(store.stored().windows.is_empty());
+        // ...but Reopen brings back the newest, then the next.
+        let (l, s) = store.reopen_last_closed(&[]).unwrap();
+        assert_eq!(l, "w-b");
+        assert_eq!(s.folder, w("/b").folder);
+        assert!(store.stored().windows.contains_key("w-b"));
+        // A label that is live again is skipped.
+        assert!(store.reopen_last_closed(&["w-a".to_string()]).is_none());
+        assert!(!store.has_closed());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
