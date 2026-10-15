@@ -422,7 +422,12 @@ fn main() {
             // menu from the toolbar app icon. Drop OS decorations so we draw
             // our own caption (icon + min/max/close).
             #[cfg(target_os = "macos")]
-            app.set_menu(app_menu.menu)?;
+            {
+                // AppKit owns the window list (#90); see lifecycle::refresh.
+                let windows_menu = app.state::<lifecycle::WindowMenu>().submenu.clone();
+                app.set_menu(app_menu.menu)?;
+                windows_menu.set_as_windows_menu_for_nsapp()?;
+            }
             #[cfg(not(target_os = "macos"))]
             {
                 app.manage(menu::AppMenuHandle(app_menu.menu));

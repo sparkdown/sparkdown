@@ -13,20 +13,20 @@ use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use tauri::menu::{MenuItem, MenuItemBuilder, Submenu};
+use tauri::menu::{MenuItemBuilder, Submenu};
 use tauri::{AppHandle, Emitter, Manager, Wry};
 
 /// The Window menu and the per-window items it lists. Managed.
 pub struct WindowMenu {
     pub submenu: Submenu<Wry>,
-    items: Mutex<Vec<MenuItem<Wry>>>,
+    items: Mutex<()>,
 }
 
 impl WindowMenu {
     pub fn new(submenu: Submenu<Wry>) -> Self {
         Self {
             submenu,
-            items: Mutex::new(Vec::new()),
+            items: Mutex::new(()),
         }
     }
 }
@@ -61,8 +61,37 @@ pub fn title_for(folder: Option<&FolderId>, display: Option<&str>) -> String {
     }
 }
 
+/// One Window-menu entry per live window: `(menu id, text)`, sorted by
+/// label, deduplicated by label, dead windows dropped (#90).
+pub fn menu_entries(
+    rows: &[(String, String)],
+    live: impl Fn(&str) -> bool,
+) -> Vec<(String, String)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<(String, String)> = rows
+        .iter()
+        .filter(|(label, _)| live(label) && seen.insert(label.clone()))
+        .map(|(label, title)| {
+            let text = title.trim_end_matches(" — SparkDown");
+            let text = if text == "SparkDown" || text.is_empty() {
+                "Untitled window"
+            } else {
+                text
+            };
+            (format!("{FOCUS_PREFIX}{label}"), text.to_string())
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 /// Re-title every window and rebuild the Window menu's list. Call after
-/// a window opens, closes, or changes folder.
+/// a window opens, closes, or changes folder. Menu edits run on the main
+/// thread (AppKit requires it; callers are often worker threads).
+///
+/// macOS: the Window menu is NSApp's `windowsMenu`, so AppKit lists the
+/// windows itself and keeps the list in sync on open/close/retitle; adding
+/// our own entries there duplicated them (#90), so we add none.
 pub fn refresh(app: &AppHandle) {
     let rows = windows::registry().summaries();
     let mut titled = Vec::new();
@@ -73,28 +102,33 @@ pub fn refresh(app: &AppHandle) {
         }
         titled.push((r.label.clone(), title));
     }
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || rebuild_window_menu(&handle, &titled));
+}
+
+fn rebuild_window_menu(app: &AppHandle, titled: &[(String, String)]) {
     let Some(menu) = app.try_state::<WindowMenu>() else {
         return;
     };
-    let Ok(mut items) = menu.items.lock() else {
+    let Ok(_guard) = menu.items.lock() else {
         return;
     };
-    for old in items.drain(..) {
-        let _ = menu.submenu.remove(&old);
-    }
-    for (label, title) in titled {
-        let text = title.trim_end_matches(" — SparkDown").to_string();
-        let text = if text == "SparkDown" {
-            "Untitled window".to_string()
-        } else {
-            text
-        };
-        if let Ok(item) =
-            MenuItemBuilder::with_id(format!("{FOCUS_PREFIX}{label}"), text).build(app)
-        {
-            if menu.submenu.append(&item).is_ok() {
-                items.push(item);
+    // Remove every window entry by id, not a tracked list, so nothing
+    // stale can survive a missed update.
+    if let Ok(items) = menu.submenu.items() {
+        for it in items {
+            if it.id().as_ref().starts_with(FOCUS_PREFIX) {
+                let _ = menu.submenu.remove(&it);
             }
+        }
+    }
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    let live = |l: &str| app.get_webview_window(l).is_some();
+    for (id, text) in menu_entries(titled, live) {
+        if let Ok(item) = MenuItemBuilder::with_id(id, text).build(app) {
+            let _ = menu.submenu.append(&item);
         }
     }
 }
@@ -695,5 +729,35 @@ mod tests {
             path: r"C:\Users\u\docs".into(),
         };
         assert_eq!(title_for(Some(&win), None), "docs — SparkDown");
+    }
+
+    #[test]
+    fn window_menu_has_one_entry_per_live_window() {
+        let rows = vec![
+            ("w2".to_string(), "B — SparkDown".to_string()),
+            ("w1".to_string(), "A — SparkDown".to_string()),
+            ("w1".to_string(), "A — SparkDown".to_string()),
+            ("w3".to_string(), "SparkDown".to_string()),
+            ("gone".to_string(), "A — SparkDown".to_string()),
+        ];
+        let e = menu_entries(&rows, |l| l != "gone");
+        let texts: Vec<_> = e.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(texts, ["A", "B", "Untitled window"]);
+        assert_eq!(e[0].0, format!("{FOCUS_PREFIX}w1"));
+    }
+
+    #[test]
+    fn window_menu_follows_retitle_and_close() {
+        let mut rows = vec![("w1".to_string(), "A — SparkDown".to_string())];
+        assert_eq!(menu_entries(&rows, |_| true)[0].1, "A");
+        rows[0].1 = "notes (host) — SparkDown".into();
+        assert_eq!(menu_entries(&rows, |_| true)[0].1, "notes (host)");
+        assert!(menu_entries(&rows, |_| false).is_empty());
+    }
+
+    #[test]
+    fn macos_window_menu_is_the_native_windows_menu() {
+        let main = include_str!("main.rs");
+        assert!(main.contains("set_as_windows_menu_for_nsapp"));
     }
 }
