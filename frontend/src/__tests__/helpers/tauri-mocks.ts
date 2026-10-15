@@ -50,6 +50,7 @@ export const searchState: { results: { matches: unknown[]; truncated: boolean } 
 /** Raw log of every invoke() for asserting on backend traffic. */
 export const invokeCalls: Array<{ cmd: string; args: Record<string, unknown> | undefined }> = [];
 export const quitCalls = { count: 0 };
+export const quitGate = { busy: false };
 
 /** Scriptable branch answer for `git_branch_status` (the working-tree
  *  changes that feed `git_status` are the separate `gitChanges` array). */
@@ -112,6 +113,7 @@ export function resetTauriMocks(): void {
   pendingFiles = [];
   invokeCalls.length = 0;
   quitCalls.count = 0;
+  quitGate.busy = false;
   dialogResponses.message.length = 0;
   messageCalls.length = 0;
   dialogResponses.save.length = 0;
@@ -249,6 +251,18 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
     case 'quit':
       quitCalls.count++;
       return;
+    // #88: the core's one-quit gate (lifecycle.rs QuitGate).
+    case 'quit_begin':
+      if (quitGate.busy) return false;
+      quitGate.busy = true;
+      return true;
+    case 'quit_end':
+      quitGate.busy = false;
+      return;
+    case 'quit_prepare_others':
+      return true;
+    case 'quit_status':
+      return { busy: [], unsaved: [] };
     case 'copy_text':
     case 'copy_file':
     case 'set_html_preview':

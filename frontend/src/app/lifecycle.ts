@@ -16,6 +16,7 @@ export interface LifecycleDeps {
 /** Window close / quit: hide to the dock, or resolve unsaved work and exit. */
 export class LifecycleController {
   private quitting = false;
+  private quitInFlight = false;
 
   constructor(
     private readonly ctx: AppContext,
@@ -99,15 +100,35 @@ export class LifecycleController {
     await getCurrentWindow().hide();
   }
 
-  /** Cmd+Q / dock Quit: prompt to save, then exit. A cancel aborts the quit. */
+  /** Cmd+Q / dock Quit: prompt to save, then exit. A cancel aborts the
+   *  quit and keeps every window open.
+   *
+   *  #88: one flow for the whole app. The core's quit gate admits a single
+   *  owner (a second ⌘Q, or the same ⌘Q arriving via both native paths, is
+   *  dropped), only the asked window answers `quit-prepare`, and the core
+   *  refuses to exit until every window agreed. Any failure counts as
+   *  Cancel: when in doubt, keep the work. */
   async requestQuit(): Promise<void> {
-    if (this.quitting) return;
-    if (!(await this.confirmBusyTerminals())) return;
-    const proceed = await this.deps.resolveUnsavedChanges();
-    if (!proceed) return; // save failed/cancelled — abort quit
-    // Every other window resolves its own unsaved tabs, in turn (#65).
-    if (!(await api.quitPrepareOthers().catch(() => true))) return;
-    await this.exitNow();
+    if (this.quitting || this.quitInFlight) return;
+    this.quitInFlight = true;
+    let exiting = false;
+    try {
+      if (!(await api.quitBegin().catch(() => false))) return;
+      if (!(await this.confirmBusyTerminals())) return;
+      if (!(await this.deps.resolveUnsavedChanges())) return; // cancelled / save failed
+      // Every other window resolves its own unsaved tabs, in turn (#65).
+      if (!(await api.quitPrepareOthers().catch(() => false))) return;
+      exiting = true;
+      await this.exitNow();
+    } catch {
+      exiting = false;
+    } finally {
+      this.quitInFlight = false;
+      if (!exiting) {
+        this.quitting = false;
+        await api.quitEnd().catch(() => {});
+      }
+    }
   }
 
   /** Update relaunch (updater.ts): the same unsaved-changes prompt as Quit.
@@ -140,7 +161,7 @@ export function quitConfirmText(status: QuitStatus): string | null {
   if (busy.length === 0) return null;
   const lines = busy
     .slice(0, 8)
-    .map((b) => `• ${b.command} — ${b.window}`)
+    .map((b) => `• ${b.command} — ${b.window}${b.keeps_running ? ' (keeps running in tmux)' : ''}`)
     .join('\n');
   const more = busy.length > 8 ? `\n…and ${busy.length - 8} more` : '';
   const n = busy.length === 1 ? 'A terminal is' : `${busy.length} terminals are`;
@@ -150,5 +171,6 @@ export function quitConfirmText(status: QuitStatus): string | null {
         .map((w) => `• ${w}`)
         .join('\n')}`
     : '';
-  return `${n} still running:\n\n${lines}${more}${dirty}\n\nQuit SparkDown and stop them?`;
+  const stops = busy.some((b) => !b.keeps_running);
+  return `${n} still running:\n\n${lines}${more}${dirty}\n\n${stops ? 'Quit SparkDown and stop them?' : 'Quit SparkDown?'}`;
 }

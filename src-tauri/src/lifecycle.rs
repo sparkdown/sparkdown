@@ -155,22 +155,142 @@ pub fn on_close_requested(app: &AppHandle, label: &str) {
         .values()
         .filter(|w| w.is_visible().unwrap_or(true))
         .count();
+    // `emit_to`, never `window.emit`: in Tauri 2 the latter reaches every
+    // window, so one red X closed them all (#89).
     match close_action(visible, cfg!(target_os = "macos")) {
         CloseAction::Close => {
-            let _ = window.emit("close-requested", serde_json::json!({ "mode": "close" }));
+            let _ = app.emit_to(
+                label,
+                "close-requested",
+                serde_json::json!({ "mode": "close" }),
+            );
         }
         CloseAction::Hide => {
-            let _ = window.emit("close-requested", serde_json::json!({ "mode": "hide" }));
+            let _ = app.emit_to(
+                label,
+                "close-requested",
+                serde_json::json!({ "mode": "hide" }),
+            );
         }
-        CloseAction::Quit => {
-            let _ = window.emit("exit-requested", ());
-        }
+        CloseAction::Quit => request_quit(app),
     }
+    drop(window);
 }
 
 // --- Quit ----------------------------------------------------------------------
 
-type Pending = HashMap<u64, Sender<bool>>;
+/// Where the app is in a quit (#88). One quit flow at a time, owned by one
+/// window; only that window may end the process, and only after every
+/// other window resolved its unsaved work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuitState {
+    Idle,
+    /// `owner` is asking: the combined confirm, its own save prompts, then
+    /// the other windows in turn.
+    Asking(String),
+    /// Every window agreed; `owner` may exit.
+    Approved(String),
+    Exiting,
+}
+
+#[derive(Debug)]
+pub struct QuitGate(QuitState);
+
+impl Default for QuitGate {
+    fn default() -> Self {
+        Self(QuitState::Idle)
+    }
+}
+
+impl QuitGate {
+    #[cfg(test)]
+    pub fn state(&self) -> &QuitState {
+        &self.0
+    }
+    /// Start a quit owned by `owner`. False if one is already running
+    /// (a second ⌘Q, or the same ⌘Q via another native path).
+    pub fn begin(&mut self, owner: &str) -> bool {
+        if self.0 == QuitState::Idle {
+            self.0 = QuitState::Asking(owner.to_string());
+            true
+        } else {
+            false
+        }
+    }
+    /// Cancelled (or failed): back to idle. Only the owner can end it.
+    pub fn end(&mut self, owner: &str) {
+        if matches!(&self.0, QuitState::Asking(o) | QuitState::Approved(o) if o == owner) {
+            self.0 = QuitState::Idle;
+        }
+    }
+    /// Every other window resolved its unsaved work.
+    pub fn approve(&mut self, owner: &str) -> bool {
+        if matches!(&self.0, QuitState::Asking(o) if o == owner) {
+            self.0 = QuitState::Approved(owner.to_string());
+            true
+        } else {
+            false
+        }
+    }
+    /// May `caller` end the process now?
+    pub fn exit(&mut self, caller: &str) -> bool {
+        match &self.0 {
+            QuitState::Approved(o) if o == caller => {
+                self.0 = QuitState::Exiting;
+                true
+            }
+            QuitState::Exiting => true,
+            _ => false,
+        }
+    }
+    pub fn owner(&self) -> Option<&str> {
+        match &self.0 {
+            QuitState::Asking(o) | QuitState::Approved(o) => Some(o),
+            _ => None,
+        }
+    }
+}
+
+pub fn quit_gate() -> std::sync::MutexGuard<'static, QuitGate> {
+    static G: OnceLock<Mutex<QuitGate>> = OnceLock::new();
+    G.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// A native quit (⌘Q, app-menu or dock Quit, last window closed on
+/// Windows/Linux): run the quit flow in ONE window. With a flow already
+/// running, bring its window forward instead of starting another (#88).
+pub fn request_quit(app: &AppHandle) {
+    let owner = quit_gate().owner().map(str::to_string);
+    let target = match owner {
+        Some(o) => {
+            crate::routing::focus(app, &o);
+            return;
+        }
+        None => windows::target_window(app),
+    };
+    if let Some(w) = target {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+        let _ = app.emit_to(w.label(), "exit-requested", ());
+    }
+}
+
+/// The frontend starts a quit flow (any entry: native or keyboard).
+#[tauri::command]
+pub fn quit_begin(webview_window: tauri::WebviewWindow) -> bool {
+    quit_gate().begin(webview_window.label())
+}
+
+/// The frontend's quit flow was cancelled or failed.
+#[tauri::command]
+pub fn quit_end(webview_window: tauri::WebviewWindow) {
+    quit_gate().end(webview_window.label());
+}
+
+type Pending = HashMap<u64, (String, Sender<bool>)>;
 
 fn quit_pending() -> std::sync::MutexGuard<'static, Pending> {
     static P: OnceLock<Mutex<Pending>> = OnceLock::new();
@@ -184,6 +304,8 @@ fn quit_pending() -> std::sync::MutexGuard<'static, Pending> {
 pub struct BusyTerminal {
     pub window: String,
     pub command: String,
+    /// A tmux session: keeps running after the quit (#88).
+    pub keeps_running: bool,
 }
 
 /// What a quit would cost, across every window (#65/#68): running
@@ -225,9 +347,10 @@ pub async fn quit_status(app: AppHandle) -> Result<QuitStatus, String> {
         };
         let busy = crate::terminal::busy_on_quit(&app.state::<crate::terminal::TerminalState>())
             .into_iter()
-            .map(|(label, command)| BusyTerminal {
+            .map(|(label, command, keeps_running)| BusyTerminal {
                 window: names.get(&label).cloned().unwrap_or(label),
                 command,
+                keeps_running,
             })
             .collect();
         QuitStatus { busy, unsaved }
@@ -269,8 +392,15 @@ pub async fn quit_prepare_others(
             }
             let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let (tx, rx) = channel();
-            quit_pending().insert(id, tx);
-            if w.emit("quit-prepare", serde_json::json!({ "id": id }))
+            quit_pending().insert(id, (label.clone(), tx));
+            // To this window only (#88): a broadcast let another window
+            // answer for it.
+            if app
+                .emit_to(
+                    label.as_str(),
+                    "quit-prepare",
+                    serde_json::json!({ "id": id }),
+                )
                 .is_err()
             {
                 quit_pending().remove(&id);
@@ -289,7 +419,7 @@ pub async fn quit_prepare_others(
                 return false;
             }
         }
-        true
+        quit_gate().approve(&caller)
     })
     .await
     .map_err(|e| e.to_string())
@@ -297,9 +427,16 @@ pub async fn quit_prepare_others(
 
 /// A window's answer to `quit-prepare`.
 #[tauri::command]
-pub fn quit_prepare_reply(id: u64, ok: bool) {
-    if let Some(tx) = quit_pending().remove(&id) {
-        let _ = tx.send(ok);
+pub fn quit_prepare_reply(webview_window: tauri::WebviewWindow, id: u64, ok: bool) {
+    let mut pending = quit_pending();
+    // Only the asked window may answer (#88).
+    if pending
+        .get(&id)
+        .is_some_and(|(label, _)| label == webview_window.label())
+    {
+        if let Some((_, tx)) = pending.remove(&id) {
+            let _ = tx.send(ok);
+        }
     }
 }
 
@@ -328,6 +465,84 @@ pub fn window_take_menu(webview_window: tauri::WebviewWindow) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quit_gate_runs_one_flow_and_only_the_owner_exits() {
+        let mut g = QuitGate::default();
+        assert!(g.begin("w-a"));
+        // The same ⌘Q via the other native path, or another window: refused.
+        assert!(!g.begin("w-a"));
+        assert!(!g.begin("w-b"));
+        assert_eq!(g.owner(), Some("w-a"));
+        // Not approved yet: nobody may exit (the data-loss path of #88).
+        assert!(!g.exit("w-a"));
+        assert!(!g.exit("w-b"));
+        // Another window can't approve or cancel it.
+        assert!(!g.approve("w-b"));
+        g.end("w-b");
+        assert_eq!(g.state(), &QuitState::Asking("w-a".into()));
+        assert!(g.approve("w-a"));
+        assert!(!g.exit("w-b"));
+        assert!(g.exit("w-a"));
+        assert_eq!(g.state(), &QuitState::Exiting);
+    }
+
+    #[test]
+    fn quit_gate_cancel_returns_to_idle() {
+        let mut g = QuitGate::default();
+        assert!(g.begin("w-a"));
+        g.end("w-a");
+        assert_eq!(g.state(), &QuitState::Idle);
+        assert!(!g.exit("w-a"));
+        // A new quit can start after a cancel.
+        assert!(g.begin("w-b"));
+        g.end("w-b");
+        assert!(g.begin("w-a"));
+        assert!(g.approve("w-a"));
+        g.end("w-a");
+        assert_eq!(g.state(), &QuitState::Idle);
+    }
+
+    /// In Tauri 2, `WebviewWindow::emit` / `AppHandle::emit` reach EVERY
+    /// window. Per-window events (quit, close, menu, prepare) broadcast
+    /// that way made each window run its own quit and close (#88, #89).
+    /// Only app-wide broadcasts on this list may use plain `emit`.
+    #[test]
+    fn per_window_events_are_never_broadcast() {
+        const ALLOWED: &[&str] = &["app.emit(PROGRESS_EVENT"];
+        let needle = [".emit", "("].concat();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut bad = Vec::new();
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        if let Ok(rd) = std::fs::read_dir(dir.join("remote")) {
+            files.extend(rd.flatten().map(|e| e.path()));
+        }
+        for f in files
+            .iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "rs"))
+        {
+            let text = std::fs::read_to_string(f).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                let t = line.trim_start();
+                if t.starts_with("//") || !line.contains(&needle) {
+                    continue;
+                }
+                if ALLOWED.iter().any(|a| line.contains(a)) {
+                    continue;
+                }
+                bad.push(format!("{}:{}: {}", f.display(), i + 1, t));
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "use emit_to(label, ..):\n{}",
+            bad.join("\n")
+        );
+    }
 
     #[test]
     fn last_window_close_quits_except_on_mac() {

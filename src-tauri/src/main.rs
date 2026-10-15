@@ -444,7 +444,9 @@ fn main() {
                 }
                 match windows::target_window(app_handle) {
                     Some(window) => {
-                        let _ = window.emit(&format!("menu:{}", id), ());
+                        // To this window only: `window.emit` would reach
+                        // every window (#88).
+                        let _ = app_handle.emit_to(window.label(), &format!("menu:{}", id), ());
                     }
                     // macOS with every window closed: Settings (or any
                     // action) opens in a new empty window (#60 decision 7).
@@ -534,6 +536,8 @@ fn main() {
             lifecycle::quit_status,
             lifecycle::quit_prepare_others,
             lifecycle::quit_prepare_reply,
+            lifecycle::quit_begin,
+            lifecycle::quit_end,
             lifecycle::window_close,
             lifecycle::window_new,
             lifecycle::window_take_menu,
@@ -704,11 +708,9 @@ fn main() {
                 }
                 if code.is_none() {
                     api.prevent_exit();
-                    if let Some(window) = windows::target_window(app) {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                        let _ = window.emit("exit-requested", ());
-                    }
+                    // ⌘Q can also arrive via applicationShouldTerminate:;
+                    // the quit gate keeps it to one flow (#88).
+                    lifecycle::request_quit(app);
                 }
                 return;
             }
