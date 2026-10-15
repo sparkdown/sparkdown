@@ -1524,7 +1524,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn real_pty_foreground_job_follows_the_running_command() {
-        use super::{foreground_job, process_name};
+        use super::foreground_job;
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
         use std::io::Write;
         use std::time::{Duration, Instant};
@@ -1566,7 +1566,7 @@ mod tests {
         writer.write_all(b"sleep 30\n").unwrap();
         let fg = wait_for(true).unwrap();
         #[cfg(target_os = "linux")]
-        assert_eq!(process_name(fg).as_deref(), Some("sleep"));
+        assert_eq!(super::process_name(fg).as_deref(), Some("sleep"));
         let _ = fg;
         writer.write_all(b"\x03").unwrap();
         wait_for(false);
