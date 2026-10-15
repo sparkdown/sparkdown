@@ -729,18 +729,10 @@ fn main() {
             } = event
             {
                 if !has_visible_windows {
-                    match windows::target_window(app) {
-                        Some(window) => {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                        None => {
-                            let app = app.clone();
-                            std::thread::spawn(move || {
-                                let _ = lifecycle::new_window(&app);
-                            });
-                        }
-                    }
+                    // #89: show hidden windows, else restore the last
+                    // closed one, else an empty window.
+                    let app = app.clone();
+                    std::thread::spawn(move || lifecycle::reopen(&app, false));
                 }
                 return;
             }
