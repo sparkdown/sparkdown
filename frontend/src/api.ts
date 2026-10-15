@@ -33,7 +33,7 @@ let watchRoot: string | null = null;
 
 /** What a quit would cost across windows (#65/#68). */
 export interface QuitStatus {
-  busy: { window: string; command: string }[];
+  busy: { window: string; command: string; keeps_running?: boolean }[];
   /** Windows with unsaved changes. */
   unsaved: string[];
 }
@@ -61,6 +61,11 @@ export const api = {
   quitStatus: () => invoke<QuitStatus>('quit_status'),
   /** Every other window resolves unsaved tabs and saves; false = cancelled. */
   quitPrepareOthers: () => invoke<boolean>('quit_prepare_others'),
+  /** #88: take the app's one quit flow for this window; false = one is
+   *  already running (a second ⌘Q, or the same one via another path). */
+  quitBegin: () => invoke<boolean>('quit_begin'),
+  /** #88: this window's quit flow was cancelled or failed. */
+  quitEnd: () => invoke<void>('quit_end'),
   quitPrepareReply: (id: number, ok: boolean) => invoke<void>('quit_prepare_reply', { id, ok }),
   windowSetRemoteFolder: () => invoke<string | null>('window_set_remote_folder'),
   readFile: (path: string) => invoke<string>('read_file', { path }),

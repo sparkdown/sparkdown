@@ -543,10 +543,16 @@ pub fn get_pending_files(state: State<'_, PendingFiles>) -> Vec<String> {
 /// Terminates the application. The frontend calls this only after the
 /// unsaved-changes guard has run, so it is safe to exit immediately.
 #[tauri::command]
-pub fn quit(app_handle: AppHandle) {
+pub fn quit(app_handle: AppHandle, webview_window: tauri::WebviewWindow) -> Result<(), String> {
+    // Only the window that owns the quit flow, after it resolved every
+    // window's unsaved work, may end the process (#88).
+    if !crate::lifecycle::quit_gate().exit(webview_window.label()) {
+        return Err("no quit in progress for this window".into());
+    }
     crate::windows::set_quitting();
     crate::mcp::shutdown(); // remove the MCP socket file
     app_handle.exit(0);
+    Ok(())
 }
 
 /// Stores the HTML served by the `htmlpreview://` protocol. The frontend pushes

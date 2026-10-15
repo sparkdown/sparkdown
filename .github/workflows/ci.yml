@@ -88,6 +88,32 @@ jobs:
       - name: Tests
         run: cargo test
 
+  rust-macos:
+    name: Rust (clippy, tests) — macOS
+    # macOS-only code (applicationShouldTerminate: hook, Reopen, the hide-to-
+    # dock close, the Window menu) compiles only here. Runs the full test
+    # suite on macOS too, including the cfg(target_os = "macos") tests of
+    # the quit / close / reopen state machine (#88, #89, #90).
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test
+
   rust-windows:
     # Name kept as is: branch protection may require this check by name.
     name: Rust (check) — Windows

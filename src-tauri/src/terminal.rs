@@ -1030,22 +1030,23 @@ pub async fn terminal_busy(
         .map_err(|e| format!("busy check failed: {e}"))?
 }
 
-/// Terminals that would be killed by a quit, with what runs in them, across
-/// every window: (window label, command). tmux-backed terminals are left
-/// out (their sessions survive a quit) as are remote ones (not visible).
-/// Blocking.
-pub fn busy_on_quit(state: &TerminalState) -> Vec<(String, String)> {
+/// Terminals running a program at quit, across every window:
+/// (window label, command, survives). tmux-backed ones are listed too
+/// (#88: the quit prompt names them) with `survives` = true, since their
+/// session keeps running after a quit. Remote ones are left out (not
+/// visible). Blocking.
+pub fn busy_on_quit(state: &TerminalState) -> Vec<(String, String, bool)> {
     let probes: Vec<(String, BusyProbe)> = match state.0.lock() {
         Ok(g) => g
             .iter()
-            .filter(|(_, t)| !t.remote && t.tmux_session.is_none())
+            .filter(|(_, t)| !t.remote)
             .map(|(k, t)| {
                 let label = k.split_once('/').map(|(l, _)| l).unwrap_or("").to_string();
                 (
                     label,
                     BusyProbe {
                         shell_pid: t.shell_pid,
-                        tmux_session: None,
+                        tmux_session: t.tmux_session.clone(),
                         #[cfg(unix)]
                         fg_pgrp: t.controller.process_group_leader(),
                     },
@@ -1056,7 +1057,10 @@ pub fn busy_on_quit(state: &TerminalState) -> Vec<(String, String)> {
     };
     probes
         .into_iter()
-        .filter_map(|(label, p)| p.run().map(|cmd| (label, cmd)))
+        .filter_map(|(label, p)| {
+            let survives = p.tmux_session.is_some();
+            p.run().map(|cmd| (label, cmd, survives))
+        })
         .collect()
 }
 
@@ -1520,7 +1524,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn real_pty_foreground_job_follows_the_running_command() {
-        use super::{foreground_job, process_name};
+        use super::foreground_job;
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
         use std::io::Write;
         use std::time::{Duration, Instant};
@@ -1562,7 +1566,7 @@ mod tests {
         writer.write_all(b"sleep 30\n").unwrap();
         let fg = wait_for(true).unwrap();
         #[cfg(target_os = "linux")]
-        assert_eq!(process_name(fg).as_deref(), Some("sleep"));
+        assert_eq!(super::process_name(fg).as_deref(), Some("sleep"));
         let _ = fg;
         writer.write_all(b"\x03").unwrap();
         wait_for(false);

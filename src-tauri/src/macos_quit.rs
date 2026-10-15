@@ -20,7 +20,7 @@ use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
 use objc2::{msg_send, sel};
 use objc2_app_kit::NSApplication;
 use objc2_foundation::MainThreadMarker;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::AppHandle;
 
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
@@ -35,11 +35,8 @@ extern "C-unwind" fn application_should_terminate(
     _sender: *mut AnyObject,
 ) -> usize {
     if let Some(app) = APP_HANDLE.get() {
-        if let Some(window) = crate::windows::target_window(app) {
-            let _ = window.show();
-            let _ = window.set_focus();
-            let _ = window.emit("exit-requested", ());
-        }
+        // One quit flow, in one window (#88).
+        crate::lifecycle::request_quit(app);
     }
     NS_TERMINATE_CANCEL
 }

@@ -27,3 +27,16 @@ describe('quit confirm across windows (#68)', () => {
     expect(t).not.toContain('Unsaved');
   });
 });
+
+describe('one quit flow (#88)', () => {
+  it('names tmux programs that keep running and does not say it stops them', () => {
+    const t = quitConfirmText({
+      busy: [{ window: 'B', command: 'sleep', keeps_running: true }],
+      unsaved: ['A'],
+    })!;
+    expect(t).toContain('• sleep — B (keeps running in tmux)');
+    expect(t).toContain('• A');
+    expect(t).toContain('Quit SparkDown?');
+    expect(t).not.toContain('stop them');
+  });
+});
