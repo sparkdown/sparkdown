@@ -35,11 +35,11 @@ attempt() {
   sock=$(ls $XDG_RUNTIME_DIR | grep '^wayland-[0-9]*$' | grep -vx "${HOST_SOCK:-none}" | head -1)
   if [ -n "$sock" ] && kill -0 $pid 2>/dev/null; then
     sig=$(ls $XDG_RUNTIME_DIR/hypr 2>/dev/null | head -1)
-    runuser -u e2e -- env XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR HYPRLAND_INSTANCE_SIGNATURE=$sig hyprctl monitors 2>&1 | tee -a "$out/hypr.log"
-    runuser -u e2e -- env XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR HYPRLAND_INSTANCE_SIGNATURE=$sig hyprctl clients 2>&1 | tee -a "$out/hypr.log"
-    runuser -u e2e -- env XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR WAYLAND_DISPLAY=$sock grim "/tmp/g.png" 2>&1 | tee -a "$out/hypr.log"
+    runuser -u e2e -- env XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR HYPRLAND_INSTANCE_SIGNATURE=$sig timeout 10 hyprctl monitors 2>&1 | tee -a "$out/hypr.log"
+    runuser -u e2e -- env XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR HYPRLAND_INSTANCE_SIGNATURE=$sig timeout 10 hyprctl clients 2>&1 | tee -a "$out/hypr.log"
+    runuser -u e2e -- env XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR WAYLAND_DISPLAY=$sock timeout 20 grim "/tmp/g.png" 2>&1 | tee -a "$out/hypr.log"
     cp /tmp/g.png "$out/hypr-$name.png" 2>/dev/null && echo "OK $name screenshot" | tee -a "$out/hypr.log"
-    kill $pid; wait $pid 2>/dev/null; rm -rf $XDG_RUNTIME_DIR/hypr
+    kill $pid; sleep 2; kill -9 $pid 2>/dev/null; rm -rf $XDG_RUNTIME_DIR/hypr
     [ -f "$out/hypr-$name.png" ] && return 0
   else
     echo "FAILED $name (sock=$sock)" | tee -a "$out/hypr.log"; tail -25 "$out/hypr-$name.log" | tee -a "$out/hypr.log"
@@ -55,7 +55,8 @@ nested() {
   [ -n "$HOST_SOCK" ] || { tail -30 "$out/sway.log" | tee -a "$out/hypr.log"; return 1; }
   attempt nested-in-sway WAYLAND_DISPLAY=$HOST_SOCK LIBGL_ALWAYS_SOFTWARE=1
 }
-attempt drm-vkms LIBSEAT_BACKEND=seatd \
+attempt drm-vkms LIBSEAT_BACKEND=seatd AQ_DRM_DEVICES=/dev/dri/card0 \
+ || attempt drm-any LIBSEAT_BACKEND=seatd \
  || attempt aq-headless AQ_BACKENDS=headless WLR_BACKENDS=headless LIBGL_ALWAYS_SOFTWARE=1 \
  || attempt wlr-headless WLR_BACKENDS=headless WLR_RENDERER_ALLOW_SOFTWARE=1 LIBGL_ALWAYS_SOFTWARE=1 \
  || nested

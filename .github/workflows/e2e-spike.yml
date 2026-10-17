@@ -96,7 +96,12 @@ jobs:
           Invoke-WebRequest "https://msedgedriver.microsoft.com/$wv/edgedriver_win64.zip" -OutFile edgedriver.zip
           Expand-Archive edgedriver.zip -DestinationPath edgedriver
           & .\edgedriver\msedgedriver.exe --version | Tee-Object -Append "$env:OUT\win-driver.log"
+      - name: WebView2 diagnostics (env vars, policies, DevToolsActivePort)
+        if: always()
+        shell: pwsh
+        run: ./e2e/spike/win-diag.ps1 -Exe "$env:GITHUB_WORKSPACE\src-tauri\target\release\sparkdown.exe" *>&1 | Tee-Object "$env:OUT\win-diag.log"
       - name: Drive the real app (WebDriver + UIA)
+        if: always()
         shell: pwsh
         run: python e2e/spike/win_driver.py "$env:GITHUB_WORKSPACE\src-tauri\target\release\sparkdown.exe" "$env:GITHUB_WORKSPACE\edgedriver\msedgedriver.exe"
       - name: Drive the real app (self-launch with CDP port, attach msedgedriver)
