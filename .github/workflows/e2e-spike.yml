@@ -40,14 +40,14 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
-      - name: Build SparkDown.app (debug bundle)
+      - name: Build SparkDown.app (release bundle, unsigned)
         run: |
           start=$(date +%s)
-          (cd frontend && npm ci) && frontend/node_modules/.bin/tauri build --debug --bundles app
+          (cd frontend && npm ci) && frontend/node_modules/.bin/tauri build --bundles app
           echo "build_seconds=$(( $(date +%s) - start ))" | tee -a "$OUT/timing.txt"
       - name: Drive the real app with System Events
         continue-on-error: true
-        run: e2e/spike/mac-app.sh "$GITHUB_WORKSPACE/src-tauri/target/debug/bundle/macos/SparkDown.app"
+        run: e2e/spike/mac-app.sh "$GITHUB_WORKSPACE/src-tauri/target/release/bundle/macos/SparkDown.app"
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -75,13 +75,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
-      - name: Build sparkdown.exe (debug, embedded frontend)
+      - name: Build sparkdown.exe (release, no installer)
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force $env:OUT | Out-Null
           $sw = [Diagnostics.Stopwatch]::StartNew()
           Push-Location frontend; npm ci; Pop-Location
-          & .\frontend\node_modules\.bin\tauri.cmd build --debug --no-bundle
+          & .\frontend\node_modules\.bin\tauri.cmd build --no-bundle
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           "build_seconds=$([int]$sw.Elapsed.TotalSeconds)" | Tee-Object -Append "$env:OUT\timing.txt"
       - name: tauri-driver + matching msedgedriver
@@ -98,7 +98,11 @@ jobs:
           & .\edgedriver\msedgedriver.exe --version | Tee-Object -Append "$env:OUT\win-driver.log"
       - name: Drive the real app (WebDriver + UIA)
         shell: pwsh
-        run: python e2e/spike/win_driver.py "$env:GITHUB_WORKSPACE\src-tauri\target\debug\sparkdown.exe" "$env:GITHUB_WORKSPACE\edgedriver\msedgedriver.exe"
+        run: python e2e/spike/win_driver.py "$env:GITHUB_WORKSPACE\src-tauri\target\release\sparkdown.exe" "$env:GITHUB_WORKSPACE\edgedriver\msedgedriver.exe"
+      - name: Drive the real app (self-launch with CDP port, attach msedgedriver)
+        if: always()
+        shell: pwsh
+        run: python e2e/spike/win_attach.py "$env:GITHUB_WORKSPACE\src-tauri\target\release\sparkdown.exe" "$env:GITHUB_WORKSPACE\edgedriver\msedgedriver.exe"
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -106,23 +110,27 @@ jobs:
           path: e2e-out
 
   omarchy-hyprland:
-    name: Omarchy-like — headless Hyprland in an Arch container + grim
+    name: Omarchy-like — Hyprland in an Arch container (vkms DRM) + grim
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    container:
-      image: archlinux:latest
-    env:
-      OUT: /out
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Boot headless Hyprland, screenshot with grim
+      - name: Virtual KMS device on the host (vkms)
+        continue-on-error: true
         run: |
-          start=$(date +%s); bash e2e/spike/hypr.sh
-          echo "total_seconds=$(( $(date +%s) - start ))" | tee -a /out/timing.txt
+          uname -r
+          sudo modprobe vkms || { sudo apt-get update -qq && sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" && sudo modprobe vkms; }
+          ls -l /dev/dri || true
+      - name: Boot Hyprland in archlinux:latest, screenshot with grim
+        run: |
+          mkdir -p out; start=$(date +%s)
+          dev=""; [ -d /dev/dri ] && dev="--device /dev/dri"
+          docker run --rm --privileged $dev -v "$PWD:/w" -v "$PWD/out:/out" -w /w archlinux:latest bash e2e/spike/hypr.sh
+          echo "total_seconds=$(( $(date +%s) - start ))" | tee -a out/timing.txt
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: spike-hyprland
-          path: /out
+          path: out

@@ -7,6 +7,7 @@ log = open(out / "win-driver.log", "a")
 def p(*a):
     s = " ".join(str(x) for x in a); print(s); log.write(s + "\n"); log.flush()
 
+os.environ["RUST_LOG"] = "debug"
 drv = subprocess.Popen(["tauri-driver", "--native-driver", native], stdout=log, stderr=log)
 time.sleep(3)
 def req(method, path, body=None):
@@ -24,6 +25,8 @@ open(os.path.join(folder, "notes.md"), "w").write("# A\n")
 t = time.time()
 s = req("POST", "/session", {"capabilities": {"alwaysMatch": {"tauri:options": {"application": exe, "args": [folder]}}}})
 p("session", json.dumps(s)[:600], f"{time.time()-t:.1f}s")
+ps = subprocess.run(["pwsh", "-NoProfile", "-Command", "Get-CimInstance Win32_Process -Filter \"Name like 'sparkdown%' or Name like 'msedgewebview2%'\" | Select-Object -First 6 ProcessId,Name,@{n='cmd';e={$_.CommandLine.Substring(0,[Math]::Min(300,$_.CommandLine.Length))}} | Format-List | Out-String -Width 400"], capture_output=True, text=True)
+p("procs during session", ps.stdout)
 sid = s.get("value", {}).get("sessionId")
 ok = bool(sid)
 if sid:
