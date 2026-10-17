@@ -43,7 +43,7 @@ jobs:
       - name: Build SparkDown.app (debug bundle)
         run: |
           start=$(date +%s)
-          cd frontend && npm ci && npx tauri build --debug --bundles app
+          (cd frontend && npm ci) && frontend/node_modules/.bin/tauri build --debug --bundles app
           echo "build_seconds=$(( $(date +%s) - start ))" | tee -a "$OUT/timing.txt"
       - name: Drive the real app with System Events
         continue-on-error: true
@@ -80,7 +80,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force $env:OUT | Out-Null
           $sw = [Diagnostics.Stopwatch]::StartNew()
-          Push-Location frontend; npm ci; npx tauri build --debug --no-bundle; Pop-Location
+          Push-Location frontend; npm ci; Pop-Location
+          & .\frontend\node_modules\.bin\tauri.cmd build --debug --no-bundle
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           "build_seconds=$([int]$sw.Elapsed.TotalSeconds)" | Tee-Object -Append "$env:OUT\timing.txt"
       - name: tauri-driver + matching msedgedriver
         shell: pwsh
