@@ -344,18 +344,26 @@ class Hypr(Base):
         # AT-SPI (WebKitGTK exposes web content), then read the GTK popup.
         title = names[0] + SUF
         self.focus(title)
+        out = pathlib.Path(OUT) / "atspi-click.json"
+        with open(out, "w") as f:
+            # Don't wait: the press's D-Bus reply can block while the popup is up.
+            clicker = subprocess.Popen(["/usr/bin/python3", str(pathlib.Path(__file__).with_name("atspi_click.py")), title, "Open menu"],
+                                       stdout=f, stderr=subprocess.STDOUT)
+        time.sleep(4)
         try:
-            p = subprocess.run(["/usr/bin/python3", str(pathlib.Path(__file__).with_name("atspi_click.py")), title, "Open menu"],
-                               capture_output=True, text=True, timeout=30)
-            click = json.loads(p.stdout or "{}")
-        except Exception as e:  # noqa: BLE001
-            click = {"ok": False, "how": str(e)}
+            click = json.loads(out.read_text().splitlines()[0])
+        except (IndexError, ValueError):
+            click = {"ok": False, "how": out.read_text()[-300:] or "no answer from atspi_click"}
         R.log("at-spi click:", click)
         if not click.get("ok"):
-            return "MANUAL", f"couldn't open the in-app menu without a pointer ({click.get('how', '')[:160]}); covered on Ubuntu and by unit tests"
-        time.sleep(2)
+            clicker.kill()
+            return "MANUAL", f"couldn't open the in-app menu without a pointer ({click.get('how', '')[:200]}); covered on Ubuntu and by unit tests"
         self.shot("app-menu-open")
-        return read_window_menu(names, lambda: (self.wtype("-k", "Escape"), self.wtype("-k", "Escape")))
+        try:
+            return read_window_menu(names, lambda: (self.wtype("-k", "Escape"), self.wtype("-k", "Escape")))
+        finally:
+            time.sleep(1)
+            clicker.kill()
 
     def shot(self, name):
         self.n += 1

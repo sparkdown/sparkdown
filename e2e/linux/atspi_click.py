@@ -49,15 +49,18 @@ for app in kids(Atspi.get_desktop(0)):
                 nm = (n.get_name() or "").strip()
                 if nm and len(named) < 40:
                     named.append(f"{n.get_role_name()}:{nm[:30]}")
-                if nm.lower() not in ALIASES or "button" not in n.get_role_name():
+                role = n.get_role_name()
+                if nm.lower() not in ALIASES or not ("button" in role or role == "combo box"):
                     continue
                 act = n.get_action_iface()
                 if act is None or act.get_n_actions() < 1:
                     continue
                 names = [act.get_action_name(i) for i in range(act.get_n_actions())]
                 i = next((k for k, a in enumerate(names) if a in ("press", "click", "activate")), 0)
+                # Report first: the action's D-Bus reply can block while the
+                # app's popup menu is up, so the caller doesn't wait for us.
+                print(json.dumps({"ok": True, "how": f"{role} {nm!r} action {names[i]!r}"}), flush=True)
                 act.do_action(i)
-                print(json.dumps({"ok": True, "how": f"{n.get_role_name()} {NAME!r} action {names[i]!r}"}))
                 sys.exit(0)
             except Exception:  # noqa: BLE001
                 continue
