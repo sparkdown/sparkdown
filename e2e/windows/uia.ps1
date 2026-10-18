@@ -14,6 +14,12 @@ Add-Type -Namespace E2E -Name Win -MemberDefinition @'
 [DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();
 [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(System.IntPtr h, System.Text.StringBuilder s, int n);
 [DllImport("user32.dll")] public static extern bool PostMessage(System.IntPtr h, uint m, System.IntPtr w, System.IntPtr l);
+[DllImport("user32.dll")] public static extern System.IntPtr SendMessage(System.IntPtr h, uint m, System.IntPtr w, System.IntPtr l);
+[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern System.IntPtr FindWindowEx(System.IntPtr parent, System.IntPtr after, string cls, string name);
+[DllImport("user32.dll")] public static extern int GetMenuItemCount(System.IntPtr m);
+[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetMenuString(System.IntPtr m, uint id, System.Text.StringBuilder s, int n, uint flags);
+[DllImport("user32.dll")] public static extern System.IntPtr GetSubMenu(System.IntPtr m, int pos);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(System.IntPtr h);
 '@
 $AE = [System.Windows.Automation.AutomationElement]
 $CT = [System.Windows.Automation.ControlType]
@@ -31,7 +37,7 @@ function Desc($el, $type) {
 }
 switch ($Cmd) {
   'windows' {
-    @(TopLevel | Where-Object { $_.Current.ClassName -notin '#32770', '#32768' } | ForEach-Object {
+    @(TopLevel | Where-Object { $_.Current.ClassName -notin '#32770', '#32768' -and $_.Current.Name -notlike '*-siw' } | ForEach-Object {
       [pscustomobject]@{ name = $_.Current.Name; hwnd = $_.Current.NativeWindowHandle; class = $_.Current.ClassName }
     }) | ConvertTo-Json -Compress -AsArray
   }
@@ -41,29 +47,58 @@ switch ($Cmd) {
     $sb.ToString() | ConvertTo-Json -Compress
   }
   'dialogs' {
-    @(TopLevel | Where-Object { $_.Current.ClassName -eq '#32770' -or ($_.Current.Name -and $_.Current.Name -notlike '*SparkDown' -and $_.Current.ClassName -ne '#32768') } | ForEach-Object {
+    $cands = @()
+    foreach ($t in (TopLevel)) {
+      $cands += $t
+      $cands += @($t.FindAll($TS::Children, (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, $CT::Window))))
+    }
+    @($cands | Where-Object {
+        $n = $_.Current.Name
+        $_.Current.ClassName -ne '#32768' -and -not $_.Current.IsOffscreen -and $n -notlike '*-siw' -and
+        ($_.Current.ClassName -eq '#32770' -or ($n -and $n -notlike '*SparkDown') -or $n -eq 'Quit SparkDown')
+      } | ForEach-Object {
       $texts = @(Desc $_ $CT::Text | ForEach-Object { $_.Current.Name }) + @(Desc $_ $CT::Document | ForEach-Object { $_.Current.Name })
       $btns = @(Desc $_ $CT::Button | ForEach-Object { $_.Current.Name })
       [pscustomobject]@{ name = $_.Current.Name; hwnd = $_.Current.NativeWindowHandle; class = $_.Current.ClassName; text = ($texts -join "`n"); buttons = $btns }
     }) | ConvertTo-Json -Compress -AsArray -Depth 4
   }
   'click' {
-    $w = TopLevel | Where-Object { $_.Current.NativeWindowHandle -eq [int]$A1 } | Select-Object -First 1
+    $c = New-Object System.Windows.Automation.PropertyCondition($AE::NativeWindowHandleProperty, [int]$A1)
+    $w = $root.FindFirst($TS::Descendants, $c)
     $b = Desc $w $CT::Button | Where-Object { $_.Current.Name -eq $A2 } | Select-Object -First 1
     $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
     'true'
   }
   'menu' {
-    $menus = { $root.FindAll($TS::Children, (New-Object System.Windows.Automation.PropertyCondition($AE::ClassNameProperty, '#32768'))) }
-    if ($A1) {
-      foreach ($m in (& $menus)) {
-        $it = Desc $m $CT::MenuItem | Where-Object { $_.Current.Name -eq $A1 } | Select-Object -First 1
-        if ($it) { $it.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand(); Start-Sleep -Milliseconds 800; break }
+    # Read the open popup menus through Win32: MN_GETHMENU on each #32768
+    # window gives its HMENU, and menu strings are readable cross-process.
+    # With <item>, also list that submenu's entries.
+    function Items($h) {
+      $n = [E2E.Win]::GetMenuItemCount($h); $out = @()
+      for ($i = 0; $i -lt $n; $i++) {
+        $sb = New-Object System.Text.StringBuilder 512
+        [E2E.Win]::GetMenuString($h, [uint32]$i, $sb, 512, 0x400) | Out-Null
+        $out += (($sb.ToString() -split "`t")[0] -replace '&', '')
       }
+      ,$out
     }
-    @(& $menus | ForEach-Object {
-      [pscustomobject]@{ hwnd = $_.Current.NativeWindowHandle; items = @(Desc $_ $CT::MenuItem | ForEach-Object { $_.Current.Name }) }
-    }) | ConvertTo-Json -Compress -AsArray -Depth 4
+    $res = @(); $prev = [System.IntPtr]::Zero
+    while ($true) {
+      $w = [E2E.Win]::FindWindowEx([System.IntPtr]::Zero, $prev, '#32768', $null)
+      if ($w -eq [System.IntPtr]::Zero) { break }
+      $prev = $w
+      if (-not [E2E.Win]::IsWindowVisible($w)) { continue }
+      $h = [E2E.Win]::SendMessage($w, 0x01E1, [System.IntPtr]::Zero, [System.IntPtr]::Zero)
+      if ($h -eq [System.IntPtr]::Zero) { continue }
+      $items = Items $h
+      $sub = $null
+      if ($A1) {
+        $idx = [array]::IndexOf($items, $A1)
+        if ($idx -ge 0) { $sub = Items ([E2E.Win]::GetSubMenu($h, $idx)) }
+      }
+      $res += [pscustomobject]@{ hwnd = [int64]$w; items = $items; sub = $sub }
+    }
+    @($res) | ConvertTo-Json -Compress -AsArray -Depth 4
   }
   'escape-menus' {
     for ($i = 0; $i -lt 3; $i++) {

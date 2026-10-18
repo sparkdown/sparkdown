@@ -162,10 +162,10 @@ class Desktop:
         self.shot("window-menu")
         left = uia("escape-menus")
         R.log("popup menus:", top, sub, "left open:", left)
-        items = [i for m in sub for i in m["items"]]
+        items = [i for m in sub for i in (m.get("sub") or [])]
         entries = [i for i in items if i in names or i in ("alpha", "beta", "gamma", "Untitled window")]
         if not items:
-            return "FAIL", f"could not read the popup menu via UIA (top-level menus: {top})"
+            return "FAIL", f"could not read the popup menu's Window submenu (menus: {top})"
         ok = sorted(entries) == sorted(names) and len(entries) == len(set(entries))
         return ("PASS" if ok else "FAIL"), f"Window submenu entries={entries} (items: {items[:14]})"
 

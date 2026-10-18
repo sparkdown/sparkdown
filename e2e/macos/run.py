@@ -90,24 +90,54 @@ def window_menu_entries():
 
 
 DIALOGS = r'''
+on textsOf(e)
+  set ts to ""
+  set bs to ""
+  try
+    set items_ to entire contents of e
+  on error
+    set items_ to {}
+  end try
+  repeat with x in items_
+    try
+      set r to role of x
+      if r is "AXStaticText" or r is "AXTextArea" then
+        set v to value of x
+        if v is not missing value then set ts to ts & (v as text) & "¦"
+      else if r is "AXButton" then
+        set n to name of x
+        if n is not missing value then set bs to bs & (n as text) & "¦"
+      end if
+    end try
+  end repeat
+  return {ts, bs}
+end textsOf
+
 set out to ""
-set AppleScript's text item delimiters to "¦"
 tell application "System Events" to tell process "sparkdown"
+  set i to 0
   repeat with w in (every window)
-    set wn to name of w
-    repeat with s in (every sheet of w)
-      set t to (value of every static text of s) as text
-      set b to (name of every button of s) as text
-      set out to out & "sheet" & tab & wn & tab & t & tab & b & linefeed
-    end repeat
+    set i to i + 1
+    set wn to ""
+    try
+      set wn to name of w
+      if wn is missing value then set wn to ""
+    end try
     set sr to ""
     try
       set sr to subrole of w
+      if sr is missing value then set sr to ""
+    end try
+    set out to out & "#win" & tab & i & tab & wn & tab & sr & linefeed
+    try
+      repeat with s in (every UI element of w whose role is "AXSheet")
+        set tb to my textsOf(s)
+        set out to out & "sheet" & tab & i & tab & (item 1 of tb) & tab & (item 2 of tb) & linefeed
+      end repeat
     end try
     if sr is not "AXStandardWindow" then
-      set t to (value of every static text of w) as text
-      set b to (name of every button of w) as text
-      set out to out & "window" & tab & wn & tab & t & tab & b & linefeed
+      set tb to my textsOf(w)
+      set out to out & "window" & tab & i & tab & (item 1 of tb) & tab & (item 2 of tb) & linefeed
     end if
   end repeat
 end tell
@@ -116,20 +146,30 @@ return out
 
 
 def dialogs():
-    out = osa(*DIALOGS.strip().split("\n"))
+    out = osa(*DIALOGS.strip().split("\n"), timeout=60)
     res = []
     for line in out.split("\n"):
         parts = line.split("\t")
-        if len(parts) == 4:
-            res.append({"kind": parts[0], "window": parts[1], "text": parts[2], "buttons": parts[3].split("¦")})
+        if parts[0] == "#win":
+            R.log("  ax window:", parts[1:])
+        elif len(parts) == 4:
+            res.append({"kind": parts[0], "window": int(parts[1]), "text": parts[2].replace("¦", "\n"),
+                        "buttons": [b for b in parts[3].split("¦") if b]})
     return res
 
 
 def click_dialog_button(d, name):
     if d["kind"] == "sheet":
-        se(f'click button "{name}" of sheet 1 of window "{d["window"]}"')
+        se(f'click (first button of (first UI element of window {d["window"]} whose role is "AXSheet") whose name is "{name}")')
     else:
-        se(f'click button "{name}" of window "{d["window"]}"')
+        se(f'click (first button of window {d["window"]} whose name is "{name}")')
+    time.sleep(1)
+    if name == "Cancel" and dialogs():
+        # Buttons nested deeper than the sheet: Escape is Cancel on an alert.
+        R.log("Cancel button not clickable by name; pressing Escape")
+        activate()
+        osa('tell application "System Events" to key code 53')
+        time.sleep(1)
 
 
 def close_window(title):
@@ -254,7 +294,10 @@ def main():
         shot(f"{label}-prompt")
         R.log("dialogs:", ds)
         if not ds:
-            return "FAIL", "no prompt appeared"
+            # Don't leave an undetected alert up for the next checks.
+            activate()
+            osa('tell application "System Events" to key code 53')
+            return "FAIL", "no prompt found via Accessibility (see screenshot; Escape pressed)"
         if len(ds) != 1:
             for d in ds:
                 if "Cancel" in d["buttons"]:
