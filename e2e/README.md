@@ -23,8 +23,8 @@ part, or blocked by a known app bug; the detail says which), **MANUAL** (not
 automatable here). A job fails if any of its checks is FAIL; the summary job
 fails if any OS has a FAIL or reported nothing.
 
-App bugs the suite found are in [KNOWN_ISSUES.md](KNOWN_ISSUES.md); their
-checks stay PARTIAL until the app is fixed.
+App bugs the suite found are in [KNOWN_ISSUES.md](KNOWN_ISSUES.md). Checks
+for open ones stay PARTIAL until the app is fixed (#95 is fixed by #96).
 
 Artifacts per run: `e2e-macos`, `e2e-windows`, `e2e-ubuntu`,
 `e2e-omarchy-hyprland` (screenshots, `e2e.log`, `app.log`, `results.json`,

@@ -73,18 +73,19 @@ def isolation_check(exe, folders, log):
         if not ok or not isinstance(ctx, dict):
             return "FAIL", f"{name}: get_context failed: {str(ctx)[:200]}"
         if ctx.get("workspace_root") is None and ctx.get("updated_at") is None:
-            # Routed to a window that never published (no root, no update):
-            # known gap when an empty window adopts a folder from a second
-            # launch (openDroppedPaths doesn't publish). Confirm the routing
-            # by opening a file there, which does publish.
+            # The window never published (#95 regression: a reused empty
+            # window that adopted a folder from `sparkdown <dir>`). Check the
+            # routing by opening a file there, for the log only: it's a FAIL.
             note = os.path.join(path, "notes.md")
             ok_o, r_o = call(exe, path, "sparkdown_open_file", {"path": note})
             time.sleep(3)
-            ok, ctx = context(exe, path)
-            log(f"mcp {name} after open_file ({ok_o} {str(r_o)[:120]}): ok={ok} {str(ctx)[:300]}")
-            if ok and isinstance(ctx, dict) and norm(ctx.get("workspace_root")) == norm(path):
-                stale.append(name)
+            ok3, ctx3 = context(exe, path)
+            log(f"mcp {name} after open_file ({ok_o} {str(r_o)[:120]}): ok={ok3} {str(ctx3)[:300]}")
+            stale.append(name)
         roots[name] = ctx.get("workspace_root") if isinstance(ctx, dict) else None
+    if stale:
+        return "FAIL", (f"REGRESSION of #95: {stale} published no agent context within 15 s of `sparkdown <dir>` "
+                        f"(https://github.com/sparkdown/sparkdown/issues/95); roots={roots}")
     bad = [n for n, r in roots.items() if norm(r) != norm(folders[n])]
     if bad:
         return "FAIL", f"wrong workspace_root for {bad}: {roots}"
@@ -98,9 +99,6 @@ def isolation_check(exe, folders, log):
     ok2, err = call(exe, None, "sparkdown_get_context")
     named = not ok2 and all(n in str(err) for n in folders)
     base = f"each of {sorted(folders)} sees only its own root; list_windows lists all"
-    if stale:
-        return "PARTIAL", (base + f"; APP BUG (e2e/KNOWN_ISSUES.md #1): {stale} (a reused empty window) published "
-                           "no agent context after `sparkdown <dir>` until a file was opened in it")
     if named:
         return "PASS", base + "; a call with no folder errors and names every window"
     return "PARTIAL", base + f"; but a call with no folder gave ok={ok2} {str(err)[:120]}"

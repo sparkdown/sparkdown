@@ -1,13 +1,18 @@
 # App bugs the E2E suite found
 
-Checks that hit one of these stay **PARTIAL** (never PASS) until the app is
-fixed. Fixes go to `main` after the 0.4.0 tag decision, not on this branch.
+Checks that hit an open one stay **PARTIAL** (never PASS) until the app is
+fixed. Fixes go to `main`, not to this branch. No issues are open right now.
 
-## 1. A reused empty window never publishes its agent context (MCP)
+## 1. FIXED: a reused empty window never published its agent context (MCP)
+
+**Fixed** by https://github.com/sparkdown/sparkdown/pull/96 (issue
+https://github.com/sparkdown/sparkdown/issues/95). `mcp-isolation` now expects
+the fix: PASS when every window publishes its own root, and FAIL (a #95
+regression) when one doesn't. The original report follows.
 
 - **Found by:** `mcp-isolation` on every OS (run 39088377564: macOS, Windows,
   Ubuntu, Arch + Hyprland all report `BUG: ['gamma']`).
-- **GitHub issue:** not filed yet (pending approval); the draft is in the PR.
+- **GitHub issue:** https://github.com/sparkdown/sparkdown/issues/95
 - **Affects:** 0.4.0 at main 77fc1cc (multi-window). Not a test artifact.
 
 **Steps**
@@ -40,6 +45,5 @@ folder to an empty window and waits past the 800 ms publish debounce sees 0
 `mcp_publish` calls for that root (control: `openFolder` publishes); with the
 terminal already open it is still 0.
 
-**Suggested fix (after the tag decision):** route directories in
-`openDroppedPaths` through `openFolder` (keep files as tabs), plus a
-regression test asserting `mcp_publish` with the new root.
+**Fix (#96):** `openDroppedPaths` routes directories through `openFolder`
+(files stay tabs), with regression tests in `app.integration.test.ts`.
