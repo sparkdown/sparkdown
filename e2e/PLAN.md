@@ -1,6 +1,6 @@
-# E2E plan: 0.4.0 multi-window must-pass on GitHub-hosted runners (draft for Sparky)
+# E2E plan: 0.4.0 multi-window must-pass on GitHub-hosted runners (approved by Sparky)
 
-Branch: `e2e/multi-window` (off frozen main 77fc1cc). Spikes: `.github/workflows/e2e-spike.yml`, `e2e/spike/`.
+Branch: `e2e/multi-window` (off frozen main 77fc1cc). The spikes (`e2e-spike.yml`, `e2e/spike/`) are retired; the suite is `.github/workflows/e2e.yml` + `e2e/` (see README.md).
 Final spike run: https://github.com/sparkdown/sparkdown/actions/runs/39081607848
 
 ## Approach per OS
