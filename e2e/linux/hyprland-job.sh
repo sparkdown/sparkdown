@@ -25,6 +25,10 @@ monitor = ,1920x1080@60,0x0,1
 misc {
   disable_hyprland_logo = true
   disable_splash_rendering = true
+  # Omarchy's default (default/hypr/looknfeel): honour xdg-activation focus
+  # requests, so `sparkdown <open folder>` can raise its window. Stock
+  # Hyprland ignores them (focus-stealing prevention).
+  focus_on_activate = true
 }
 debug {
   disable_logs = false

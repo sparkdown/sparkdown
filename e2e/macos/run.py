@@ -116,6 +116,8 @@ on textsOf(e)
 end textsOf
 
 set AppleScript's text item delimiters to ","
+-- Records end with RS (ASCII 30), not linefeed: alert text has newlines.
+set RS to character id 30
 set out to ""
 tell application "System Events" to tell process "sparkdown"
   set i to 0
@@ -135,7 +137,7 @@ tell application "System Events" to tell process "sparkdown"
     try
       set kids to (role of every UI element of w) as text
     end try
-    set out to out & "#win" & tab & i & tab & wn & tab & sr & " kids=" & kids & linefeed
+    set out to out & "#win" & tab & i & tab & wn & tab & sr & " kids=" & kids & RS
     try
       set nk to count of UI elements of w
       repeat with k from 1 to nk
@@ -156,22 +158,22 @@ tell application "System Events" to tell process "sparkdown"
               end if
             end try
           end repeat
-          set out to out & "sheet" & tab & i & tab & ts & tab & bs & linefeed
+          set out to out & "sheet" & tab & i & tab & ts & tab & bs & RS
         end if
       end repeat
     on error errMsg
-      set out to out & "#err" & tab & i & tab & errMsg & linefeed
+      set out to out & "#err" & tab & i & tab & errMsg & RS
     end try
     if sr is not "AXStandardWindow" then
       set tb to my textsOf(w)
-      set out to out & "window" & tab & i & tab & (item 1 of tb) & tab & (item 2 of tb) & linefeed
+      set out to out & "window" & tab & i & tab & (item 1 of tb) & tab & (item 2 of tb) & RS
     end if
   end repeat
 end tell
 try
   tell application "System Events"
     set fp to first process whose frontmost is true
-    set out to out & "#front" & tab & (name of fp) & tab & ((name of every window of fp) as text) & linefeed
+    set out to out & "#front" & tab & (name of fp) & tab & ((name of every window of fp) as text) & RS
   end tell
 end try
 return out
@@ -181,8 +183,8 @@ return out
 def dialogs():
     out = osa(*DIALOGS.strip().split("\n"), timeout=60)
     res = []
-    for line in out.split("\n"):
-        parts = line.split("\t")
+    for line in out.split("\x1e"):
+        parts = line.strip("\r\n").split("\t")
         if parts[0] in ("#win", "#front", "#err"):
             R.log("  ax window:", parts[1:])
         elif len(parts) == 4:
