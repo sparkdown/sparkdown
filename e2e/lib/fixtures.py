@@ -36,7 +36,10 @@ def seed_config(**prefs):
     checklist's quit step asks)."""
     d = config_dir()
     d.mkdir(parents=True, exist_ok=True)
-    cfg = {"mcp_external_agents": True, "use_tmux": False}
+    cfg = {"mcp_external_agents": True, "agent_context_enabled": True, "use_tmux": False,
+           # Agent tools only see a window once its terminal has been shown
+           # (privacy gate in agent-context.ts), so every window opens with it.
+           "terminal_visible": True}
     cfg.update(prefs)
     (d / "config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     return d / "config.json"

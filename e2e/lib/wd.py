@@ -117,3 +117,24 @@ def map_windows(s, log=print):
         except WebDriverError as e:
             log(f"handle {h[:8]}: {e}")
     return out
+
+
+READY_JS = "return document.readyState === 'complete' && !!document.querySelector('#btn-app-menu')"
+
+
+def wait_ready(s, title, log=print, secs=30):
+    """Wait until the webview titled `title` has built its UI (its event
+    listeners are registered before the UI is), then switch back to nothing
+    in particular. True when it got there."""
+    end = time.time() + secs
+    while time.time() < end:
+        m = map_windows(s, log)
+        if title in m:
+            try:
+                s.switch(m[title])
+                if s.js(READY_JS):
+                    return True
+            except WebDriverError as e:
+                log(f"ready {title}: {e}")
+        time.sleep(1)
+    return False

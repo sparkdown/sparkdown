@@ -22,7 +22,7 @@ SUF = flow.SUF
 
 
 def uia(*args, timeout=40):
-    p = subprocess.run(["pwsh", "-NoProfile", "-File", UIA, *args], capture_output=True, text=True, timeout=timeout)
+    p = subprocess.run(["pwsh", "-NoProfile", "-File", UIA, *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     if p.returncode:
         R.log(f"uia {args[0]} error: {p.stderr.strip()[:300]}")
         return None
@@ -123,7 +123,9 @@ class Desktop:
 
     def start_job(self, title):
         self.handle(title)
-        self.wd.click(self.wd.find("#btn-terminal"))
+        self.wd.click(self.wd.find("#btn-terminal"))  # seeded open: hide…
+        time.sleep(1.5)
+        self.wd.click(self.wd.find("#btn-terminal"))  # …and show, focused
         ta = self.wd.find(".xterm-helper-textarea", wait=20)
         time.sleep(3)
         self.wd.type(ta, "ping -n 300 127.0.0.1" + wd.KEYS["enter"])
@@ -146,6 +148,9 @@ class Desktop:
     def cancel_dialog(self, d):
         uia("click", str(d["id"]), "Cancel")
         time.sleep(1)
+
+    def wait_ready(self, title):
+        return wd.wait_ready(self.wd, title, R.log) if self.wd else (time.sleep(6) or None)
 
     def window_menu(self, names):
         title = names[0] + SUF

@@ -57,6 +57,10 @@ class X11(Base):
 
     def __init__(self):
         super().__init__()
+        self.wd = None
+        self._driver()
+
+    def _driver(self):
         self.driver = subprocess.Popen(["tauri-driver", "--native-driver", "/usr/bin/WebKitWebDriver"],
                                        stdout=self.log, stderr=subprocess.STDOUT)
         time.sleep(2)
@@ -71,7 +75,18 @@ class X11(Base):
         time.sleep(6)
 
     def relaunch(self):
-        self.wd = None
+        # The old session's app has quit; start a fresh driver so a stale
+        # session can't hit "Maximum number of active sessions".
+        if self.wd:
+            self.wd.quit()
+            self.wd = None
+        self.driver.terminate()
+        try:
+            self.driver.wait(10)
+        except subprocess.TimeoutExpired:
+            self.driver.kill()
+        subprocess.run(["pkill", "-x", "WebKitWebDriver"])
+        self._driver()
         self._session([])
         time.sleep(8)
 
@@ -133,12 +148,18 @@ class X11(Base):
 
     def start_job(self, title):
         if self._wd_handle(title):
+            # The drawer starts open (seeded); hide and show it so the
+            # terminal takes keyboard focus.
+            self.wd.click(self.wd.find("#btn-terminal"))
+            time.sleep(1.5)
             self.wd.click(self.wd.find("#btn-terminal"))
             ta = self.wd.find(".xterm-helper-textarea", wait=20)
             time.sleep(3)
             self.wd.type(ta, "sleep 300" + wd.KEYS["enter"])
         else:
             self.focus(title)
+            sh("xdotool", "key", "--clearmodifiers", "ctrl+grave")
+            time.sleep(1.5)
             sh("xdotool", "key", "--clearmodifiers", "ctrl+grave")
             time.sleep(4)
             sh("xdotool", "type", "--delay", "40", "sleep 300")
@@ -152,6 +173,9 @@ class X11(Base):
         sh("xdotool", "windowactivate", "--sync", d["id"])
         sh("xdotool", "key", "Escape")
         time.sleep(1)
+
+    def wait_ready(self, title):
+        return wd.wait_ready(self.wd, title, R.log) if self.wd else (time.sleep(6) or None)
 
     def window_menu(self, names):
         if not self._wd_handle(names[0] + SUF):
@@ -247,6 +271,8 @@ class Hypr(Base):
 
     def start_job(self, title):
         self.focus(title)
+        self.wtype("-M", "ctrl", "-k", "grave", "-m", "ctrl")
+        time.sleep(1.5)
         self.wtype("-M", "ctrl", "-k", "grave", "-m", "ctrl")
         time.sleep(4)
         self.wtype("sleep 300")

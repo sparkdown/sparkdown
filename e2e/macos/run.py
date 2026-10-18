@@ -231,6 +231,9 @@ def main():
         cli(B)
         time.sleep(1)
         activate()
+        # Seeded open: hide then show so the terminal takes keyboard focus.
+        se('click menu item "Toggle Terminal" of menu "View" of menu bar item "View" of menu bar 1')
+        time.sleep(1.5)
         se('click menu item "Toggle Terminal" of menu "View" of menu bar item "View" of menu bar 1')
         time.sleep(4)
         osa('tell application "System Events" to keystroke "sleep 300"', 'tell application "System Events" to key code 36')

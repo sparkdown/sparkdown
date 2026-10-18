@@ -38,11 +38,14 @@ def run(R, D):
     D.shot("alpha")
     if not got:
         R.add("two-windows", "FAIL", f"the app did not open alpha: {D.windows()}")
+        for cid in ("one-process-focus", "window-menu", "empty-reuse", "mcp-isolation", "red-close", "quit-prompt", "restore"):
+            R.add(cid, "FAIL", "not run: the app never opened its first window")
         return
 
     def two_windows():
         D.cli(B)
-        w = wait_for(lambda: titled("alpha", "beta") <= set(D.windows()) and D.windows(), 25)
+        wait_for(lambda: titled("alpha", "beta") <= set(D.windows()), 25)
+        w = D.windows()
         D.shot("two-windows")
         n = D.procs()
         ok = set(w) == titled("alpha", "beta") and n == 1
@@ -75,8 +78,15 @@ def run(R, D):
         D.shot("empty-window")
         if not got:
             return "FAIL", f"no empty window after Ctrl+Shift+N: {mid}"
+        # Let the new window finish loading before handing it a folder: a
+        # path forwarded while its webview is still starting is dropped
+        # (the backend emits to it before its listener exists).
+        ready = D.wait_ready("SparkDown") if hasattr(D, "wait_ready") else (time.sleep(6) or None)
+        R.log(f"empty window ready: {ready}")
+        time.sleep(2)
         D.cli(C)
-        w = wait_for(lambda: ("gamma" + SUF) in D.windows() and D.windows(), 20)
+        wait_for(lambda: ("gamma" + SUF) in D.windows(), 20)
+        w = D.windows()
         D.shot("gamma-in-empty")
         ok = set(w) == titled("alpha", "beta", "gamma") and len(w) == len(mid)
         return ("PASS" if ok else "FAIL"), f"after Ctrl+Shift+N: {mid}; after `sparkdown gamma`: {w}"
@@ -86,7 +96,8 @@ def run(R, D):
 
     def red_close():
         D.close_window("gamma" + SUF)
-        w = wait_for(lambda: ("gamma" + SUF) not in D.windows() and D.windows(), 15)
+        wait_for(lambda: ("gamma" + SUF) not in D.windows(), 15)
+        w = D.windows()
         D.shot("closed-gamma")
         ok = set(w) == titled("alpha", "beta") and D.procs() == 1
         return ("PASS" if ok else "FAIL"), f"closed gamma via {D.close_how}: windows={w}"

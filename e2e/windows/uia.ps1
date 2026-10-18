@@ -8,6 +8,7 @@
 #   uia.ps1 shot <path>        full-screen screenshot
 param([string]$Cmd, [string]$A1, [string]$A2)
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms, System.Drawing
 Add-Type -Namespace E2E -Name Win -MemberDefinition @'
 [DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();
