@@ -391,6 +391,57 @@ describe('App integration', () => {
       ).toBe(true);
     });
 
+    describe('a forwarded folder opens like Open Folder (#95)', () => {
+      const publishedRoots = () =>
+        invokeCalls
+          .filter((c) => c.cmd === 'mcp_publish')
+          .map((c) => (c.args?.snapshot as { workspace_root?: string } | undefined)?.workspace_root);
+      /** Past the 800 ms agent-context publish debounce. */
+      const publishSettle = async () => {
+        await flush();
+        await new Promise((r) => setTimeout(r, 1000));
+        await flush();
+      };
+
+      it('an empty window reused by `sparkdown <dir>` publishes its agent context', async () => {
+        directories.add('/projects/gamma');
+        await startApp();
+        emitTauriEvent('open-paths', { paths: ['/projects/gamma'] });
+        await publishSettle();
+        expect(publishedRoots()).toContain('/projects/gamma');
+        // Recents and the config save come with it, as with Open Folder.
+        // Past the 2 s config-save debounce.
+        await new Promise((r) => setTimeout(r, 2200));
+        const saved = savedConfigs[savedConfigs.length - 1] as { recent_folders?: string[] };
+        expect(saved.recent_folders?.[0]).toBe('/projects/gamma');
+      });
+
+      it('publishes even when the terminal was already open in the empty window', async () => {
+        directories.add('/projects/delta');
+        await startApp();
+        emitTauriEvent(MENU.TOGGLE_TERMINAL);
+        await publishSettle();
+        emitTauriEvent('open-paths', { paths: ['/projects/delta'] });
+        await publishSettle();
+        expect(publishedRoots()).toContain('/projects/delta');
+      });
+
+      it('a forwarded file still opens as a tab without re-rooting the window', async () => {
+        vfs.set('/elsewhere/only.md', '# only');
+        await startApp();
+        emitTauriEvent('open-paths', { paths: ['/elsewhere/only.md'] });
+        await flush();
+        expect(tabTitles()).toEqual(['only.md']);
+        // The file's tab doesn't make its directory the window's folder.
+        expect(
+          invokeCalls.some(
+            (c) => c.cmd === 'window_set_folder' && JSON.stringify(c.args ?? {}).includes('/elsewhere'),
+          ),
+        ).toBe(false);
+        expect(publishedRoots()).not.toContain('/elsewhere');
+      });
+    });
+
     it('the file prompt\'s New File button creates Untitled', async () => {
       directories.add('/projects/notes');
       setPendingFiles(['/projects/notes']);

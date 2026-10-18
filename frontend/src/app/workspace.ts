@@ -95,21 +95,13 @@ export class WorkspaceController {
     const dirs = paths.filter((_, i) => kinds[i]);
 
     await this.deps.documents.openFilesInOrder(files);
-    // If a folder was dropped, point the sidebar at it (last one wins) and
-    // reveal the sidebar so the change is visible.
+    // A dropped, forwarded (`sparkdown <dir>`) or first-launch folder (last
+    // one wins) opens exactly like Open Folder: tree, watcher, git, search,
+    // terminal cwd, baseDir, recents, config save and the agent-context
+    // publish. Folder routing to this window already happened (#62), so
+    // this is the resolved local open, not App.openFolder (#95).
     const lastDir = dirs[dirs.length - 1];
-    if (lastDir) {
-      this.ctx.fileTree.ensureVisible();
-      this.ctx.workspaceRoot = lastDir;
-      this.reportFolder(lastDir);
-      this.deps.syncEmptyState();
-      void this.ctx.fileTree.setRoot(lastDir, true);
-      this.deps.diff.setRoot(lastDir);
-      // Badge and tree letters now, not only after the first disk change.
-      this.deps.diff.refreshNow();
-      this.deps.search.setRoot(lastDir);
-      void this.ensureWatching(lastDir);
-    }
+    if (lastDir) await this.openFolder(lastDir);
   }
 
   /** Tell the core which folder this window shows (#61 registry). Remote
