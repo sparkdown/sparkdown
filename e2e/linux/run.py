@@ -212,11 +212,24 @@ class X11(Base):
         self.wd.click(self.wd.find("#btn-app-menu"))
         time.sleep(2)
         self.shot("app-menu-open")
+        menu = {}
+        try:
+            p = subprocess.run(["/usr/bin/python3", str(pathlib.Path(__file__).with_name("atspi_menu.py"))],
+                               capture_output=True, text=True, timeout=30)
+            menu = json.loads(p.stdout or "{}")
+            R.log("at-spi menu:", menu, p.stderr.strip()[-300:])
+        except Exception as e:  # noqa: BLE001
+            R.log("at-spi menu failed:", e)
         sh("xdotool", "key", "Escape")
         time.sleep(0.5)
         sh("xdotool", "key", "Escape")
-        return "PARTIAL", ("menu popup opened (screenshot); its native GTK entries can't be read by "
-                           "WebDriver or xdotool; the entry model is unit-tested (window_menu_has_one_entry_per_live_window)")
+        items = menu.get("Window") or []
+        if not items:
+            return "PARTIAL", ("menu popup opened (screenshot); its GTK entries couldn't be read over AT-SPI; "
+                               "the entry model is unit-tested (window_menu_has_one_entry_per_live_window)")
+        entries = [i for i in items if i in names or i in ("alpha", "beta", "gamma", "Untitled window")]
+        ok = sorted(entries) == sorted(names) and len(entries) == len(set(entries))
+        return ("PASS" if ok else "FAIL"), f"Window submenu entries={entries} (items over AT-SPI: {items[:14]})"
 
     def webview_check(self, title, folder, edit):
         if not self._wd_handle(title):
