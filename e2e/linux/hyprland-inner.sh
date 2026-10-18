@@ -17,4 +17,11 @@ timeout 10 hyprctl monitors | head -3
 wtype -s 86400000 -k F24 &
 sleep 1
 timeout 10 hyprctl devices | sed -n '/Keyboards/,$p' | head -8
+# Tell toolkits an assistive technology is running, so WebKitGTK exposes
+# web content (the in-app menu button) over AT-SPI, not just GTK widgets.
+for p in IsEnabled ScreenReaderEnabled; do
+  dbus-send --session --print-reply --dest=org.a11y.Bus /org/a11y/bus \
+    org.freedesktop.DBus.Properties.Set string:org.a11y.Status string:$p variant:boolean:true >/dev/null 2>&1 \
+    || echo "a11y: could not set $p"
+done
 python3 "$HOME/e2e/linux/run.py" hyprland /usr/local/bin/sparkdown "$OUT"

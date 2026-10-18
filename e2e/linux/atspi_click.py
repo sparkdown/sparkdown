@@ -13,6 +13,7 @@ except Exception as e:  # noqa: BLE001
     sys.exit(0)
 
 TITLE, NAME = sys.argv[1], sys.argv[2]
+ALIASES = {NAME.lower(), "menu"}  # aria-label, then the title attribute
 
 
 def kids(n):
@@ -35,7 +36,7 @@ def walk(n, d=0):
         yield from walk(c, d + 1)
 
 
-seen = []
+seen, named = [], []
 for app in kids(Atspi.get_desktop(0)):
     if (app.get_name() or "").lower() != "sparkdown":
         continue
@@ -45,7 +46,10 @@ for app in kids(Atspi.get_desktop(0)):
             continue
         for n in walk(win):
             try:
-                if (n.get_name() or "") != NAME or "button" not in n.get_role_name():
+                nm = (n.get_name() or "").strip()
+                if nm and len(named) < 40:
+                    named.append(f"{n.get_role_name()}:{nm[:30]}")
+                if nm.lower() not in ALIASES or "button" not in n.get_role_name():
                     continue
                 act = n.get_action_iface()
                 if act is None or act.get_n_actions() < 1:
@@ -57,4 +61,4 @@ for app in kids(Atspi.get_desktop(0)):
                 sys.exit(0)
             except Exception:  # noqa: BLE001
                 continue
-print(json.dumps({"ok": False, "how": f"no {NAME!r} button in {TITLE!r}; windows over AT-SPI: {seen}"}))
+print(json.dumps({"ok": False, "how": f"no {NAME!r} button in {TITLE!r}; windows over AT-SPI: {seen}; named nodes: {named}"}))
