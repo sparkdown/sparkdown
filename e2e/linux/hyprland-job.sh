@@ -7,7 +7,7 @@ set -uo pipefail
 BIN_IN=$1; OUT=$2
 mkdir -p "$OUT"
 pacman -Syu --noconfirm --needed hyprland seatd grim wtype python git mesa ttf-dejavu \
-  webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg xdotool openssl dbus procps-ng >"$OUT/pacman.log" 2>&1 \
+  webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg xdotool openssl dbus procps-ng at-spi2-core python-gobject >"$OUT/pacman.log" 2>&1 \
   || { tail -30 "$OUT/pacman.log"; exit 1; }
 pacman -Q hyprland aquamarine webkit2gtk-4.1 | tee "$OUT/versions.txt"
 install -m 755 "$BIN_IN" /usr/local/bin/sparkdown

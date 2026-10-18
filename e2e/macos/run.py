@@ -137,10 +137,30 @@ tell application "System Events" to tell process "sparkdown"
     end try
     set out to out & "#win" & tab & i & tab & wn & tab & sr & " kids=" & kids & linefeed
     try
-      repeat with s in (every UI element of w whose role is "AXSheet")
-        set tb to my textsOf(s)
-        set out to out & "sheet" & tab & i & tab & (item 1 of tb) & tab & (item 2 of tb) & linefeed
+      set nk to count of UI elements of w
+      repeat with k from 1 to nk
+        set el to UI element k of w
+        if role of el is "AXSheet" then
+          set ts to ""
+          set bs to ""
+          set items_ to entire contents of el
+          repeat with x in items_
+            try
+              set r to role of x
+              if r is "AXStaticText" or r is "AXTextArea" then
+                set v to value of x
+                if v is not missing value then set ts to ts & (v as text) & "¦"
+              else if r is "AXButton" then
+                set n to name of x
+                if n is not missing value then set bs to bs & (n as text) & "¦"
+              end if
+            end try
+          end repeat
+          set out to out & "sheet" & tab & i & tab & ts & tab & bs & linefeed
+        end if
       end repeat
+    on error errMsg
+      set out to out & "#err" & tab & i & tab & errMsg & linefeed
     end try
     if sr is not "AXStandardWindow" then
       set tb to my textsOf(w)
@@ -163,7 +183,7 @@ def dialogs():
     res = []
     for line in out.split("\n"):
         parts = line.split("\t")
-        if parts[0] in ("#win", "#front"):
+        if parts[0] in ("#win", "#front", "#err"):
             R.log("  ax window:", parts[1:])
         elif len(parts) == 4:
             res.append({"kind": parts[0], "window": int(parts[1]), "text": parts[2].replace("¦", "\n"),

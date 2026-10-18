@@ -17,6 +17,35 @@ MODE, BIN, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
 R = Report("Ubuntu (X11, WebKitWebDriver)" if MODE == "x11" else "Arch + Hyprland (vkms)", OUT)
 SUF = flow.SUF
 DIALOG_TITLES = ("Quit SparkDown", "Unsaved Changes")
+ATSPI = str(pathlib.Path(__file__).with_name("atspi_dialogs.py"))
+
+
+def atspi_texts():
+    """{dialog title: text} read over AT-SPI; {} when unavailable."""
+    try:
+        p = subprocess.run(["/usr/bin/python3", ATSPI], capture_output=True, text=True, timeout=20)
+        res = {d["name"]: d for d in json.loads(p.stdout or "[]")}
+        R.log("at-spi dialogs:", res, p.stderr.strip()[-400:])
+        return res
+    except Exception as e:  # noqa: BLE001
+        R.log("at-spi failed:", e)
+        return {}
+
+
+def with_text(ds):
+    if not ds:
+        return ds
+    acc = atspi_texts()
+    vals = list(acc.values())
+    for d in ds:
+        # GTK names the alert "Warning"/"Question"; its labels hold the title.
+        a = acc.get(d["name"]) or next((v for v in vals if d["name"] in v.get("text", "")), None)
+        if a is None and len(ds) == 1 and len(vals) == 1:
+            a = vals[0]
+        if a and a.get("text"):
+            d["text"] = f"{d['name']}\n{a['text']}"
+            d["buttons"] = a.get("buttons", [])
+    return ds
 
 
 def sh(*args, timeout=30):
@@ -167,7 +196,7 @@ class X11(Base):
         time.sleep(3)
 
     def dialogs(self):
-        return [{"name": t, "id": w, "text": None} for w, t in self._xwins() if t in DIALOG_TITLES]
+        return with_text([{"name": t, "id": w, "text": None} for w, t in self._xwins() if t in DIALOG_TITLES])
 
     def cancel_dialog(self, d):
         sh("xdotool", "windowactivate", "--sync", d["id"])
@@ -280,7 +309,7 @@ class Hypr(Base):
         time.sleep(3)
 
     def dialogs(self):
-        return [{"name": c["title"], "id": c["address"], "text": None} for c in self._clients() if c["title"] in DIALOG_TITLES]
+        return with_text([{"name": c["title"], "id": c["address"], "text": None} for c in self._clients() if c["title"] in DIALOG_TITLES])
 
     def cancel_dialog(self, d):
         sh("hyprctl", "dispatch", "focuswindow", f"address:{d['id']}")
@@ -314,7 +343,7 @@ def main():
         R.manual("manual-omarchy", "Real Omarchy config (keybindings, Waybar, walker) and a real GPU",
                  "container runs stock Hyprland on a virtual display with software rendering")
     else:
-        R.manual("manual-linux-dialog", "Quit prompt wording on GTK", "dialog text isn't readable here; read it on a desktop")
+        R.manual("manual-linux-dialog", "Quit prompt look on a real GTK desktop", "CI reads its text over AT-SPI where available; theme and layout are only in the screenshot")
     return R.write()
 
 

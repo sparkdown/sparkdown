@@ -1,5 +1,6 @@
 """Minimal W3C WebDriver client (no Selenium dependency)."""
 import base64
+import http.client
 import json
 import time
 import urllib.error
@@ -23,11 +24,18 @@ class Session:
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(self.base + path, data=data, method=method,
                                      headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as f:
-                return json.load(f).get("value")
-        except urllib.error.HTTPError as e:
-            raise WebDriverError(f"{method} {path}: {e.code} {e.read().decode()[:400]}") from None
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as f:
+                    return json.load(f).get("value")
+            except urllib.error.HTTPError as e:
+                raise WebDriverError(f"{method} {path}: {e.code} {e.read().decode()[:400]}") from None
+            except (ConnectionError, http.client.RemoteDisconnected, urllib.error.URLError) as e:
+                # tauri-driver occasionally drops a proxied connection while a
+                # new window's webview starts; the session itself survives.
+                if attempt == 2 or path == "/session":
+                    raise WebDriverError(f"{method} {path}: connection failed: {e}") from None
+                time.sleep(2)
 
     def cmd(self, method, path, body=None, timeout=60):
         return self._req(method, f"/session/{self.id}{path}", body, timeout)
@@ -128,13 +136,17 @@ def wait_ready(s, title, log=print, secs=30):
     in particular. True when it got there."""
     end = time.time() + secs
     while time.time() < end:
-        m = map_windows(s, log)
+        try:
+            m = map_windows(s, log)
+        except Exception as e:  # noqa: BLE001
+            log(f"ready {title}: {e}")
+            m = {}
         if title in m:
             try:
                 s.switch(m[title])
                 if s.js(READY_JS):
                     return True
-            except WebDriverError as e:
+            except Exception as e:  # noqa: BLE001
                 log(f"ready {title}: {e}")
         time.sleep(1)
     return False
