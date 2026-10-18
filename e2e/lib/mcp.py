@@ -1,0 +1,85 @@
+"""Talk to a running SparkDown through its stdio MCP shim, as an external
+agent would (`sparkdown --mcp-stdio` with $SPARKDOWN_FOLDER)."""
+import json
+import os
+import subprocess
+
+
+def call(exe, folder, tool, args=None, timeout=30):
+    """Run one tool in the window of `folder`. Returns (ok, value): value is
+    the parsed JSON text result when possible, else the raw text/error."""
+    env = dict(os.environ)
+    env.pop("SPARKDOWN_MCP", None)
+    env.pop("SPARKDOWN_MCP_TOKEN", None)
+    if folder:
+        env["SPARKDOWN_FOLDER"] = folder
+    else:
+        env.pop("SPARKDOWN_FOLDER", None)
+    msgs = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "sparkdown-e2e", "version": "1"}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool, "arguments": args or {}}},
+    ]
+    data = "".join(json.dumps(m) + "\n" for m in msgs)
+    p = subprocess.run([exe, "--mcp-stdio"], input=data, capture_output=True, text=True, timeout=timeout, env=env)
+    reply = None
+    for line in p.stdout.splitlines():
+        try:
+            m = json.loads(line)
+        except ValueError:
+            continue
+        if m.get("id") == 2:
+            reply = m
+    if reply is None:
+        return False, f"no reply (stdout={p.stdout[-400:]!r} stderr={p.stderr[-400:]!r})"
+    if "error" in reply:
+        return False, reply["error"].get("message", str(reply["error"]))
+    res = reply.get("result", {})
+    text = "".join(c.get("text", "") for c in res.get("content", []))
+    if res.get("isError"):
+        return False, text
+    try:
+        return True, json.loads(text)
+    except ValueError:
+        return True, text
+
+
+def context(exe, folder):
+    return call(exe, folder, "sparkdown_get_context")
+
+
+def norm(p):
+    return os.path.normcase(os.path.realpath(p)) if p else p
+
+
+def isolation_check(exe, folders, log):
+    """Each folder's agent sees its own workspace root; list_windows lists
+    them all. Returns (status, detail)."""
+    roots = {}
+    for name, path in folders.items():
+        ok, ctx = context(exe, path)
+        log(f"mcp {name}: ok={ok} {str(ctx)[:300]}")
+        if not ok or not isinstance(ctx, dict):
+            return "FAIL", f"{name}: get_context failed: {str(ctx)[:200]}"
+        roots[name] = ctx.get("workspace_root")
+    bad = [n for n, r in roots.items() if norm(r) != norm(folders[n])]
+    if bad:
+        return "FAIL", f"wrong workspace_root for {bad}: {roots}"
+    first = next(iter(folders.values()))
+    ok, wins = call(exe, first, "sparkdown_list_windows")
+    log(f"mcp list_windows: {str(wins)[:400]}")
+    listed = json.dumps(wins)
+    missing = [n for n in folders if n not in listed]
+    if not ok or missing:
+        return "FAIL", f"list_windows missing {missing}: {str(wins)[:200]}"
+    ok2, err = call(exe, None, "sparkdown_get_context")
+    unnamed = "error names every window" if (not ok2 and all(n in str(err) for n in folders)) else f"no-folder call: ok={ok2} {str(err)[:120]}"
+    return "PASS", f"each of {sorted(folders)} sees only its own root; list_windows lists all; {unnamed}"
+
+
+def tab(ctx, path):
+    for t in (ctx or {}).get("tabs", []):
+        if norm(t.get("path")) == norm(path):
+            return t
+    return None

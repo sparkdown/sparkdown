@@ -560,6 +560,43 @@ mod tests {
         }
         assert_ne!(r1.key(), r3.key());
     }
+
+    /// Release gate (E2E): a default build (no `e2e-webdriver` feature, which
+    /// is every shipped build) ignores the env var and passes no extra
+    /// WebView2 argument, so no remote-debugging port can be opened.
+    #[cfg(not(feature = "e2e-webdriver"))]
+    #[test]
+    fn release_build_ignores_e2e_webview2_args() {
+        std::env::set_var(
+            "SPARKDOWN_E2E_WEBVIEW2_ARGS",
+            "--remote-debugging-port=9222",
+        );
+        assert_eq!(super::e2e_webview2_args(), None);
+        std::env::remove_var("SPARKDOWN_E2E_WEBVIEW2_ARGS");
+        assert_eq!(super::e2e_webview2_args(), None);
+        let src = include_str!("windows.rs");
+        let read_at = src
+            .find(concat!("std::env::var(", "E2E_WEBVIEW2_ARGS_ENV)"))
+            .unwrap();
+        let gate = src[..read_at]
+            .rfind(concat!("#[cfg(feature = ", "\"e2e-webdriver\")]"))
+            .unwrap();
+        assert!(
+            read_at - gate < 120,
+            "the env read must sit directly under the feature gate"
+        );
+    }
+
+    #[cfg(feature = "e2e-webdriver")]
+    #[test]
+    fn e2e_build_passes_the_webdriver_args() {
+        std::env::set_var(super::E2E_WEBVIEW2_ARGS_ENV, "--remote-debugging-port=9222");
+        let a = super::e2e_webview2_args().unwrap();
+        assert!(a.ends_with("--remote-debugging-port=9222"));
+        assert!(a.contains("msSmartScreenProtection"));
+        std::env::remove_var(super::E2E_WEBVIEW2_ARGS_ENV);
+        assert_eq!(super::e2e_webview2_args(), None);
+    }
 }
 
 // --- Lifecycle ---------------------------------------------------------------
@@ -574,6 +611,35 @@ pub fn set_quitting() {
 
 pub fn is_quitting() -> bool {
     QUITTING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Env var read only by `--features e2e-webdriver` builds (E2E tests).
+#[cfg(feature = "e2e-webdriver")]
+pub const E2E_WEBVIEW2_ARGS_ENV: &str = "SPARKDOWN_E2E_WEBVIEW2_ARGS";
+
+/// WebView2 browser arguments for an E2E build: wry's defaults plus
+/// `$SPARKDOWN_E2E_WEBVIEW2_ARGS` (e.g. `--remote-debugging-port=9222`).
+/// wry always sets its own arguments, which WebView2 lets win over the
+/// standard WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, so WebDriver can't attach
+/// otherwise. Release builds (feature off) compile the env read out and
+/// always return None: the webview keeps wry's defaults.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn e2e_webview2_args() -> Option<String> {
+    #[cfg(feature = "e2e-webdriver")]
+    {
+        let extra = std::env::var(E2E_WEBVIEW2_ARGS_ENV).ok()?;
+        let extra = extra.trim();
+        if extra.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required {extra}"
+        ))
+    }
+    #[cfg(not(feature = "e2e-webdriver"))]
+    {
+        None
+    }
 }
 
 /// Create a window from the `tauri.conf.json` template under `label`,
@@ -599,7 +665,13 @@ pub fn create_window(
     config.label = label.to_string();
     config.create = true;
     config.visible = false;
-    let window = tauri::WebviewWindowBuilder::from_config(app, &config)?.build()?;
+    let builder = tauri::WebviewWindowBuilder::from_config(app, &config)?;
+    #[cfg(windows)]
+    let builder = match e2e_webview2_args() {
+        Some(args) => builder.additional_browser_args(&args),
+        None => builder,
+    };
+    let window = builder.build()?;
     #[cfg(not(target_os = "macos"))]
     let _ = window.set_decorations(false);
     if let Some(g) = geometry {
