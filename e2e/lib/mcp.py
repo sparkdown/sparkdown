@@ -1,6 +1,7 @@
 """Talk to a running SparkDown through its stdio MCP shim, as an external
 agent would (`sparkdown --mcp-stdio` with $SPARKDOWN_FOLDER)."""
 import json
+import time
 import os
 import subprocess
 
@@ -58,8 +59,16 @@ def isolation_check(exe, folders, log):
     them all. Returns (status, detail)."""
     roots = {}
     for name, path in folders.items():
-        ok, ctx = context(exe, path)
-        log(f"mcp {name}: ok={ok} {str(ctx)[:300]}")
+        # A window that just opened its folder publishes its snapshot after
+        # a short debounce; give it a few seconds before judging.
+        end = time.time() + 15
+        while True:
+            ok, ctx = context(exe, path)
+            log(f"mcp {name}: ok={ok} {str(ctx)[:300]}")
+            good = ok and isinstance(ctx, dict) and norm(ctx.get("workspace_root")) == norm(path)
+            if good or time.time() > end:
+                break
+            time.sleep(1.5)
         if not ok or not isinstance(ctx, dict):
             return "FAIL", f"{name}: get_context failed: {str(ctx)[:200]}"
         roots[name] = ctx.get("workspace_root")
@@ -74,8 +83,11 @@ def isolation_check(exe, folders, log):
     if not ok or missing:
         return "FAIL", f"list_windows missing {missing}: {str(wins)[:200]}"
     ok2, err = call(exe, None, "sparkdown_get_context")
-    unnamed = "error names every window" if (not ok2 and all(n in str(err) for n in folders)) else f"no-folder call: ok={ok2} {str(err)[:120]}"
-    return "PASS", f"each of {sorted(folders)} sees only its own root; list_windows lists all; {unnamed}"
+    named = not ok2 and all(n in str(err) for n in folders)
+    base = f"each of {sorted(folders)} sees only its own root; list_windows lists all"
+    if named:
+        return "PASS", base + "; a call with no folder errors and names every window"
+    return "PARTIAL", base + f"; but a call with no folder gave ok={ok2} {str(err)[:120]}"
 
 
 def tab(ctx, path):
