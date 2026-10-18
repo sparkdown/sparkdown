@@ -4,12 +4,12 @@ name: E2E (multi-window must-pass)
 # (System Events), Windows (WebDriver over CDP + UI Automation), Ubuntu
 # (tauri-driver/WebKitWebDriver under Xvfb) and Arch + Hyprland (vkms DRM in
 # a privileged container). Never runs on tags or releases. See e2e/README.md.
+# No push trigger: a push to a PR branch would also start the pull_request
+# run, and the two share the concurrency group and cancel each other.
 on:
   workflow_dispatch:
   pull_request:
     branches: [main]
-  push:
-    branches: ["e2e/**"]
 
 permissions:
   contents: read
