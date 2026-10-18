@@ -345,22 +345,39 @@ class Hypr(Base):
         title = names[0] + SUF
         self.focus(title)
         out = pathlib.Path(OUT) / "atspi-click.json"
-        with open(out, "w") as f:
+        err = pathlib.Path(OUT) / "atspi-click.err"
+        with open(out, "w") as f, open(err, "w") as e:
             # Don't wait: the press's D-Bus reply can block while the popup is up.
             clicker = subprocess.Popen(["/usr/bin/python3", str(pathlib.Path(__file__).with_name("atspi_click.py")), title, "Open menu"],
-                                       stdout=f, stderr=subprocess.STDOUT)
+                                       stdout=f, stderr=e)
         time.sleep(4)
-        try:
-            click = json.loads(out.read_text().splitlines()[0])
-        except (IndexError, ValueError):
-            click = {"ok": False, "how": out.read_text()[-300:] or "no answer from atspi_click"}
+        click = {"ok": False, "how": (err.read_text()[-200:] or "no answer from atspi_click")}
+        for line in out.read_text().splitlines():
+            try:
+                click = json.loads(line)
+            except ValueError:
+                pass
         R.log("at-spi click:", click)
-        if not click.get("ok"):
-            clicker.kill()
-            return "MANUAL", f"couldn't open the in-app menu without a pointer ({click.get('how', '')[:200]}); covered on Ubuntu and by unit tests"
         self.shot("app-menu-open")
+
+        def dismiss():
+            # Always close the popup: a GTK popup left up grabs the keyboard
+            # and breaks every later check.
+            self.wtype("-k", "Escape")
+            self.wtype("-k", "Escape")
+            time.sleep(0.5)
+            self.focus(title)
+
         try:
-            return read_window_menu(names, lambda: (self.wtype("-k", "Escape"), self.wtype("-k", "Escape")))
+            if not click.get("ok"):
+                dismiss()
+                return "MANUAL", (f"couldn't open the in-app menu without a pointer ({click.get('how', '')[:200]}); "
+                                  "covered on Ubuntu and by unit tests")
+            st, detail = read_window_menu(names, dismiss)
+            if st == "PARTIAL":
+                # Nothing readable: we can't tell whether the press opened it.
+                return "MANUAL", f"pressed {click.get('how')}, but no GTK popup was readable over AT-SPI; covered on Ubuntu and by unit tests"
+            return st, detail + f" (opened by AT-SPI: {click.get('how')})"
         finally:
             time.sleep(1)
             clicker.kill()

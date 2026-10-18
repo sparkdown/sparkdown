@@ -3,6 +3,9 @@ works on Wayland). Usage: atspi_click.py WINDOW_TITLE ACCESSIBLE_NAME
 Prints JSON {"ok": bool, "how": str}."""
 import json
 import sys
+import warnings
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 try:
     import gi
