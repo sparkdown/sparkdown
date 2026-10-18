@@ -96,6 +96,14 @@ jobs:
           Invoke-WebRequest "https://msedgedriver.microsoft.com/$wv/edgedriver_win64.zip" -OutFile edgedriver.zip
           Expand-Archive edgedriver.zip -DestinationPath edgedriver
           & .\edgedriver\msedgedriver.exe --version | Tee-Object -Append "$env:OUT\win-driver.log"
+      - name: UIA view inside the webview
+        if: always()
+        shell: pwsh
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP 'delta'; New-Item -ItemType Directory -Force $d | Out-Null; '# delta' | Set-Content "$d\notes.md"
+          $p = Start-Process "$env:GITHUB_WORKSPACE\src-tauri\target\release\sparkdown.exe" -ArgumentList $d -PassThru; Start-Sleep 12
+          ./e2e/spike/win-uia-tree.ps1 *>&1 | Tee-Object "$env:OUT\win-uia-tree.log"
+          Stop-Process -Id $p.Id -Force
       - name: WebView2 diagnostics (env vars, policies, DevToolsActivePort)
         if: always()
         shell: pwsh
@@ -104,6 +112,20 @@ jobs:
         if: always()
         shell: pwsh
         run: python e2e/spike/win_driver.py "$env:GITHUB_WORKSPACE\src-tauri\target\release\sparkdown.exe" "$env:GITHUB_WORKSPACE\edgedriver\msedgedriver.exe"
+      - name: Rebuild with the spike patch (app honours WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS)
+        if: always()
+        shell: pwsh
+        run: |
+          python e2e/spike/patch_wv2_args.py
+          & .\frontend\node_modules\.bin\tauri.cmd build --no-bundle
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Copy-Item src-tauri\target\release\sparkdown.exe sparkdown-patched.exe
+      - name: tauri-driver against the patched build
+        if: always()
+        shell: pwsh
+        env:
+          OUT: ${{ github.workspace }}\e2e-out\patched
+        run: python e2e/spike/win_driver.py "$env:GITHUB_WORKSPACE\sparkdown-patched.exe" "$env:GITHUB_WORKSPACE\edgedriver\msedgedriver.exe"
       - name: Drive the real app (self-launch with CDP port, attach msedgedriver)
         if: always()
         shell: pwsh
