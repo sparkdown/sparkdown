@@ -1,7 +1,13 @@
 """Print the open popup menu of SparkDown as JSON via AT-SPI:
-{"top": [labels], "Window": [labels of the Window submenu]}."""
+{"top": [labels], "Window": [labels of the Window submenu]}.
+With `--activate LABEL`, also activate that Window-submenu item, which closes
+the popup (on headless Hyprland a popup ignores Escape: nothing grabs keys)."""
 import json
 import sys
+import warnings
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+ACTIVATE = sys.argv[2] if len(sys.argv) > 2 and sys.argv[1] == "--activate" else None
 
 try:
     import gi
@@ -53,6 +59,14 @@ for app in kids(desk):
                 w = items[labels.index("Window")]
                 sub = [c for c in walk(w) if c is not w and c.get_role_name() in ("menu item", "check menu item", "radio menu item")]
                 res["Window"] = [item_label(c) for c in sub]
+                if ACTIVATE:
+                    hit = next((c for c in sub if item_label(c) == ACTIVATE), None)
+                    act = hit.get_action_iface() if hit is not None else None
+                    res["activated"] = bool(act)
+                    print(json.dumps(res), flush=True)  # the action's reply may block
+                    if act:
+                        act.do_action(0)
+                    sys.exit(0)
 if not res:
     print(f"at-spi windows: {seen}", file=sys.stderr)
 print(json.dumps(res))

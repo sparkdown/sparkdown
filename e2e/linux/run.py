@@ -361,12 +361,21 @@ class Hypr(Base):
         self.shot("app-menu-open")
 
         def dismiss():
-            # Always close the popup: a GTK popup left up grabs the keyboard
-            # and breaks every later check.
-            self.wtype("-k", "Escape")
+            # Always close the popup: one left up breaks every later check.
+            # Escape doesn't reach it here, so activate this window's own
+            # Window-menu entry (it only focuses this window), over AT-SPI.
+            try:
+                p = subprocess.Popen(["/usr/bin/python3", str(pathlib.Path(__file__).with_name("atspi_menu.py")),
+                                      "--activate", names[0]], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                time.sleep(3)
+                p.kill()
+                R.log("menu dismissed via:", (p.stdout.read() or "")[-200:])
+            except Exception as e:  # noqa: BLE001
+                R.log("menu dismiss failed:", e)
             self.wtype("-k", "Escape")
             time.sleep(0.5)
             self.focus(title)
+            self.shot("app-menu-closed")
 
         try:
             if not click.get("ok"):
