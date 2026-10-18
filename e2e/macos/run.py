@@ -93,6 +93,7 @@ DIALOGS = r'''
 on textsOf(e)
   set ts to ""
   set bs to ""
+  tell application "System Events"
   try
     set items_ to entire contents of e
   on error
@@ -110,9 +111,11 @@ on textsOf(e)
       end if
     end try
   end repeat
+  end tell
   return {ts, bs}
 end textsOf
 
+set AppleScript's text item delimiters to ","
 set out to ""
 tell application "System Events" to tell process "sparkdown"
   set i to 0
@@ -128,7 +131,11 @@ tell application "System Events" to tell process "sparkdown"
       set sr to subrole of w
       if sr is missing value then set sr to ""
     end try
-    set out to out & "#win" & tab & i & tab & wn & tab & sr & linefeed
+    set kids to ""
+    try
+      set kids to (role of every UI element of w) as text
+    end try
+    set out to out & "#win" & tab & i & tab & wn & tab & sr & " kids=" & kids & linefeed
     try
       repeat with s in (every UI element of w whose role is "AXSheet")
         set tb to my textsOf(s)
@@ -141,6 +148,12 @@ tell application "System Events" to tell process "sparkdown"
     end if
   end repeat
 end tell
+try
+  tell application "System Events"
+    set fp to first process whose frontmost is true
+    set out to out & "#front" & tab & (name of fp) & tab & ((name of every window of fp) as text) & linefeed
+  end tell
+end try
 return out
 '''
 
@@ -150,7 +163,7 @@ def dialogs():
     res = []
     for line in out.split("\n"):
         parts = line.split("\t")
-        if parts[0] == "#win":
+        if parts[0] in ("#win", "#front"):
             R.log("  ax window:", parts[1:])
         elif len(parts) == 4:
             res.append({"kind": parts[0], "window": int(parts[1]), "text": parts[2].replace("¦", "\n"),

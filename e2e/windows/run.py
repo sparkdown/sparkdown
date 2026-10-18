@@ -146,8 +146,8 @@ class Desktop:
         return out
 
     def cancel_dialog(self, d):
-        uia("click", str(d["id"]), "Cancel")
-        time.sleep(1)
+        R.log("cancel:", uia("click", str(d["id"]), "Cancel"))
+        time.sleep(1.5)
 
     def wait_ready(self, title):
         return wd.wait_ready(self.wd, title, R.log) if self.wd else (time.sleep(6) or None)

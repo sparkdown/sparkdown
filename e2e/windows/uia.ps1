@@ -65,9 +65,18 @@ switch ($Cmd) {
   'click' {
     $c = New-Object System.Windows.Automation.PropertyCondition($AE::NativeWindowHandleProperty, [int]$A1)
     $w = $root.FindFirst($TS::Descendants, $c)
-    $b = Desc $w $CT::Button | Where-Object { $_.Current.Name -eq $A2 } | Select-Object -First 1
-    $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-    'true'
+    $b = $null
+    if ($w) { $b = Desc $w $CT::Button | Where-Object { $_.Current.Name -eq $A2 } | Select-Object -First 1 }
+    if ($b) {
+      $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+      'true'
+    } elseif ($A2 -eq 'Cancel') {
+      # Task dialog buttons aren't always exposed: IDCANCEL is the Cancel button.
+      [E2E.Win]::PostMessage([System.IntPtr][int64]$A1, 0x0111, [System.IntPtr]2, [System.IntPtr]0) | Out-Null
+      '"idcancel"'
+    } else {
+      throw "no button $A2 in window $A1"
+    }
   }
   'menu' {
     # Read the open popup menus through Win32: MN_GETHMENU on each #32768

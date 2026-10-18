@@ -286,7 +286,12 @@ class Hypr(Base):
         sh("hyprctl", "dispatch", "focuswindow", f"address:{d['id']}")
         time.sleep(0.5)
         self.wtype("-k", "Escape")
-        time.sleep(1)
+        time.sleep(1.5)
+        if any(x["id"] == d["id"] for x in self.dialogs()):
+            # Closing the dialog window answers it like Cancel (GTK delete-event).
+            R.log("Escape didn't close the dialog; closing it via hyprctl")
+            sh("hyprctl", "dispatch", "closewindow", f"address:{d['id']}")
+            time.sleep(1.5)
 
     def window_menu(self, names):
         return "MANUAL", "no WebDriver here and the GTK popup isn't inspectable; covered as PARTIAL on Ubuntu and by unit tests"

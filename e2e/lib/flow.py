@@ -138,7 +138,7 @@ def run(R, D):
         kept = bool(t and t.get("dirty")) and EDIT in str(buf)
         alive = D.procs() == 1 and D.job_alive()
         D.shot("quit-cancelled")
-        base = (f"after Cancel: windows={after}, alpha's edit unsaved and kept={kept}, "
+        base = (f"prompt closed by Cancel={gone}; after Cancel: windows={after}, alpha's edit unsaved and kept={kept}, "
                 f"app and {D.job_name} still running={alive}")
         if not (gone and set(after) == set(before) and kept and alive) or missing:
             return "FAIL", f"prompt={d}; missing={missing}; {base}"
