@@ -99,8 +99,8 @@ def isolation_check(exe, folders, log):
     named = not ok2 and all(n in str(err) for n in folders)
     base = f"each of {sorted(folders)} sees only its own root; list_windows lists all"
     if stale:
-        return "PARTIAL", (base + f"; BUG: {stale} (a reused empty window) published no agent context "
-                           "after `sparkdown <dir>` until a file was opened in it")
+        return "PARTIAL", (base + f"; APP BUG (e2e/KNOWN_ISSUES.md #1): {stale} (a reused empty window) published "
+                           "no agent context after `sparkdown <dir>` until a file was opened in it")
     if named:
         return "PASS", base + "; a call with no folder errors and names every window"
     return "PARTIAL", base + f"; but a call with no folder gave ok={ok2} {str(err)[:120]}"

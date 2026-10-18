@@ -48,6 +48,27 @@ def with_text(ds):
     return ds
 
 
+def read_window_menu(names, dismiss):
+    """Read the open GTK popup's Window submenu over AT-SPI, then dismiss it."""
+    menu = {}
+    try:
+        p = subprocess.run(["/usr/bin/python3", str(pathlib.Path(__file__).with_name("atspi_menu.py"))],
+                           capture_output=True, text=True, timeout=30)
+        menu = json.loads(p.stdout or "{}")
+        R.log("at-spi menu:", menu, p.stderr.strip()[-300:])
+    except Exception as e:  # noqa: BLE001
+        R.log("at-spi menu failed:", e)
+    dismiss()
+    time.sleep(0.5)
+    items = menu.get("Window") or []
+    if not items:
+        return "PARTIAL", ("menu popup opened (screenshot); its GTK entries couldn't be read over AT-SPI; "
+                           "the entry model is unit-tested (window_menu_has_one_entry_per_live_window)")
+    entries = [i for i in items if i in names or i in ("alpha", "beta", "gamma", "Untitled window")]
+    ok = sorted(entries) == sorted(names) and len(entries) == len(set(entries))
+    return ("PASS" if ok else "FAIL"), f"Window submenu entries={entries} (items over AT-SPI: {items[:14]})"
+
+
 def sh(*args, timeout=30):
     p = subprocess.run(list(args), capture_output=True, text=True, timeout=timeout)
     return p.stdout.strip()
@@ -212,24 +233,7 @@ class X11(Base):
         self.wd.click(self.wd.find("#btn-app-menu"))
         time.sleep(2)
         self.shot("app-menu-open")
-        menu = {}
-        try:
-            p = subprocess.run(["/usr/bin/python3", str(pathlib.Path(__file__).with_name("atspi_menu.py"))],
-                               capture_output=True, text=True, timeout=30)
-            menu = json.loads(p.stdout or "{}")
-            R.log("at-spi menu:", menu, p.stderr.strip()[-300:])
-        except Exception as e:  # noqa: BLE001
-            R.log("at-spi menu failed:", e)
-        sh("xdotool", "key", "Escape")
-        time.sleep(0.5)
-        sh("xdotool", "key", "Escape")
-        items = menu.get("Window") or []
-        if not items:
-            return "PARTIAL", ("menu popup opened (screenshot); its GTK entries couldn't be read over AT-SPI; "
-                               "the entry model is unit-tested (window_menu_has_one_entry_per_live_window)")
-        entries = [i for i in items if i in names or i in ("alpha", "beta", "gamma", "Untitled window")]
-        ok = sorted(entries) == sorted(names) and len(entries) == len(set(entries))
-        return ("PASS" if ok else "FAIL"), f"Window submenu entries={entries} (items over AT-SPI: {items[:14]})"
+        return read_window_menu(names, lambda: (sh("xdotool", "key", "Escape"), time.sleep(0.5), sh("xdotool", "key", "Escape")))
 
     def webview_check(self, title, folder, edit):
         if not self._wd_handle(title):
@@ -336,7 +340,22 @@ class Hypr(Base):
             time.sleep(1.5)
 
     def window_menu(self, names):
-        return "MANUAL", "no WebDriver here and the GTK popup isn't inspectable; covered as PARTIAL on Ubuntu and by unit tests"
+        # No WebDriver or pointer here: press the in-app menu button over
+        # AT-SPI (WebKitGTK exposes web content), then read the GTK popup.
+        title = names[0] + SUF
+        self.focus(title)
+        try:
+            p = subprocess.run(["/usr/bin/python3", str(pathlib.Path(__file__).with_name("atspi_click.py")), title, "Open menu"],
+                               capture_output=True, text=True, timeout=30)
+            click = json.loads(p.stdout or "{}")
+        except Exception as e:  # noqa: BLE001
+            click = {"ok": False, "how": str(e)}
+        R.log("at-spi click:", click)
+        if not click.get("ok"):
+            return "MANUAL", f"couldn't open the in-app menu without a pointer ({click.get('how', '')[:160]}); covered on Ubuntu and by unit tests"
+        time.sleep(2)
+        self.shot("app-menu-open")
+        return read_window_menu(names, lambda: (self.wtype("-k", "Escape"), self.wtype("-k", "Escape")))
 
     def shot(self, name):
         self.n += 1
