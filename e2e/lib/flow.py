@@ -115,7 +115,7 @@ def run(R, D):
             return "FAIL", f"could not start the {D.job_name} job in beta's terminal"
         return quit_and_check("quit", 0)
 
-    def quit_and_check(tag, bg_wait):
+    def quit_and_check(tag, bg_wait, want=None):
         if bg_wait:
             # Paulo's case: A focused, B (running job) left in the background
             # long enough for webview throttling, then quit from A.
@@ -140,7 +140,7 @@ def run(R, D):
         d = ds[0]
         missing = None
         if d.get("text") is not None:
-            want = ["still running", D.job_name, "beta", "Unsaved changes", "alpha"]
+            want = want or ["still running", D.job_name, "beta", "Unsaved changes", "alpha"]
             missing = [x for x in want if x.lower() not in d["text"].lower()]
         D.cancel_dialog(d)
         gone = wait_for(lambda: not D.dialogs(), 8)
@@ -161,6 +161,19 @@ def run(R, D):
         return "PASS", f"one prompt: {d['text'][:200]!r}; {base}"
     R.run("quit-prompt", quit_prompt)
     R.run("quit-prompt-bg-occluded", lambda: quit_and_check("bgquit", int(os.environ.get("E2E_BG_WAIT", "45"))))
+
+    def renamed_check():
+        old = fixtures.tmux_busy_session()
+        if not old:
+            return "FAIL", "no tmux session with a running job found"
+        ok, err = fixtures.tmux_rename(old, old + "-renamed")
+        R.log(f"renamed {old} -> {old}-renamed: {ok} {err}")
+        try:
+            return quit_and_check("renamed", 0, ["beta", "Unsaved changes", "alpha"])
+        finally:
+            fixtures.tmux_rename(old + "-renamed", old)
+    if fixtures.TMUX:
+        R.run("quit-prompt-probe-error", renamed_check)
 
     if D.wd is not None:
         R.run("webview-content", lambda: D.webview_check("alpha" + SUF, "alpha", EDIT))

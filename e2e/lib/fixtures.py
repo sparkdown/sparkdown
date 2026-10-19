@@ -90,3 +90,25 @@ def tmux_diag(log, tag):
         if tty:
             ps = subprocess.run(["ps", "-o", "pid=,pgid=,tpgid=,comm=", "-t", tty.replace("/dev/", "")], capture_output=True, text=True)
             log(f"[{tag}]   ps -t {tty}: {ps.stdout.strip()!r}")
+
+
+def _tmux():
+    return next((t for t in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux") if os.path.exists(t)), "tmux")
+
+
+def tmux_busy_session():
+    """Name of the sd-* tmux session whose pane runs a foreground job."""
+    ls = subprocess.run([_tmux(), "ls", "-F", "#{session_name} #{pane_pid}"], capture_output=True, text=True)
+    for line in ls.stdout.splitlines():
+        name, _, pid = line.partition(" ")
+        if not name.startswith("sd-") or not pid.isdigit():
+            continue
+        ps = subprocess.run(["ps", "-o", "pgid=,tpgid=", "-p", pid], capture_output=True, text=True).stdout.split()
+        if len(ps) == 2 and ps[0] != ps[1] and int(ps[1]) > 0:
+            return name
+    return None
+
+
+def tmux_rename(old, new):
+    p = subprocess.run([_tmux(), "rename-session", "-t", f"={old}", new], capture_output=True, text=True)
+    return p.returncode == 0, p.stderr.strip()

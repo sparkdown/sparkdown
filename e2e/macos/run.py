@@ -359,7 +359,7 @@ def main():
         R.log("sleep pids:", busy)
         return bool(busy) and ok2
 
-    def quit_check(trigger, label):
+    def quit_check(trigger, label, want=None):
         if fixtures.TMUX:
             fixtures.tmux_diag(R.log, label)
         before = windows()
@@ -379,7 +379,7 @@ def main():
             return "FAIL", f"{len(ds)} prompts: {ds}"
         d = ds[0]
         text = d["text"]
-        want = ["still running", "sleep", "beta", "Unsaved changes", "alpha"]
+        want = want or ["still running", "sleep", "beta", "Unsaved changes", "alpha"]
         missing = [w for w in want if w not in text]
         click_dialog_button(d, "Cancel")
         time.sleep(2)
@@ -437,6 +437,21 @@ def main():
     R.run("quit-prompt-bg-occluded", lambda: bg_check("cmdq", "bgocc") if ready else ("FAIL", "setup failed"))
     R.run("quit-prompt-bg-occluded-menu", lambda: bg_check("menu", "bgoccmenu") if ready else ("FAIL", "setup failed"))
     R.run("quit-prompt-bg-minimized", lambda: bg_check("cmdq", "bgmin", True) if ready else ("FAIL", "setup failed"))
+
+    def renamed_check():
+        """The probe fails for B (its tmux session was renamed, so the stored
+        name no longer resolves): the prompt must still name B, never drop it."""
+        old = fixtures.tmux_busy_session()
+        if not old:
+            return "FAIL", "no tmux session with a running job found"
+        ok, err = fixtures.tmux_rename(old, old + "-renamed")
+        R.log(f"renamed {old} -> {old}-renamed: {ok} {err}")
+        try:
+            return quit_check(lambda: key("q"), "renamed", ["beta", "Unsaved changes", "alpha"])
+        finally:
+            fixtures.tmux_rename(old + "-renamed", old)
+    if fixtures.TMUX:
+        R.run("quit-prompt-probe-error", lambda: renamed_check() if ready else ("FAIL", "setup failed"))
 
     def restore():
         subprocess.run(["pkill", "-x", "sleep"])

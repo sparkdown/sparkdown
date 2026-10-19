@@ -21,6 +21,7 @@ CHECKS = {
     "quit-prompt-bg-occluded": "Quit from A after B (running job) sat 45 s in the background (hidden behind A on macOS): prompt still names B's job",
     "quit-prompt-bg-occluded-menu": "Same, quitting from the app menu",
     "quit-prompt-bg-minimized": "Same, with B minimized",
+    "quit-prompt-probe-error": "Job check fails for B (its tmux session was renamed): prompt still lists B, never drops it",
     "red-close": "Closing one window closes only that window",
     "dock-reopen": "Dock click with no visible window brings a window back",
     "restore": "Clean quit + relaunch restores the open windows (a closed one stays closed)",
