@@ -21,6 +21,7 @@ CHECKS = {
     "quit-prompt-bg-occluded": "Quit from A after B (running job) sat 45 s in the background (hidden behind A on macOS): prompt still names B's job",
     "quit-prompt-bg-occluded-menu": "Same, quitting from the app menu",
     "quit-prompt-bg-minimized": "Same, with B minimized",
+    "tmux-split-pane": "B's tmux window split (idle pane active, sleep in the other pane): quit prompt still lists sleep",
     "tmux-transient-failure": "B's tmux session briefly unresolvable (transient failure) while sleep runs: B's tab survives, quit prompt still lists sleep",
     "quit-prompt-probe-timeout": "Job check can't finish (tmux server wedged): quit still prompts, says it couldn't check, Cancel keeps everything",
     "red-close": "Closing one window closes only that window",

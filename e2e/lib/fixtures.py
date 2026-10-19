@@ -151,3 +151,23 @@ def flap_session(name, secs=0.7):
     time.sleep(secs)
     ok2, e2 = tmux_rename(tmp, name)
     return ok1 and ok2, f"{e1} {e2}".strip()
+
+
+def tmux_attached(name):
+    """Clients attached to session `name` (SparkDown's tab is one). None = unknown."""
+    p = subprocess.run([_tmux(), "display-message", "-p", "-t", f"={name}:", "#{session_name} #{session_attached}"],
+                       capture_output=True, text=True, timeout=10)
+    got, _, n = p.stdout.strip().rpartition(" ")
+    return int(n) if got == name and n.isdigit() else None
+
+
+def tmux_split_idle_pane(name):
+    """Split B's window: the new idle pane becomes the ACTIVE one, the
+    running job stays in the other pane. Returns the new pane id."""
+    p = subprocess.run([_tmux(), "split-window", "-t", f"={name}:", "-P", "-F", "#{pane_id}"],
+                       capture_output=True, text=True, timeout=10)
+    return p.stdout.strip() or None, p.stderr.strip()
+
+
+def tmux_kill_pane(pane_id):
+    subprocess.run([_tmux(), "kill-pane", "-t", pane_id], capture_output=True, timeout=10)

@@ -466,8 +466,27 @@ def main():
         ok, err = fixtures.flap_session(name)
         R.log(f"flapped {name} for 0.7 s: {ok} {err}")
         time.sleep(3)
+        att = fixtures.tmux_attached(name)
+        R.log(f"right before quit: {name} attached clients={att}")
+        if not att:
+            return "FAIL", f"B's tab is gone before ⌘Q: session {name} has no attached SparkDown client ({att})"
         return quit_check(lambda: key("q"), "flap")
+    def split_check():
+        """B's tmux window split by the user: the new idle pane is active,
+        `sleep` runs in the other pane. The quit prompt must still list it."""
+        name = fixtures.tmux_busy_session()
+        if not name:
+            return "FAIL", "no tmux session with a running job found"
+        pane, err = fixtures.tmux_split_idle_pane(name)
+        R.log(f"split {name}: new active pane {pane} {err}; attached={fixtures.tmux_attached(name)}")
+        if not pane:
+            return "FAIL", f"split-window failed: {err}"
+        try:
+            return quit_check(lambda: key("q"), "split")
+        finally:
+            fixtures.tmux_kill_pane(pane)
     if fixtures.TMUX:
+        R.run("tmux-split-pane", (lambda: split_check() if ready else ("FAIL", "setup failed")))
         R.run("tmux-transient-failure", (lambda: flap_check() if ready else ("FAIL", "setup failed")))
 
     def restore():
