@@ -1,6 +1,6 @@
-import { invoke } from '@tauri-apps/api/core';
-import { isUnderRoot } from './utils';
-import type { AppConfig } from './types/AppConfig';
+import { invoke } from "@tauri-apps/api/core";
+import { isUnderRoot } from "./utils";
+import type { AppConfig } from "./types/AppConfig";
 
 export type { AppConfig };
 
@@ -9,18 +9,24 @@ export type { AppConfig };
 export interface AgentMcpStatus {
   installed: boolean;
   command: string | null;
-  stale: 'missing' | 'other' | null;
+  stale: "missing" | "other" | null;
 }
 
 /** Canonical folder identity (windows.rs FolderId). */
 export type WindowFolder =
-  | { kind: 'local'; path: string }
-  | { kind: 'remote'; user: string; hostname: string; port: number; path: string };
+  | { kind: "local"; path: string }
+  | {
+      kind: "remote";
+      user: string;
+      hostname: string;
+      port: number;
+      path: string;
+    };
 
 export type FolderRoute =
-  | { action: 'here' }
-  | { action: 'focused'; label: string }
-  | { action: 'new'; label: string };
+  | { action: "here" }
+  | { action: "focused"; label: string }
+  | { action: "new"; label: string };
 
 export interface FileEntry {
   name: string;
@@ -33,7 +39,13 @@ let watchRoot: string | null = null;
 
 /** What a quit would cost across windows (#65/#68). */
 export interface QuitStatus {
-  busy: { window: string; command: string; keeps_running?: boolean }[];
+  /** `unchecked`: this terminal's job check failed or timed out (#99). */
+  busy: {
+    window: string;
+    command: string;
+    keeps_running?: boolean;
+    unchecked?: string;
+  }[];
   /** Windows with unsaved changes. */
   unsaved: string[];
 }
@@ -41,64 +53,73 @@ export interface QuitStatus {
 export const api = {
   /** Multi-window registry (#61): this window's folder and unsaved state. */
   windowSetFolder: (folder: WindowFolder | null, display: string | null) =>
-    invoke<void>('window_set_folder', { folder, display }),
-  windowSetDirty: (dirty: boolean) => invoke<void>('window_set_dirty', { dirty }),
+    invoke<void>("window_set_folder", { folder, display }),
+  windowSetDirty: (dirty: boolean) =>
+    invoke<void>("window_set_dirty", { dirty }),
   /** Open Folder routing (#62): where `dir` (local, on this window's
    *  session, or ssh://host/path) opens. `here` = this window opens it. */
   routeFolder: (dir: string, newWindow = false) =>
-    invoke<FolderRoute>('route_folder', { dir, newWindow }),
+    invoke<FolderRoute>("route_folder", { dir, newWindow }),
   /** #66: for each recent spec, the number of the window that has it open. */
-  windowNumbersFor: (specs: string[]) => invoke<Array<number | null>>('window_numbers_for', { specs }),
+  windowNumbersFor: (specs: string[]) =>
+    invoke<Array<number | null>>("window_numbers_for", { specs }),
   /** The folder this (new) window was created to open, once. */
-  windowTakeOpen: () => invoke<string | null>('window_take_open'),
+  windowTakeOpen: () => invoke<string | null>("window_take_open"),
   /** Record this window's remote folder after a connect; the label of the
    *  window that already has it (now focused), or null. */
   /** Window lifecycle (#65). */
-  windowNew: () => invoke<void>('window_new'),
-  windowClose: () => invoke<void>('window_close'),
-  windowTakeMenu: () => invoke<string | null>('window_take_menu'),
+  windowNew: () => invoke<void>("window_new"),
+  windowClose: () => invoke<void>("window_close"),
+  windowTakeMenu: () => invoke<string | null>("window_take_menu"),
   /** Running non-tmux terminals in every window (what a quit stops). */
-  quitStatus: () => invoke<QuitStatus>('quit_status'),
+  quitStatus: () => invoke<QuitStatus>("quit_status"),
   /** Every other window resolves unsaved tabs and saves; false = cancelled. */
-  quitPrepareOthers: () => invoke<boolean>('quit_prepare_others'),
+  quitPrepareOthers: () => invoke<boolean>("quit_prepare_others"),
   /** #88: take the app's one quit flow for this window; false = one is
    *  already running (a second ⌘Q, or the same one via another path). */
-  quitBegin: () => invoke<boolean>('quit_begin'),
+  quitBegin: () => invoke<boolean>("quit_begin"),
   /** #88: this window's quit flow was cancelled or failed. */
-  quitEnd: () => invoke<void>('quit_end'),
-  quitPrepareReply: (id: number, ok: boolean) => invoke<void>('quit_prepare_reply', { id, ok }),
-  windowSetRemoteFolder: () => invoke<string | null>('window_set_remote_folder'),
-  readFile: (path: string) => invoke<string>('read_file', { path }),
+  quitEnd: () => invoke<void>("quit_end"),
+  quitPrepareReply: (id: number, ok: boolean) =>
+    invoke<void>("quit_prepare_reply", { id, ok }),
+  windowSetRemoteFolder: () =>
+    invoke<string | null>("window_set_remote_folder"),
+  readFile: (path: string) => invoke<string>("read_file", { path }),
   writeFile: (path: string, content: string) =>
-    invoke<void>('write_file', { path, content }),
-  isDirectory: (path: string) => invoke<boolean>('is_directory', { path }),
+    invoke<void>("write_file", { path, content }),
+  isDirectory: (path: string) => invoke<boolean>("is_directory", { path }),
   /** Append a crash-log entry; the backend picks the platform log dir. */
-  appendCrashLog: (entry: string) => invoke<void>('append_crash_log', { entry }),
-  copyText: (text: string) => invoke<void>('copy_text', { text }),
-  copyFile: (path: string) => invoke<void>('copy_file', { path }),
+  appendCrashLog: (entry: string) =>
+    invoke<void>("append_crash_log", { entry }),
+  copyText: (text: string) => invoke<void>("copy_text", { text }),
+  copyFile: (path: string) => invoke<void>("copy_file", { path }),
   listDirectory: (path: string, includeHidden = false) =>
-    invoke<FileEntry[]>('list_directory', { path, includeHidden }),
+    invoke<FileEntry[]>("list_directory", { path, includeHidden }),
   /** Every file under `root` (root-relative, `/`-separated) for Quick open.
    *  Local walk or one remote `find`; capped and cached in the backend. */
   listWorkspaceFiles: (root: string, includeHidden = false) =>
-    invoke<{ files: string[]; truncated: boolean }>('list_workspace_files', { root, includeHidden }),
-  loadConfig: () => invoke<AppConfig>('load_config'),
-  saveConfig: (config: AppConfig) => invoke<void>('save_config', { config }),
-  getPendingFiles: () => invoke<string[]>('get_pending_files'),
-  quit: () => invoke<void>('quit'),
-  setHtmlPreview: (html: string) => invoke<void>('set_html_preview', { html }),
+    invoke<{ files: string[]; truncated: boolean }>("list_workspace_files", {
+      root,
+      includeHidden,
+    }),
+  loadConfig: () => invoke<AppConfig>("load_config"),
+  saveConfig: (config: AppConfig) => invoke<void>("save_config", { config }),
+  getPendingFiles: () => invoke<string[]>("get_pending_files"),
+  quit: () => invoke<void>("quit"),
+  setHtmlPreview: (html: string) => invoke<void>("set_html_preview", { html }),
   setHtmlJsChecked: (checked: boolean) =>
-    invoke<void>('set_html_js_checked', { checked }),
+    invoke<void>("set_html_js_checked", { checked }),
   /** Native app menu under the brand icon; x/y are window-logical CSS px. */
-  showAppMenu: (x: number, y: number) => invoke<void>('show_app_menu', { x, y }),
+  showAppMenu: (x: number, y: number) =>
+    invoke<void>("show_app_menu", { x, y }),
   /** Open an http(s)/mailto URL in the system default handler (browser). */
-  openExternal: (url: string) => invoke<void>('open_external', { url }),
+  openExternal: (url: string) => invoke<void>("open_external", { url }),
   /** Grant the asset protocol each local preview image (one flag per path). */
   allowPreviewAssets: (paths: string[]) =>
-    invoke<boolean[]>('allow_preview_assets', { paths }),
+    invoke<boolean[]>("allow_preview_assets", { paths }),
   /** Raw bytes of an image on the SSH host `host` (must be the active one). */
   remoteReadImage: (host: string, path: string) =>
-    invoke<ArrayBuffer>('remote_read_image', { host, path }),
+    invoke<ArrayBuffer>("remote_read_image", { host, path }),
 
   // Agent cockpit: embedded terminals + file watching.
   // Each terminal is keyed by a frontend-generated id so several can run at once.
@@ -110,99 +131,130 @@ export const api = {
     rows: number,
     session: string | null,
     launch: string | null = null,
-  ) => invoke<string>('terminal_start', { id, cwd, cols, rows, session, launch }),
-  tmuxSessions: (prefix: string) => invoke<string[]>('tmux_sessions', { prefix }),
+  ) =>
+    invoke<string>("terminal_start", { id, cwd, cols, rows, session, launch }),
+  tmuxSessions: (prefix: string) =>
+    invoke<string[]>("tmux_sessions", { prefix }),
   /** Type text into a tmux session (no Enter) via tmux's own input cycle, so
    *  it can't race tmux's startup redraw and appear duplicated. */
   tmuxSendKeys: (session: string, text: string) =>
-    invoke<void>('tmux_send_keys', { session, text }),
-  tmuxKillSession: (session: string) => invoke<void>('tmux_kill_session', { session }),
+    invoke<void>("tmux_send_keys", { session, text }),
+  tmuxKillSession: (session: string) =>
+    invoke<void>("tmux_kill_session", { session }),
   terminalWrite: (id: string, data: string) =>
-    invoke<void>('terminal_write', { id, data }),
+    invoke<void>("terminal_write", { id, data }),
   terminalResize: (id: string, cols: number, rows: number) =>
-    invoke<void>('terminal_resize', { id, cols, rows }),
-  terminalClose: (id: string) => invoke<void>('terminal_close', { id }),
+    invoke<void>("terminal_resize", { id, cols, rows }),
+  terminalClose: (id: string) => invoke<void>("terminal_close", { id }),
   /** #43: what runs in the pane besides its idle shell (null = idle / unknown). */
-  terminalBusy: (id: string) => invoke<string | null>('terminal_busy', { id }),
-  shellName: () => invoke<string>('shell_name'),
+  terminalBusy: (id: string) => invoke<string | null>("terminal_busy", { id }),
+  shellName: () => invoke<string>("shell_name"),
   /** Which shell syntax a chip's launch line needs right now. */
-  launchShell: () => invoke<LaunchShell>('terminal_launch_shell'),
+  launchShell: () => invoke<LaunchShell>("terminal_launch_shell"),
   // Pin the inotify/FSEvents root: tab-switch into a subdir must not
   // restart the watcher (that burst flashes the active file on Linux).
   watchStart: async (root: string) => {
-    if (watchRoot && (watchRoot === root || isUnderRoot(root, watchRoot))) return;
-    await invoke<void>('watch_start', { root });
+    if (watchRoot && (watchRoot === root || isUnderRoot(root, watchRoot)))
+      return;
+    await invoke<void>("watch_start", { root });
     watchRoot = root;
   },
   watchStop: async () => {
     watchRoot = null;
-    await invoke<void>('watch_stop');
+    await invoke<void>("watch_stop");
   },
-  gitStatus: (root: string) => invoke<GitStatus>('git_status', { root }),
+  gitStatus: (root: string) => invoke<GitStatus>("git_status", { root }),
   /** Literal text search under `root` (local walk or remote grep). */
-  searchInFiles: (root: string, query: string, caseSensitive = false, includeHidden = false) =>
-    invoke<SearchResults>('search_in_files', { root, query, caseSensitive, includeHidden }),
+  searchInFiles: (
+    root: string,
+    query: string,
+    caseSensitive = false,
+    includeHidden = false,
+  ) =>
+    invoke<SearchResults>("search_in_files", {
+      root,
+      query,
+      caseSensitive,
+      includeHidden,
+    }),
   /** Branch + ahead/behind its upstream (status bar). */
-  gitBranchStatus: (root: string) => invoke<GitBranchStatus>('git_branch_status', { root }),
+  gitBranchStatus: (root: string) =>
+    invoke<GitBranchStatus>("git_branch_status", { root }),
   gitDiffFile: (root: string, path: string, untracked: boolean) =>
-    invoke<string>('git_diff_file', { root, path, untracked }),
+    invoke<string>("git_diff_file", { root, path, untracked }),
   /** Per changed file: +adds / −dels and a fingerprint of the change
    *  (review.rs). Paths are repo-relative to `root` (the repo top level). */
-  gitChangeStats: (root: string, changes: Pick<GitChange, 'path' | 'status'>[]) =>
-    invoke<ChangeStat[]>('git_change_stats', {
+  gitChangeStats: (
+    root: string,
+    changes: Pick<GitChange, "path" | "status">[],
+  ) =>
+    invoke<ChangeStat[]>("git_change_stats", {
       root,
       changes: changes.map((c) => ({ path: c.path, status: c.status })),
     }),
   /** Reviewed marks (path → fingerprint) of one workspace ("origin\nroot"). */
   reviewStateLoad: (workspace: string) =>
-    invoke<Record<string, string>>('review_state_load', { workspace }),
+    invoke<Record<string, string>>("review_state_load", { workspace }),
   reviewStateSave: (workspace: string, entries: Record<string, string>) =>
-    invoke<void>('review_state_save', { workspace, entries }),
+    invoke<void>("review_state_save", { workspace, entries }),
   // Agent context bridge: publish editor state for agents to read; detect
   // installed agent CLIs for the terminal's launch buttons.
-  agentContextUpdate: (root: string, contextJson: string, buffers: ShadowBuffer[]) =>
-    invoke<string>('agent_context_update', { root, contextJson, buffers }),
-  agentContextClear: (root: string) => invoke<void>('agent_context_clear', { root }),
-  detectAgents: () => invoke<AgentCli[]>('detect_agents'),
+  agentContextUpdate: (
+    root: string,
+    contextJson: string,
+    buffers: ShadowBuffer[],
+  ) => invoke<string>("agent_context_update", { root, contextJson, buffers }),
+  agentContextClear: (root: string) =>
+    invoke<void>("agent_context_clear", { root }),
+  detectAgents: () => invoke<AgentCli[]>("detect_agents"),
   // In-app MCP server (agent context v2): push editor state; answer edit /
   // open round trips; get the endpoint URL agents are pointed at.
-  mcpPublish: (snapshot: McpSnapshot) => invoke<void>('mcp_publish', { snapshot }),
+  mcpPublish: (snapshot: McpSnapshot) =>
+    invoke<void>("mcp_publish", { snapshot }),
   mcpReply: (reply: { id: number; ok: boolean; message: string }) =>
-    invoke<void>('mcp_reply', { reply }),
+    invoke<void>("mcp_reply", { reply }),
   /** How an agent should start our stdio MCP server (this binary), or null
    *  when the server is not running. */
-  mcpShimCommand: () => invoke<ShimCommand | null>('mcp_shim_command'),
+  mcpShimCommand: () => invoke<ShimCommand | null>("mcp_shim_command"),
   /** Whether the in-app MCP server is serving (status bar "Agent tools"). */
-  mcpServerRunning: () => invoke<boolean>('mcp_server_running'),
+  mcpServerRunning: () => invoke<boolean>("mcp_server_running"),
   /** Register / remove SparkDown in an agent's own MCP config, via its CLI. */
-  mcpInstallAgent: (bin: string) => invoke<string>('mcp_install_agent', { bin }),
-  mcpUninstallAgent: (bin: string) => invoke<string>('mcp_uninstall_agent', { bin }),
-  mcpAgentInstalled: (bin: string) => invoke<boolean>('mcp_agent_installed', { bin }),
+  mcpInstallAgent: (bin: string) =>
+    invoke<string>("mcp_install_agent", { bin }),
+  mcpUninstallAgent: (bin: string) =>
+    invoke<string>("mcp_uninstall_agent", { bin }),
+  mcpAgentInstalled: (bin: string) =>
+    invoke<boolean>("mcp_agent_installed", { bin }),
   /** #32: installed, and whether the entry points at a missing / other SparkDown. */
-  mcpAgentStatus: (bin: string) => invoke<AgentMcpStatus>('mcp_agent_status', { bin }),
+  mcpAgentStatus: (bin: string) =>
+    invoke<AgentMcpStatus>("mcp_agent_status", { bin }),
   // Remote sessions v1 (#36): SSH config hosts + one workspace at a time.
-  sshConfigHosts: () => invoke<SshHost[]>('ssh_config_hosts'),
+  sshConfigHosts: () => invoke<SshHost[]>("ssh_config_hosts"),
   // First connect to an unknown host (#24): scan its keys for the user to
   // confirm, then append exactly the scanned lines to known_hosts.
-  remoteHostkeyScan: (host: string) => invoke<HostKeyScan>('remote_hostkey_scan', { host }),
-  remoteHostkeyTrust: (scanId: string) => invoke<void>('remote_hostkey_trust', { scanId }),
-  remoteHostkeyForget: (scanId: string) => invoke<void>('remote_hostkey_forget', { scanId }),
+  remoteHostkeyScan: (host: string) =>
+    invoke<HostKeyScan>("remote_hostkey_scan", { host }),
+  remoteHostkeyTrust: (scanId: string) =>
+    invoke<void>("remote_hostkey_trust", { scanId }),
+  remoteHostkeyForget: (scanId: string) =>
+    invoke<void>("remote_hostkey_forget", { scanId }),
   // Both stop the backend watcher (watch_stop in remote/mod.rs), so drop the
   // watchStart pin too — else reopening the same root never restarts it.
   /** #27: the in-app key passphrase prompt's answer (null = cancelled). */
   askpassAnswer: (id: number, passphrase: string | null) =>
-    invoke<void>('askpass_answer', { id, passphrase }),
+    invoke<void>("askpass_answer", { id, passphrase }),
   remoteConnect: (host: string, path: string) =>
-    invoke<RemoteSession>('remote_connect', { host, path }).finally(() => {
+    invoke<RemoteSession>("remote_connect", { host, path }).finally(() => {
       watchRoot = null;
     }),
   remoteDisconnect: () =>
-    invoke<void>('remote_disconnect').finally(() => {
+    invoke<void>("remote_disconnect").finally(() => {
       watchRoot = null;
     }),
-  remoteSession: () => invoke<RemoteSession | null>('remote_session'),
+  remoteSession: () => invoke<RemoteSession | null>("remote_session"),
   /** `mkdir -p` on the remote host (absolute path; the backend validates it). */
-  remoteCreateDir: (path: string) => invoke<void>('remote_create_dir', { path }),
+  remoteCreateDir: (path: string) =>
+    invoke<void>("remote_create_dir", { path }),
 };
 
 /** One open tab as seen by the MCP server. `content` is the live editor
@@ -254,7 +306,7 @@ export interface ShimCommand {
 /** Shell syntax an agent chip's launch line must use (see
  *  `terminal_launch_shell`): PowerShell for a local terminal on Windows,
  *  POSIX for macOS / Linux and for any remote SSH host. */
-export type LaunchShell = 'posix' | 'powershell';
+export type LaunchShell = "posix" | "powershell";
 
 /** A known agent CLI and whether it was found on PATH. */
 export interface AgentCli {
@@ -267,7 +319,7 @@ export interface AgentCli {
 /** A changed path in the git working tree (Changes view). */
 export interface GitChange {
   path: string;
-  status: 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked';
+  status: "modified" | "added" | "deleted" | "renamed" | "untracked";
   staged: boolean;
   /** A folder, not a file: an untracked nested git repo (`?? proj/`).
    *  Shown as a folder row, never opened as a tab (#47). */
