@@ -314,7 +314,7 @@ def webcontent_reload():
     return pids
 
 
-def reload_keeps_jobs(A, B, note, edit, quit_check):
+def reload_keeps_jobs(A, B, note, edit, quit_check, phys_cmd_q):
     pids = subprocess.run(["pgrep", "-f", "com.apple.WebKit.WebContent"], capture_output=True, text=True).stdout.split()
     R.log(f"reload-keeps-jobs: killing every WebContent process {pids}")
     for pid in pids:
@@ -699,7 +699,7 @@ def main():
         # #108: reload BOTH webviews (macOS ends their web-content
         # processes; Tauri reloads them). The core must still know every
         # window's tmux sessions: both jobs stay in the prompt.
-        rl = reload_keeps_jobs(A, B, note, edit, quit_check)
+        rl = reload_keeps_jobs(A, B, note, edit, quit_check, phys_cmd_q)
         R.add("reload-keeps-jobs", *rl)
         if rl[0] != "PASS":
             return "FAIL", f"after reloading both webviews: {rl[1]}"
