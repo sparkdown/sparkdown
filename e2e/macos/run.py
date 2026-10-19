@@ -512,6 +512,76 @@ def main():
         return ("PASS" if ok else "FAIL"), f"saved A={saved}; before quit={before}; after relaunch={w} (gamma was closed, must stay closed)"
     R.run("restore", restore)
 
+    # 0.4.0 must-pass step 3, as on Paulo's Mac: pre-existing tmux server
+    # (tmux on), B's terminal split into two SparkDown panes with `sleep` in
+    # the new one, a long-lived "agent" process in A's terminal, A unsaved,
+    # A focused, a PHYSICAL ⌘Q (key code 12). Then a real Quit: with tmux on
+    # the sleep must survive it (no job killed).
+    def toggle_terminal():
+        se('click menu item "Toggle Terminal" of menu "View" of menu bar item "View" of menu bar 1')
+
+    def type_line(text):
+        osa(f'tell application "System Events" to keystroke "{text}"', 'tell application "System Events" to key code 36')
+
+    def phys_cmd_q():
+        osa('tell application "System Events" to key code 12 using {command down}')
+
+    def must_pass_3():
+        subprocess.run(["pkill", "-x", "sleep"])
+        if procs() == 0:
+            launch(A)
+            wait_for(lambda: titled(["alpha"]) <= set(windows()), 30)
+        cli(B)
+        time.sleep(2)
+        activate()
+        toggle_terminal(); time.sleep(1.5); toggle_terminal(); time.sleep(4)
+        osa('tell application "System Events" to keystroke "d" using {command down}')  # split right
+        time.sleep(4)
+        type_line("sleep 300")
+        time.sleep(1)
+        cli(A)
+        time.sleep(2)
+        activate()
+        toggle_terminal(); time.sleep(1.5); toggle_terminal(); time.sleep(4)
+        type_line("python3 -c 'import time; time.sleep(900)'")
+        time.sleep(2)
+        ok2, r2 = mcp.call(BIN, A, "sparkdown_edit_buffer", {"path": note, "content": edit + " (step 3)"})
+        cli(A)
+        time.sleep(2)
+        sleeps = subprocess.run(["pgrep", "-x", "sleep"], capture_output=True, text=True).stdout.split()
+        R.log(f"step3 setup: front={front()!r} sleep pids={sleeps} edit={ok2}")
+        if fixtures.TMUX:
+            fixtures.tmux_diag(R.log, "step3")
+        if not sleeps or not ok2:
+            return "FAIL", f"setup failed: sleep={sleeps} edit={ok2} {r2}"
+        res = quit_check(phys_cmd_q, "step3", ["still running", "sleep", "beta", "Unsaved changes", "alpha"])
+        if res[0] != "PASS" or not fixtures.TMUX:
+            return res
+        # Real quit: Quit, then Don't Save. tmux jobs must outlive the app.
+        phys_cmd_q()
+        ds = wait_for(dialogs, 15)
+        for _ in range(4):
+            if not ds:
+                break
+            d = ds[0]
+            btn = "Quit" if "Quit" in d["buttons"] else ("Don't Save" if "Don't Save" in d["buttons"] else None)
+            R.log(f"step3 quit: answering {btn!r} to {d['text'][:80]!r}")
+            if not btn:
+                break
+            click_dialog_button(d, btn)
+            time.sleep(2)
+            ds = dialogs()
+        gone = wait_for(lambda: procs() == 0, 25)
+        time.sleep(2)
+        alive = subprocess.run(["pgrep", "-x", "sleep"], capture_output=True, text=True).stdout.split()
+        fixtures.tmux_diag(R.log, "after-quit")
+        if not gone:
+            return "FAIL", f"{res[1]}; app did not exit after Quit/Don't Save"
+        if not alive:
+            return "FAIL", f"{res[1]}; QUIT KILLED THE tmux JOB: no sleep left after the app exited"
+        return "PASS", f"{res[1]}; after a real Quit the tmux sleep {alive} still runs"
+    R.run("must-pass-3", must_pass_3)
+
     R.manual("manual-gatekeeper", "Gatekeeper first launch of the signed, notarized build", "CI builds are unsigned; see e2e/README.md")
     R.manual("manual-spaces", "Spaces / Mission Control / gestures / notifications", "not automatable on hosted runners")
     subprocess.run(["pkill", "-x", "sparkdown"])
