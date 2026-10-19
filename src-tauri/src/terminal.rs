@@ -1030,12 +1030,36 @@ pub async fn terminal_busy(
         .map_err(|e| format!("busy check failed: {e}"))?
 }
 
-/// Terminals running a program at quit, across every window:
-/// (window label, command, survives). tmux-backed ones are listed too
-/// (#88: the quit prompt names them) with `survives` = true, since their
-/// session keeps running after a quit. Remote ones are left out (not
-/// visible). Blocking.
-pub fn busy_on_quit(state: &TerminalState) -> Vec<(String, String, bool)> {
+/// What one terminal's job check found (#99). A check that fails or times
+/// out is `Unknown`, never `Idle`: the quit prompt must not drop a window it
+/// could not check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobState {
+    Idle,
+    Busy(String),
+    Unknown(String),
+}
+
+/// Upper bound for one helper (tmux, ps) a job check runs. A wedged tmux
+/// server must not hang the quit, nor be read as "nothing running".
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// One terminal in the quit status: its window label, what runs in it,
+/// whether it survives the quit (tmux, #88), or why it couldn't be checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuitProbe {
+    pub label: String,
+    pub command: String,
+    pub survives: bool,
+    pub unchecked: Option<String>,
+}
+
+/// Terminals running a program at quit, across every window. Detection is
+/// all in Rust, from the process table and tmux, so it does not depend on
+/// any window's webview being awake. tmux-backed ones are listed too (#88)
+/// with `survives` = true. Remote ones are left out (not visible). A check
+/// that fails is listed with `unchecked` set (#99). Blocking.
+pub fn busy_on_quit(state: &TerminalState) -> Vec<QuitProbe> {
     let probes: Vec<(String, BusyProbe)> = match state.0.lock() {
         Ok(g) => g
             .iter()
@@ -1053,15 +1077,38 @@ pub fn busy_on_quit(state: &TerminalState) -> Vec<(String, String, bool)> {
                 )
             })
             .collect(),
-        Err(_) => return vec![],
+        Err(_) => {
+            return vec![QuitProbe {
+                label: String::new(),
+                command: String::new(),
+                survives: false,
+                unchecked: Some("terminal state unavailable".into()),
+            }]
+        }
     };
     probes
         .into_iter()
-        .filter_map(|(label, p)| {
-            let survives = p.tmux_session.is_some();
-            p.run().map(|cmd| (label, cmd, survives))
-        })
+        .filter_map(|(label, p)| quit_probe(label, p.tmux_session.is_some(), p.check()))
         .collect()
+}
+
+/// A terminal's [`JobState`] as a quit-status row; idle ones are left out.
+pub(crate) fn quit_probe(label: String, survives: bool, state: JobState) -> Option<QuitProbe> {
+    match state {
+        JobState::Idle => None,
+        JobState::Busy(command) => Some(QuitProbe {
+            label,
+            command,
+            survives,
+            unchecked: None,
+        }),
+        JobState::Unknown(why) => Some(QuitProbe {
+            label,
+            command: String::new(),
+            survives,
+            unchecked: Some(why),
+        }),
+    }
 }
 
 /// The facts [`terminal_busy`] reads under the lock; probed off it.
@@ -1073,21 +1120,52 @@ struct BusyProbe {
 }
 
 impl BusyProbe {
-    fn run(&self) -> Option<String> {
+    fn check(&self) -> JobState {
         if let Some(session) = &self.tmux_session {
-            return tmux_busy_command(session);
+            return tmux_job_state(session);
         }
-        let shell = self.shell_pid?;
+        let Some(shell) = self.shell_pid else {
+            return JobState::Idle;
+        };
         #[cfg(unix)]
         {
-            let fg = foreground_job(shell, self.fg_pgrp)?;
-            Some(process_name(fg).unwrap_or_else(|| "A program".into()))
+            pty_job_state(shell, self.fg_pgrp, process_name)
         }
         #[cfg(windows)]
         {
             let procs = windows_process_table();
-            first_child_name(shell, &procs)
+            match first_child_name(shell, &procs) {
+                Some(n) => JobState::Busy(n),
+                None => JobState::Idle,
+            }
         }
+    }
+
+    /// Single-terminal check (close one terminal): a failed check counts
+    /// as busy, so the close still asks.
+    fn run(&self) -> Option<String> {
+        match self.check() {
+            JobState::Idle => None,
+            JobState::Busy(c) => Some(c),
+            JobState::Unknown(_) => Some("A program (couldn't check)".into()),
+        }
+    }
+}
+
+/// Local pty: busy when the tty's foreground process group is not the
+/// shell's (#43). No foreground group readable = `Unknown`.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn pty_job_state(
+    shell_pid: u32,
+    fg_pgrp: Option<i32>,
+    name: impl Fn(u32) -> Option<String>,
+) -> JobState {
+    match fg_pgrp {
+        None => JobState::Unknown("couldn't read the terminal's foreground job".into()),
+        Some(p) => match foreground_job(shell_pid, Some(p)) {
+            Some(fg) => JobState::Busy(name(fg).unwrap_or_else(|| "A program".into())),
+            None => JobState::Idle,
+        },
     }
 }
 
@@ -1113,23 +1191,35 @@ pub(crate) fn pane_foreground_job(pane_pid: u32, pane_pgid: i32, tpgid: i32) -> 
 }
 
 /// (pgid, tpgid) of process `pid`: its own process group and the
-/// foreground process group of its controlling tty. Blocking.
-fn pgid_and_tty_foreground(pid: u32) -> Option<(i32, i32)> {
+/// foreground process group of its controlling tty. Blocking, bounded.
+fn pgid_and_tty_foreground(pid: u32) -> Result<(i32, i32), String> {
     #[cfg(target_os = "linux")]
     {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map_err(|e| format!("pane shell {pid}: {e}"))?;
         parse_proc_stat_pgrps(&stat)
+            .ok_or_else(|| format!("pane shell {pid}: unreadable /proc stat"))
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let out = crate::proc::command("ps")
-            .args(["-o", "pgid=,tpgid=", "-p", &pid.to_string()])
-            .output()
-            .ok()?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        let mut it = text.split_whitespace().map(|v| v.parse::<i32>().ok());
-        Some((it.next()??, it.next()??))
+        let pid_s = pid.to_string();
+        let out = crate::mcp::run_with_timeout(
+            "ps",
+            &["-o", "pgid=,tpgid=", "-p", pid_s.as_str()],
+            &std::env::temp_dir(),
+            PROBE_TIMEOUT,
+        )
+        .map_err(|_| format!("ps did not answer within {} s", PROBE_TIMEOUT.as_secs()))?;
+        parse_ps_pgrps(&out.1)
+            .ok_or_else(|| format!("ps -p {pid}: no process group ({})", out.2.trim()))
     }
+}
+
+/// `ps -o pgid=,tpgid=` output → (pgid, tpgid).
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+pub(crate) fn parse_ps_pgrps(text: &str) -> Option<(i32, i32)> {
+    let mut it = text.split_whitespace().map(|v| v.parse::<i32>().ok());
+    Some((it.next()??, it.next()??))
 }
 
 /// `/proc/<pid>/stat` → (pgrp, tpgid). The command name (field 2) is in
@@ -1143,29 +1233,67 @@ pub(crate) fn parse_proc_stat_pgrps(stat: &str) -> Option<(i32, i32)> {
 }
 
 /// Ask tmux for the active pane's shell pid of `session`, then compare its
-/// tty's foreground process group with the shell's own. Blocking.
-fn tmux_busy_command(session: &str) -> Option<String> {
-    let tmux = tmux_path()?;
-    let out = crate::proc::command(tmux)
-        .args([
+/// tty's foreground process group with the shell's own. Blocking, bounded.
+fn tmux_job_state(session: &str) -> JobState {
+    let Some(tmux) = tmux_path() else {
+        return JobState::Unknown("tmux not found".into());
+    };
+    let target = format!("={session}:");
+    let out = crate::mcp::run_with_timeout(
+        &tmux,
+        &[
             "display-message",
             "-p",
             "-t",
-            &format!("={session}:"),
+            target.as_str(),
             "#{pane_pid}",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+        ],
+        &std::env::temp_dir(),
+        PROBE_TIMEOUT,
+    )
+    .map_err(|_| format!("tmux did not answer within {} s", PROBE_TIMEOUT.as_secs()));
+    tmux_state_from(out, pgid_and_tty_foreground, process_name)
+}
+
+/// [`tmux_job_state`] with its helpers injected, so the error and timeout
+/// paths are unit-tested (#99). `display` is tmux's (ok, stdout, stderr).
+pub(crate) fn tmux_state_from(
+    display: Result<(bool, String, String), String>,
+    pgrps: impl Fn(u32) -> Result<(i32, i32), String>,
+    name: impl Fn(u32) -> Option<String>,
+) -> JobState {
+    let (ok, stdout, stderr) = match display {
+        Ok(v) => v,
+        Err(e) => return JobState::Unknown(e),
+    };
+    if !ok {
+        let why = stderr.trim();
+        return JobState::Unknown(if why.is_empty() {
+            "tmux error".into()
+        } else {
+            format!("tmux: {why}")
+        });
     }
-    let pane_pid = String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse::<u32>()
-        .ok()?;
-    let (pgid, tpgid) = pgid_and_tty_foreground(pane_pid)?;
-    let fg = pane_foreground_job(pane_pid, pgid, tpgid)?;
-    Some(process_name(fg).unwrap_or_else(|| "A program".into()))
+    let Ok(pane_pid) = stdout.trim().parse::<u32>() else {
+        return JobState::Unknown(format!("tmux: unexpected pane pid {:?}", stdout.trim()));
+    };
+    let (pgid, tpgid) = match pgrps(pane_pid) {
+        Ok(v) => v,
+        Err(e) => return JobState::Unknown(e),
+    };
+    match pane_foreground_job(pane_pid, pgid, tpgid) {
+        Some(fg) => JobState::Busy(name(fg).unwrap_or_else(|| "A program".into())),
+        None => JobState::Idle,
+    }
+}
+
+/// Old shape kept for the live tmux test: the busy command, if any.
+#[cfg(test)]
+fn tmux_busy_command(session: &str) -> Option<String> {
+    match tmux_job_state(session) {
+        JobState::Busy(c) => Some(c),
+        _ => None,
+    }
 }
 
 /// Short name of process `pid` (`claude`, `node`, `vim`). Blocking.
@@ -1323,6 +1451,83 @@ mod tests {
             (11, 1, "conhost.exe".to_string()),
         ];
         assert_eq!(first_child_name(10, &idle), None);
+    }
+
+    /// #99: a job check that fails or times out is never "nothing running".
+    #[test]
+    fn tmux_check_errors_and_timeouts_are_unknown_not_idle() {
+        use super::{tmux_state_from, JobState};
+        let never = |_: u32| -> Result<(i32, i32), String> { panic!("must not probe ps") };
+        let name = |_: u32| Some("sleep".to_string());
+        // tmux timed out
+        assert!(matches!(
+            tmux_state_from(Err("tmux did not answer within 3 s".into()), never, name),
+            JobState::Unknown(w) if w.contains("did not answer")
+        ));
+        // tmux failed (session renamed / gone, server mismatch)
+        assert!(matches!(
+            tmux_state_from(Ok((false, String::new(), "can't find session: =sd-x\n".into())), never, name),
+            JobState::Unknown(w) if w.contains("can't find session")
+        ));
+        // unparsable pane pid
+        assert!(matches!(
+            tmux_state_from(Ok((true, "\n".into(), String::new())), never, name),
+            JobState::Unknown(_)
+        ));
+        // ps / proc failed
+        assert!(matches!(
+            tmux_state_from(Ok((true, "42\n".into(), String::new())), |_| Err("ps did not answer".into()), name),
+            JobState::Unknown(w) if w.contains("ps")
+        ));
+        // healthy: busy and idle still work
+        assert_eq!(
+            tmux_state_from(
+                Ok((true, "42\n".into(), String::new())),
+                |_| Ok((42, 77)),
+                name
+            ),
+            JobState::Busy("sleep".into())
+        );
+        assert_eq!(
+            tmux_state_from(
+                Ok((true, "42\n".into(), String::new())),
+                |_| Ok((42, 42)),
+                name
+            ),
+            JobState::Idle
+        );
+    }
+
+    #[test]
+    fn pty_check_without_foreground_group_is_unknown() {
+        use super::{pty_job_state, JobState};
+        let name = |_: u32| Some("sleep".to_string());
+        assert!(matches!(
+            pty_job_state(10, None, name),
+            JobState::Unknown(_)
+        ));
+        assert_eq!(pty_job_state(10, Some(10), name), JobState::Idle);
+        assert_eq!(
+            pty_job_state(10, Some(11), name),
+            JobState::Busy("sleep".into())
+        );
+    }
+
+    #[test]
+    fn unknown_terminals_stay_in_the_quit_status() {
+        use super::{quit_probe, JobState};
+        assert!(quit_probe("w".into(), false, JobState::Idle).is_none());
+        let p = quit_probe("w".into(), true, JobState::Unknown("tmux: boom".into())).unwrap();
+        assert_eq!(p.unchecked.as_deref(), Some("tmux: boom"));
+        assert!(p.survives);
+        let b = quit_probe("w".into(), false, JobState::Busy("sleep".into())).unwrap();
+        assert_eq!((b.command.as_str(), b.unchecked), ("sleep", None));
+    }
+
+    #[test]
+    fn ps_pgrps_parse() {
+        assert_eq!(super::parse_ps_pgrps(" 5974  6111\n"), Some((5974, 6111)));
+        assert_eq!(super::parse_ps_pgrps(""), None);
     }
 
     /// #43 with tmux: the active pane's foreground command decides.
