@@ -30,7 +30,7 @@ mod windows;
 
 use std::sync::{Arc, Mutex};
 use tauri::menu::CheckMenuItem;
-use tauri::{Emitter, Manager, State, Wry};
+use tauri::{Emitter, Manager, Wry};
 
 /// Stores file paths received via macOS Apple Events ("Open With")
 /// before the frontend is ready to receive them.
@@ -41,6 +41,65 @@ pub struct PendingFiles {
     /// later arrivals go to it as an `open-paths` event instead (#51).
     /// Only read or written under the `paths` lock.
     pub frontend_took: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PendingFiles {
+    /// Paths that arrived from outside (a second launch, macOS "Open With",
+    /// `open -a`): queued for the starting frontend while it has not taken
+    /// the startup queue yet (None), else handed back for routing to one
+    /// window (Some). Never both: a path queued after the take would sit in
+    /// the app-wide queue and be opened, unrouted, by whichever webview
+    /// starts next — a new window or a reloaded one (#106).
+    pub fn offer(&self, paths: Vec<String>) -> Option<Vec<String>> {
+        let Ok(mut queue) = self.paths.lock() else {
+            return Some(paths);
+        };
+        if self.frontend_took.load(std::sync::atomic::Ordering::SeqCst) {
+            return Some(paths);
+        }
+        for p in paths {
+            if queue.len() < MAX_PENDING_FILES {
+                queue.push(p);
+            } else {
+                eprintln!("Warning: Pending files queue full, dropping: {p}");
+            }
+        }
+        None
+    }
+
+    /// The startup queue, handed out once: to the first frontend that asks.
+    /// A later webview start (another window, or a reload after macOS ended
+    /// its web-content process) gets nothing, so it never opens another
+    /// window's folder (#106).
+    pub fn take_startup(&self) -> Vec<String> {
+        let Ok(mut queue) = self.paths.lock() else {
+            return Vec::new();
+        };
+        // Under the lock: a second launch's paths either land in this batch
+        // or come later as an `open-paths` event, never neither (#51).
+        let first = !self
+            .frontend_took
+            .swap(true, std::sync::atomic::Ordering::SeqCst);
+        let taken = std::mem::take(&mut *queue);
+        if first {
+            taken
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// Route forwarded paths (#62) and send each window its share as
+/// `open-paths`, scoped to that window (`emit_to`).
+fn route_and_emit(app: &tauri::AppHandle, paths: &[String], new_window: bool) {
+    for (label, paths) in routing::route_forwarded(app, paths, new_window) {
+        routing::focus(app, &label);
+        let _ = app.emit_to(
+            label.as_str(),
+            OPEN_PATHS_EVENT,
+            serde_json::json!({ "paths": paths }),
+        );
+    }
 }
 
 /// Event for paths a second `sparkdown <path>…` launch forwarded (#51).
@@ -95,35 +154,12 @@ fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, cwd: String) {
         }
         return;
     }
-    let state = app.state::<PendingFiles>();
-    let Ok(mut queue) = state.paths.lock() else {
-        return;
-    };
-    if state
-        .frontend_took
-        .load(std::sync::atomic::Ordering::SeqCst)
-    {
-        drop(queue);
-        // Folders route (#62): focus the window that has it, else the
-        // focused window if empty, else a new window.
+    // Folders route (#62): focus the window that has it, else the focused
+    // window if empty, else a new window. Before the frontend has started,
+    // it takes these with the CLI's.
+    if let Some(paths) = app.state::<PendingFiles>().offer(paths) {
         let app = app.clone();
-        std::thread::spawn(move || {
-            for (label, paths) in routing::route_forwarded(&app, &paths, new_window) {
-                routing::focus(&app, &label);
-                let _ = app.emit_to(
-                    label.as_str(),
-                    OPEN_PATHS_EVENT,
-                    serde_json::json!({ "paths": paths }),
-                );
-            }
-        });
-    } else {
-        // The frontend has not started yet: it takes these with the CLI's.
-        for p in paths {
-            if queue.len() < MAX_PENDING_FILES {
-                queue.push(p);
-            }
-        }
+        std::thread::spawn(move || route_and_emit(&app, &paths, new_window));
     }
 }
 
@@ -201,33 +237,6 @@ pub struct HtmlJsMenuItem(pub CheckMenuItem<Wry>);
 
 /// Maximum pending files to queue before dropping new arrivals.
 const MAX_PENDING_FILES: usize = 100;
-
-fn push_pending<I: IntoIterator<Item = String>>(state: &State<'_, PendingFiles>, paths: I) {
-    if let Ok(mut guard) = state.paths.lock() {
-        for path in paths {
-            if guard.len() >= MAX_PENDING_FILES {
-                eprintln!("Warning: Pending files queue full, dropping: {}", path);
-                break;
-            }
-            guard.push(path);
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn emit_open_file_paths(app: &tauri::AppHandle, paths: &[String]) {
-    // Folders route like any Open Folder (#62); files go to the window
-    // whose folder holds them.
-    for (label, paths) in routing::route_forwarded(app, paths, false) {
-        for path in paths {
-            let _ = app.emit_to(
-                label.as_str(),
-                "open-file-path",
-                serde_json::json!({ "path": path }),
-            );
-        }
-    }
-}
 
 /// Navigation guard for every webview: only the app's own origin (and the
 /// preview iframe's documents) may load. Link clicks in the markdown preview
@@ -465,7 +474,7 @@ fn main() {
 
             let cli_files: Vec<String> = std::env::args().skip(1).collect();
             if !cli_files.is_empty() {
-                push_pending(&app.state::<PendingFiles>(), cli_files);
+                let _ = app.state::<PendingFiles>().offer(cli_files);
             }
 
             // macOS: intercept dock/menu Quit so it runs the save prompt.
@@ -769,8 +778,12 @@ fn main() {
                     let _ = window.set_focus();
                 }
 
-                emit_open_file_paths(app, &paths);
-                push_pending(&app.state::<PendingFiles>(), paths);
+                // Queued for a frontend that hasn't started, else routed
+                // and sent to one window. Never both (#106).
+                if let Some(paths) = app.state::<PendingFiles>().offer(paths) {
+                    let app = app.clone();
+                    std::thread::spawn(move || route_and_emit(&app, &paths, false));
+                }
             }
         });
 }
@@ -822,6 +835,64 @@ fn release_window(app: &tauri::AppHandle, label: &str) {
 
 #[cfg(test)]
 mod tests {
+    use super::PendingFiles;
+
+    fn v(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn pending_queues_only_until_the_frontend_takes_it() {
+        let p = PendingFiles::default();
+        assert_eq!(p.offer(v(&["/cli/A"])), None, "before the take: queued");
+        assert_eq!(p.take_startup(), v(&["/cli/A"]));
+        // #106: an Apple Event (`open -a`, Open With) after the take is
+        // routed, never also left in the app-wide queue.
+        assert_eq!(p.offer(v(&["/x/A"])), Some(v(&["/x/A"])));
+        assert!(
+            p.paths.lock().unwrap().is_empty(),
+            "nothing lingers in the queue"
+        );
+    }
+
+    #[test]
+    fn a_later_webview_start_gets_no_startup_paths() {
+        // #106: B's webview reloaded (web-content process ended) or a new
+        // window starting must not open A from the startup queue.
+        let p = PendingFiles::default();
+        let _ = p.offer(v(&["/cli/A"]));
+        assert_eq!(p.take_startup(), v(&["/cli/A"]), "first frontend gets them");
+        assert!(
+            p.take_startup().is_empty(),
+            "a reload or second window gets none"
+        );
+        // Even if something were queued behind the flag, a later start drops it.
+        p.paths.lock().unwrap().push("/stale/A".into());
+        assert!(p.take_startup().is_empty());
+        assert!(p.paths.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pending_queue_is_capped() {
+        let p = PendingFiles::default();
+        let many: Vec<String> = (0..150).map(|i| format!("/f{i}")).collect();
+        assert_eq!(p.offer(many), None);
+        assert_eq!(p.take_startup().len(), super::MAX_PENDING_FILES);
+    }
+
+    #[test]
+    fn no_path_is_both_queued_and_emitted() {
+        // The macOS Opened handler used to emit AND queue every path.
+        let src = include_str!("main.rs");
+        let opened = &src[src.find("RunEvent::Opened { urls }").unwrap()..];
+        let opened = &opened[..opened.find("\n    });").unwrap_or(opened.len()).min(2500)];
+        assert!(
+            !opened.contains("push_pending"),
+            "Opened must not queue after the take"
+        );
+        assert!(opened.contains(".offer("));
+    }
+
     #[test]
     fn second_launch_paths_resolve_against_its_own_cwd() {
         // #51: `sparkdown .` / `sparkdown notes` from another directory.
