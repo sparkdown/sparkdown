@@ -304,7 +304,10 @@ def webcontent_reload():
     or a crash does); Tauri then reloads each webview, which re-runs the
     frontend's startup (get_pending_files, session restore)."""
     pids = subprocess.run(["pgrep", "-f", "com.apple.WebKit.WebContent"], capture_output=True, text=True).stdout.split()
-    R.log(f"killing WebContent processes {pids}")
+    # The newest one is B's (B's window opened after A's); A keeps its
+    # unsaved edit.
+    pids = sorted(pids, key=int)[-1:]
+    R.log(f"killing B's WebContent process {pids}")
     for pid in pids:
         subprocess.run(["kill", "-9", pid])
     time.sleep(8)
