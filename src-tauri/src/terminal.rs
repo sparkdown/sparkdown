@@ -411,29 +411,32 @@ impl SessionWatch {
 /// job, read while the session was alive. Bounded; `None` = unknown.
 fn tmux_pane_pids(name: &str) -> Option<Vec<u32>> {
     let tmux = tmux_path()?;
-    let target = format!("={name}:");
+    let target = format!("={name}");
     let (ok, out, _) = crate::mcp::run_with_timeout(
         &tmux,
         &[
-            "display-message",
-            "-p",
+            "list-panes",
+            "-s",
             "-t",
             target.as_str(),
+            "-F",
             "#{session_name} #{pane_pid}",
         ],
         &std::env::temp_dir(),
         Duration::from_secs(2),
     )
     .ok()?;
-    let (got, pid) = out.trim().rsplit_once(' ')?;
-    if !ok || got != name {
+    if !ok {
         return None;
     }
-    let pane: u32 = pid.parse().ok()?;
-    let mut pids = vec![pane];
-    if let Ok((_, tpgid)) = pgid_and_tty_foreground(pane) {
-        if tpgid > 0 && tpgid as u32 != pane {
-            pids.push(tpgid as u32);
+    // #104: every pane's shell and foreground job, not just the active pane.
+    let mut pids = Vec::new();
+    for pane in parse_session_panes(name, &out)? {
+        pids.push(pane);
+        if let Ok((_, tpgid)) = pgid_and_tty_foreground(pane) {
+            if tpgid > 0 && tpgid as u32 != pane {
+                pids.push(tpgid as u32);
+            }
         }
     }
     Some(pids)
@@ -1392,31 +1395,52 @@ fn tmux_job_state(session: &str) -> JobState {
     let Some(tmux) = tmux_path() else {
         return JobState::Unknown("tmux not found".into());
     };
-    let target = format!("={session}:");
+    // #104: every pane in every window of the session, not just the
+    // active one: a job in a split or another tmux window counts too.
+    let target = format!("={session}");
     let out = crate::mcp::run_with_timeout(
         &tmux,
         &[
-            "display-message",
-            "-p",
+            "list-panes",
+            "-s",
             "-t",
             target.as_str(),
-            "#{pane_pid}",
+            "-F",
+            "#{session_name} #{pane_pid}",
         ],
         &std::env::temp_dir(),
         PROBE_TIMEOUT,
     )
     .map_err(|_| format!("tmux did not answer within {} s", PROBE_TIMEOUT.as_secs()));
-    tmux_state_from(out, pgid_and_tty_foreground, process_name)
+    tmux_state_from(session, out, pgid_and_tty_foreground, process_name)
 }
 
-/// [`tmux_job_state`] with its helpers injected, so the error and timeout
-/// paths are unit-tested (#99). `display` is tmux's (ok, stdout, stderr).
+/// `list-panes -F "#{session_name} #{pane_pid}"` output → the pane pids of
+/// `session`. `None` when any line is not for `session` or not a pid, or
+/// there are no panes (tmux answered for something else, #99/#104).
+pub(crate) fn parse_session_panes(session: &str, out: &str) -> Option<Vec<u32>> {
+    let mut pids = Vec::new();
+    for line in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let (name, pid) = line.rsplit_once(' ')?;
+        if name != session {
+            return None;
+        }
+        pids.push(pid.parse().ok()?);
+    }
+    (!pids.is_empty()).then_some(pids)
+}
+
+/// [`tmux_job_state`] with its helpers injected, so the error, timeout and
+/// multi-pane paths are unit-tested (#99, #104). `list` is tmux's
+/// (ok, stdout, stderr). Busy if ANY pane's tty foreground process group is
+/// not its shell's; else Unknown if any pane couldn't be read; else Idle.
 pub(crate) fn tmux_state_from(
-    display: Result<(bool, String, String), String>,
+    session: &str,
+    list: Result<(bool, String, String), String>,
     pgrps: impl Fn(u32) -> Result<(i32, i32), String>,
     name: impl Fn(u32) -> Option<String>,
 ) -> JobState {
-    let (ok, stdout, stderr) = match display {
+    let (ok, stdout, stderr) = match list {
         Ok(v) => v,
         Err(e) => return JobState::Unknown(e),
     };
@@ -1428,15 +1452,22 @@ pub(crate) fn tmux_state_from(
             format!("tmux: {why}")
         });
     }
-    let Ok(pane_pid) = stdout.trim().parse::<u32>() else {
-        return JobState::Unknown(format!("tmux: unexpected pane pid {:?}", stdout.trim()));
+    let Some(panes) = parse_session_panes(session, &stdout) else {
+        return JobState::Unknown(format!("tmux: no panes for session {session}"));
     };
-    let (pgid, tpgid) = match pgrps(pane_pid) {
-        Ok(v) => v,
-        Err(e) => return JobState::Unknown(e),
-    };
-    match pane_foreground_job(pane_pid, pgid, tpgid) {
-        Some(fg) => JobState::Busy(name(fg).unwrap_or_else(|| "A program".into())),
+    let mut unknown = None;
+    for pane_pid in panes {
+        match pgrps(pane_pid) {
+            Ok((pgid, tpgid)) => {
+                if let Some(fg) = pane_foreground_job(pane_pid, pgid, tpgid) {
+                    return JobState::Busy(name(fg).unwrap_or_else(|| "A program".into()));
+                }
+            }
+            Err(e) => unknown = unknown.or(Some(e)),
+        }
+    }
+    match unknown {
+        Some(e) => JobState::Unknown(e),
         None => JobState::Idle,
     }
 }
@@ -1607,6 +1638,76 @@ mod tests {
         assert_eq!(first_child_name(10, &idle), None);
     }
 
+    /// #104: every pane of the session is checked.
+    #[test]
+    fn session_panes_parse() {
+        use super::parse_session_panes;
+        assert_eq!(
+            parse_session_panes("sd-x", "sd-x 10\nsd-x 20\n\n"),
+            Some(vec![10, 20])
+        );
+        assert_eq!(parse_session_panes("sd-x", ""), None, "no panes");
+        assert_eq!(
+            parse_session_panes("sd-x", "sd-x 10\nother 20\n"),
+            None,
+            "another session"
+        );
+        assert_eq!(parse_session_panes("sd-x", "sd-x abc\n"), None);
+        assert_eq!(parse_session_panes("sd-x", "10\n"), None);
+    }
+
+    #[test]
+    fn a_job_in_any_pane_is_busy() {
+        use super::{tmux_state_from, JobState};
+        let out = || {
+            Ok((
+                true,
+                "sd-x 10\nsd-x 20\nsd-x 30\n".to_string(),
+                String::new(),
+            ))
+        };
+        let name = |p: u32| Some(format!("job{p}"));
+        // job only in the 2nd (non-active) pane
+        let pg = |p: u32| {
+            Ok(if p == 20 {
+                (20, 99)
+            } else {
+                (p as i32, p as i32)
+            })
+        };
+        assert_eq!(
+            tmux_state_from("sd-x", out(), pg, name),
+            JobState::Busy("job99".into())
+        );
+        // all idle
+        assert_eq!(
+            tmux_state_from("sd-x", out(), |p| Ok((p as i32, p as i32)), name),
+            JobState::Idle
+        );
+        // one pane unreadable, none busy: couldn't check
+        let pg = |p: u32| {
+            if p == 30 {
+                Err("ps did not answer".into())
+            } else {
+                Ok((p as i32, p as i32))
+            }
+        };
+        assert!(matches!(
+            tmux_state_from("sd-x", out(), pg, name),
+            JobState::Unknown(_)
+        ));
+        // one unreadable but another busy: busy wins
+        let pg = |p: u32| match p {
+            10 => Err("ps did not answer".into()),
+            30 => Ok((30, 77)),
+            _ => Ok((p as i32, p as i32)),
+        };
+        assert_eq!(
+            tmux_state_from("sd-x", out(), pg, name),
+            JobState::Busy("job77".into())
+        );
+    }
+
     /// #102: the session-alive watchdog's counter.
     #[test]
     fn session_watch_needs_three_consecutive_gone_and_resets_on_success() {
@@ -1724,28 +1825,29 @@ mod tests {
         let name = |_: u32| Some("sleep".to_string());
         // tmux timed out
         assert!(matches!(
-            tmux_state_from(Err("tmux did not answer within 3 s".into()), never, name),
+            tmux_state_from("sd-x", Err("tmux did not answer within 3 s".into()), never, name),
             JobState::Unknown(w) if w.contains("did not answer")
         ));
         // tmux failed (session renamed / gone, server mismatch)
         assert!(matches!(
-            tmux_state_from(Ok((false, String::new(), "can't find session: =sd-x\n".into())), never, name),
+            tmux_state_from("sd-x", Ok((false, String::new(), "can't find session: =sd-x\n".into())), never, name),
             JobState::Unknown(w) if w.contains("can't find session")
         ));
         // unparsable pane pid
         assert!(matches!(
-            tmux_state_from(Ok((true, "\n".into(), String::new())), never, name),
+            tmux_state_from("sd-x", Ok((true, "\n".into(), String::new())), never, name),
             JobState::Unknown(_)
         ));
         // ps / proc failed
         assert!(matches!(
-            tmux_state_from(Ok((true, "42\n".into(), String::new())), |_| Err("ps did not answer".into()), name),
+            tmux_state_from("sd-x", Ok((true, "sd-x 42\n".into(), String::new())), |_| Err("ps did not answer".into()), name),
             JobState::Unknown(w) if w.contains("ps")
         ));
         // healthy: busy and idle still work
         assert_eq!(
             tmux_state_from(
-                Ok((true, "42\n".into(), String::new())),
+                "sd-x",
+                Ok((true, "sd-x 42\n".into(), String::new())),
                 |_| Ok((42, 77)),
                 name
             ),
@@ -1753,7 +1855,8 @@ mod tests {
         );
         assert_eq!(
             tmux_state_from(
-                Ok((true, "42\n".into(), String::new())),
+                "sd-x",
+                Ok((true, "sd-x 42\n".into(), String::new())),
                 |_| Ok((42, 42)),
                 name
             ),
