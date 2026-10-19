@@ -403,6 +403,41 @@ def main():
         se('click menu item "Quit SparkDown" of menu 1 of menu bar item "SparkDown" of menu bar 1')
     R.run("quit-prompt-menu", lambda: quit_check(menu_quit, "menuquit") if ready else ("FAIL", "setup failed"))
 
+    # Paulo's case: A focused, B (with the running job) still open but fully
+    # hidden behind A, left alone long enough for App Nap / occlusion / timer
+    # throttling to kick in, then quit from A. Variant: B minimized.
+    BG_WAIT = int(os.environ.get("E2E_BG_WAIT", "45"))
+    wa, wb = "alpha" + SUF, "beta" + SUF
+
+    def hide_b_behind_a(minimize=False):
+        se(f'set value of attribute "AXMinimized" of window "{wb}" to false')
+        time.sleep(1)
+        if minimize:
+            se(f'set value of attribute "AXMinimized" of window "{wb}" to true')
+        else:
+            se(f'set position of window "{wb}" to {{100, 100}}')
+            se(f'set size of window "{wb}" to {{600, 400}}')
+            se(f'set position of window "{wa}" to {{40, 40}}')
+            se(f'set size of window "{wa}" to {{900, 650}}')
+        se(f'perform action "AXRaise" of window "{wa}"')
+        activate()
+        R.log(f"B {'minimized' if minimize else 'occluded behind A'}; front={front()!r}; waiting {BG_WAIT}s")
+        shot("b-hidden")
+        time.sleep(BG_WAIT)
+        R.log(f"after wait front={front()!r}")
+
+    def bg_check(trigger, label, minimize=False):
+        hide_b_behind_a(minimize)
+        def raw():
+            osa(f'tell application "System Events" to keystroke "q" using {{command down}}') if trigger == "cmdq" else \
+                se('click menu item "Quit SparkDown" of menu 1 of menu bar item "SparkDown" of menu bar 1')
+        res = quit_check(raw, label)
+        se(f'set value of attribute "AXMinimized" of window "{wb}" to false')
+        return res
+    R.run("quit-prompt-bg-occluded", lambda: bg_check("cmdq", "bgocc") if ready else ("FAIL", "setup failed"))
+    R.run("quit-prompt-bg-occluded-menu", lambda: bg_check("menu", "bgoccmenu") if ready else ("FAIL", "setup failed"))
+    R.run("quit-prompt-bg-minimized", lambda: bg_check("cmdq", "bgmin", True) if ready else ("FAIL", "setup failed"))
+
     def restore():
         subprocess.run(["pkill", "-x", "sleep"])
         cli(A)

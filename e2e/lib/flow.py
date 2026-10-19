@@ -113,8 +113,19 @@ def run(R, D):
         R.log("open/edit via MCP:", ok1, r1, ok2, r2)
         if not D.job_alive():
             return "FAIL", f"could not start the {D.job_name} job in beta's terminal"
+        return quit_and_check("quit", 0)
+
+    def quit_and_check(tag, bg_wait):
+        if bg_wait:
+            # Paulo's case: A focused, B (running job) left in the background
+            # long enough for webview throttling, then quit from A.
+            D.focus("alpha" + SUF) if hasattr(D, "focus") else None
+            R.log(f"waiting {bg_wait}s with alpha focused, beta in the background")
+            time.sleep(bg_wait)
+            if not D.job_alive():
+                return "FAIL", f"the {D.job_name} job in beta's terminal is gone"
         if fixtures.TMUX:
-            fixtures.tmux_diag(R.log, "quit")
+            fixtures.tmux_diag(R.log, tag)
         before = D.windows()
         D.quit_keys("alpha" + SUF)
         ds = wait_for(D.dialogs, 12)
@@ -149,6 +160,7 @@ def run(R, D):
                                "its text can't be read on this platform (screenshot attached)")
         return "PASS", f"one prompt: {d['text'][:200]!r}; {base}"
     R.run("quit-prompt", quit_prompt)
+    R.run("quit-prompt-bg-occluded", lambda: quit_and_check("bgquit", int(os.environ.get("E2E_BG_WAIT", "45"))))
 
     if D.wd is not None:
         R.run("webview-content", lambda: D.webview_check("alpha" + SUF, "alpha", EDIT))
