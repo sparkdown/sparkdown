@@ -94,9 +94,15 @@ jobs:
           retention-days: 7
 
   macos:
-    name: E2E macOS (System Events)
+    name: E2E macOS (System Events, tmux ${{ matrix.tmux }})
     runs-on: macos-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        tmux: ["off", "on"]
+    env:
+      E2E_TMUX: ${{ matrix.tmux }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -116,12 +122,15 @@ jobs:
         run: |
           (cd frontend && npm ci)
           frontend/node_modules/.bin/tauri build --bundles app
+      - name: tmux from Homebrew (as on a user's Mac; not on launchd's PATH)
+        if: matrix.tmux == 'on'
+        run: command -v tmux || brew install tmux; tmux -V
       - name: Run the must-pass
         run: python3 e2e/macos/run.py src-tauri/target/release/bundle/macos/SparkDown.app e2e-out
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: e2e-macos
+          name: e2e-macos-tmux-${{ matrix.tmux }}
           path: e2e-out
 
   windows:
@@ -174,10 +183,16 @@ jobs:
           path: e2e-out
 
   ubuntu-webdriver:
-    name: E2E Ubuntu (tauri-driver + WebKitWebDriver, X11)
+    name: E2E Ubuntu (tauri-driver + WebKitWebDriver, X11, tmux ${{ matrix.tmux }})
     needs: linux-build
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        tmux: ["off", "on"]
+    env:
+      E2E_TMUX: ${{ matrix.tmux }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -191,7 +206,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libxdo3 librsvg2-common \
             webkit2gtk-driver xvfb openbox xdotool wmctrl imagemagick dbus-x11 fonts-dejavu-core \
-            at-spi2-core libatk-adaptor python3-gi gir1.2-atspi-2.0
+            at-spi2-core libatk-adaptor python3-gi gir1.2-atspi-2.0 tmux
           chmod +x bin/sparkdown && sudo install -m 755 bin/sparkdown /usr/local/bin/sparkdown
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -208,14 +223,18 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: e2e-ubuntu
+          name: e2e-ubuntu-tmux-${{ matrix.tmux }}
           path: e2e-out
 
   omarchy-hyprland:
-    name: E2E Arch + Hyprland (vkms, privileged container)
+    name: E2E Arch + Hyprland (vkms, privileged container, tmux ${{ matrix.tmux }})
     needs: linux-build
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        tmux: ["off", "on"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -231,7 +250,7 @@ jobs:
       - name: Run the must-pass in archlinux:latest under Hyprland
         run: |
           mkdir -p e2e-out
-          docker run --rm --privileged --device /dev/dri -v "$PWD:/w:ro" -v "$PWD/e2e-out:/out" \
+          docker run --rm --privileged --device /dev/dri -e E2E_TMUX=${{ matrix.tmux }} -v "$PWD:/w:ro" -v "$PWD/e2e-out:/out" \
             archlinux:latest bash /w/e2e/linux/hyprland-job.sh /w/bin/sparkdown /out
       - name: Step summary
         if: always()
@@ -239,7 +258,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: e2e-omarchy-hyprland
+          name: e2e-omarchy-hyprland-tmux-${{ matrix.tmux }}
           path: e2e-out
 
   summary:

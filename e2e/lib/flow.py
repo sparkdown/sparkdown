@@ -113,6 +113,8 @@ def run(R, D):
         R.log("open/edit via MCP:", ok1, r1, ok2, r2)
         if not D.job_alive():
             return "FAIL", f"could not start the {D.job_name} job in beta's terminal"
+        if fixtures.TMUX:
+            fixtures.tmux_diag(R.log, "quit")
         before = D.windows()
         D.quit_keys("alpha" + SUF)
         ds = wait_for(D.dialogs, 12)

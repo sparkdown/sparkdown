@@ -14,7 +14,7 @@ from report import Report  # noqa: E402
 
 APP = pathlib.Path(sys.argv[1])
 BIN = str(APP / "Contents/MacOS/sparkdown")
-R = Report("macOS", sys.argv[2])
+R = Report("macOS" + fixtures.variant(), sys.argv[2])
 SUF = " — SparkDown"
 PROC = "sparkdown"
 step_n = [0]
@@ -211,6 +211,23 @@ def close_window(title):
     se(f'click (first button of window "{title}" whose subrole is "AXCloseButton")')
 
 
+def launch(*args):
+    """Start the app the way Finder / the Dock does: through LaunchServices
+    (`open`), so it gets launchd's environment (minimal PATH, no shell
+    profile, no Homebrew), not this harness's."""
+    logf = str(R.out / "app.log")
+    cmd = ["open", "-a", str(APP), "--stdout", logf, "--stderr", logf]
+    if args:
+        cmd += ["--args", *args]
+    subprocess.run(cmd, check=False, timeout=30)
+    time.sleep(2)
+    pid = subprocess.run(["pgrep", "-x", "sparkdown"], capture_output=True, text=True).stdout.split()
+    if pid:
+        env = subprocess.run(["ps", "eww", "-o", "command=", "-p", pid[0]], capture_output=True, text=True).stdout
+        path = next((w for w in env.split() if w.startswith("PATH=")), "PATH=<not visible>")
+        R.log(f"launched via open: pid={pid[0]} {path}")
+
+
 def cli(path):
     subprocess.run([BIN, path], timeout=30, capture_output=True)
 
@@ -221,7 +238,7 @@ def main():
     A, B, C = F["alpha"], F["beta"], F["gamma"]
     fixtures.seed_config()
     log = open(R.out / "app.log", "w")
-    subprocess.Popen([BIN, A], stdout=log, stderr=subprocess.STDOUT)
+    launch(A)
     wait_for(lambda: titled(["alpha"]) <= set(windows()), 40)
     R.log("windows:", windows())
     shot("alpha")
@@ -323,6 +340,8 @@ def main():
         return bool(busy) and ok2
 
     def quit_check(trigger, label):
+        if fixtures.TMUX:
+            fixtures.tmux_diag(R.log, label)
         before = windows()
         trigger()
         ds = wait_for(dialogs, 10)
@@ -378,7 +397,7 @@ def main():
         if not gone:
             ds = dialogs()
             return "FAIL", f"app did not exit on a clean ⌘Q (saved={saved}); dialogs={ds}"
-        subprocess.Popen([BIN], stdout=log, stderr=subprocess.STDOUT)
+        launch()
         w = wait_for(lambda: titled(["alpha", "beta"]) <= set(windows()) and windows(), 40)
         time.sleep(2)
         w = windows()

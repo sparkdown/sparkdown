@@ -12,7 +12,9 @@ root = pathlib.Path(sys.argv[1])
 runs = []
 for p in sorted(root.rglob("results.json")):
     runs.append(json.loads(p.read_text(encoding="utf-8")))
-order = ["macOS", "Windows", "Ubuntu (X11, WebKitWebDriver)", "Arch + Hyprland (vkms)"]
+order = ["macOS · tmux off", "macOS · tmux on", "Windows · tmux off",
+         "Ubuntu (X11, WebKitWebDriver) · tmux off", "Ubuntu (X11, WebKitWebDriver) · tmux on",
+         "Arch + Hyprland (vkms) · tmux off", "Arch + Hyprland (vkms) · tmux on"]
 runs.sort(key=lambda r: order.index(r["os"]) if r["os"] in order else 99)
 ids = list(CHECKS)
 extra = []

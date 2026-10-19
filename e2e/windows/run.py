@@ -10,12 +10,13 @@ import sys
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "lib"))
+import fixtures  # noqa: E402
 import flow  # noqa: E402
 import wd  # noqa: E402
 from report import Report  # noqa: E402
 
 EXE, DRIVER, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
-R = Report("Windows", OUT)
+R = Report("Windows" + fixtures.variant(), OUT)
 UIA = str(pathlib.Path(__file__).with_name("uia.ps1"))
 PORT = 9222
 SUF = flow.SUF

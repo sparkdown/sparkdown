@@ -9,12 +9,13 @@ import sys
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "lib"))
+import fixtures  # noqa: E402
 import flow  # noqa: E402
 import wd  # noqa: E402
 from report import Report  # noqa: E402
 
 MODE, BIN, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
-R = Report("Ubuntu (X11, WebKitWebDriver)" if MODE == "x11" else "Arch + Hyprland (vkms)", OUT)
+R = Report(("Ubuntu (X11, WebKitWebDriver)" if MODE == "x11" else "Arch + Hyprland (vkms)") + fixtures.variant(), OUT)
 SUF = flow.SUF
 DIALOG_TITLES = ("Quit SparkDown", "Unsaved Changes")
 ATSPI = str(pathlib.Path(__file__).with_name("atspi_dialogs.py"))
@@ -111,8 +112,10 @@ class X11(Base):
         self._driver()
 
     def _driver(self):
-        self.driver = subprocess.Popen(["tauri-driver", "--native-driver", "/usr/bin/WebKitWebDriver"],
-                                       stdout=self.log, stderr=subprocess.STDOUT)
+        # The app inherits the driver's env: a desktop-launcher PATH.
+        import shutil
+        self.driver = subprocess.Popen([shutil.which("tauri-driver") or "tauri-driver", "--native-driver", "/usr/bin/WebKitWebDriver"],
+                                       stdout=self.log, stderr=subprocess.STDOUT, env=fixtures.app_env())
         time.sleep(2)
 
     def _session(self, args):
@@ -268,11 +271,11 @@ class Hypr(Base):
             return []
 
     def start(self, folder):
-        subprocess.Popen([BIN, folder], stdout=self.log, stderr=subprocess.STDOUT)
+        subprocess.Popen([BIN, folder], stdout=self.log, stderr=subprocess.STDOUT, env=fixtures.app_env())
         time.sleep(6)
 
     def relaunch(self):
-        subprocess.Popen([BIN], stdout=self.log, stderr=subprocess.STDOUT)
+        subprocess.Popen([BIN], stdout=self.log, stderr=subprocess.STDOUT, env=fixtures.app_env())
         time.sleep(8)
 
     def windows(self):

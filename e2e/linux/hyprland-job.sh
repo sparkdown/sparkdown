@@ -6,7 +6,7 @@
 set -uo pipefail
 BIN_IN=$1; OUT=$2
 mkdir -p "$OUT"
-pacman -Syu --noconfirm --needed hyprland seatd grim wtype python git mesa ttf-dejavu \
+pacman -Syu --noconfirm --needed hyprland seatd grim wtype tmux python git mesa ttf-dejavu \
   webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg xdotool openssl dbus procps-ng at-spi2-core python-gobject >"$OUT/pacman.log" 2>&1 \
   || { tail -30 "$OUT/pacman.log"; exit 1; }
 pacman -Q hyprland aquamarine webkit2gtk-4.1 | tee "$OUT/versions.txt"
@@ -38,7 +38,7 @@ chown -R e2e /home/e2e "$OUT"
 cp -r /w/e2e /home/e2e/e2e && chown -R e2e /home/e2e/e2e
 aq=(); [ -n "$card" ] && aq=(AQ_DRM_DEVICES="$card")
 runuser -u e2e -- env XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR LIBSEAT_BACKEND=seatd "${aq[@]}" \
-  SHELL=/bin/bash HOME=/home/e2e GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
+  SHELL=/bin/bash HOME=/home/e2e E2E_TMUX="${E2E_TMUX:-off}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
   dbus-run-session -- bash /home/e2e/e2e/linux/hyprland-inner.sh "$OUT"
 rc=$?
 cp $XDG_RUNTIME_DIR/hypr/*/hyprland.log "$OUT/hyprland.log" 2>/dev/null
