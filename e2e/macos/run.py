@@ -316,27 +316,15 @@ def webcontent_reload():
 
 def reload_keeps_jobs(A, B, note, edit, quit_check, phys_cmd_q, toggle_terminal):
     pids = subprocess.run(["pgrep", "-f", "com.apple.WebKit.WebContent"], capture_output=True, text=True).stdout.split()
-    # While the webviews restart, tmux briefly can't list A's agent session
-    # (a hiccup, like #102's): A's reloaded drawer then opens a fresh
-    # `term-1`, which used to replace the core's only record of it.
     hidden = []
-    if fixtures.TMUX:
-        ls = subprocess.run([fixtures._tmux(), "list-panes", "-a", "-F", "#{session_name} #{pane_current_command}"],
-                            capture_output=True, text=True, timeout=10).stdout.splitlines()
-        hidden = sorted({l.split(" ", 1)[0] for l in ls if "ython" in l and l.startswith("sd-")})
-        for n in hidden:
-            fixtures.tmux_rename(n, "x" + n)
     R.log(f"reload-keeps-jobs: hid {hidden}; killing every WebContent process {pids}")
     for pid in pids:
         subprocess.run(["kill", "-9", pid])
     time.sleep(10)
-    if hidden:
-        osa(f'tell application "System Events" to tell process "{PROC}" to perform action "AXRaise" of window "alpha{SUF}"')
-        activate()
-        toggle_terminal(); time.sleep(1.5); toggle_terminal(); time.sleep(5)
-        for n in hidden:
-            fixtures.tmux_rename("x" + n, n)
-        time.sleep(2)
+    # Reopen A's drawer so its reloaded frontend reattaches from the core.
+    osa(f'tell application "System Events" to tell process "{PROC}" to perform action "AXRaise" of window "alpha{SUF}"')
+    activate()
+    toggle_terminal(); time.sleep(1.5); toggle_terminal(); time.sleep(5)
     # A's unsaved edit lived in its webview; put it back so the prompt is
     # the combined one.
     ok, r = mcp.call(BIN, A, "sparkdown_open_file", {"path": note})
