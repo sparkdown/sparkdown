@@ -247,6 +247,78 @@ pub struct Terminal {
 #[derive(Default)]
 pub struct TerminalState(pub Arc<Mutex<HashMap<String, Terminal>>>);
 
+/// The core's record of every local tmux session a window started (#108):
+/// session name → window label. It outlives the terminal map's entries,
+/// which are keyed by webview-chosen ids (`term-N`): a reloaded webview
+/// restarts at `term-1` and its new pane replaces the old entry even when it
+/// attaches a different session (or none), so the old session would drop
+/// out of the quit probe. This record is the source of truth instead; an
+/// entry goes only when the session is killed on purpose or tmux confirms
+/// it is gone.
+#[derive(Default)]
+pub(crate) struct WindowSessions(HashMap<String, String>);
+
+impl WindowSessions {
+    pub(crate) fn record(&mut self, session: &str, label: &str) {
+        self.0.insert(session.to_string(), label.to_string());
+    }
+    pub(crate) fn forget(&mut self, session: &str) {
+        self.0.remove(session);
+    }
+    /// Sessions of `label`, sorted.
+    pub(crate) fn of(&self, label: &str) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .0
+            .iter()
+            .filter(|(_, l)| l.as_str() == label)
+            .map(|(s, _)| s.clone())
+            .collect();
+        v.sort();
+        v
+    }
+    /// Recorded sessions no live terminal entry covers, with their window,
+    /// for windows that are still open.
+    pub(crate) fn uncovered(
+        &self,
+        covered: &std::collections::HashSet<String>,
+        window_open: impl Fn(&str) -> bool,
+    ) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = self
+            .0
+            .iter()
+            .filter(|(s, l)| !covered.contains(s.as_str()) && window_open(l))
+            .map(|(s, l)| (s.clone(), l.clone()))
+            .collect();
+        v.sort();
+        v
+    }
+}
+
+pub(crate) fn window_sessions() -> std::sync::MutexGuard<'static, WindowSessions> {
+    static W: std::sync::OnceLock<Mutex<WindowSessions>> = std::sync::OnceLock::new();
+    W.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// tmux sessions this window started, from the core (#108): a reloaded
+/// webview reattaches these, whatever its own memory or layout store says.
+#[tauri::command]
+pub async fn tmux_window_sessions(webview_window: tauri::WebviewWindow) -> Vec<String> {
+    let label = webview_window.label().to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mine = window_sessions().of(&label);
+        mine.into_iter()
+            // A single Gone may be a transient tmux hiccup (#102): skip it
+            // now, but only the watchdog's confirmed-gone or a deliberate
+            // kill forgets it. Unknown: keep; `new-session -A` reattaches.
+            .filter(|s| tmux_session_probe(s) != SessionProbe::Gone)
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// Core map key of window `label`'s terminal `id` (ids repeat across
 /// windows: each starts at `term-1`).
 pub(crate) fn term_key(label: &str, id: &str) -> String {
@@ -833,6 +905,8 @@ pub fn terminal_start(
                         polls = polls.wrapping_add(1);
                     }
                     if watch.observe(probe, || any_alive(&pids, pid_alive)) {
+                        // Confirmed gone (#102 rule): the core forgets it.
+                        window_sessions().forget(&sess);
                         let _ = killer.kill();
                         emit_exit();
                         break;
@@ -897,26 +971,43 @@ pub fn terminal_start(
         });
     }
 
-    state
-        .0
-        .lock()
-        .map_err(|_| "terminal state poisoned")?
-        .insert(
-            key,
-            Terminal {
-                input_tx,
-                controller,
-                silenced,
-                killer: map_killer,
-                shell_pid,
-                tmux_session: if mode == "tmux" && !is_remote {
-                    session.clone()
-                } else {
-                    None
-                },
-                remote: is_remote,
-            },
-        );
+    let tmux_session = if mode == "tmux" && !is_remote {
+        session.clone()
+    } else {
+        None
+    };
+    let mut guard = state.0.lock().map_err(|_| "terminal state poisoned")?;
+    if let Some(s) = &tmux_session {
+        window_sessions().record(s, &label);
+        // A reloaded webview reattaching this session under a new id: the
+        // previous webview's client of it goes (one tab per session).
+        let prefix = format!("{label}/");
+        let stale: Vec<String> = guard
+            .iter()
+            .filter(|(k, t)| {
+                k.starts_with(&prefix) && **k != key && t.tmux_session.as_deref() == Some(s)
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in stale {
+            if let Some(mut old) = guard.remove(&k) {
+                old.silenced.store(true, Ordering::SeqCst);
+                let _ = old.killer.kill();
+            }
+        }
+    }
+    guard.insert(
+        key,
+        Terminal {
+            input_tx,
+            controller,
+            silenced,
+            killer: map_killer,
+            shell_pid,
+            tmux_session,
+            remote: is_remote,
+        },
+    );
     Ok(mode.to_string())
 }
 
@@ -1089,6 +1180,7 @@ pub async fn tmux_kill_session(
 }
 
 fn tmux_kill_session_impl(session: &str) -> Result<(), String> {
+    window_sessions().forget(session);
     if crate::remote::is_active() {
         return crate::remote::tmux_kill_session(session);
     }
@@ -1243,10 +1335,34 @@ pub fn busy_on_quit(state: &TerminalState) -> Vec<QuitProbe> {
             }]
         }
     };
-    probes
+    // One row per tmux session, whichever entry holds it.
+    let mut covered = std::collections::HashSet::new();
+    let mut out: Vec<QuitProbe> = probes
         .into_iter()
+        .filter(|(_, p)| {
+            p.tmux_session
+                .as_ref()
+                .is_none_or(|s| covered.insert(s.clone()))
+        })
         .filter_map(|(label, p)| quit_probe(label, p.tmux_session.is_some(), p.check()))
-        .collect()
+        .collect();
+    // #108: sessions a window started that no terminal entry holds any more
+    // (its webview reloaded and has not reattached them): the core still
+    // checks them, so their jobs stay in the quit prompt.
+    let extra = window_sessions().uncovered(&covered, |l| crate::windows::registry().contains(l));
+    for (session, label) in extra {
+        match tmux_session_probe(&session) {
+            // Not forgotten on one answer (#102); simply not running now.
+            SessionProbe::Gone => {}
+            SessionProbe::Unknown => out.extend(quit_probe(
+                label,
+                true,
+                JobState::Unknown("tmux did not answer".into()),
+            )),
+            SessionProbe::Alive => out.extend(quit_probe(label, true, tmux_job_state(&session))),
+        }
+    }
+    out
 }
 
 /// A terminal's [`JobState`] as a quit-status row; idle ones are left out.
@@ -1590,6 +1706,36 @@ fn fallback_shell() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn window_sessions_outlive_terminal_ids() {
+        let mut w = super::WindowSessions::default();
+        w.record("sd-a-zsh-1", "w-a");
+        w.record("sd-a-zsh-2-a-claude", "w-a");
+        w.record("sd-b-zsh-3", "w-b");
+        assert_eq!(w.of("w-a"), vec!["sd-a-zsh-1", "sd-a-zsh-2-a-claude"]);
+        // After A's reload its new term-1 holds zsh-1 only: zsh-2 is still
+        // checked; B's session is covered by B's live entry.
+        let covered: std::collections::HashSet<String> =
+            ["sd-a-zsh-1".to_string(), "sd-b-zsh-3".to_string()].into();
+        assert_eq!(
+            w.uncovered(&covered, |_| true),
+            vec![("sd-a-zsh-2-a-claude".to_string(), "w-a".to_string())]
+        );
+        // A closed window's sessions are not this quit's concern.
+        assert!(w.uncovered(&covered, |l| l != "w-a").is_empty());
+        w.forget("sd-a-zsh-2-a-claude");
+        assert!(w.uncovered(&covered, |_| true).is_empty());
+    }
+
+    #[test]
+    fn rerecording_moves_a_session_to_its_new_window() {
+        let mut w = super::WindowSessions::default();
+        w.record("sd-x-zsh-1", "w-a");
+        w.record("sd-x-zsh-1", "w-b");
+        assert!(w.of("w-a").is_empty());
+        assert_eq!(w.of("w-b"), vec!["sd-x-zsh-1"]);
+    }
+
     #[test]
     fn foreground_job_is_busy_only_when_not_the_shell() {
         use super::foreground_job;
