@@ -1,7 +1,7 @@
-import { getCurrentWindow } from '@tauri-apps/api/window';
-import { ask } from '@tauri-apps/plugin-dialog';
-import { api, type QuitStatus } from '../api';
-import type { AppContext } from './context';
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { ask } from "@tauri-apps/plugin-dialog";
+import { api, type QuitStatus } from "../api";
+import type { AppContext } from "./context";
 
 /** What the quit flow needs from the App. */
 export interface LifecycleDeps {
@@ -35,13 +35,19 @@ export class LifecycleController {
    *   changes, then exit.
    */
   registerCloseGuard(): void {
-    this.ctx.listenTauri<{ mode?: 'hide' | 'close' } | null>('close-requested', (e) => {
-      if (e.payload?.mode === 'close') void this.closeThisWindow();
-      else void this.handleCloseToTray();
-    });
-    this.ctx.listenTauri('exit-requested', () => void this.requestQuit());
+    this.ctx.listenTauri<{ mode?: "hide" | "close" } | null>(
+      "close-requested",
+      (e) => {
+        if (e.payload?.mode === "close") void this.closeThisWindow();
+        else void this.handleCloseToTray();
+      },
+    );
+    this.ctx.listenTauri("exit-requested", () => void this.requestQuit());
     // Another window is quitting the app (#65): resolve ours, then answer.
-    this.ctx.listenTauri<{ id: number }>('quit-prepare', (e) => void this.prepareForOtherQuit(e.payload.id));
+    this.ctx.listenTauri<{ id: number }>(
+      "quit-prepare",
+      (e) => void this.prepareForOtherQuit(e.payload.id),
+    );
   }
 
   /** Close only this window (others stay open): resolve its unsaved tabs
@@ -74,15 +80,15 @@ export class LifecycleController {
    *  prompt shows everything the quit touches. True = go ahead (the save
    *  prompts for unsaved files follow). */
   private async confirmBusyTerminals(): Promise<boolean> {
-    const status = await api.quitStatus().catch(() => ({ busy: [], unsaved: [] }));
+    const status = await quitStatusOrUnchecked(api.quitStatus());
     const text = quitConfirmText(status);
     if (!text) return true;
     try {
       return await ask(text, {
-        title: 'Quit SparkDown',
-        kind: 'warning',
-        okLabel: 'Quit',
-        cancelLabel: 'Cancel',
+        title: "Quit SparkDown",
+        kind: "warning",
+        okLabel: "Quit",
+        cancelLabel: "Cancel",
       });
     } catch {
       return false;
@@ -156,21 +162,79 @@ export class LifecycleController {
 
 /** The quit confirm's text, or null when no terminal is running (unsaved
  *  files alone get the usual save prompts). */
+/** How long the quit waits for the job check before it asks anyway (#99). */
+export const QUIT_STATUS_TIMEOUT_MS = 10_000;
+
+/** The quit status, or, if the check fails or takes too long, a status that
+ *  still makes the quit ask (#99): never read a failed check as "nothing
+ *  running". */
+export async function quitStatusOrUnchecked(
+  p: Promise<QuitStatus>,
+  ms = QUIT_STATUS_TIMEOUT_MS,
+): Promise<QuitStatus> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`no answer within ${Math.round(ms / 1000)} s`)),
+      ms,
+    );
+  });
+  try {
+    return await Promise.race([p, timeout]);
+  } catch (e) {
+    const why = e instanceof Error ? e.message : String(e);
+    return {
+      busy: [{ window: "every window", command: "", unchecked: why }],
+      unsaved: [],
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function quitConfirmText(status: QuitStatus): string | null {
-  const { busy, unsaved } = status;
-  if (busy.length === 0) return null;
-  const lines = busy
-    .slice(0, 8)
-    .map((b) => `• ${b.command} — ${b.window}${b.keeps_running ? ' (keeps running in tmux)' : ''}`)
-    .join('\n');
-  const more = busy.length > 8 ? `\n…and ${busy.length - 8} more` : '';
-  const n = busy.length === 1 ? 'A terminal is' : `${busy.length} terminals are`;
-  const dirty = unsaved.length
-    ? `\n\nUnsaved changes (you will be asked to save them):\n${unsaved
+  const { busy: all, unsaved } = status;
+  if (all.length === 0) return null;
+  const busy = all.filter((b) => !b.unchecked);
+  const unchecked = all.filter((b) => b.unchecked);
+  const parts: string[] = [];
+  if (busy.length) {
+    const lines = busy
+      .slice(0, 8)
+      .map(
+        (b) =>
+          `• ${b.command} — ${b.window}${b.keeps_running ? " (keeps running in tmux)" : ""}`,
+      )
+      .join("\n");
+    const more = busy.length > 8 ? `\n…and ${busy.length - 8} more` : "";
+    const n =
+      busy.length === 1 ? "A terminal is" : `${busy.length} terminals are`;
+    parts.push(`${n} still running:\n\n${lines}${more}`);
+  }
+  if (unchecked.length) {
+    const lines = unchecked
+      .slice(0, 8)
+      .map((b) => `• ${b.window} (${b.unchecked})`)
+      .join("\n");
+    const more =
+      unchecked.length > 8 ? `\n…and ${unchecked.length - 8} more` : "";
+    parts.push(
+      `Couldn't check these terminals for running programs:\n${lines}${more}`,
+    );
+  }
+  if (unsaved.length) {
+    parts.push(
+      `Unsaved changes (you will be asked to save them):\n${unsaved
         .slice(0, 8)
         .map((w) => `• ${w}`)
-        .join('\n')}`
-    : '';
+        .join("\n")}`,
+    );
+  }
   const stops = busy.some((b) => !b.keeps_running);
-  return `${n} still running:\n\n${lines}${more}${dirty}\n\n${stops ? 'Quit SparkDown and stop them?' : 'Quit SparkDown?'}`;
+  const question = stops
+    ? "Quit SparkDown and stop them?"
+    : unchecked.length
+      ? "Quit SparkDown anyway?"
+      : "Quit SparkDown?";
+  return `${parts.join("\n\n")}\n\n${question}`;
 }

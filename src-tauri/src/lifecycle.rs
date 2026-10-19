@@ -423,6 +423,10 @@ pub struct BusyTerminal {
     pub command: String,
     /// A tmux session: keeps running after the quit (#88).
     pub keeps_running: bool,
+    /// Set when this terminal's job check failed or timed out (#99): the
+    /// window is listed as "couldn't check", never dropped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unchecked: Option<String>,
 }
 
 /// What a quit would cost, across every window (#65/#68): running
@@ -464,10 +468,11 @@ pub async fn quit_status(app: AppHandle) -> Result<QuitStatus, String> {
         };
         let busy = crate::terminal::busy_on_quit(&app.state::<crate::terminal::TerminalState>())
             .into_iter()
-            .map(|(label, command, keeps_running)| BusyTerminal {
-                window: names.get(&label).cloned().unwrap_or(label),
-                command,
-                keeps_running,
+            .map(|p| BusyTerminal {
+                window: names.get(&p.label).cloned().unwrap_or(p.label),
+                command: p.command,
+                keeps_running: p.survives,
+                unchecked: p.unchecked,
             })
             .collect();
         QuitStatus { busy, unsaved }
