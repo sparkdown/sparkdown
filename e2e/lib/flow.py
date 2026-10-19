@@ -282,6 +282,11 @@ def run(R, D):
             return "FAIL", "could not reload the webviews"
         if not D.job_alive():
             return "FAIL", f"the {D.job_name} job is gone after the reload"
+        # A's unsaved edit lived in its webview; put it back for `restore`.
+        mcp.call(D.exe, A, "sparkdown_open_file", {"path": note})
+        time.sleep(2)
+        mcp.call(D.exe, A, "sparkdown_edit_buffer", {"path": note, "content": f"# alpha\n\n{EDIT}\n"})
+        time.sleep(2)
         return quit_and_check("reloaded", 0, want=["still running", f"{D.job_name} — alpha", f"{D.job_name} — beta"])
     if fixtures.TMUX and hasattr(D, "reload"):
         R.run("reload-keeps-jobs", reload_keeps_jobs)
