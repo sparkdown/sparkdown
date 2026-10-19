@@ -68,6 +68,30 @@ def run(R, D):
                            f"(app's own focus state: {str(wins)[:160]})")
     R.run("one-process-focus", one_process_focus)
 
+    def cli_forward_keeps_b():
+        """`sparkdown <A>` as a second process with A and B open: B's
+        frontend must still show B (its published workspace root)."""
+        before = D.windows()
+        D.cli(A)
+        time.sleep(4)
+        after, fg, n = D.windows(), D.foreground(), D.procs()
+        roots = {}
+        for name, path in (("alpha", A), ("beta", B)):
+            ok, ctx = mcp.context(D.exe, path)
+            roots[name] = ctx.get("workspace_root") if ok and isinstance(ctx, dict) else f"ERR {str(ctx)[:100]}"
+        R.log(f"cli-forward: windows {before}->{after} fg={fg!r} procs={n} roots={roots}")
+        D.shot("cli-forward")
+        bad = []
+        if n != 1: bad.append(f"{n} processes")
+        if set(after) != set(before): bad.append(f"windows {before}->{after}")
+        if mcp.norm(roots["beta"]) != mcp.norm(B): bad.append(f"B's webview root is {roots['beta']!r}, not beta")
+        if mcp.norm(roots["alpha"]) != mcp.norm(A): bad.append(f"A's webview root is {roots['alpha']!r}")
+        if bad:
+            return "FAIL", "; ".join(bad)
+        tail = "" if fg == "alpha" + SUF else f" (OS foreground {fg!r})"
+        return ("PASS" if not tail else "PARTIAL"), f"1 process; B still shows beta, A shows alpha{tail}"
+    R.run("cli-forward-keeps-b", cli_forward_keeps_b)
+
     R.run("window-menu", lambda: D.window_menu(["alpha", "beta"]))
 
     def empty_reuse():

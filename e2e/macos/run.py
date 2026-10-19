@@ -238,6 +238,67 @@ def launch(*args):
         path = next((w for w in e.split() if w.startswith("PATH=")), path)
     R.log(f"launched with Finder env: pid={pid} {path}")
 
+def ax_texts(title):
+    """The accessibility text of window `title` (WKWebView maps the DOM to
+    AX, so this is what B's webview renders: #sidebar-title, tabs, editor)."""
+    out = osa(
+        'set AppleScript\'s text item delimiters to linefeed',
+        f'tell application "System Events" to tell process "{PROC}"',
+        f'set es to entire contents of window "{title}"',
+        'set acc to {}',
+        'repeat with e in es',
+        'try',
+        'set v to value of e',
+        'if v is not missing value and class of v is text then set end of acc to v',
+        'end try',
+        'try',
+        'set n to name of e',
+        'if n is not missing value and n is not "" then set end of acc to n',
+        'end try',
+        'end repeat',
+        'end tell',
+        'return acc as text', timeout=90)
+    return [l.strip() for l in out.split("\n") if l.strip()]
+
+
+def webview_root(title, folder):
+    """(frontend workspace_root via the folder's MCP route, AX root guess)."""
+    ok, ctx = mcp.context(BIN, folder)
+    root = ctx.get("workspace_root") if ok and isinstance(ctx, dict) else f"ERR {str(ctx)[:120]}"
+    texts = ax_texts(title)
+    return root, texts
+
+
+def cli_forward_check(tag, A, B, outside=True):
+    """`sparkdown <A>` from another app with A and B open: one process, A
+    focused, and B's webview still shows B (frontend root + AX text)."""
+    if outside:
+        osa('tell application "Finder" to activate')
+        time.sleep(1)
+    before = windows()
+    cli(A)
+    time.sleep(4)
+    after, f, n = windows(), front(), procs()
+    rb, tb = webview_root("beta" + SUF, B)
+    ra, ta = webview_root("alpha" + SUF, A)
+    shot(f"cli-forward-{tag}")
+    R.log(f"cli-forward {tag}: windows {before}->{after} front={f!r} procs={n}")
+    R.log(f"cli-forward {tag}: B root={rb!r} B ax={tb[:40]}")
+    R.log(f"cli-forward {tag}: A root={ra!r} A ax={ta[:40]}")
+    b_ax_alpha = any(t.lower() in ("alpha", "# alpha") for t in tb)
+    b_ax_beta = any(t.lower() in ("beta", "# beta") for t in tb)
+    bad = []
+    if n != 1: bad.append(f"{n} app processes")
+    if set(after) != set(before): bad.append(f"windows {before}->{after}")
+    if f != "alpha" + SUF: bad.append(f"focused {f!r}, not alpha")
+    if mcp.norm(rb) != mcp.norm(B): bad.append(f"B's webview root is {rb!r}, not beta")
+    if mcp.norm(ra) != mcp.norm(A): bad.append(f"A's webview root is {ra!r}")
+    if b_ax_alpha and not b_ax_beta: bad.append("B's window renders alpha (AX), not beta")
+    if bad:
+        return "FAIL", "; ".join(bad)
+    return "PASS", f"1 process, alpha focused, B's webview root={rb} (AX beta={b_ax_beta} alpha={b_ax_alpha})"
+
+
 def cli(path):
     subprocess.run([BIN, path], timeout=30, capture_output=True)
 
@@ -282,6 +343,7 @@ def main():
         ok = len(after) == len(before) and f == "alpha" + SUF and n == 1
         return ("PASS" if ok else "FAIL"), f"windows {len(before)}→{len(after)}; front={f!r}; app processes={n}"
     R.run("one-process-focus", one_process_focus)
+    R.run("cli-forward-keeps-b", lambda: cli_forward_check("live", A, B))
 
     def window_menu():
         entries, items = window_menu_entries()
@@ -554,6 +616,10 @@ def main():
             fixtures.tmux_diag(R.log, "step3")
         if not sleeps or not ok2:
             return "FAIL", f"setup failed: sleep={sleeps} edit={ok2} {r2}"
+        fw = cli_forward_check("step3", A, B)
+        R.log(f"step3 cli-forward: {fw}")
+        if fw[0] != "PASS":
+            return "FAIL", f"after `sparkdown <A>` from outside: {fw[1]}"
         res = quit_check(phys_cmd_q, "step3", ["still running", "sleep", "beta", "Unsaved changes", "alpha"])
         if res[0] != "PASS" or not fixtures.TMUX:
             return res
@@ -599,8 +665,12 @@ def main():
         fixtures.tmux_diag(R.log, "relaunched")
         if not w or not ok2:
             return "FAIL", f"setup: windows={windows()} edit={ok2} {r2}"
+        fw = cli_forward_check("relaunched", A, B)
+        R.log(f"relaunched cli-forward: {fw}")
         res = quit_check(phys_cmd_q, "relaunched", ["still running", "sleep", "beta", "Unsaved changes", "alpha"])
         subprocess.run(["pkill", "-x", "sleep"])
+        if fw[0] != "PASS":
+            return "FAIL", f"after `sparkdown <A>`: {fw[1]}; quit: {res[0]} {res[1]}"
         return res
     if fixtures.TMUX:
         R.run("must-pass-3-relaunched", must_pass_3_relaunched)

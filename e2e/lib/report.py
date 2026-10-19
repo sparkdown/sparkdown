@@ -21,6 +21,7 @@ CHECKS = {
     "quit-prompt-bg-occluded": "Quit from A after B (running job) sat 45 s in the background (hidden behind A on macOS): prompt still names B's job",
     "quit-prompt-bg-occluded-menu": "Same, quitting from the app menu",
     "quit-prompt-bg-minimized": "Same, with B minimized",
+    "cli-forward-keeps-b": "`sparkdown <A>` from another app with A and B open: one process, A focused, B's webview still shows B (frontend root + rendered text)",
     "must-pass-3": "0.4.0 step 3 (Paulo's setup): split B with sleep, agent-like job in A, A unsaved, physical ⌘Q: combined prompt; with tmux, a real Quit leaves the sleep running",
     "must-pass-3-relaunched": "Step 3 after a relaunch (windows and B's split reattached to the surviving tmux sessions): physical ⌘Q still lists the sleep",
     "tmux-split-pane": "B's tmux window split (idle pane active, sleep in the other pane): quit prompt still lists sleep",
