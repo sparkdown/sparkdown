@@ -248,6 +248,16 @@ def main():
     A, B, C = F["alpha"], F["beta"], F["gamma"]
     fixtures.seed_config()
     log = open(R.out / "app.log", "w")
+    if fixtures.TMUX:
+        # A real Mac user who has tmux usually already has their own server
+        # running (started from Terminal, full env, their ~/.tmux.conf), so
+        # SparkDown's sessions are created on THAT server, not a fresh one.
+        conf = pathlib.Path.home() / ".tmux.conf"
+        conf.write_text("set -g base-index 1\nsetw -g pane-base-index 1\nset -g mouse on\n"
+                        "set -g default-terminal tmux-256color\nset -g detach-on-destroy off\n")
+        t = subprocess.run(["tmux", "new-session", "-d", "-s", "user", "-x", "120", "-y", "40"],
+                           capture_output=True, text=True)
+        R.log(f"pre-existing user tmux server: rc={t.returncode} {t.stderr.strip()}")
     launch(A)
     wait_for(lambda: titled(["alpha"]) <= set(windows()), 40)
     R.log("windows:", windows())
