@@ -299,6 +299,18 @@ def cli_forward_check(tag, A, B, outside=True):
     return "PASS", f"1 process, alpha focused, B's webview root={rb} (AX beta={b_ax_beta} alpha={b_ax_alpha})"
 
 
+def webcontent_reload():
+    """Make macOS end the WebKit web-content processes (as memory pressure
+    or a crash does); Tauri then reloads each webview, which re-runs the
+    frontend's startup (get_pending_files, session restore)."""
+    pids = subprocess.run(["pgrep", "-f", "com.apple.WebKit.WebContent"], capture_output=True, text=True).stdout.split()
+    R.log(f"killing WebContent processes {pids}")
+    for pid in pids:
+        subprocess.run(["kill", "-9", pid])
+    time.sleep(8)
+    return pids
+
+
 def cli(path):
     subprocess.run([BIN, path], timeout=30, capture_output=True)
 
@@ -650,6 +662,12 @@ def main():
             fixtures.tmux_diag(R.log, "step3")
         if not sleeps or not ok2:
             return "FAIL", f"setup failed: sleep={sleeps} edit={ok2} {r2}"
+        # Paulo's path: an Apple Event open of A earlier (`open -a`, Open
+        # With, dock drop), then B's webview re-initialises (web-content
+        # process ended → Tauri reloads it), then `sparkdown <A>`.
+        subprocess.run(["open", "-a", str(APP.resolve()), A], capture_output=True, timeout=30)
+        time.sleep(3)
+        webcontent_reload()
         fw = cli_forward_check("step3", A, B)
         R.log(f"step3 cli-forward: {fw}")
         if fw[0] != "PASS":
