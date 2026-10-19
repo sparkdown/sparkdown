@@ -228,7 +228,7 @@ def launch(*args):
     env = finder_env()
     lp = subprocess.run(["/bin/zsh", "-lc", 'printf %s "$PATH"'], env=env, capture_output=True, text=True, timeout=20)
     R.log(f"login shell (zsh -lc) PATH under Finder env: {lp.stdout!r} rc={lp.returncode}")
-    subprocess.Popen([str(Path(BIN).resolve()), *args], stdout=open(logf, "a"), stderr=subprocess.STDOUT,
+    subprocess.Popen([os.path.abspath(str(BIN)), *args], stdout=open(logf, "a"), stderr=subprocess.STDOUT,
                      env=env, start_new_session=True, cwd="/")
     wait_for(lambda: procs() >= 1, 20)
     pid = subprocess.run(["pgrep", "-x", "sparkdown"], capture_output=True, text=True).stdout.split()
