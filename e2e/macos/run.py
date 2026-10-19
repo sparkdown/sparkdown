@@ -314,6 +314,24 @@ def webcontent_reload():
     return pids
 
 
+def reload_keeps_jobs(A, B, note, edit):
+    pids = subprocess.run(["pgrep", "-f", "com.apple.WebKit.WebContent"], capture_output=True, text=True).stdout.split()
+    R.log(f"reload-keeps-jobs: killing every WebContent process {pids}")
+    for pid in pids:
+        subprocess.run(["kill", "-9", pid])
+    time.sleep(10)
+    # A's unsaved edit lived in its webview; put it back so the prompt is
+    # the combined one.
+    ok, r = mcp.call(BIN, A, "sparkdown_open_file", {"path": note})
+    time.sleep(2)
+    ok2, r2 = mcp.call(BIN, A, "sparkdown_edit_buffer", {"path": note, "content": edit + " (reloaded)"})
+    time.sleep(2)
+    R.log(f"reload-keeps-jobs: windows={windows()} reopen={ok} edit={ok2} {str(r2)[:120]}")
+    if fixtures.TMUX:
+        fixtures.tmux_diag(R.log, "reloaded")
+    return quit_check(phys_cmd_q, "reloaded", ["still running", "sleep", "beta", "Python", "alpha"])
+
+
 def cli(path):
     subprocess.run([BIN, path], timeout=30, capture_output=True)
 
@@ -678,6 +696,13 @@ def main():
         res = quit_check(phys_cmd_q, "step3", ["still running", "sleep", "beta", "Unsaved changes", "alpha"])
         if res[0] != "PASS" or not fixtures.TMUX:
             return res
+        # #108: reload BOTH webviews (macOS ends their web-content
+        # processes; Tauri reloads them). The core must still know every
+        # window's tmux sessions: both jobs stay in the prompt.
+        rl = reload_keeps_jobs(A, B, note, edit)
+        R.add("reload-keeps-jobs", *rl)
+        if rl[0] != "PASS":
+            return "FAIL", f"after reloading both webviews: {rl[1]}"
         # Real quit: Quit, then Don't Save. tmux jobs must outlive the app.
         phys_cmd_q()
         ds = wait_for(dialogs, 15)

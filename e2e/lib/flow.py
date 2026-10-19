@@ -269,5 +269,22 @@ def run(R, D):
         ok = set(w) == titled("alpha", "beta") and saved
         return ("PASS" if ok else "FAIL"), (f"saved alpha={bool(saved)}; before quit={before}; "
                                             f"after relaunch={w} (gamma was closed and must stay closed)")
+    def reload_keeps_jobs():
+        """#108: reload both webviews; the quit prompt must still list the
+        tmux job of every window (the core is the source of truth)."""
+        D.start_job("alpha" + SUF)
+        time.sleep(2)
+        ok_a = D.reload("alpha" + SUF)
+        ok_b = D.reload("beta" + SUF)
+        time.sleep(10)
+        R.log(f"reload-keeps-jobs: reloaded alpha={ok_a} beta={ok_b} windows={D.windows()}")
+        if not (ok_a and ok_b):
+            return "FAIL", "could not reload the webviews"
+        if not D.job_alive():
+            return "FAIL", f"the {D.job_name} job is gone after the reload"
+        return quit_and_check("reloaded", 0, want=["still running", f"{D.job_name} — alpha", f"{D.job_name} — beta"])
+    if fixtures.TMUX and hasattr(D, "reload"):
+        R.run("reload-keeps-jobs", reload_keeps_jobs)
+
     R.run("restore", restore)
     D.stop()

@@ -171,6 +171,17 @@ class X11(Base):
             return True
         return False
 
+    def reload(self, title):
+        """Reload `title`'s webview (the web-content process restart a
+        compositor or memory pressure can cause)."""
+        if not self._wd_handle(title):
+            return False
+        try:
+            self.wd.js("setTimeout(() => location.reload(), 50); return 1;")
+        except Exception as e:  # the page goes away under the call
+            R.log(f"reload {title}: {e}")
+        return True
+
     def keys(self, title, xkeys, *chord):
         if self._wd_handle(title):
             self.wd.find("body")
