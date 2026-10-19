@@ -345,6 +345,40 @@ def main():
     R.run("one-process-focus", one_process_focus)
     R.run("cli-forward-keeps-b", lambda: cli_forward_check("live", A, B))
 
+    def open_with_keeps_b():
+        """`open -a SparkDown <A>` (what a shell alias or Finder "Open With"
+        does): an Apple Event to the running app. B must stay on B, and the
+        path must not linger in the startup queue for the next window."""
+        osa('tell application "Finder" to activate')
+        time.sleep(1)
+        p = subprocess.run(["open", "-a", str(APP.resolve()), A], capture_output=True, text=True, timeout=30)
+        time.sleep(4)
+        rb, tb = webview_root("beta" + SUF, B)
+        f, w = front(), windows()
+        R.log(f"open-with: rc={p.returncode} {p.stderr.strip()[:200]} front={f!r} windows={w} B root={rb!r} B ax={tb[:30]}")
+        bad = []
+        if mcp.norm(rb) != mcp.norm(B): bad.append(f"B's webview root is {rb!r}")
+        if f != "alpha" + SUF: bad.append(f"focused {f!r}")
+        # A new empty window must start empty, not with A from a stale queue.
+        key("n", "command down, shift down")
+        got = wait_for(lambda: "SparkDown" in windows(), 15)
+        time.sleep(4)
+        w2 = windows()
+        R.log(f"open-with: after ⌘⇧N windows={w2}")
+        if not got:
+            ex = [t for t in w2 if t not in w]
+            bad.append(f"the new window is not empty: new titles {ex}")
+        else:
+            ax = ax_texts("SparkDown")
+            R.log(f"open-with: empty window ax={ax[:30]}")
+            if any(t.lower() == "alpha" for t in ax):
+                bad.append("the new empty window rendered alpha (stale startup queue)")
+        if "SparkDown" in windows():
+            osa(f'tell application "System Events" to tell process "{PROC}" to click (first button of window "SparkDown" whose subrole is "AXCloseButton")')
+            time.sleep(2)
+        return ("FAIL", "; ".join(bad)) if bad else ("PASS", f"B still beta, alpha focused, a new window starts empty ({w2})")
+    R.run("open-with-keeps-b", open_with_keeps_b)
+
     def window_menu():
         entries, items = window_menu_entries()
         R.log("Window menu:", items)
