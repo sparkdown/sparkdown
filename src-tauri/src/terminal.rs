@@ -24,7 +24,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::Stdio;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -307,6 +307,7 @@ fn tmux_path() -> Option<std::path::PathBuf> {
 }
 
 /// True when a tmux session of this name currently exists on the default server.
+#[cfg(test)]
 fn tmux_session_exists(name: &str) -> bool {
     let Some(tmux) = tmux_path() else {
         return false;
@@ -316,12 +317,152 @@ fn tmux_session_exists(name: &str) -> bool {
         // prefix then fnmatch, so `has-session -t sd-..-1` would report alive
         // while only `sd-..-10` exists.
         .args(["has-session", "-t", &format!("={name}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// One poll of the tmux session-alive watchdog (#102).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionProbe {
+    Alive,
+    /// tmux answered that the session does not exist.
+    Gone,
+    /// tmux could not be asked (spawn error, timeout, any other error).
+    Unknown,
+}
+
+/// `tmux has-session` for exactly `name`, bounded. Only tmux's own "no such
+/// session" / "no server" answers count as `Gone`; anything else is `Unknown`.
+fn tmux_session_probe(name: &str) -> SessionProbe {
+    let Some(tmux) = tmux_path() else {
+        return SessionProbe::Unknown;
+    };
+    let target = format!("={name}");
+    let out = crate::mcp::run_with_timeout(
+        &tmux,
+        &["has-session", "-t", target.as_str()],
+        &std::env::temp_dir(),
+        Duration::from_secs(2),
+    );
+    classify_has_session(out)
+}
+
+/// [`tmux_session_probe`]'s verdict from tmux's (ok, stdout, stderr).
+pub(crate) fn classify_has_session(out: Result<(bool, String, String), String>) -> SessionProbe {
+    match out {
+        Ok((true, _, _)) => SessionProbe::Alive,
+        Ok((false, _, err)) => {
+            let e = err.to_ascii_lowercase();
+            if e.contains("can't find session")
+                || e.contains("no server running")
+                || e.contains("session not found")
+            {
+                SessionProbe::Gone
+            } else {
+                SessionProbe::Unknown
+            }
+        }
+        Err(_) => SessionProbe::Unknown,
+    }
+}
+
+/// Watchdog state for one tmux tab (#102). The tab is closed only after
+/// `GONE_POLLS` consecutive `Gone` answers AND no process of the pane is
+/// still alive. `Alive` and `Unknown` reset the count; nothing is counted
+/// before the session was seen once (creation race).
+#[derive(Debug, Default)]
+pub(crate) struct SessionWatch {
+    seen: bool,
+    gone: u32,
+}
+
+pub(crate) const GONE_POLLS: u32 = 3;
+
+impl SessionWatch {
+    /// Feed one poll; `live` says whether any tracked process of the pane
+    /// (shell, foreground job) still runs. True = close the tab now.
+    pub(crate) fn observe(&mut self, probe: SessionProbe, live: impl FnOnce() -> bool) -> bool {
+        match probe {
+            SessionProbe::Alive => {
+                self.seen = true;
+                self.gone = 0;
+                false
+            }
+            SessionProbe::Unknown => {
+                self.gone = 0;
+                false
+            }
+            SessionProbe::Gone => {
+                if !self.seen {
+                    return false;
+                }
+                self.gone = self.gone.saturating_add(1);
+                self.gone >= GONE_POLLS && !live()
+            }
+        }
+    }
+}
+
+/// Pids worth keeping a tab for: the pane's shell and its tty's foreground
+/// job, read while the session was alive. Bounded; `None` = unknown.
+fn tmux_pane_pids(name: &str) -> Option<Vec<u32>> {
+    let tmux = tmux_path()?;
+    let target = format!("={name}:");
+    let (ok, out, _) = crate::mcp::run_with_timeout(
+        &tmux,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            target.as_str(),
+            "#{session_name} #{pane_pid}",
+        ],
+        &std::env::temp_dir(),
+        Duration::from_secs(2),
+    )
+    .ok()?;
+    let (got, pid) = out.trim().rsplit_once(' ')?;
+    if !ok || got != name {
+        return None;
+    }
+    let pane: u32 = pid.parse().ok()?;
+    let mut pids = vec![pane];
+    if let Ok((_, tpgid)) = pgid_and_tty_foreground(pane) {
+        if tpgid > 0 && tpgid as u32 != pane {
+            pids.push(tpgid as u32);
+        }
+    }
+    Some(pids)
+}
+
+/// True if any pid in `pids` is still running, or if that can't be told
+/// (never drop what might be alive). An empty list = nothing known = alive.
+pub(crate) fn any_alive(pids: &[u32], alive: impl Fn(u32) -> Option<bool>) -> bool {
+    pids.is_empty() || pids.iter().any(|&p| alive(p).unwrap_or(true))
+}
+
+/// Whether process `pid` exists. `None` when it can't be told.
+fn pid_alive(pid: u32) -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(std::path::Path::new(&format!("/proc/{pid}")).exists())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let p = pid.to_string();
+        let (_, out, _) = crate::mcp::run_with_timeout(
+            "ps",
+            &["-o", "pid=", "-p", p.as_str()],
+            &std::env::temp_dir(),
+            Duration::from_secs(2),
+        )
+        .ok()?;
+        Some(out.split_whitespace().any(|v| v == p))
+    }
 }
 
 /// Force `detach-on-destroy on` for this session (chained after `new-session`).
@@ -664,7 +805,11 @@ pub fn terminal_start(
             let flag = exit_emitted.clone();
             let emit_exit = emit_exit.clone();
             std::thread::spawn(move || {
-                let mut seen = false;
+                // #102: one failed poll must not close a tab whose job is
+                // still running in tmux. See SessionWatch for the rules.
+                let mut watch = SessionWatch::default();
+                let mut pids: Vec<u32> = Vec::new();
+                let mut polls: u32 = 0;
                 loop {
                     if flag.load(Ordering::SeqCst) {
                         break;
@@ -673,9 +818,18 @@ pub fn terminal_start(
                     if flag.load(Ordering::SeqCst) {
                         break;
                     }
-                    if tmux_session_exists(&sess) {
-                        seen = true;
-                    } else if seen {
+                    let probe = tmux_session_probe(&sess);
+                    if probe == SessionProbe::Alive {
+                        // Refresh the pane's pids now and then (~3 s), and
+                        // on first sight, so a later "gone" can be checked.
+                        if pids.is_empty() || polls.is_multiple_of(10) {
+                            if let Some(p) = tmux_pane_pids(&sess) {
+                                pids = p;
+                            }
+                        }
+                        polls = polls.wrapping_add(1);
+                    }
+                    if watch.observe(probe, || any_alive(&pids, pid_alive)) {
                         let _ = killer.kill();
                         emit_exit();
                         break;
@@ -1451,6 +1605,115 @@ mod tests {
             (11, 1, "conhost.exe".to_string()),
         ];
         assert_eq!(first_child_name(10, &idle), None);
+    }
+
+    /// #102: the session-alive watchdog's counter.
+    #[test]
+    fn session_watch_needs_three_consecutive_gone_and_resets_on_success() {
+        use super::{SessionProbe::*, SessionWatch};
+        let dead = || false;
+        let mut w = SessionWatch::default();
+        // nothing counts before the session was seen
+        assert!(!w.observe(Gone, dead));
+        assert!(!w.observe(Gone, dead));
+        assert!(!w.observe(Gone, dead));
+        assert!(!w.observe(Alive, dead));
+        // 1-2 gone, then success: reset
+        assert!(!w.observe(Gone, dead));
+        assert!(!w.observe(Gone, dead));
+        assert!(!w.observe(Alive, dead));
+        assert!(!w.observe(Gone, dead));
+        assert!(!w.observe(Gone, dead));
+        // an unknown (transient tmux error) breaks the streak too
+        assert!(!w.observe(Unknown, dead));
+        assert!(!w.observe(Gone, dead));
+        assert!(!w.observe(Gone, dead));
+        // third consecutive gone with nothing alive: close
+        assert!(w.observe(Gone, dead));
+    }
+
+    #[test]
+    fn session_watch_never_closes_while_a_process_lives() {
+        use super::{SessionProbe::*, SessionWatch};
+        let mut w = SessionWatch::default();
+        assert!(!w.observe(Alive, || false));
+        for _ in 0..10 {
+            assert!(!w.observe(Gone, || true));
+        }
+        // the job ended: next gone poll closes
+        assert!(w.observe(Gone, || false));
+    }
+
+    #[test]
+    fn unknown_never_closes() {
+        use super::{SessionProbe::*, SessionWatch};
+        let mut w = SessionWatch::default();
+        w.observe(Alive, || false);
+        for _ in 0..20 {
+            assert!(!w.observe(Unknown, || false));
+        }
+    }
+
+    #[test]
+    fn has_session_errors_are_unknown_not_gone() {
+        use super::{classify_has_session, SessionProbe};
+        assert_eq!(
+            classify_has_session(Ok((true, String::new(), String::new()))),
+            SessionProbe::Alive
+        );
+        assert_eq!(
+            classify_has_session(Ok((
+                false,
+                String::new(),
+                "can't find session: =sd-x\n".into()
+            ))),
+            SessionProbe::Gone
+        );
+        assert_eq!(
+            classify_has_session(Ok((
+                false,
+                String::new(),
+                "no server running on /tmp/tmux-1/default\n".into()
+            ))),
+            SessionProbe::Gone
+        );
+        assert_eq!(
+            classify_has_session(Ok((false, String::new(), "lost server\n".into()))),
+            SessionProbe::Unknown
+        );
+        assert_eq!(
+            classify_has_session(Ok((false, String::new(), String::new()))),
+            SessionProbe::Unknown
+        );
+        assert_eq!(
+            classify_has_session(Err("timed out".into())),
+            SessionProbe::Unknown
+        );
+    }
+
+    #[test]
+    fn pane_liveness_is_conservative() {
+        use super::any_alive;
+        assert!(any_alive(&[], |_| Some(false)), "no pids known: keep");
+        assert!(!any_alive(&[1, 2], |_| Some(false)));
+        assert!(
+            any_alive(&[1, 2], |p| Some(p == 2)),
+            "foreground job alive: keep"
+        );
+        assert!(any_alive(&[1], |_| None), "can't tell: keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pid_alive_sees_this_process_and_not_a_dead_one() {
+        assert_eq!(super::pid_alive(std::process::id()), Some(true));
+        let mut c = crate::proc::command("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = c.id();
+        c.wait().unwrap();
+        assert_eq!(super::pid_alive(pid), Some(false));
     }
 
     /// #99: a job check that fails or times out is never "nothing running".
