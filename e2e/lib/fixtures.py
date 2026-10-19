@@ -80,6 +80,8 @@ def tmux_diag(log, tag):
     ls = subprocess.run([tmux, "ls", "-F", "#{session_name} pane_pid=#{pane_pid} tty=#{pane_tty}"],
                         capture_output=True, text=True)
     log(f"[{tag}] tmux ls rc={ls.returncode}: {ls.stdout.strip()} {ls.stderr.strip()[:200]}")
+    v = subprocess.run([tmux, "-V"], capture_output=True, text=True)
+    log(f"[{tag}] {v.stdout.strip()}")
     for line in ls.stdout.splitlines():
         parts = dict(x.split("=", 1) for x in line.split()[1:] if "=" in x)
         pid = parts.get("pane_pid")
@@ -111,4 +113,7 @@ def tmux_busy_session():
 
 def tmux_rename(old, new):
     p = subprocess.run([_tmux(), "rename-session", "-t", f"={old}", new], capture_output=True, text=True)
+    d = subprocess.run([_tmux(), "display-message", "-p", "-t", f"={old}:", "#{session_name} #{pane_pid}"],
+                       capture_output=True, text=True)
+    print(f"display-message for the old name now: rc={d.returncode} out={d.stdout.strip()!r} err={d.stderr.strip()!r}", flush=True)
     return p.returncode == 0, p.stderr.strip()
