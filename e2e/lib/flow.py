@@ -124,6 +124,15 @@ def run(R, D):
             time.sleep(bg_wait)
             if not D.job_alive():
                 return "FAIL", f"the {D.job_name} job in beta's terminal is gone"
+        # A prompt left over from the previous check (e.g. Hyprland, where a
+        # dialog Escape can't close is closed via hyprctl, and the old quit
+        # flow may go on to its save prompt) must not be read as this
+        # check's prompt: let it surface, log it, cancel it.
+        time.sleep(3)
+        for d in D.dialogs():
+            R.log(f"[{tag}] stray prompt from the previous check, cancelling: {d}")
+            D.cancel_dialog(d)
+        wait_for(lambda: not D.dialogs(), 8)
         if fixtures.TMUX:
             fixtures.tmux_diag(R.log, tag)
         before = D.windows()
