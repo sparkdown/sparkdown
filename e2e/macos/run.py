@@ -314,12 +314,29 @@ def webcontent_reload():
     return pids
 
 
-def reload_keeps_jobs(A, B, note, edit, quit_check, phys_cmd_q):
+def reload_keeps_jobs(A, B, note, edit, quit_check, phys_cmd_q, toggle_terminal):
     pids = subprocess.run(["pgrep", "-f", "com.apple.WebKit.WebContent"], capture_output=True, text=True).stdout.split()
-    R.log(f"reload-keeps-jobs: killing every WebContent process {pids}")
+    # While the webviews restart, tmux briefly can't list A's agent session
+    # (a hiccup, like #102's): A's reloaded drawer then opens a fresh
+    # `term-1`, which used to replace the core's only record of it.
+    hidden = []
+    if fixtures.TMUX:
+        ls = subprocess.run([fixtures._tmux(), "list-panes", "-a", "-F", "#{session_name} #{pane_current_command}"],
+                            capture_output=True, text=True, timeout=10).stdout.splitlines()
+        hidden = sorted({l.split(" ", 1)[0] for l in ls if "ython" in l and l.startswith("sd-")})
+        for n in hidden:
+            fixtures.tmux_rename(n, "x" + n)
+    R.log(f"reload-keeps-jobs: hid {hidden}; killing every WebContent process {pids}")
     for pid in pids:
         subprocess.run(["kill", "-9", pid])
     time.sleep(10)
+    if hidden:
+        osa(f'tell application "System Events" to tell process "{PROC}" to perform action "AXRaise" of window "alpha{SUF}"')
+        activate()
+        toggle_terminal(); time.sleep(1.5); toggle_terminal(); time.sleep(5)
+        for n in hidden:
+            fixtures.tmux_rename("x" + n, n)
+        time.sleep(2)
     # A's unsaved edit lived in its webview; put it back so the prompt is
     # the combined one.
     ok, r = mcp.call(BIN, A, "sparkdown_open_file", {"path": note})
@@ -699,7 +716,7 @@ def main():
         # #108: reload BOTH webviews (macOS ends their web-content
         # processes; Tauri reloads them). The core must still know every
         # window's tmux sessions: both jobs stay in the prompt.
-        rl = reload_keeps_jobs(A, B, note, edit, quit_check, phys_cmd_q)
+        rl = reload_keeps_jobs(A, B, note, edit, quit_check, phys_cmd_q, toggle_terminal)
         R.add("reload-keeps-jobs", *rl)
         if rl[0] != "PASS":
             return "FAIL", f"after reloading both webviews: {rl[1]}"
