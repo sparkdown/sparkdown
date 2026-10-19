@@ -309,14 +309,10 @@ pub async fn tmux_window_sessions(webview_window: tauri::WebviewWindow) -> Vec<S
     tauri::async_runtime::spawn_blocking(move || {
         let mine = window_sessions().of(&label);
         mine.into_iter()
-            .filter(|s| match tmux_session_probe(s) {
-                SessionProbe::Gone => {
-                    window_sessions().forget(s);
-                    false
-                }
-                // Unknown: keep it; `new-session -A` reattaches if it lives.
-                _ => true,
-            })
+            // A single Gone may be a transient tmux hiccup (#102): skip it
+            // now, but only the watchdog's confirmed-gone or a deliberate
+            // kill forgets it. Unknown: keep; `new-session -A` reattaches.
+            .filter(|s| tmux_session_probe(s) != SessionProbe::Gone)
             .collect()
     })
     .await
@@ -909,6 +905,8 @@ pub fn terminal_start(
                         polls = polls.wrapping_add(1);
                     }
                     if watch.observe(probe, || any_alive(&pids, pid_alive)) {
+                        // Confirmed gone (#102 rule): the core forgets it.
+                        window_sessions().forget(&sess);
                         let _ = killer.kill();
                         emit_exit();
                         break;
@@ -1354,7 +1352,8 @@ pub fn busy_on_quit(state: &TerminalState) -> Vec<QuitProbe> {
     let extra = window_sessions().uncovered(&covered, |l| crate::windows::registry().contains(l));
     for (session, label) in extra {
         match tmux_session_probe(&session) {
-            SessionProbe::Gone => window_sessions().forget(&session),
+            // Not forgotten on one answer (#102); simply not running now.
+            SessionProbe::Gone => {}
             SessionProbe::Unknown => out.extend(quit_probe(
                 label,
                 true,
