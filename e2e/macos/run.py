@@ -582,6 +582,29 @@ def main():
         return "PASS", f"{res[1]}; after a real Quit the tmux sleep {alive} still runs"
     R.run("must-pass-3", must_pass_3)
 
+    def must_pass_3_relaunched():
+        """Paulo's cases 2-3 came after a relaunch: the windows and B's split
+        come back reattached to the surviving tmux sessions, and the sleep
+        started before the quit still runs in one of them."""
+        alive = subprocess.run(["pgrep", "-x", "sleep"], capture_output=True, text=True).stdout.split()
+        if procs() != 0 or not alive:
+            return "FAIL", f"precondition: app should be quit with the tmux sleep alive (procs={procs()}, sleep={alive})"
+        launch()
+        w = wait_for(lambda: titled(["alpha", "beta"]) <= set(windows()), 40)
+        time.sleep(8)  # restored panes reattach
+        R.log(f"relaunched: windows={windows()}")
+        ok2, r2 = mcp.call(BIN, A, "sparkdown_edit_buffer", {"path": note, "content": edit + " (relaunched)"})
+        cli(A)
+        time.sleep(2)
+        fixtures.tmux_diag(R.log, "relaunched")
+        if not w or not ok2:
+            return "FAIL", f"setup: windows={windows()} edit={ok2} {r2}"
+        res = quit_check(phys_cmd_q, "relaunched", ["still running", "sleep", "beta", "Unsaved changes", "alpha"])
+        subprocess.run(["pkill", "-x", "sleep"])
+        return res
+    if fixtures.TMUX:
+        R.run("must-pass-3-relaunched", must_pass_3_relaunched)
+
     R.manual("manual-gatekeeper", "Gatekeeper first launch of the signed, notarized build", "CI builds are unsigned; see e2e/README.md")
     R.manual("manual-spaces", "Spaces / Mission Control / gestures / notifications", "not automatable on hosted runners")
     subprocess.run(["pkill", "-x", "sparkdown"])
