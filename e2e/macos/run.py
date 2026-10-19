@@ -211,31 +211,32 @@ def close_window(title):
     se(f'click (first button of window "{title}" whose subrole is "AXCloseButton")')
 
 
+def finder_env():
+    """The environment a Finder/Dock launch gets on a real Mac: launchd's
+    per-user env. Hosted runners' launchd domain carries the runner's full
+    PATH (`open` showed /opt/homebrew/bin etc.), so `open` alone does NOT
+    reproduce Finder there; build launchd's env explicitly (no LANG, minimal
+    PATH, zsh as the login shell like a default Mac account)."""
+    return {"PATH": fixtures.LAUNCHD_PATH, "HOME": os.environ["HOME"], "USER": os.environ.get("USER", ""),
+            "LOGNAME": os.environ.get("USER", ""), "SHELL": "/bin/zsh",
+            "TMPDIR": os.environ.get("TMPDIR", "/tmp/"), "__CF_USER_TEXT_ENCODING": "0x1F5:0x0:0x0"}
+
+
 def launch(*args):
-    """Start the app the way Finder / the Dock does: through LaunchServices
-    (`open`), so it gets launchd's environment (minimal PATH, no shell
-    profile, no Homebrew), not this harness's. If LaunchServices won't start
-    it, run the binary with launchd's minimal environment instead (logged)."""
+    """Start the app with Finder's environment (see finder_env)."""
     logf = str(R.out / "app.log")
-    cmd = ["open", "-a", str(APP.resolve()), "--stdout", logf, "--stderr", logf]
-    if args:
-        cmd += ["--args", *args]
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    R.log(f"open rc={p.returncode} {p.stdout.strip()[:200]} {p.stderr.strip()[:300]}")
-    how = "open (LaunchServices)"
-    if not wait_for(lambda: procs() >= 1, 15):
-        env = {"PATH": fixtures.LAUNCHD_PATH, "HOME": os.environ["HOME"], "USER": os.environ.get("USER", ""),
-               "SHELL": os.environ.get("SHELL", "/bin/zsh"), "TMPDIR": os.environ.get("TMPDIR", "/tmp/")}
-        subprocess.Popen([BIN, *args], stdout=open(logf, "a"), stderr=subprocess.STDOUT, env=env,
-                         start_new_session=True)
-        how = "direct exec with launchd's minimal env (open didn't start it)"
-        wait_for(lambda: procs() >= 1, 15)
+    env = finder_env()
+    lp = subprocess.run(["/bin/zsh", "-lc", 'printf %s "$PATH"'], env=env, capture_output=True, text=True, timeout=20)
+    R.log(f"login shell (zsh -lc) PATH under Finder env: {lp.stdout!r} rc={lp.returncode}")
+    subprocess.Popen([str(Path(BIN).resolve()), *args], stdout=open(logf, "a"), stderr=subprocess.STDOUT,
+                     env=env, start_new_session=True, cwd="/")
+    wait_for(lambda: procs() >= 1, 20)
     pid = subprocess.run(["pgrep", "-x", "sparkdown"], capture_output=True, text=True).stdout.split()
     path = "PATH=<not visible>"
     if pid:
-        env = subprocess.run(["ps", "eww", "-o", "command=", "-p", pid[0]], capture_output=True, text=True).stdout
-        path = next((w for w in env.split() if w.startswith("PATH=")), path)
-    R.log(f"launched via {how}: pid={pid} {path}")
+        e = subprocess.run(["ps", "eww", "-o", "command=", "-p", pid[0]], capture_output=True, text=True).stdout
+        path = next((w for w in e.split() if w.startswith("PATH=")), path)
+    R.log(f"launched with Finder env: pid={pid} {path}")
 
 def cli(path):
     subprocess.run([BIN, path], timeout=30, capture_output=True)
