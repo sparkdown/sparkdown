@@ -566,6 +566,7 @@ fn main() {
             commands::load_config,
             commands::save_config,
             commands::get_pending_files,
+            terminal::tmux_window_sessions,
             commands::quit,
             commands::set_html_preview,
             commands::set_html_js_checked,

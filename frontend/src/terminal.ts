@@ -1008,9 +1008,7 @@ export class TerminalManager {
       this.focusActive();
       return;
     }
-    const sessions = this.useTmux
-      ? await api.tmuxSessions(this.sessionPrefix).catch(() => [] as string[])
-      : [];
+    const sessions = this.useTmux ? await this.sessionsToRestore() : [];
     await this.remoteReady;
     // Numeric order, so "zsh-10" comes after "zsh-2" (a plain sort() is
     // lexicographic and restored panes came back out of order).
@@ -1038,6 +1036,17 @@ export class TerminalManager {
     for (const start of starts) await start();
     this.persist();
     this.focusActive();
+  }
+
+  /** Sessions to reattach: this workspace's surviving ones plus every
+   *  session the core says this window started (#108). The core is the
+   *  source of truth after a webview reload; webview memory is gone. */
+  private async sessionsToRestore(): Promise<string[]> {
+    const [byPrefix, mine] = await Promise.all([
+      api.tmuxSessions(this.sessionPrefix).catch(() => [] as string[]),
+      (api.tmuxWindowSessions?.() ?? Promise.resolve([] as string[])).catch(() => [] as string[]),
+    ]);
+    return [...new Set([...byPrefix, ...mine])];
   }
 
   /** Recover shell, number and agent from a surviving session's encoded id,
