@@ -117,3 +117,25 @@ def tmux_rename(old, new):
                        capture_output=True, text=True)
     print(f"display-message for the old name now: rc={d.returncode} out={d.stdout.strip()!r} err={d.stderr.strip()!r}", flush=True)
     return p.returncode == 0, p.stderr.strip()
+
+
+def tmux_server_pid():
+    p = subprocess.run([_tmux(), "display-message", "-p", "#{pid}"], capture_output=True, text=True, timeout=10)
+    v = p.stdout.strip()
+    return int(v) if v.isdigit() else None
+
+
+def stop_tmux_server():
+    """Wedge the tmux server (SIGSTOP): any tmux client call hangs, the panes'
+    programs keep running. Returns the pid to resume with resume()."""
+    import signal
+    pid = tmux_server_pid()
+    if pid:
+        os.kill(pid, signal.SIGSTOP)
+    return pid
+
+
+def resume(pid):
+    import signal
+    if pid:
+        os.kill(pid, signal.SIGCONT)

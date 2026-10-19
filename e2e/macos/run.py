@@ -359,12 +359,12 @@ def main():
         R.log("sleep pids:", busy)
         return bool(busy) and ok2
 
-    def quit_check(trigger, label, want=None):
-        if fixtures.TMUX:
+    def quit_check(trigger, label, want=None, dlg_wait=10):
+        if fixtures.TMUX and label != "wedged":
             fixtures.tmux_diag(R.log, label)
         before = windows()
         trigger()
-        ds = wait_for(dialogs, 10)
+        ds = wait_for(dialogs, dlg_wait)
         shot(f"{label}-prompt")
         R.log("dialogs:", ds)
         if not ds:
@@ -380,7 +380,8 @@ def main():
         d = ds[0]
         text = d["text"]
         want = want or ["still running", "sleep", "beta", "Unsaved changes", "alpha"]
-        missing = [w for w in want if w not in text]
+        norm = text.replace('\u2019', "'").lower()
+        missing = [w for w in want if w.lower() not in norm]
         click_dialog_button(d, "Cancel")
         time.sleep(2)
         after = windows()
@@ -438,20 +439,22 @@ def main():
     R.run("quit-prompt-bg-occluded-menu", lambda: bg_check("menu", "bgoccmenu") if ready else ("FAIL", "setup failed"))
     R.run("quit-prompt-bg-minimized", lambda: bg_check("cmdq", "bgmin", True) if ready else ("FAIL", "setup failed"))
 
-    def renamed_check():
-        """The probe fails for B (its tmux session was renamed, so the stored
-        name no longer resolves): the prompt must still name B, never drop it."""
-        old = fixtures.tmux_busy_session()
-        if not old:
-            return "FAIL", "no tmux session with a running job found"
-        ok, err = fixtures.tmux_rename(old, old + "-renamed")
-        R.log(f"renamed {old} -> {old}-renamed: {ok} {err}")
+    def wedged_check():
+        """The job check can't finish: the tmux server is wedged (SIGSTOP),
+        so every tmux call hangs while B's job keeps running. The quit must
+        still prompt and say it couldn't check, not skip the prompt or hang."""
+        WANT = ["couldn't check", "Unsaved changes", "alpha"]
+        pid = fixtures.stop_tmux_server()
+        R.log(f"tmux server {pid} stopped (SIGSTOP)")
+        if not pid:
+            return "FAIL", "tmux server pid not found"
         try:
-            return quit_check(lambda: key("q"), "renamed", ["beta", "Unsaved changes", "alpha"])
+            return quit_check(lambda: key("q"), "wedged", WANT, 30)
         finally:
-            fixtures.tmux_rename(old + "-renamed", old)
+            fixtures.resume(pid)
+            R.log(f"tmux server {pid} resumed (SIGCONT)")
     if fixtures.TMUX:
-        R.run("quit-prompt-probe-error", lambda: renamed_check() if ready else ("FAIL", "setup failed"))
+        R.run("quit-prompt-probe-timeout", lambda: wedged_check() if ready else ("FAIL", "setup failed"))
 
     def restore():
         subprocess.run(["pkill", "-x", "sleep"])

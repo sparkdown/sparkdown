@@ -115,7 +115,7 @@ def run(R, D):
             return "FAIL", f"could not start the {D.job_name} job in beta's terminal"
         return quit_and_check("quit", 0)
 
-    def quit_and_check(tag, bg_wait, want=None):
+    def quit_and_check(tag, bg_wait, want=None, dlg_wait=12):
         if bg_wait:
             # Paulo's case: A focused, B (running job) left in the background
             # long enough for webview throttling, then quit from A.
@@ -133,11 +133,11 @@ def run(R, D):
             R.log(f"[{tag}] stray prompt from the previous check, cancelling: {d}")
             D.cancel_dialog(d)
         wait_for(lambda: not D.dialogs(), 8)
-        if fixtures.TMUX:
+        if fixtures.TMUX and tag != "wedged":
             fixtures.tmux_diag(R.log, tag)
         before = D.windows()
         D.quit_keys("alpha" + SUF)
-        ds = wait_for(D.dialogs, 12)
+        ds = wait_for(D.dialogs, dlg_wait)
         D.shot("quit-prompt")
         R.log("dialogs:", ds)
         if not ds:
@@ -150,7 +150,7 @@ def run(R, D):
         missing = None
         if d.get("text") is not None:
             want = want or ["still running", D.job_name, "beta", "Unsaved changes", "alpha"]
-            missing = [x for x in want if x.lower() not in d["text"].lower()]
+            missing = [x for x in want if x.lower() not in d["text"].replace("\u2019", "'").lower()]
         D.cancel_dialog(d)
         gone = wait_for(lambda: not D.dialogs(), 8)
         after = D.windows()
@@ -171,18 +171,22 @@ def run(R, D):
     R.run("quit-prompt", quit_prompt)
     R.run("quit-prompt-bg-occluded", lambda: quit_and_check("bgquit", int(os.environ.get("E2E_BG_WAIT", "45"))))
 
-    def renamed_check():
-        old = fixtures.tmux_busy_session()
-        if not old:
-            return "FAIL", "no tmux session with a running job found"
-        ok, err = fixtures.tmux_rename(old, old + "-renamed")
-        R.log(f"renamed {old} -> {old}-renamed: {ok} {err}")
+    def wedged_check():
+        """The job check can't finish: the tmux server is wedged (SIGSTOP),
+        so every tmux call hangs while B's job keeps running. The quit must
+        still prompt and say it couldn't check, not skip the prompt or hang."""
+        WANT = ["couldn't check", "Unsaved changes", "alpha"]
+        pid = fixtures.stop_tmux_server()
+        R.log(f"tmux server {pid} stopped (SIGSTOP)")
+        if not pid:
+            return "FAIL", "tmux server pid not found"
         try:
-            return quit_and_check("renamed", 0, ["beta", "Unsaved changes", "alpha"])
+            return quit_and_check("wedged", 0, WANT, 30)
         finally:
-            fixtures.tmux_rename(old + "-renamed", old)
+            fixtures.resume(pid)
+            R.log(f"tmux server {pid} resumed (SIGCONT)")
     if fixtures.TMUX:
-        R.run("quit-prompt-probe-error", renamed_check)
+        R.run("quit-prompt-probe-timeout", wedged_check)
 
     if D.wd is not None:
         R.run("webview-content", lambda: D.webview_check("alpha" + SUF, "alpha", EDIT))
