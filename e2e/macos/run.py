@@ -214,19 +214,28 @@ def close_window(title):
 def launch(*args):
     """Start the app the way Finder / the Dock does: through LaunchServices
     (`open`), so it gets launchd's environment (minimal PATH, no shell
-    profile, no Homebrew), not this harness's."""
+    profile, no Homebrew), not this harness's. If LaunchServices won't start
+    it, run the binary with launchd's minimal environment instead (logged)."""
     logf = str(R.out / "app.log")
-    cmd = ["open", "-a", str(APP), "--stdout", logf, "--stderr", logf]
+    cmd = ["open", "-a", str(APP.resolve()), "--stdout", logf, "--stderr", logf]
     if args:
         cmd += ["--args", *args]
-    subprocess.run(cmd, check=False, timeout=30)
-    time.sleep(2)
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    R.log(f"open rc={p.returncode} {p.stdout.strip()[:200]} {p.stderr.strip()[:300]}")
+    how = "open (LaunchServices)"
+    if not wait_for(lambda: procs() >= 1, 15):
+        env = {"PATH": fixtures.LAUNCHD_PATH, "HOME": os.environ["HOME"], "USER": os.environ.get("USER", ""),
+               "SHELL": os.environ.get("SHELL", "/bin/zsh"), "TMPDIR": os.environ.get("TMPDIR", "/tmp/")}
+        subprocess.Popen([BIN, *args], stdout=open(logf, "a"), stderr=subprocess.STDOUT, env=env,
+                         start_new_session=True)
+        how = "direct exec with launchd's minimal env (open didn't start it)"
+        wait_for(lambda: procs() >= 1, 15)
     pid = subprocess.run(["pgrep", "-x", "sparkdown"], capture_output=True, text=True).stdout.split()
+    path = "PATH=<not visible>"
     if pid:
         env = subprocess.run(["ps", "eww", "-o", "command=", "-p", pid[0]], capture_output=True, text=True).stdout
-        path = next((w for w in env.split() if w.startswith("PATH=")), "PATH=<not visible>")
-        R.log(f"launched via open: pid={pid[0]} {path}")
-
+        path = next((w for w in env.split() if w.startswith("PATH=")), path)
+    R.log(f"launched via {how}: pid={pid} {path}")
 
 def cli(path):
     subprocess.run([BIN, path], timeout=30, capture_output=True)
