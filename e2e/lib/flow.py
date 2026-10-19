@@ -188,6 +188,20 @@ def run(R, D):
     if fixtures.TMUX:
         R.run("quit-prompt-probe-timeout", wedged_check)
 
+    def flap_check():
+        """B's tmux session vanishes for ~0.7 s (a transient tmux failure)
+        while `sleep` runs in it, then is back. B's tab must survive, and the
+        quit prompt must still list the sleep."""
+        name = fixtures.tmux_busy_session()
+        if not name:
+            return "FAIL", "no tmux session with a running job found"
+        ok, err = fixtures.flap_session(name)
+        R.log(f"flapped {name} for 0.7 s: {ok} {err}")
+        time.sleep(3)
+        return quit_and_check("flap", 0)
+    if fixtures.TMUX:
+        R.run("tmux-transient-failure", flap_check)
+
     if D.wd is not None:
         R.run("webview-content", lambda: D.webview_check("alpha" + SUF, "alpha", EDIT))
 

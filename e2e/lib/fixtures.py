@@ -1,6 +1,7 @@
 """Test folders and an isolated app config for one E2E run."""
 import json
 import os
+import time
 import pathlib
 import subprocess
 import sys
@@ -139,3 +140,14 @@ def resume(pid):
     import signal
     if pid:
         os.kill(pid, signal.SIGCONT)
+
+
+def flap_session(name, secs=0.7):
+    """Transient tmux failure: the session's name stops resolving for ~2
+    polls of the app's 300 ms watchdog, then comes back. The pane and its
+    job never stop."""
+    tmp = name + "-flap"
+    ok1, e1 = tmux_rename(name, tmp)
+    time.sleep(secs)
+    ok2, e2 = tmux_rename(tmp, name)
+    return ok1 and ok2, f"{e1} {e2}".strip()
