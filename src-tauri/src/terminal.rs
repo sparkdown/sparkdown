@@ -1246,18 +1246,19 @@ fn tmux_job_state(session: &str) -> JobState {
             "-p",
             "-t",
             target.as_str(),
-            "#{pane_pid}",
+            "#{session_name} #{pane_pid}",
         ],
         &std::env::temp_dir(),
         PROBE_TIMEOUT,
     )
     .map_err(|_| format!("tmux did not answer within {} s", PROBE_TIMEOUT.as_secs()));
-    tmux_state_from(out, pgid_and_tty_foreground, process_name)
+    tmux_state_from(session, out, pgid_and_tty_foreground, process_name)
 }
 
 /// [`tmux_job_state`] with its helpers injected, so the error and timeout
 /// paths are unit-tested (#99). `display` is tmux's (ok, stdout, stderr).
 pub(crate) fn tmux_state_from(
+    session: &str,
     display: Result<(bool, String, String), String>,
     pgrps: impl Fn(u32) -> Result<(i32, i32), String>,
     name: impl Fn(u32) -> Option<String>,
@@ -1274,8 +1275,16 @@ pub(crate) fn tmux_state_from(
             format!("tmux: {why}")
         });
     }
-    let Ok(pane_pid) = stdout.trim().parse::<u32>() else {
-        return JobState::Unknown(format!("tmux: unexpected pane pid {:?}", stdout.trim()));
+    // Some tmux versions answer a target that no longer resolves (session
+    // renamed or gone) with empty output, others with ANOTHER session's
+    // pane. Only an answer for this very session counts (#99).
+    let line = stdout.trim();
+    let (got, pid) = line.rsplit_once(' ').unwrap_or(("", line));
+    if got != session {
+        return JobState::Unknown(format!("tmux session {session} not found"));
+    }
+    let Ok(pane_pid) = pid.parse::<u32>() else {
+        return JobState::Unknown(format!("tmux: unexpected pane pid {pid:?}"));
     };
     let (pgid, tpgid) = match pgrps(pane_pid) {
         Ok(v) => v,
@@ -1461,28 +1470,34 @@ mod tests {
         let name = |_: u32| Some("sleep".to_string());
         // tmux timed out
         assert!(matches!(
-            tmux_state_from(Err("tmux did not answer within 3 s".into()), never, name),
+            tmux_state_from("sd-x", Err("tmux did not answer within 3 s".into()), never, name),
             JobState::Unknown(w) if w.contains("did not answer")
         ));
         // tmux failed (session renamed / gone, server mismatch)
         assert!(matches!(
-            tmux_state_from(Ok((false, String::new(), "can't find session: =sd-x\n".into())), never, name),
+            tmux_state_from("sd-x", Ok((false, String::new(), "can't find session: =sd-x\n".into())), never, name),
             JobState::Unknown(w) if w.contains("can't find session")
         ));
         // unparsable pane pid
         assert!(matches!(
-            tmux_state_from(Ok((true, "\n".into(), String::new())), never, name),
+            tmux_state_from("sd-x", Ok((true, "\n".into(), String::new())), never, name),
             JobState::Unknown(_)
         ));
         // ps / proc failed
         assert!(matches!(
-            tmux_state_from(Ok((true, "42\n".into(), String::new())), |_| Err("ps did not answer".into()), name),
+            tmux_state_from("sd-x", Ok((true, "sd-x 42\n".into(), String::new())), |_| Err("ps did not answer".into()), name),
             JobState::Unknown(w) if w.contains("ps")
+        ));
+        // tmux answered for a DIFFERENT session (target fell back)
+        assert!(matches!(
+            tmux_state_from("sd-x", Ok((true, "other 7\n".into(), String::new())), never, name),
+            JobState::Unknown(w) if w.contains("not found")
         ));
         // healthy: busy and idle still work
         assert_eq!(
             tmux_state_from(
-                Ok((true, "42\n".into(), String::new())),
+                "sd-x",
+                Ok((true, "sd-x 42\n".into(), String::new())),
                 |_| Ok((42, 77)),
                 name
             ),
@@ -1490,7 +1505,8 @@ mod tests {
         );
         assert_eq!(
             tmux_state_from(
-                Ok((true, "42\n".into(), String::new())),
+                "sd-x",
+                Ok((true, "sd-x 42\n".into(), String::new())),
                 |_| Ok((42, 42)),
                 name
             ),
