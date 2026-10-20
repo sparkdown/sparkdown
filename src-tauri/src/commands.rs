@@ -350,11 +350,51 @@ fn set_clipboard_text(text: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// #130: one long-lived arboard handle. On X11 the owner of a selection has
+/// to stay alive to serve it, so the handle is kept for the app's lifetime.
 #[cfg(not(target_os = "macos"))]
-fn set_clipboard_text(_text: &str) -> Result<(), AppError> {
-    Err(AppError::Other(
-        "clipboard not supported on this platform".into(),
-    ))
+fn with_clipboard<T>(
+    f: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboard::Error>,
+) -> Result<T, AppError> {
+    use std::sync::Mutex;
+    static CLIP: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
+    let mut g = CLIP.lock().unwrap_or_else(|e| e.into_inner());
+    if g.is_none() {
+        *g = Some(
+            arboard::Clipboard::new().map_err(|e| AppError::Other(format!("clipboard: {e}")))?,
+        );
+    }
+    let clip = g.as_mut().expect("clipboard set above");
+    f(clip).map_err(|e| AppError::Other(format!("clipboard: {e}")))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_clipboard_text(text: &str) -> Result<(), AppError> {
+    with_clipboard(|c| c.set_text(text.to_string()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn get_clipboard_text() -> Result<String, AppError> {
+    match with_clipboard(|c| c.get_text()) {
+        Ok(t) => Ok(t),
+        // Empty or non-text clipboard: nothing to paste (the terminal then
+        // sends ^V for Ctrl+V).
+        Err(_) => Ok(String::new()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn get_clipboard_text() -> Result<String, AppError> {
+    let out = crate::proc::command("pbpaste").output()?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// #130: read the system clipboard's text for a terminal paste ("" if none).
+#[tauri::command]
+pub async fn read_clipboard_text() -> Result<String, AppError> {
+    tauri::async_runtime::spawn_blocking(get_clipboard_text)
+        .await
+        .map_err(|e| AppError::Other(format!("clipboard task failed: {e}")))?
 }
 
 /// Write content to a file. Validates the path and enforces a per-path rate

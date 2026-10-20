@@ -169,7 +169,7 @@ export class TerminalPane {
       if (action === 'paste-or-ctrl-v') {
         e.preventDefault();
         void pasteOrCtrlV(
-          () => navigator.clipboard?.readText() ?? Promise.resolve(''),
+          () => api.readClipboardText(),
           (data) => {
             if (this.started) void api.terminalWrite(this.id, data);
           },
@@ -177,8 +177,11 @@ export class TerminalPane {
         return false;
       }
       if (action === 'paste') {
-        void navigator.clipboard
-          ?.readText()
+        // Read through the core: WebKitGTK's navigator.clipboard can't read
+        // without a user gesture (#130). preventDefault: no second, native paste.
+        e.preventDefault();
+        void api
+          .readClipboardText()
           .then((text) => {
             if (text && this.started) void api.terminalWrite(this.id, text);
           })

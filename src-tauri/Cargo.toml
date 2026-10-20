@@ -46,6 +46,11 @@ tauri-plugin-single-instance = "2"
 # windows-sys + widestring (both already in the tree via interprocess, same
 # versions) build the pipe's per-user security descriptor: the current
 # user's SID from the process token, as SDDL.
+# #130: system clipboard for the terminal on Linux / Windows (WebKitGTK's
+# navigator.clipboard can't read it without a user gesture).
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
+
 [target.'cfg(windows)'.dependencies]
 interprocess = "2"
 widestring = "1"

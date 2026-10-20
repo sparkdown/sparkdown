@@ -92,6 +92,8 @@ export const api = {
   appendCrashLog: (entry: string) =>
     invoke<void>("append_crash_log", { entry }),
   copyText: (text: string) => invoke<void>("copy_text", { text }),
+  /** #130: the system clipboard via the core (WebKitGTK can't read it). */
+  readClipboardText: () => invoke<string>("read_clipboard_text"),
   copyFile: (path: string) => invoke<void>("copy_file", { path }),
   listDirectory: (path: string, includeHidden = false) =>
     invoke<FileEntry[]>("list_directory", { path, includeHidden }),
