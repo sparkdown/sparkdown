@@ -226,8 +226,9 @@
     .dl-grid h3 { font: 600 1.05rem var(--sans); margin-bottom: 6px; }
     .dl-grid p { font-size: 16px; color: var(--ink-2); }
     .dl-grid p + p { margin-top: 6px; }
+    .hero .brew { margin-top: 14px; font-size: 16px; color: var(--ink-2); }
     #download .cta { margin-left: var(--gutter); margin-top: 32px; }
-    .dl-grid .copy { font: .78em var(--sans); color: var(--ink-2); background: none; border: 1px solid var(--rule); border-radius: 4px; padding: .05em .5em; cursor: pointer; }
+    .copy { font: .78em var(--sans); color: var(--ink-2); background: none; border: 1px solid var(--rule); border-radius: 4px; padding: .05em .5em; cursor: pointer; }
 
     footer.doc { margin-top: 128px; padding-top: 28px; padding-bottom: 56px; border-top: 1px solid var(--rule); }
     footer .line { font-size: 15px; color: var(--muted); }
@@ -280,7 +281,9 @@
         </a>
         <a class="alt" href="https://github.com/sparkdown/sparkdown">Source on GitHub</a>
       </div>
+      <p class="brew line">On a Mac with Homebrew: <code id="brew-cmd">brew install --cask sparkdown/tap/sparkdown</code> <button type="button" class="copy" data-umami-event="copy-brew" onclick="var t=document.getElementById('brew-cmd').textContent,b=this,d=function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy'},1500)};if(navigator.clipboard){navigator.clipboard.writeText(t).then(d)}else{var r=document.createRange();r.selectNodeContents(document.getElementById('brew-cmd'));var x=getSelection();x.removeAllRanges();x.addRange(r);document.execCommand('copy');x.removeAllRanges();d()}">Copy</button></p>
       <p class="facts line">For macOS on Apple Silicon, Windows and Linux. 3.9 MB installed on Mac. Free and open source (MIT).</p>
+      <p class="facts line"><b>New in 0.4.0:</b> one window per folder. Work on several projects side by side in one app.</p>
     </div>
 
     <figure class="demo-fig">
@@ -350,6 +353,7 @@
         <li><b>Markdown that reads like a document.</b> <span>Live preview with Mermaid diagrams, math, tables and code highlighting. Each tab has its own view: Edit, Split, Preview or Diff (<kbd>⌘1</kbd>–<kbd>⌘4</kbd>).</span></li>
         <li><b>Your agent can read the editor.</b> <span>A built-in MCP server lets agents in SparkDown's terminals see your open files, the line you are on, your selection and the git changes. Its one write tool edits the unsaved buffer, so you still review and save.</span></li>
         <li><b>Remote folders over SSH.</b> <span>Pick a host from <code>~/.ssh/config</code>. Files, Changes and terminals all work on the remote folder, with your own keys.</span></li>
+        <li><b>One window per folder.</b> <span>Opening a folder that is already open focuses its window. Each window keeps its own tabs, terminals and agent tools, and agents in a window's terminal see only that folder. Every window comes back when you relaunch. <kbd>⌘⇧N</kbd> (<kbd>Ctrl+Shift+N</kbd> on Windows and Linux) opens an empty window.</span></li>
         <li><b>Keyboard first.</b> <span><kbd>⌘P</kbd> finds a file, <kbd>⌘⇧P</kbd> runs any command, and the status bar keeps your word, character and line counts in view.</span></li>
         <li><b>Small and native.</b> <span>3.9 MB installed on Mac. It uses the system web view instead of a bundled browser, and updates itself with signed releases.</span></li>
       </ul>
@@ -388,7 +392,6 @@
           <h3>macOS</h3>
           <p>Apple Silicon, macOS 10.15 or later. 3.9 MB installed.</p>
           <p>Not notarized yet: on first launch, right-click the app and choose Open.</p>
-          <p>Or with Homebrew: <code id="brew-cmd">brew install --cask sparkdown/tap/sparkdown</code> <button type="button" class="copy" data-umami-event="copy-brew" onclick="var t=document.getElementById('brew-cmd').textContent,b=this,d=function(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy'},1500)};if(navigator.clipboard){navigator.clipboard.writeText(t).then(d)}else{var r=document.createRange();r.selectNodeContents(document.getElementById('brew-cmd'));var x=getSelection();x.removeAllRanges();x.addRange(r);document.execCommand('copy');x.removeAllRanges();d()}">Copy</button></p>
         </div>
         <div>
           <h3>Windows</h3>
