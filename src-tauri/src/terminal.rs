@@ -1402,7 +1402,11 @@ impl BusyProbe {
         };
         #[cfg(unix)]
         {
-            pty_job_state(shell, self.fg_pgrp, process_name)
+            with_nested(
+                pty_job_state(shell, self.fg_pgrp, process_name),
+                &[shell],
+                process_table,
+            )
         }
         #[cfg(windows)]
         {
@@ -1528,7 +1532,147 @@ fn tmux_job_state(session: &str) -> JobState {
         PROBE_TIMEOUT,
     )
     .map_err(|_| format!("tmux did not answer within {} s", PROBE_TIMEOUT.as_secs()));
-    tmux_state_from(session, out, pgid_and_tty_foreground, process_name)
+    let panes = out
+        .as_ref()
+        .ok()
+        .and_then(|(ok, o, _)| ok.then(|| parse_session_panes(session, o)).flatten())
+        .unwrap_or_default();
+    let state = tmux_state_from(session, out, pgid_and_tty_foreground, process_name);
+    with_nested(state, &panes, process_table)
+}
+
+/// #110: a pane can wrap its shell in a nested pty (kiro-cli-term,
+/// script(1), a python pty wrapper). The pane's own tty then reads idle
+/// while the inner shell's tty has a foreground job. When the pane-tty
+/// check says Idle, walk each pane's descendants (one bounded `ps`) and
+/// check every nested tty too. A failed `ps` is "couldn't check".
+pub(crate) fn with_nested(
+    state: JobState,
+    roots: &[u32],
+    table: impl FnOnce() -> Result<Vec<PsRow>, String>,
+) -> JobState {
+    if state != JobState::Idle || roots.is_empty() {
+        return state;
+    }
+    match table() {
+        Err(e) => JobState::Unknown(e),
+        Ok(rows) => roots
+            .iter()
+            .find_map(|r| nested_foreground(*r, &rows))
+            .map(JobState::Busy)
+            .unwrap_or(JobState::Idle),
+    }
+}
+
+/// One `ps` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PsRow {
+    pub pid: u32,
+    pub ppid: u32,
+    pub pgid: i32,
+    pub tpgid: i32,
+    pub tty: String,
+    pub comm: String,
+}
+
+/// `ps -A -o pid=,ppid=,pgid=,tpgid=,tty=,comm=` → rows (comm may hold
+/// spaces: it is the rest of the line).
+pub(crate) fn parse_ps_table(text: &str) -> Vec<PsRow> {
+    text.lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let pid = it.next()?.parse().ok()?;
+            let ppid = it.next()?.parse().ok()?;
+            let pgid = it.next()?.parse().ok()?;
+            let tpgid = it.next()?.parse().ok()?;
+            let tty = it.next()?.to_string();
+            let comm = it.collect::<Vec<_>>().join(" ");
+            Some(PsRow {
+                pid,
+                ppid,
+                pgid,
+                tpgid,
+                tty,
+                comm,
+            })
+        })
+        .collect()
+}
+
+fn no_tty(t: &str) -> bool {
+    matches!(t, "?" | "??" | "-" | "")
+}
+
+/// The foreground job on a nested tty under `root`, as a short command
+/// name, or None. For each distinct controlling tty among `root` and its
+/// descendants, the shallowest process on it is that tty's shell; the tty
+/// is busy when its foreground group (tpgid) is neither that shell's pid
+/// nor its group. The deepest busy tty wins (the inner command, e.g.
+/// `sleep`, not the wrapper).
+pub(crate) fn nested_foreground(root: u32, rows: &[PsRow]) -> Option<String> {
+    let by_pid: HashMap<u32, &PsRow> = rows.iter().map(|r| (r.pid, r)).collect();
+    by_pid.get(&root)?;
+    // BFS with depth over the parent links.
+    let mut depth: HashMap<u32, usize> = HashMap::from([(root, 0)]);
+    let mut queue = std::collections::VecDeque::from([root]);
+    while let Some(p) = queue.pop_front() {
+        let d = depth[&p];
+        for c in rows.iter().filter(|r| r.ppid == p && r.pid != p) {
+            if let std::collections::hash_map::Entry::Vacant(e) = depth.entry(c.pid) {
+                e.insert(d + 1);
+                queue.push_back(c.pid);
+            }
+        }
+    }
+    // tty → (depth, leader)
+    let mut leaders: HashMap<&str, (usize, &PsRow)> = HashMap::new();
+    for (pid, d) in &depth {
+        let r = by_pid[pid];
+        if no_tty(&r.tty) {
+            continue;
+        }
+        let e = leaders.entry(r.tty.as_str()).or_insert((*d, r));
+        if *d < e.0 || (*d == e.0 && r.pid < e.1.pid) {
+            *e = (*d, r);
+        }
+    }
+    let mut busy: Vec<(usize, &PsRow)> = leaders
+        .into_values()
+        .filter(|(_, l)| l.tpgid > 0 && l.tpgid as u32 != l.pid && l.tpgid != l.pgid)
+        .collect();
+    busy.sort_by_key(|x| std::cmp::Reverse(x.0));
+    let (_, l) = busy.first()?;
+    let fg = rows
+        .iter()
+        .find(|r| r.pid == l.tpgid as u32)
+        .or_else(|| rows.iter().find(|r| r.pgid == l.tpgid));
+    let name = fg
+        .map(|r| {
+            r.comm
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&r.comm)
+                .trim()
+                .to_string()
+        })
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "A program".into());
+    Some(name.trim_start_matches('-').to_string())
+}
+
+/// The process table, one bounded `ps`.
+fn process_table() -> Result<Vec<PsRow>, String> {
+    let out = crate::mcp::run_with_timeout(
+        "ps",
+        &["-A", "-o", "pid=,ppid=,pgid=,tpgid=,tty=,comm="],
+        &std::env::temp_dir(),
+        PROBE_TIMEOUT,
+    )
+    .map_err(|_| format!("ps did not answer within {} s", PROBE_TIMEOUT.as_secs()))?;
+    if !out.0 {
+        return Err(format!("ps failed: {}", out.2.trim()));
+    }
+    Ok(parse_ps_table(&out.1))
 }
 
 /// `list-panes -F "#{session_name} #{pane_pid}"` output → the pane pids of
@@ -1706,6 +1850,186 @@ fn fallback_shell() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use crate::terminal::*;
+
+    fn row(pid: u32, ppid: u32, pgid: i32, tpgid: i32, tty: &str, comm: &str) -> super::PsRow {
+        super::PsRow {
+            pid,
+            ppid,
+            pgid,
+            tpgid,
+            tty: tty.into(),
+            comm: comm.into(),
+        }
+    }
+
+    /// Paulo's Mac (#110): kiro-cli-term wraps the pane's zsh 6406
+    /// (ttys017, idle) around an inner /bin/zsh 6422 on ttys018 whose
+    /// foreground job is sleep 11561.
+    fn kiro() -> Vec<super::PsRow> {
+        vec![
+            row(1, 0, 1, -1, "??", "/sbin/launchd"),
+            row(6406, 6400, 6406, 6406, "ttys017", "-zsh"),
+            row(
+                6410,
+                6406,
+                6410,
+                6406,
+                "ttys017",
+                "/Users/p/.local/bin/kiro-cli-term",
+            ),
+            row(6422, 6410, 6422, 11561, "ttys018", "/bin/zsh"),
+            row(11561, 6422, 11561, 11561, "ttys018", "sleep"),
+            row(7000, 1, 7000, 7000, "ttys020", "sleep"), // unrelated
+        ]
+    }
+
+    #[test]
+    fn nested_pty_job_is_busy_with_the_inner_command() {
+        assert_eq!(
+            super::nested_foreground(6406, &kiro()).as_deref(),
+            Some("sleep")
+        );
+        assert_eq!(
+            super::with_nested(JobState::Idle, &[6406], || Ok(kiro())),
+            JobState::Busy("sleep".into())
+        );
+    }
+
+    #[test]
+    fn nested_pty_idle_inner_shell_is_idle() {
+        let mut t = kiro();
+        t.retain(|r| r.pid != 11561);
+        t.iter_mut().find(|r| r.pid == 6422).unwrap().tpgid = 6422;
+        assert_eq!(super::nested_foreground(6406, &t), None);
+        assert_eq!(
+            super::with_nested(JobState::Idle, &[6406], || Ok(t)),
+            JobState::Idle
+        );
+    }
+
+    #[test]
+    fn nested_check_keeps_couldnt_check_and_busy() {
+        assert_eq!(
+            super::with_nested(JobState::Idle, &[6406], || Err(
+                "ps did not answer within 3 s".into()
+            )),
+            JobState::Unknown("ps did not answer within 3 s".into())
+        );
+        let u = JobState::Unknown("tmux did not answer".into());
+        assert_eq!(
+            super::with_nested(u.clone(), &[6406], || panic!("not asked")),
+            u
+        );
+        let b = JobState::Busy("vim".into());
+        assert_eq!(
+            super::with_nested(b.clone(), &[6406], || panic!("not asked")),
+            b
+        );
+    }
+
+    #[test]
+    fn nested_check_covers_every_pane() {
+        let mut t = kiro();
+        t.push(row(500, 1, 500, 500, "ttys030", "-zsh")); // idle first pane
+        assert_eq!(
+            super::with_nested(JobState::Idle, &[500, 6406], || Ok(t)),
+            JobState::Busy("sleep".into())
+        );
+    }
+
+    #[test]
+    fn plain_pane_job_still_found_and_unrelated_ttys_ignored() {
+        let t = vec![
+            row(10, 1, 10, 12, "pts/1", "bash"),
+            row(12, 10, 12, 12, "pts/1", "vim"),
+        ];
+        assert_eq!(super::nested_foreground(10, &t).as_deref(), Some("vim"));
+        // pane 6406's tree doesn't include pid 7000 on ttys020.
+        let mut k = kiro();
+        k.retain(|r| r.pid != 11561 && r.pid != 6422);
+        assert_eq!(super::nested_foreground(6406, &k), None);
+        assert_eq!(
+            super::nested_foreground(999, &k),
+            None,
+            "pane not in the table"
+        );
+    }
+
+    #[test]
+    fn ps_table_parses_macos_and_linux_rows() {
+        let mac = "  6406  6400  6406  6406 ttys017  -zsh\n 6410 6406 6410 6406 ttys017  /Applications/Kiro CLI.app/kiro-cli-term\n    1     0     1     0 ??       /sbin/launchd\n";
+        let r = super::parse_ps_table(mac);
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[1].comm, "/Applications/Kiro CLI.app/kiro-cli-term");
+        let linux = " 674471  674469  674471  674472 pts/0    bash\n";
+        assert_eq!(super::parse_ps_table(linux)[0].tpgid, 674472);
+    }
+
+    /// Live: a python pty wrapper inside a tmux pane (#110), like
+    /// kiro-cli-term. The pane's own tty stays idle; the inner tty runs sleep.
+    #[test]
+    #[cfg(unix)]
+    fn live_nested_pty_wrapper_in_tmux_pane() {
+        let Some(tmux) = tmux_path() else { return };
+        if crate::proc::command("python3").arg("-V").output().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("sd-nested-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wrap = dir.join("wrap.py");
+        std::fs::write(&wrap, "import pty,os,sys\npid,fd=pty.fork()\nif pid==0:\n    os.execvp('bash',['bash','--norc','--noprofile','-ic',sys.argv[1]+'; true'])\nwhile True:\n    try:\n        if not os.read(fd,4096): break\n    except OSError: break\nos.waitpid(pid,0)\n").unwrap();
+        let sock = dir.join("tmux.sock");
+        let session = format!("sd-nested-{}", std::process::id());
+        let t = |args: &[&str]| {
+            crate::proc::command(&tmux)
+                .arg("-S")
+                .arg(&sock)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        assert!(t(&[
+            "new-session",
+            "-d",
+            "-s",
+            &session,
+            "bash --norc --noprofile -i"
+        ])
+        .status
+        .success());
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let cmd = format!("python3 {} 'sleep 301' >/dev/null 2>&1 &", wrap.display());
+        t(&["send-keys", "-t", &format!("={session}:"), &cmd, "Enter"]);
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        let out = t(&[
+            "list-panes",
+            "-s",
+            "-t",
+            &format!("={session}"),
+            "-F",
+            "#{session_name} #{pane_pid}",
+        ]);
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let panes = parse_session_panes(&session, &stdout).unwrap();
+        let old = tmux_state_from(
+            &session,
+            Ok((true, stdout.clone(), String::new())),
+            pgid_and_tty_foreground,
+            process_name,
+        );
+        let new = with_nested(old.clone(), &panes, process_table);
+        t(&["kill-server"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            old,
+            JobState::Idle,
+            "the pane's own tty reads idle (the bug's precondition)"
+        );
+        assert_eq!(new, JobState::Busy("sleep".into()));
+    }
+
     #[test]
     fn window_sessions_outlive_terminal_ids() {
         let mut w = super::WindowSessions::default();
