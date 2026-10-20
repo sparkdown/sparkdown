@@ -5,7 +5,8 @@ import {
   summarizeDiff,
   type OpenHow,
 } from '../changes-view';
-import { api, type GitChange } from '../api';
+import { api, type GitBranchStatus, type GitChange } from '../api';
+import { GitActions } from '../git-actions';
 import type { Command } from '../commands';
 import { EVENTS } from '../event-names';
 import { effectiveView } from '../view-mode';
@@ -62,6 +63,8 @@ const isDiff = (tab: Tab | null | undefined): boolean =>
  */
 export class DiffController {
   private changesView: ChangesView | null = null;
+  /** Commit / Pull / Push above the Changes list (#122). */
+  private gitActions: GitActions | null = null;
   private changesMode = false; // the sidebar is showing the Changes view
   // Diff pane: "reading" (meat-abridged) vs full verbatim. Reading by default,
   // matching the meat philosophy; the header control flips it (sticky across
@@ -133,6 +136,28 @@ export class DiffController {
       },
     );
     $('btn-changes-refresh')?.addEventListener('click', () => void this.changesView?.refresh());
+    const gitRoot = $('changes-git');
+    if (gitRoot) {
+      this.gitActions = new GitActions(
+        {
+          root: gitRoot,
+          message: $('changes-commit-msg') as HTMLTextAreaElement,
+          commit: $('btn-git-commit') as HTMLButtonElement,
+          pull: $('btn-git-pull') as HTMLButtonElement,
+          push: $('btn-git-push') as HTMLButtonElement,
+          sync: $('changes-git-branch') as HTMLElement,
+          files: $('changes-git-files') as HTMLElement,
+          status: $('changes-git-status') as HTMLElement,
+        },
+        {
+          repoRoot: () => this.changesView?.getRepoRoot() ?? null,
+          refresh: async () => {
+            await this.changesView?.refresh();
+            await this.refreshBranch();
+          },
+        },
+      );
+    }
     this.dom.reading?.addEventListener('click', () => this.setDiffReading(true));
     this.dom.full?.addEventListener('click', () => this.setDiffReading(false));
     this.dom.prev?.addEventListener('click', () => this.stepFile(-1));
@@ -420,6 +445,7 @@ export class DiffController {
    * tree for inline markers. (The badge counts pending files: onPending.)
    */
   private applyGitStatus(changes: GitChange[]): void {
+    this.gitActions?.setChanges(changes);
     const letter: Record<GitChange['status'], string> = {
       modified: 'M',
       added: 'A',
@@ -444,8 +470,13 @@ export class DiffController {
     if (this.changesView?.getRepoRoot()) this.debouncedBranch();
     else {
       this.branchRepo = null;
-      this.ctx.statusbar.setBranch(null);
+      this.setBranch(null);
     }
+  }
+
+  private setBranch(status: GitBranchStatus | null): void {
+    this.ctx.statusbar.setBranch(status);
+    this.gitActions?.setBranch(status);
   }
 
   /** Ask git for the branch and ahead/behind of the current repo. */
@@ -453,15 +484,15 @@ export class DiffController {
     const repo = this.changesView?.getRepoRoot() ?? null;
     this.branchRepo = repo;
     if (!repo) {
-      this.ctx.statusbar.setBranch(null);
+      this.setBranch(null);
       return;
     }
     try {
       const status = await api.gitBranchStatus(repo);
       if (this.branchRepo !== repo) return; // the repo moved on meanwhile
-      this.ctx.statusbar.setBranch(status);
+      this.setBranch(status);
     } catch {
-      if (this.branchRepo === repo) this.ctx.statusbar.setBranch(null);
+      if (this.branchRepo === repo) this.setBranch(null);
     }
   }
 

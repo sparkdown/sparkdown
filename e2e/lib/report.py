@@ -35,6 +35,7 @@ CHECKS = {
     "restore": "Clean quit + relaunch restores the open windows (a closed one stays closed)",
     "geometry-stable": "Two more quit + relaunch cycles: every window keeps the same size and position (#112)",
     "webview-content": "Web content (WebDriver): sidebar folder, editor text, unsaved marker",
+    "git-actions": "Changes view Commit / Pull / Push against a local bare remote: empty message blocked, commit, rejected push leaves the remote untouched, pull merges, push lands (#122)",
     "terminal-clipboard": "Linux terminal: Ctrl+V and Shift+Insert paste, Ctrl+C with no selection interrupts (#130)",
     "explorer-delete": "Explorer Delete… asks, then moves the file to the trash (#121)",
 }

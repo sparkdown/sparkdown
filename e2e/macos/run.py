@@ -807,6 +807,8 @@ def main():
         R.run("must-pass-3-relaunched", must_pass_3_relaunched)
 
     R.manual("manual-gatekeeper", "Gatekeeper first launch of the signed, notarized build", "CI builds are unsigned; see e2e/README.md")
+    R.manual("manual-git-signing-credentials", "Commit / Pull / Push with your real setup (#122): signed commit (gpg / ssh pinentry), Keychain / HTTPS credential helper, SSH agent key, and a locked key failing with the auth error instead of a prompt",
+             "needs the user's own keys, agent and credential helper; the Linux job covers the bare-remote flow")
     R.manual("manual-spaces", "Spaces / Mission Control / gestures / notifications", "not automatable on hosted runners")
     subprocess.run(["pkill", "-x", "sparkdown"])
     return R.write()

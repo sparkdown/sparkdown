@@ -8,6 +8,7 @@ mod context;
 mod file_index;
 mod fsio;
 mod git;
+mod git_write;
 mod lifecycle;
 #[cfg(target_os = "macos")]
 mod macos_quit;
@@ -591,6 +592,9 @@ fn main() {
             git::git_status,
             git::git_branch_status,
             git::git_diff_file,
+            git_write::git_commit,
+            git_write::git_pull,
+            git_write::git_push,
             review::git_change_stats,
             review::review_state_load,
             review::review_state_save,
