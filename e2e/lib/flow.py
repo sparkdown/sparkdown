@@ -265,7 +265,14 @@ def run(R, D):
     if D.wd is not None:
         R.run("webview-content", lambda: D.webview_check("alpha" + SUF, "alpha", EDIT))
     if D.wd is not None and hasattr(D, "terminal_clipboard"):
-        R.run("terminal-clipboard", lambda: D.terminal_clipboard("alpha" + SUF))
+        def terminal_clipboard():
+            try:
+                return D.terminal_clipboard("alpha" + SUF)
+            finally:
+                # The check stops every `sleep`; later checks expect beta's job.
+                if fixtures.TMUX:
+                    D.start_job("beta" + SUF)
+        R.run("terminal-clipboard", terminal_clipboard)
 
     def restore():
         D.kill_job()
