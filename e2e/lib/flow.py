@@ -378,6 +378,21 @@ def run(R, D):
         if ok and retried:
             return "PARTIAL", (f"sizes stable, but cycle(s) {retried} needed a second Ctrl+Q to quit; "
                                f"saved={cfg}; live={seen}")
-        return ("PASS" if ok else "FAIL"), f"saved after quit 1={cfg[0]} quit 2={cfg[1]}; live after relaunch 1={seen[0]} 2={seen[1]}"
+        detail = f"saved after quit 1={cfg[0]} quit 2={cfg[1]}; live after relaunch 1={seen[0]} 2={seen[1]}"
+        if ok:
+            return "PASS", detail
+
+        def sizes(d, live=False):
+            if d is None:
+                return None
+            if live:
+                return {k: tuple(v)[2:] if v else None for k, v in d.items()}
+            return {k: (v or {}).get("width") and ((v or {}).get("width"), (v or {}).get("height")) for k, v in d.items()}
+        # #112 is size creep. On a bare X server a window larger than the
+        # screen can be moved by the WM when it is raised: report a
+        # position-only change as PARTIAL, never as a size pass.
+        if sizes(cfg[0]) == sizes(cfg[1]) and sizes(seen[0], True) == sizes(seen[1], True):
+            return "PARTIAL", "sizes identical across both relaunches; only the position moved (WM placement). " + detail
+        return "FAIL", detail
     R.run("geometry-stable", geometry_stable)
     D.stop()
