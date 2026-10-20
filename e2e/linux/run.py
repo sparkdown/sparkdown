@@ -549,6 +549,8 @@ def main():
         R.manual("manual-omarchy", "Real Omarchy config (keybindings, Waybar, walker) and a real GPU",
                  "container runs stock Hyprland on a virtual display with software rendering")
     else:
+        R.manual("manual-git-signing-credentials", "Commit / Pull / Push with your real setup (#122): signed commit (gpg / ssh pinentry), HTTPS credential helper, SSH agent key, and a locked key failing with the auth error instead of a prompt",
+                 "needs the user's own keys, agent and credential helper; CI covers the bare-remote flow and typed errors")
         R.manual("manual-linux-dialog", "Quit prompt look on a real GTK desktop", "CI reads its text over AT-SPI where available; theme and layout are only in the screenshot")
     return R.write()
 

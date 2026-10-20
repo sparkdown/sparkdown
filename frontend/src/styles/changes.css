@@ -537,3 +537,45 @@
 .change-row-folder:hover {
   background: transparent;
 }
+
+/* --- Commit / Pull / Push (#122) ----------------------------------------- */
+.changes-git {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 14px 10px;
+  border-bottom: 1px solid var(--border-light);
+  font-size: 12px;
+}
+.changes-git[hidden] { display: none; }
+.changes-git-sync { display: flex; align-items: center; gap: 6px; }
+.changes-git-branch { flex: 1; min-width: 0; display: flex; gap: 6px; overflow: hidden; white-space: nowrap; }
+.changes-git-branch .git-branch { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.changes-git-branch .git-ab { color: var(--text-subtle); }
+.changes-git-btn {
+  font: inherit;
+  padding: 3px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.changes-git-btn:disabled { opacity: 0.5; cursor: default; }
+.changes-git-commit { background: var(--accent); border-color: var(--accent); color: #fff; }
+.changes-commit-msg {
+  font: inherit;
+  resize: vertical;
+  min-height: 34px;
+  padding: 5px 7px;
+  border: 1px solid var(--border-light);
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+}
+.git-files summary { cursor: pointer; color: var(--text-subtle); }
+.git-file { display: flex; gap: 6px; align-items: center; padding: 1px 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.changes-git-status { line-height: 1.5; word-break: break-word; }
+.changes-git-status[data-tone='error'] { color: var(--danger, #d9534f); }
+.changes-git-status[data-tone='ok'] { color: var(--text-subtle); }
+.changes-git-status pre { white-space: pre-wrap; font-size: 11px; max-height: 160px; overflow: auto; margin: 4px 0 0; }

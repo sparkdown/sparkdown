@@ -5,7 +5,8 @@
 //! since the last commit. We shell out to the user's `git` (already on PATH for
 //! anyone using coding agents) rather than linking a git library — it keeps the
 //! binary tiny and always matches the repo's real git behavior. Read-only:
-//! `status` and `diff` only; SparkDown never mutates the repo.
+//! `status` and `diff` only. The only writes (commit / pull / push, on a
+//! click) live in `git_write.rs`, with their own runner.
 
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -46,7 +47,7 @@ pub struct GitStatus {
 /// PATH (macOS GUI apps inherit launchd's minimal PATH, so a bare `git` would
 /// miss Homebrew/Nix installs and pop the Xcode CLT installer). Falls back to
 /// the bare name so a PATH-based lookup still happens if resolution fails.
-fn git_bin() -> PathBuf {
+pub(crate) fn git_bin() -> PathBuf {
     static GIT: OnceLock<PathBuf> = OnceLock::new();
     GIT.get_or_init(|| crate::context::find_on_path("git").unwrap_or_else(|| PathBuf::from("git")))
         .clone()
