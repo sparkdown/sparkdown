@@ -432,9 +432,14 @@ class Hypr(Base):
 
     def focus_editor(self, title):
         """No WebDriver here: Ctrl+` (passed to the app from a terminal)
-        hides the restored terminal, so plain Ctrl+Q reaches the app."""
+        hides the restored terminal, so plain Ctrl+Q reaches the app. It is
+        a toggle, and the hidden drawer is restored hidden on the next
+        launch, so press it once only (no DOM here to check)."""
         self.focus(title)
+        if getattr(self, "_term_hidden", False):
+            return
         self.wtype("-M", "ctrl", "-k", "grave", "-m", "ctrl")
+        self._term_hidden = True
         time.sleep(1)
 
     def save(self, title):
