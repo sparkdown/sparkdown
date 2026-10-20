@@ -1196,6 +1196,35 @@ fn tmux_kill_session_impl(session: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// #127 Close Folder: every tmux session `label` owns: the ones its
+/// terminals hold plus the ones only [`WindowSessions`] remembers (#108).
+pub(crate) fn sessions_of_window(state: &TerminalState, label: &str) -> Vec<String> {
+    let prefix = format!("{label}/");
+    let mut v: Vec<String> = match state.0.lock() {
+        Ok(g) => g
+            .iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .filter_map(|(_, t)| t.tmux_session.clone())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    v.extend(window_sessions().of(label));
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// #127: stop (kill, not detach) every tmux session of `label`, so closing
+/// its folder really ends its jobs and nothing reattaches later. Must run
+/// scoped to `label` (a remote session's tmux is on that window's host).
+pub(crate) fn kill_window_sessions(state: &TerminalState, label: &str) -> Vec<String> {
+    let sessions = sessions_of_window(state, label);
+    for s in &sessions {
+        let _ = tmux_kill_session_impl(s);
+    }
+    sessions
+}
+
 /// Forward user input (keystrokes) to terminal `id`.
 #[tauri::command]
 pub fn terminal_write(
@@ -2135,6 +2164,21 @@ mod tests {
             "the pane's own tty reads idle (the bug's precondition)"
         );
         assert_eq!(new, JobState::Busy("sleep".into()));
+    }
+
+    #[test]
+    fn close_folder_finds_every_session_of_the_window() {
+        // #127: the ones only WindowSessions remembers count too (#108).
+        let state = TerminalState::default();
+        window_sessions().record("sd-close-a-1", "w-close-a");
+        window_sessions().record("sd-close-b-1", "w-close-b");
+        assert_eq!(
+            sessions_of_window(&state, "w-close-a"),
+            vec!["sd-close-a-1".to_string()]
+        );
+        window_sessions().forget("sd-close-a-1");
+        window_sessions().forget("sd-close-b-1");
+        assert!(sessions_of_window(&state, "w-close-a").is_empty());
     }
 
     #[test]

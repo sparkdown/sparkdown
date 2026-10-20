@@ -309,4 +309,30 @@ def run(R, D):
         R.run("reload-keeps-jobs", reload_keeps_jobs)
 
     R.run("restore", restore)
+
+    def close_folder():
+        """#127: Close Folder in beta leaves an empty window in its place (no
+        second process, alpha untouched); `sparkdown beta` opens it fresh."""
+        before = D.windows()
+        D.close_folder_keys("beta" + SUF)
+        ds = wait_for(D.dialogs, 5)
+        if ds:
+            for d in ds:
+                D.cancel_dialog(d)
+            return "FAIL", f"unexpected prompt with nothing running or unsaved: {ds}"
+        wait_for(lambda: set(D.windows()) == titled("alpha") | {"SparkDown"}, 20)
+        mid = D.windows()
+        D.shot("closed-folder")
+        if set(mid) != titled("alpha") | {"SparkDown"} or D.procs() != 1:
+            return "FAIL", f"before={before}; after Close Folder={mid}; processes={D.procs()}"
+        time.sleep(4)
+        D.cli(B)
+        wait_for(lambda: ("beta" + SUF) in D.windows(), 20)
+        w = D.windows()
+        D.shot("beta-reopened")
+        ok = set(w) == titled("alpha", "beta") and len(w) == len(mid)
+        return ("PASS" if ok else "FAIL"), (f"before={before}; after Close Folder={mid}; "
+                                            f"after `sparkdown beta`={w} (reused the empty window)")
+    if hasattr(D, "close_folder_keys"):
+        R.run("close-folder", close_folder)
     D.stop()

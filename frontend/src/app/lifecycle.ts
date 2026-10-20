@@ -62,6 +62,46 @@ export class LifecycleController {
     await api.windowClose();
   }
 
+  /**
+   * #127 File > Close Folder: the same checks as closing the window (its
+   * running jobs, then its unsaved tabs, each with Cancel), then the core
+   * swaps this window for a fresh empty one at the same place and size,
+   * stopping this window's terminals (tmux sessions too) and dropping the
+   * folder from restore and the window registry.
+   */
+  async closeFolder(): Promise<boolean> {
+    if (this.quitting || this.quitInFlight || !this.ctx.workspaceRoot) return false;
+    const status = await quitStatusOrUnchecked(api.closeFolderStatus());
+    const text = quitConfirmText(status, CLOSE_FOLDER_QUESTION);
+    if (text) {
+      let ok = false;
+      try {
+        ok = await ask(text, {
+          title: "Close Folder",
+          kind: "warning",
+          okLabel: "Close Folder",
+          cancelLabel: "Cancel",
+        });
+      } catch {
+        ok = false;
+      }
+      if (!ok) return false;
+    }
+    if (!(await this.deps.resolveUnsavedChanges())) return false;
+    await this.deps.persistConfig();
+    this.quitting = true;
+    this.deps.destroy();
+    await this.deps.clearAgentContext();
+    try {
+      await api.closeFolder();
+      return true;
+    } catch {
+      // The window is still here but its listeners are gone: reload it.
+      window.location.reload();
+      return false;
+    }
+  }
+
   private async prepareForOtherQuit(id: number): Promise<void> {
     let ok = false;
     try {
@@ -192,7 +232,30 @@ export async function quitStatusOrUnchecked(
   }
 }
 
-export function quitConfirmText(status: QuitStatus): string | null {
+/** The question that ends a confirm: quit (default) or Close Folder (#127). */
+export interface ConfirmQuestion {
+  stops: string;
+  anyway: string;
+  plain: string;
+}
+
+const QUIT_QUESTION: ConfirmQuestion = {
+  stops: "Quit SparkDown and stop them?",
+  anyway: "Quit SparkDown anyway?",
+  plain: "Quit SparkDown?",
+};
+
+/** #127: Close Folder stops this window's jobs, tmux ones included. */
+export const CLOSE_FOLDER_QUESTION: ConfirmQuestion = {
+  stops: "Close the folder and stop them?",
+  anyway: "Close the folder anyway?",
+  plain: "Close the folder?",
+};
+
+export function quitConfirmText(
+  status: QuitStatus,
+  q: ConfirmQuestion = QUIT_QUESTION,
+): string | null {
   const { busy: all, unsaved } = status;
   if (all.length === 0) return null;
   const busy = all.filter((b) => !b.unchecked);
@@ -231,10 +294,6 @@ export function quitConfirmText(status: QuitStatus): string | null {
     );
   }
   const stops = busy.some((b) => !b.keeps_running);
-  const question = stops
-    ? "Quit SparkDown and stop them?"
-    : unchecked.length
-      ? "Quit SparkDown anyway?"
-      : "Quit SparkDown?";
+  const question = stops ? q.stops : unchecked.length ? q.anyway : q.plain;
   return `${parts.join("\n\n")}\n\n${question}`;
 }

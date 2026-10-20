@@ -28,6 +28,7 @@ export const MENU = {
   OPEN_FILE: 'menu:open-file',
   OPEN_FOLDER: 'menu:open-folder',
   OPEN_REMOTE: 'menu:open-remote',
+  CLOSE_FOLDER: 'menu:close-folder',
   SAVE: 'menu:save',
   SAVE_AS: 'menu:save-as',
   EXPORT_HTML: 'menu:export-html',

@@ -14,6 +14,9 @@ pub struct AppMenu {
     /// The Window submenu; its window list is rebuilt by lifecycle.rs.
     pub window_menu: tauri::menu::Submenu<Wry>,
     pub allow_html_js: CheckMenuItem<Wry>,
+    /// File > Close Folder: enabled only while the focused window has a
+    /// folder (#127; lifecycle::refresh keeps it in sync).
+    pub close_folder: tauri::menu::MenuItem<Wry>,
 }
 
 /// Handle to the app menu so Windows/Linux can pop it up from the toolbar
@@ -97,6 +100,11 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
     let open_file = MenuItemBuilder::with_id("open-file", "Open...")
         .accelerator("CmdOrCtrl+O")
         .build(app)?;
+    // #127: back to the empty window of Ctrl/⌘+Shift+N. Starts disabled; the
+    // core enables it while the focused window has a folder.
+    let close_folder = MenuItemBuilder::with_id("close-folder", "Close Folder")
+        .enabled(false)
+        .build(app)?;
     let save = MenuItemBuilder::with_id("save", "Save")
         .accelerator("CmdOrCtrl+S")
         .build(app)?;
@@ -120,6 +128,7 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
         .item(&open_folder)
         .item(&open_remote)
         .item(&open_file)
+        .item(&close_folder)
         .separator()
         .item(&save)
         .item(&save_as)
@@ -288,6 +297,7 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
         menu,
         window_menu,
         allow_html_js,
+        close_folder,
     })
 }
 
@@ -336,6 +346,20 @@ mod tests {
         assert_eq!(m.version.as_deref(), Some("0.4.1"));
         assert_eq!(m.license.as_deref(), Some("MIT"));
         assert_eq!(m.website.as_deref(), Some("https://sparkdown.dev"));
+    }
+
+    #[test]
+    fn close_folder_sits_with_the_folder_items_and_starts_disabled() {
+        // #127
+        let rust = include_str!("menu.rs");
+        let at = rust
+            .find("with_id(\"close-folder\"")
+            .expect("Close Folder item");
+        let item = &rust[at..at + rust[at..].find(".build(app)").unwrap()];
+        assert!(item.contains(".enabled(false)"));
+        let file = &rust[rust.find("SubmenuBuilder::new(app, \"File\")").unwrap()..];
+        let file = &file[..file.find(".build()").unwrap()];
+        assert!(file.contains(".item(&open_file)\n        .item(&close_folder)"));
     }
 
     #[test]

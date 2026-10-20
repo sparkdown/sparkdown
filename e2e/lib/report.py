@@ -33,6 +33,7 @@ CHECKS = {
     "red-close": "Closing one window closes only that window",
     "dock-reopen": "Dock click with no visible window brings a window back",
     "restore": "Clean quit + relaunch restores the open windows (a closed one stays closed)",
+    "close-folder": "File > Close Folder leaves an empty window; reopening the folder reuses it (#127)",
     "webview-content": "Web content (WebDriver): sidebar folder, editor text, unsaved marker",
 }
 

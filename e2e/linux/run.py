@@ -196,6 +196,19 @@ class X11(Base):
     def quit_keys(self, title):
         self.keys(title, "ctrl+q", "ctrl", "q")
 
+    def close_folder_keys(self, title):
+        """#127: File > Close Folder via the palette (same action as the menu)."""
+        self.keys(title, "ctrl+shift+p", "ctrl", "shift", "P")
+        time.sleep(1.5)
+        if self._wd_handle(title):
+            self.wd.type(self.wd.find(".pal-input"), "File: Close folder")
+            time.sleep(0.8)
+            self.wd.chord("enter")
+        else:
+            sh("xdotool", "type", "--delay", "40", "File: Close folder")
+            time.sleep(0.8)
+            sh("xdotool", "key", "Return")
+
     def save(self, title):
         if self._wd_handle(title):
             self.wd.click(self.wd.find(".cm-content"))

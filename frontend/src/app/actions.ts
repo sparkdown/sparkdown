@@ -35,7 +35,7 @@ export interface ActionTargets {
     | 'hasTerminalFocus'
   >;
   htmlScripts: Pick<HtmlScriptsController, 'toggle'>;
-  lifecycle: Pick<LifecycleController, 'requestQuit'>;
+  lifecycle: Pick<LifecycleController, 'requestQuit' | 'closeFolder'>;
   palette: Pick<Palette, 'open'>;
   newFile(): void;
   openFile(path: string): Promise<void>;
@@ -69,6 +69,7 @@ export function registerMenuListeners(t: ActionTargets): void {
   reg(MENU.NEW_TAB, () => t.newFile());
   reg(MENU.OPEN_FILE, () => t.openFileDialog());
   reg(MENU.OPEN_FOLDER, () => void t.openFolderDialog());
+  reg(MENU.CLOSE_FOLDER, () => void t.lifecycle.closeFolder());
   reg(MENU.SAVE, () => t.save());
   reg(MENU.SAVE_AS, () => t.saveAs());
   reg(MENU.TOGGLE_THEME, () => t.theme.toggle());

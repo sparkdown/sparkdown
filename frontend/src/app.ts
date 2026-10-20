@@ -660,6 +660,7 @@ export class App {
       },
       openLinePrompt: () => this.palette.open('line'),
       openFolderInNewWindow: () => void this.workspace.openFolderDialog({ newWindow: true }),
+      closeFolder: () => void this.lifecycle.closeFolder(),
       toggleHtmlScripts: () => this.htmlScripts.toggle(false),
       checkForUpdates: () => void this.updates.check(true),
       terminal: {

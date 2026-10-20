@@ -52,6 +52,10 @@ export interface QuitStatus {
 
 export const api = {
   /** Multi-window registry (#61): this window's folder and unsaved state. */
+  /** #127: what Close Folder would stop in this window (busy terminals). */
+  closeFolderStatus: () => invoke<QuitStatus>("close_folder_status"),
+  /** #127: replace this window with a fresh empty one (same place/size). */
+  closeFolder: () => invoke<string>("close_folder"),
   windowSetFolder: (folder: WindowFolder | null, display: string | null) =>
     invoke<void>("window_set_folder", { folder, display }),
   windowSetDirty: (dirty: boolean) =>

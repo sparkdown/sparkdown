@@ -68,6 +68,7 @@ function targets(over: Partial<BuiltinCommandTargets> = {}) {
     setViewMode: vi.fn(),
     showSidebarView: vi.fn(),
     openLinePrompt: vi.fn(),
+    closeFolder: vi.fn(),
     openFolderInNewWindow: vi.fn(),
     toggleHtmlScripts: vi.fn(),
     checkForUpdates: vi.fn(),
@@ -238,5 +239,20 @@ describe('KEYBINDINGS', () => {
   it('shortcutFor formats a bound action and is empty otherwise', () => {
     expect(shortcutFor(ACTIONS.COMMAND_PALETTE, true)).toBe('⌘⇧P');
     expect(shortcutFor(ACTIONS.TOGGLE_THEME, true)).toBe('');
+  });
+});
+
+describe('File: Close folder command (#127)', () => {
+  it('runs Close Folder only when a folder is open', async () => {
+    const reg = new CommandRegistry();
+    const { t } = targets();
+    registerBuiltinCommands(reg, t);
+    await reg.run('file.closeFolder');
+    expect(t.closeFolder).toHaveBeenCalledOnce();
+    const { t: empty } = targets({ root: () => null });
+    const reg2 = new CommandRegistry();
+    registerBuiltinCommands(reg2, empty);
+    await reg2.run('file.closeFolder');
+    expect(empty.closeFolder).not.toHaveBeenCalled();
   });
 });

@@ -425,6 +425,7 @@ fn main() {
 
             let app_menu = menu::build_menu(&handle)?;
             app.manage(HtmlJsMenuItem(app_menu.allow_html_js));
+            app.manage(lifecycle::CloseFolderItem(app_menu.close_folder));
             app.manage(lifecycle::WindowMenu::new(app_menu.window_menu));
             // macOS: native menu bar (and traffic-light overlay title bar).
             // Windows/Linux: no in-window menu bar — the frontend pops this
@@ -561,6 +562,8 @@ fn main() {
             commands::is_directory,
             commands::copy_text,
             commands::copy_file,
+            lifecycle::close_folder,
+            lifecycle::close_folder_status,
             commands::list_directory,
             file_index::list_workspace_files,
             commands::load_config,
@@ -672,6 +675,9 @@ fn main() {
                     r.focus_seq(label)
                 };
                 app.state::<session::ConfigStore>().note_focus(label, seq);
+                // #127: Close Folder follows the focused window.
+                let handle = app.clone();
+                let _ = app.run_on_main_thread(move || lifecycle::sync_close_folder(&handle));
                 return;
             }
             if let tauri::RunEvent::WindowEvent {

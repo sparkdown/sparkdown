@@ -20,6 +20,8 @@ export interface BuiltinCommandTargets {
   openLinePrompt(): void;
   /** #66: Open Folder, forcing a new window. */
   openFolderInNewWindow(): void;
+  /** #127: File > Close Folder. */
+  closeFolder(): void;
   toggleHtmlScripts(): void;
   checkForUpdates(): void;
   /** The terminal split grid (CockpitController). */
@@ -211,6 +213,14 @@ export function registerBuiltinCommands(reg: CommandRegistry, t: BuiltinCommandT
       title: 'Window: Open folder in new window…',
       keywords: 'open folder new window',
       run: () => t.openFolderInNewWindow(),
+    },
+    {
+      id: 'file.closeFolder',
+      title: 'File: Close folder',
+      keywords: 'close folder workspace',
+      run: () => {
+        if (t.root() !== null) t.closeFolder();
+      },
     },
     act('app.quit', 'App: Quit', ACTIONS.QUIT),
   );
