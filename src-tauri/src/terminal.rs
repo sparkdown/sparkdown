@@ -1337,15 +1337,35 @@ pub fn busy_on_quit(state: &TerminalState) -> Vec<QuitProbe> {
     };
     // One row per tmux session, whichever entry holds it.
     let mut covered = std::collections::HashSet::new();
-    let mut out: Vec<QuitProbe> = probes
+    let probes: Vec<(String, BusyProbe)> = probes
         .into_iter()
         .filter(|(_, p)| {
             p.tmux_session
                 .as_ref()
                 .is_none_or(|s| covered.insert(s.clone()))
         })
-        .filter_map(|(label, p)| quit_probe(label, p.tmux_session.is_some(), p.check()))
         .collect();
+    // #113: one process table per quit, taken only if some pane needs the
+    // nested-pty walk, and every pane probed at once instead of one after
+    // another. Each probe keeps its own bound, and so does the table, so the
+    // prompt waits for the slowest single check, not the sum of all of them.
+    let table = SharedTable::default();
+    let mut out: Vec<QuitProbe> = std::thread::scope(|sc| {
+        let handles: Vec<_> = probes
+            .iter()
+            .map(|(_, p)| sc.spawn(|| p.check_with(&|| table.get())))
+            .collect();
+        probes
+            .iter()
+            .zip(handles)
+            .filter_map(|((label, p), h)| {
+                let state = h
+                    .join()
+                    .unwrap_or_else(|_| JobState::Unknown("check panicked".into()));
+                quit_probe(label.clone(), p.tmux_session.is_some(), state)
+            })
+            .collect()
+    });
     // #108: sessions a window started that no terminal entry holds any more
     // (its webview reloaded and has not reattached them): the core still
     // checks them, so their jobs stay in the quit prompt.
@@ -1359,7 +1379,11 @@ pub fn busy_on_quit(state: &TerminalState) -> Vec<QuitProbe> {
                 true,
                 JobState::Unknown("tmux did not answer".into()),
             )),
-            SessionProbe::Alive => out.extend(quit_probe(label, true, tmux_job_state(&session))),
+            SessionProbe::Alive => out.extend(quit_probe(
+                label,
+                true,
+                tmux_job_state_with(&session, &|| table.get()),
+            )),
         }
     }
     out
@@ -1392,10 +1416,43 @@ struct BusyProbe {
     fg_pgrp: Option<i32>,
 }
 
+/// #113: the process table, read at most once and shared by every probe of
+/// one quit check. A failed read is shared too, so each pane that needed it
+/// shows "couldn't check".
+pub(crate) struct SharedTable {
+    cell: std::sync::OnceLock<Result<Vec<PsRow>, String>>,
+    read: fn() -> Result<Vec<PsRow>, String>,
+}
+
+impl Default for SharedTable {
+    fn default() -> Self {
+        Self::reading(process_table)
+    }
+}
+
+impl SharedTable {
+    pub(crate) fn reading(read: fn() -> Result<Vec<PsRow>, String>) -> Self {
+        Self {
+            cell: std::sync::OnceLock::new(),
+            read,
+        }
+    }
+
+    pub(crate) fn get(&self) -> Result<Vec<PsRow>, String> {
+        self.cell.get_or_init(self.read).clone()
+    }
+}
+
+type TableFn<'a> = &'a (dyn Fn() -> Result<Vec<PsRow>, String> + Sync);
+
 impl BusyProbe {
     fn check(&self) -> JobState {
+        self.check_with(&process_table)
+    }
+
+    fn check_with(&self, table: TableFn<'_>) -> JobState {
         if let Some(session) = &self.tmux_session {
-            return tmux_job_state(session);
+            return tmux_job_state_with(session, table);
         }
         let Some(shell) = self.shell_pid else {
             return JobState::Idle;
@@ -1405,7 +1462,7 @@ impl BusyProbe {
             with_nested(
                 pty_job_state(shell, self.fg_pgrp, process_name),
                 &[shell],
-                process_table,
+                table,
             )
         }
         #[cfg(windows)]
@@ -1512,6 +1569,11 @@ pub(crate) fn parse_proc_stat_pgrps(stat: &str) -> Option<(i32, i32)> {
 /// Ask tmux for the active pane's shell pid of `session`, then compare its
 /// tty's foreground process group with the shell's own. Blocking, bounded.
 fn tmux_job_state(session: &str) -> JobState {
+    tmux_job_state_with(session, &process_table)
+}
+
+/// [`tmux_job_state`] with the process table supplied (#113: shared per quit).
+fn tmux_job_state_with(session: &str, table: TableFn<'_>) -> JobState {
     let Some(tmux) = tmux_path() else {
         return JobState::Unknown("tmux not found".into());
     };
@@ -1538,7 +1600,7 @@ fn tmux_job_state(session: &str) -> JobState {
         .and_then(|(ok, o, _)| ok.then(|| parse_session_panes(session, o)).flatten())
         .unwrap_or_default();
     let state = tmux_state_from(session, out, pgid_and_tty_foreground, process_name);
-    with_nested(state, &panes, process_table)
+    with_nested(state, &panes, table)
 }
 
 /// #110: a pane can wrap its shell in a nested pty (kiro-cli-term,
@@ -1926,6 +1988,54 @@ mod tests {
         assert_eq!(
             super::with_nested(b.clone(), &[6406], || panic!("not asked")),
             b
+        );
+    }
+
+    #[test]
+    fn quit_check_reads_the_process_table_once_for_all_panes() {
+        // #113: many idle panes, many threads, one `ps`.
+        static READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        fn read() -> Result<Vec<PsRow>, String> {
+            READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            Ok(parse_ps_table(
+                "10 1 10 30 pts/1 kiro-cli-term\n20 10 20 30 pts/2 bash\n30 20 30 30 pts/2 sleep\n",
+            ))
+        }
+        let table = SharedTable::reading(read);
+        let states: Vec<JobState> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..8)
+                .map(|i| {
+                    let t = &table;
+                    sc.spawn(move || {
+                        let root = if i == 0 { 10 } else { 999 };
+                        with_nested(JobState::Idle, &[root], || t.get())
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(READS.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(states[0], JobState::Busy("sleep".into()));
+        assert!(states[1..].iter().all(|s| *s == JobState::Idle));
+    }
+
+    #[test]
+    fn quit_check_shares_a_failed_table_as_couldnt_check() {
+        fn read() -> Result<Vec<PsRow>, String> {
+            Err("ps did not answer within 3 s".into())
+        }
+        let table = SharedTable::reading(read);
+        for root in [1, 2] {
+            assert!(matches!(
+                with_nested(JobState::Idle, &[root], || table.get()),
+                JobState::Unknown(_)
+            ));
+        }
+        // Busy / Unknown from the tty check never need the table.
+        assert_eq!(
+            with_nested(JobState::Busy("vim".into()), &[1], || table.get()),
+            JobState::Busy("vim".into())
         );
     }
 
