@@ -460,6 +460,18 @@ def run(R, D):
         # with or without Close Folder (checked locally on X11).
         D.save("alpha" + SUF)
         D.quit_keys("alpha" + SUF)
+        how = "Ctrl+Q"
+        if not wait_for(lambda: D.procs() == 0, 15) and not D.dialogs():
+            # Hyprland has no pointer to give the relaunched page keyboard
+            # focus, so the key can be lost. Quit the other native way:
+            # close the empty window, then the last one (a quit on Linux
+            # and Windows; it runs the same quit flow).
+            how = f"{D.close_how} on each window"
+            R.log("close-folder-relaunch: Ctrl+Q did not quit; closing the windows instead")
+            for t in ("SparkDown", "alpha" + SUF):
+                if t in D.windows():
+                    D.close_window(t)
+                    time.sleep(3)
         if not wait_for(lambda: D.procs() == 0, 40):
             ds = D.dialogs()
             D.shot("close-folder-no-exit")
@@ -473,6 +485,6 @@ def run(R, D):
         w = D.windows()
         D.shot("close-folder-relaunched")
         ok = ("alpha" + SUF) in w and b not in w
-        return ("PASS" if ok else "FAIL"), f"before quit={mid}; after relaunch={w} (beta's folder was closed and must not come back)"
+        return ("PASS" if ok else "FAIL"), f"before quit={mid}; quit via {how}; after relaunch={w} (beta's folder was closed and must not come back)"
     R.run("close-folder-relaunch", close_folder_relaunch)
     D.stop()
