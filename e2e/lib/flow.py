@@ -264,6 +264,8 @@ def run(R, D):
 
     if D.wd is not None:
         R.run("webview-content", lambda: D.webview_check("alpha" + SUF, "alpha", EDIT))
+    if D.wd is not None and hasattr(D, "terminal_clipboard"):
+        R.run("terminal-clipboard", lambda: D.terminal_clipboard("alpha" + SUF))
 
     def restore():
         D.kill_job()

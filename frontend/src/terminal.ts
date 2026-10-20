@@ -6,7 +6,7 @@ import { api, type RemoteSession } from './api';
 import { shortcutFor, terminalPaneAction, terminalPassesToApp, type TerminalPaneAction } from './shortcuts';
 import { ACTIONS } from './event-names';
 import { attachResizeDrag } from './resize-drag';
-import { isMacOS } from './utils';
+import { isLinux, isMacOS } from './utils';
 import { showMcpInstallPrompt } from './mcp-install-prompt';
 import {
   MAX_PANES,
@@ -40,21 +40,53 @@ const TERM_FONT =
  * Map a terminal keydown to a clipboard action, or null to let xterm handle
  * it. macOS: ⌘C copies ONLY when text is selected (so ⌘C with no selection
  * stays inert — it never becomes ^C), ⌘V pastes. Linux/Windows: the terminal
- * convention Ctrl+Shift+C / Ctrl+Shift+V (plain Ctrl+C must stay SIGINT).
- * Pure, so it is unit-tested without xterm.
+ * convention Ctrl+Shift+C / Ctrl+Shift+V, and Shift+Insert pastes.
+ *
+ * Linux also (#130): Omarchy's universal Super+V / Super+C reach an untagged
+ * window as plain Ctrl+V / Ctrl+C. So plain Ctrl+V is 'paste-or-ctrl-v'
+ * (paste when the clipboard has text, else the shell still gets ^V), and
+ * plain Ctrl+C copies when text is selected — with no selection it stays
+ * SIGINT. Pure, so it is unit-tested without xterm.
  */
 export function clipboardAction(
   e: Pick<KeyboardEvent, 'type' | 'key' | 'metaKey' | 'ctrlKey' | 'shiftKey' | 'altKey'>,
   hasSelection: boolean,
-): 'copy' | 'paste' | null {
+  linux = false,
+): 'copy' | 'paste' | 'paste-or-ctrl-v' | null {
   if (e.type !== 'keydown' || e.altKey) return null;
   const key = e.key.toLowerCase();
   const mac = e.metaKey && !e.ctrlKey;
   const other = e.ctrlKey && e.shiftKey && !e.metaKey;
+  if (key === 'insert' && e.shiftKey && !e.ctrlKey && !e.metaKey) return 'paste';
+  if (linux && e.ctrlKey && !e.shiftKey && !e.metaKey) {
+    if (key === 'c') return hasSelection ? 'copy' : null;
+    if (key === 'v') return 'paste-or-ctrl-v';
+    return null;
+  }
   if (!mac && !other) return null;
   if (key === 'c') return hasSelection ? 'copy' : null;
   if (key === 'v') return 'paste';
   return null;
+}
+
+/** #130: paste the clipboard's text, or — when it is empty or unreadable —
+ *  send ^V (0x16) so the shell's quoted-insert still works. */
+export async function pasteOrCtrlV(
+  read: () => Promise<string>,
+  write: (data: string) => void,
+): Promise<'pasted' | 'ctrl-v'> {
+  let text = '';
+  try {
+    text = (await read()) ?? '';
+  } catch {
+    text = '';
+  }
+  if (text) {
+    write(text);
+    return 'pasted';
+  }
+  write('\x16');
+  return 'ctrl-v';
 }
 
 /** Quiet time after the last container resize before a pane refits. */
@@ -128,10 +160,20 @@ export class TerminalPane {
     // does not route ⌘C/⌘V to the terminal on its own. Copy goes through the
     // backend (system clipboard); paste reads the clipboard and types it.
     this.term.attachCustomKeyEventHandler((e) => {
-      const action = clipboardAction(e, this.term.hasSelection());
+      const action = clipboardAction(e, this.term.hasSelection(), isLinux());
       if (action === 'copy') {
         void api.copyText(this.term.getSelection());
         this.term.clearSelection();
+        return false;
+      }
+      if (action === 'paste-or-ctrl-v') {
+        e.preventDefault();
+        void pasteOrCtrlV(
+          () => navigator.clipboard?.readText() ?? Promise.resolve(''),
+          (data) => {
+            if (this.started) void api.terminalWrite(this.id, data);
+          },
+        );
         return false;
       }
       if (action === 'paste') {
