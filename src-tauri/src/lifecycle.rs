@@ -104,6 +104,25 @@ pub fn refresh(app: &AppHandle) {
     }
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || rebuild_window_menu(&handle, &titled));
+    sync_close_folder_item(app);
+}
+
+/// File > Close Folder is enabled only while the focused window has a
+/// folder (#127). The menu is app-wide, so it follows the focused window.
+pub fn close_folder_enabled(rows: &[windows::WindowSummary]) -> bool {
+    rows.iter().any(|r| r.focused && r.folder.is_some())
+}
+
+/// Grey out / enable Close Folder for the focused window. Call after a
+/// focus change or a folder change.
+pub fn sync_close_folder_item(app: &AppHandle) {
+    let enabled = close_folder_enabled(&windows::registry().summaries());
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(item) = handle.try_state::<crate::menu::CloseFolderItem>() {
+            let _ = item.0.set_enabled(enabled);
+        }
+    });
 }
 
 fn rebuild_window_menu(app: &AppHandle, titled: &[(String, String)]) {
@@ -568,6 +587,103 @@ pub fn window_close(webview_window: tauri::WebviewWindow) -> Result<(), String> 
     webview_window.destroy().map_err(|e| e.to_string())
 }
 
+// --- Close Folder (#127) --------------------------------------------------------
+
+/// What Close Folder in this window would stop: its running terminals
+/// (tmux ones too: Close Folder stops them, it does not detach) and
+/// whether it has unsaved changes. Same checks as the quit prompt, scoped
+/// to the calling window.
+#[tauri::command]
+pub async fn window_close_status(
+    app: AppHandle,
+    webview_window: tauri::WebviewWindow,
+) -> Result<QuitStatus, String> {
+    let label = webview_window.label().to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (name, dirty) = {
+            let reg = windows::registry();
+            let row = reg.summaries().into_iter().find(|s| s.label == label);
+            let name = row.as_ref().map(window_name).unwrap_or_default();
+            (name, reg.get(&label).is_some_and(|w| w.dirty))
+        };
+        let probes = crate::terminal::busy_on_quit(&app.state::<crate::terminal::TerminalState>());
+        close_status_for(&label, &name, dirty, probes)
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// The calling window's share of the quit probes, as Close Folder sees
+/// them: nothing keeps running.
+pub fn close_status_for(
+    label: &str,
+    name: &str,
+    dirty: bool,
+    probes: Vec<crate::terminal::QuitProbe>,
+) -> QuitStatus {
+    let busy = probes
+        .into_iter()
+        .filter(|p| p.label == label)
+        .map(|p| BusyTerminal {
+            window: name.to_string(),
+            command: p.command,
+            keeps_running: false,
+            unchecked: p.unchecked,
+        })
+        .collect();
+    let unsaved = if dirty {
+        vec![name.to_string()]
+    } else {
+        Vec::new()
+    };
+    QuitStatus { busy, unsaved }
+}
+
+/// Close the calling window's folder (#127); its frontend has resolved the
+/// prompts and reloads into the empty state right after. Order matters:
+/// stop the terminals (tmux sessions killed, not detached) before the
+/// folder's routing token stops resolving, so a still-running agent never
+/// routes to another window; then free the folder, drop its session
+/// section, and route again anything queued for this window. Returns the
+/// tmux sessions it stopped.
+#[tauri::command]
+pub async fn window_close_folder(
+    app: AppHandle,
+    webview_window: tauri::WebviewWindow,
+) -> Result<Vec<String>, String> {
+    let label = webview_window.label().to_string();
+    windows::spawn_scoped(label.clone(), move || {
+        let stopped = app
+            .state::<crate::terminal::TerminalState>()
+            .close_folder(&label);
+        app.state::<std::sync::Arc<crate::mcp::McpState>>()
+            .release_window(&label);
+        app.state::<crate::watcher::WatcherStates>()
+            .release_window(&label);
+        crate::remote::release_window(&label);
+        crate::askpass::release_window(&label);
+        let closed = windows::registry().close_folder(&label);
+        app.state::<crate::session::ConfigStore>()
+            .close_folder(&label);
+        if let Some(spec) = crate::routing::take_pending_open(&label) {
+            let queued = windows::local_folder_id(&spec).ok();
+            if crate::routing::reroute_after_close(queued.as_ref(), closed.as_ref()) {
+                // This window is empty now: "Here" means its reloaded
+                // webview opens it; otherwise the route focuses or creates.
+                if let Ok(crate::routing::Route::Here) =
+                    crate::routing::route(&app, Some(&label), &spec, false)
+                {
+                    crate::routing::queue_open(&label, spec);
+                }
+            }
+        }
+        refresh(&app);
+        Ok(stopped)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// New Window from the frontend (shortcut / command palette).
 #[tauri::command]
 pub async fn window_new(app: AppHandle) -> Result<(), String> {
@@ -587,6 +703,52 @@ pub fn window_take_menu(webview_window: tauri::WebviewWindow) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn close_folder_prompt_lists_only_this_windows_jobs_as_stopping() {
+        use crate::terminal::QuitProbe;
+        let probe = |l: &str, c: &str, survives: bool| QuitProbe {
+            label: l.into(),
+            command: c.into(),
+            survives,
+            unchecked: None,
+        };
+        let st = close_status_for(
+            "w-b",
+            "beta",
+            true,
+            vec![probe("w-a", "vim", false), probe("w-b", "sleep 300", true)],
+        );
+        assert_eq!(st.busy.len(), 1);
+        assert_eq!(st.busy[0].command, "sleep 300");
+        assert_eq!(st.busy[0].window, "beta");
+        // A tmux job does not survive Close Folder.
+        assert!(!st.busy[0].keeps_running);
+        assert_eq!(st.unsaved, vec!["beta".to_string()]);
+        let clean = close_status_for("w-c", "gamma", false, vec![probe("w-a", "vim", false)]);
+        assert!(clean.busy.is_empty() && clean.unsaved.is_empty());
+    }
+
+    #[test]
+    fn close_folder_is_greyed_out_without_a_folder_in_the_focused_window() {
+        let row = |l: &str, folder: bool, focused: bool| windows::WindowSummary {
+            label: l.into(),
+            folder: folder.then(|| FolderId::Local {
+                path: format!("/{l}"),
+            }),
+            display: None,
+            focused,
+        };
+        assert!(close_folder_enabled(&[
+            row("a", true, true),
+            row("b", false, false)
+        ]));
+        assert!(!close_folder_enabled(&[
+            row("a", true, false),
+            row("b", false, true)
+        ]));
+        assert!(!close_folder_enabled(&[]));
+    }
 
     #[test]
     fn red_close_closes_only_that_window_until_the_last() {

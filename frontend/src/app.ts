@@ -109,6 +109,7 @@ export class App {
   private forwardedPaths: string[] = [];
   private unlisteners: Array<() => void> = [];
   private configSaveFailures = 0;
+  private savesSuspended = false;
   private raf = createRafBatch();
   private debouncedSaveConfig = debounce(() => this.persistConfig(), TIMING.CONFIG_SAVE_MS);
   private debouncedTocUpdate = debounce((c: string) => this.toc.update(c), TIMING.TOC_UPDATE_MS);
@@ -165,6 +166,11 @@ export class App {
       persistConfig: () => this.persistConfig(),
       clearAgentContext: () => this.agent.clear(),
       destroy: () => this.destroy(),
+      hasFolder: () => this.ctx.workspaceRoot !== null,
+      suspendSaves: () => {
+        this.savesSuspended = true;
+      },
+      reload: () => window.location.reload(),
     });
     this.agent = new AgentContextBridge(this.ctx, {
       openFile: (path) => this.openFile(path),
@@ -649,6 +655,7 @@ export class App {
       bus: this.bus,
       tabs: this.tabs,
       root: () => this.ctx.workspaceRoot ?? this.fileTree.getRoot(),
+      hasFolder: () => this.ctx.workspaceRoot !== null,
       setViewMode: (mode) => this.setViewMode(mode),
       // "Show", not toggle: a view that is already open stays open.
       showSidebarView: (view) => {
@@ -774,6 +781,9 @@ export class App {
   }
 
   private async persistConfig(): Promise<void> {
+    // Close Folder (#127) is reloading this window empty: a late save would
+    // write the old folder's tabs back into its (dropped) session section.
+    if (this.savesSuspended) return;
     try {
       const config: AppConfig = {
         theme: this.theme.getTheme(),

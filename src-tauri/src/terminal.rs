@@ -265,6 +265,15 @@ impl WindowSessions {
     pub(crate) fn forget(&mut self, session: &str) {
         self.0.remove(session);
     }
+    /// Close Folder (#127): forget every session of `label` and hand them
+    /// back (sorted) for the caller to kill.
+    pub(crate) fn take(&mut self, label: &str) -> Vec<String> {
+        let mine = self.of(label);
+        for s in &mine {
+            self.0.remove(s);
+        }
+        mine
+    }
     /// Sessions of `label`, sorted.
     pub(crate) fn of(&self, label: &str) -> Vec<String> {
         let mut v: Vec<String> = self
@@ -326,6 +335,35 @@ pub(crate) fn term_key(label: &str, id: &str) -> String {
 }
 
 impl TerminalState {
+    /// Close Folder (#127): unlike a window close or a quit, the window's
+    /// tmux sessions do NOT survive. Kill them (local, or on the window's
+    /// remote host while its session is still up), forget them so neither
+    /// a reload (#108) nor the quit probe brings them back, then close the
+    /// window's terminals. Returns the sessions it stopped. Blocking; run
+    /// it in the window's scope.
+    pub fn close_folder(&self, label: &str) -> Vec<String> {
+        let prefix = format!("{label}/");
+        let mut sessions = window_sessions().take(label);
+        if let Ok(g) = self.0.lock() {
+            for (k, t) in g.iter() {
+                if k.starts_with(&prefix) {
+                    if let Some(s) = &t.tmux_session {
+                        sessions.push(s.clone());
+                    }
+                }
+            }
+        }
+        sessions.sort();
+        sessions.dedup();
+        for s in &sessions {
+            if validate_own_session(s).is_ok() {
+                let _ = tmux_kill_session_impl(s);
+            }
+        }
+        self.release_window(label);
+        sessions
+    }
+
     /// Close every terminal of a window (the window closed). Dropping the
     /// entries drops their writers/controllers; killing ends the shells.
     pub fn release_window(&self, label: &str) {
@@ -2156,6 +2194,23 @@ mod tests {
         assert!(w.uncovered(&covered, |l| l != "w-a").is_empty());
         w.forget("sd-a-zsh-2-a-claude");
         assert!(w.uncovered(&covered, |_| true).is_empty());
+    }
+
+    #[test]
+    fn close_folder_forgets_only_that_windows_sessions() {
+        let mut w = super::WindowSessions::default();
+        w.record("sd-a-zsh-1", "w-a");
+        w.record("sd-a-zsh-2", "w-a");
+        w.record("sd-b-zsh-1", "w-b");
+        assert_eq!(w.take("w-a"), vec!["sd-a-zsh-1", "sd-a-zsh-2"]);
+        // Nothing left for a reload to reattach, or for the quit to probe.
+        assert!(w.of("w-a").is_empty());
+        let none = std::collections::HashSet::new();
+        assert_eq!(
+            w.uncovered(&none, |_| true),
+            vec![("sd-b-zsh-1".to_string(), "w-b".to_string())]
+        );
+        assert!(w.take("w-a").is_empty());
     }
 
     #[test]

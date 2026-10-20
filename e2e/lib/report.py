@@ -31,6 +31,8 @@ CHECKS = {
     "tmux-transient-failure": "B's tmux session briefly unresolvable (transient failure) while sleep runs: B's tab survives, quit prompt still lists sleep",
     "quit-prompt-probe-timeout": "Job check can't finish (tmux server wedged): quit still prompts, says it couldn't check, Cancel keeps everything",
     "red-close": "Closing one window closes only that window",
+    "close-folder": "File > Close Folder (#127) on gamma: the job prompt and the save prompt each Cancel cleanly; confirmed, the same window goes empty, gamma's terminals and tmux sessions stop, the folder is freed, and `sparkdown gamma` reopens it fresh in that window",
+    "close-folder-relaunch": "A folder closed with Close Folder (#127) is not restored by quit + relaunch",
     "dock-reopen": "Dock click with no visible window brings a window back",
     "restore": "Clean quit + relaunch restores the open windows (a closed one stays closed)",
     "webview-content": "Web content (WebDriver): sidebar folder, editor text, unsaved marker",

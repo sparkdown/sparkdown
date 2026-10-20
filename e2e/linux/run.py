@@ -17,7 +17,7 @@ from report import Report  # noqa: E402
 MODE, BIN, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
 R = Report(("Ubuntu (X11, WebKitWebDriver)" if MODE == "x11" else "Arch + Hyprland (vkms)") + fixtures.variant(), OUT)
 SUF = flow.SUF
-DIALOG_TITLES = ("Quit SparkDown", "Unsaved Changes")
+DIALOG_TITLES = ("Quit SparkDown", "Unsaved Changes", "Close Folder")
 ATSPI = str(pathlib.Path(__file__).with_name("atspi_dialogs.py"))
 
 
@@ -193,6 +193,25 @@ class X11(Base):
     def new_window_keys(self, title):
         self.keys(title, "ctrl+shift+n", "ctrl", "shift", "N")
 
+    def command(self, title, text):
+        """Run a command palette command in `title` (Ctrl+Shift+P, type, Enter)."""
+        if self._wd_handle(title):
+            self.wd.js("document.activeElement && document.activeElement.blur(); return 1;")
+            self.wd.find("body")
+            self.wd.chord("ctrl", "shift", "P")
+            inp = self.wd.find(".pal-input", wait=10)
+            self.wd.type(inp, text)
+            time.sleep(1)
+            self.wd.type(inp, wd.KEYS["enter"])
+        else:
+            self.focus(title)
+            sh("xdotool", "key", "--clearmodifiers", "ctrl+shift+p")
+            time.sleep(1)
+            sh("xdotool", "type", "--delay", "40", text)
+            time.sleep(1)
+            sh("xdotool", "key", "Return")
+        time.sleep(2)
+
     def quit_keys(self, title):
         self.keys(title, "ctrl+q", "ctrl", "q")
 
@@ -318,6 +337,15 @@ class Hypr(Base):
     def quit_keys(self, title):
         self.focus(title)
         self.wtype("-M", "ctrl", "q", "-m", "ctrl")
+
+    def command(self, title, text):
+        self.focus(title)
+        self.wtype("-M", "ctrl", "-M", "shift", "p", "-m", "shift", "-m", "ctrl")
+        time.sleep(1)
+        self.wtype(text)
+        time.sleep(1)
+        self.wtype("-k", "Return")
+        time.sleep(2)
 
     def save(self, title):
         self.focus(title)

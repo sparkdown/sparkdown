@@ -505,6 +505,19 @@ impl ConfigStore {
         let _ = self.write();
     }
 
+    /// Close Folder (#127): the window stays open but its folder is gone.
+    /// Drop its section entirely (a relaunch must not reopen the folder or
+    /// its files) and keep nothing for Reopen either. The window's next
+    /// save writes a fresh, empty section.
+    pub fn close_folder(&self, label: &str) {
+        {
+            let mut g = self.lock();
+            g.stored.windows.remove(label);
+            g.closed.retain(|(l, _)| l != label);
+        }
+        let _ = self.write();
+    }
+
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn has_closed(&self) -> bool {
         !self.lock().closed.is_empty()
@@ -557,6 +570,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn close_folder_drops_the_section_so_a_relaunch_does_not_restore_it() {
+        let d = tmpdir("close-folder");
+        let path = d.join("config.json");
+        let store = ConfigStore::open(path.clone());
+        let f = |p: &str| FolderId::Local { path: p.into() };
+        let a = windows::label_for_folder(&f("/a"));
+        let b = windows::label_for_folder(&f("/b"));
+        {
+            let mut g = store.lock();
+            for (l, p) in [(&a, "/a"), (&b, "/b")] {
+                g.stored.windows.insert(
+                    l.clone(),
+                    WindowSession {
+                        folder: Some(f(p)),
+                        open_files: vec![format!("{p}/notes.md")],
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        store.close_folder(&a);
+        // On disk: only B is restored at the next launch.
+        let on_disk = Stored::parse(&std::fs::read_to_string(&path).unwrap(), None);
+        let plan = plan_restore(&on_disk);
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].label, b);
+        // The window that stays open loads nothing of the old folder.
+        let cfg = store.load_for(&a);
+        assert!(cfg.last_open_files.is_empty());
+        assert_eq!(cfg.window_folder, None);
+        // Reopen (dock) can't bring the closed folder back either.
+        assert!(!store.has_closed());
+        // Its next save (empty window) restores as an empty window, not A.
+        store.save_from(&a, &cfg, None).unwrap();
+        let on_disk = Stored::parse(&std::fs::read_to_string(&path).unwrap(), None);
+        assert!(plan_restore(&on_disk)
+            .iter()
+            .all(|p| p.session.folder != Some(f("/a"))
+                && p.session.open_files.iter().all(|o| !o.starts_with("/a/"))));
     }
 
     #[test]

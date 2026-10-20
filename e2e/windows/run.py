@@ -111,6 +111,18 @@ class Desktop:
     def quit_keys(self, title):
         self.keys(title, "ctrl", "q")
 
+    def command(self, title, text):
+        """Run a command palette command in `title` (Ctrl+Shift+P, type, Enter)."""
+        self.handle(title)
+        self.wd.js("document.activeElement && document.activeElement.blur(); return 1;")
+        self.wd.find("body")
+        self.wd.chord("ctrl", "shift", "P")
+        inp = self.wd.find(".pal-input", wait=10)
+        self.wd.type(inp, text)
+        time.sleep(1)
+        self.wd.type(inp, wd.KEYS["enter"])
+        time.sleep(2)
+
     def save(self, title):
         self.handle(title)
         self.wd.click(self.wd.find(".cm-content"))

@@ -36,6 +36,7 @@ export type EventMap = {
   [ACTIONS.FIND]: void;
   [ACTIONS.QUIT]: void;
   [ACTIONS.NEW_WINDOW]: void;
+  [ACTIONS.CLOSE_FOLDER]: void;
   [ACTIONS.BOLD]: void;
   [ACTIONS.ITALIC]: void;
   [ACTIONS.HEADING]: void;

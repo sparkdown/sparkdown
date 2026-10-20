@@ -35,7 +35,7 @@ export interface ActionTargets {
     | 'hasTerminalFocus'
   >;
   htmlScripts: Pick<HtmlScriptsController, 'toggle'>;
-  lifecycle: Pick<LifecycleController, 'requestQuit'>;
+  lifecycle: Pick<LifecycleController, 'requestQuit' | 'closeFolder'>;
   palette: Pick<Palette, 'open'>;
   newFile(): void;
   openFile(path: string): Promise<void>;
@@ -69,6 +69,7 @@ export function registerMenuListeners(t: ActionTargets): void {
   reg(MENU.NEW_TAB, () => t.newFile());
   reg(MENU.OPEN_FILE, () => t.openFileDialog());
   reg(MENU.OPEN_FOLDER, () => void t.openFolderDialog());
+  reg(MENU.CLOSE_FOLDER, () => void t.lifecycle.closeFolder());
   reg(MENU.SAVE, () => t.save());
   reg(MENU.SAVE_AS, () => t.saveAs());
   reg(MENU.TOGGLE_THEME, () => t.theme.toggle());
@@ -118,6 +119,7 @@ export function registerActionListeners(t: ActionTargets): void {
   // Ctrl+Q (Windows/Linux) must take the same guarded path as Cmd+Q.
   t.bus.on(ACTIONS.QUIT, () => void t.lifecycle.requestQuit());
   t.bus.on(ACTIONS.NEW_WINDOW, () => void api.windowNew().catch(() => {}));
+  t.bus.on(ACTIONS.CLOSE_FOLDER, () => void t.lifecycle.closeFolder());
   t.bus.on(ACTIONS.BOLD, () => t.editor.wrapSelection('**', '**'));
   t.bus.on(ACTIONS.ITALIC, () => t.editor.wrapSelection('_', '_'));
   t.bus.on(ACTIONS.HEADING, () => t.editor.insertLinePrefix('## '));
