@@ -71,6 +71,13 @@ tauri-build = { version = "2", features = [] }
 minisign = "0.7"
 ts-rs = "12"
 
+[features]
+# Test-only (E2E on Windows): let WebDriver attach to WebView2 by passing
+# $SPARKDOWN_E2E_WEBVIEW2_ARGS through to the browser process. OFF by
+# default and never enabled by the release/package workflows — the code is
+# compiled out of shipped builds (scripts/check-release-gate.sh enforces it).
+e2e-webdriver = []
+
 [profile.release]
 lto = true
 strip = true

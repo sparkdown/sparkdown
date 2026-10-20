@@ -1,0 +1,283 @@
+name: E2E (multi-window must-pass)
+
+# End-to-end tests of the real built app on GitHub-hosted runners: macOS
+# (System Events), Windows (WebDriver over CDP + UI Automation), Ubuntu
+# (tauri-driver/WebKitWebDriver under Xvfb) and Arch + Hyprland (vkms DRM in
+# a privileged container). Never runs on tags or releases. See e2e/README.md.
+# No push trigger: a push to a PR branch would also start the pull_request
+# run, and the two share the concurrency group and cancel each other.
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-gate:
+    name: Release gate (e2e-webdriver never ships)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Release workflows and scripts never enable the feature
+        run: bash scripts/check-release-gate.sh
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+      - name: Default build ignores the env var (release_build_ignores_e2e_webview2_args)
+        working-directory: src-tauri
+        run: |
+          set -o pipefail
+          cargo test --bin sparkdown -- --exact windows::tests::release_build_ignores_e2e_webview2_args --nocapture 2>&1 | tee ../release-gate-test.txt
+      - name: Feature build passes the args (e2e_build_passes_the_webdriver_args)
+        working-directory: src-tauri
+        run: |
+          set -o pipefail
+          cargo test --bin sparkdown --features e2e-webdriver -- --exact windows::tests::e2e_build_passes_the_webdriver_args 2>&1 | tee -a ../release-gate-test.txt
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-release-gate
+          path: release-gate-test.txt
+
+  linux-build:
+    name: Linux build (release, default features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.2"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+      - name: Build
+        run: |
+          (cd frontend && npm ci)
+          frontend/node_modules/.bin/tauri build --no-bundle
+      - name: Shipped-style binary has no e2e-webdriver code path
+        run: bash scripts/check-release-gate.sh src-tauri/target/release/sparkdown
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-linux-binary
+          path: src-tauri/target/release/sparkdown
+          retention-days: 7
+
+  macos:
+    name: E2E macOS (System Events, tmux ${{ matrix.tmux }})
+    runs-on: macos-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        tmux: ["off", "on"]
+    env:
+      E2E_TMUX: ${{ matrix.tmux }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.2"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+      - name: Build SparkDown.app (release, unsigned)
+        run: |
+          (cd frontend && npm ci)
+          frontend/node_modules/.bin/tauri build --bundles app
+      - name: tmux from Homebrew (as on a user's Mac; not on launchd's PATH)
+        if: matrix.tmux == 'on'
+        run: command -v tmux || brew install tmux; tmux -V
+      - name: Run the must-pass
+        run: python3 e2e/macos/run.py src-tauri/target/release/bundle/macos/SparkDown.app e2e-out
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-macos-tmux-${{ matrix.tmux }}
+          path: e2e-out
+
+  windows:
+    name: E2E Windows (WebDriver + UIA)
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.2"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+      - name: Build sparkdown.exe with the test-only e2e-webdriver feature
+        shell: pwsh
+        run: |
+          Push-Location frontend; npm ci; Pop-Location
+          & .\frontend\node_modules\.bin\tauri.cmd build --no-bundle --features e2e-webdriver
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Positive control (the feature build does contain the gated code)
+        shell: bash
+        run: |
+          if bash scripts/check-release-gate.sh src-tauri/target/release/sparkdown.exe; then
+            echo "::error::the gate check did not detect the e2e-webdriver build"; exit 1
+          fi
+          echo "OK: the gate check detects a feature build"
+      - name: msedgedriver matching the WebView2 runtime
+        shell: pwsh
+        run: |
+          $wv = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}').pv
+          "WebView2 $wv"
+          Invoke-WebRequest "https://msedgedriver.microsoft.com/$wv/edgedriver_win64.zip" -OutFile edgedriver.zip
+          Expand-Archive edgedriver.zip -DestinationPath edgedriver
+          & .\edgedriver\msedgedriver.exe --version
+      - name: Run the must-pass
+        shell: pwsh
+        run: python e2e/windows/run.py "$env:GITHUB_WORKSPACE\src-tauri\target\release\sparkdown.exe" "$env:GITHUB_WORKSPACE\edgedriver\msedgedriver.exe" e2e-out
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-windows
+          path: e2e-out
+
+  ubuntu-webdriver:
+    name: E2E Ubuntu (tauri-driver + WebKitWebDriver, X11, tmux ${{ matrix.tmux }})
+    needs: linux-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        tmux: ["off", "on"]
+    env:
+      E2E_TMUX: ${{ matrix.tmux }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: e2e-linux-binary
+          path: bin
+      - name: Runtime, WebKitWebDriver, Xvfb, openbox, xdotool
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libxdo3 librsvg2-common \
+            webkit2gtk-driver xvfb openbox xdotool wmctrl imagemagick dbus-x11 fonts-dejavu-core \
+            at-spi2-core libatk-adaptor python3-gi gir1.2-atspi-2.0 tmux
+          chmod +x bin/sparkdown && sudo install -m 755 bin/sparkdown /usr/local/bin/sparkdown
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/tauri-driver
+          key: tauri-driver-${{ runner.os }}-v2
+      - name: tauri-driver
+        run: command -v tauri-driver || cargo install tauri-driver --locked
+      - name: Run the must-pass
+        env:
+          SHELL: /bin/bash
+        run: |
+          xvfb-run -a -s "-screen 0 1920x1080x24" dbus-run-session -- bash -c \
+            'openbox >/dev/null 2>&1 & sleep 1; python3 e2e/linux/run.py x11 /usr/local/bin/sparkdown e2e-out'
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-ubuntu-tmux-${{ matrix.tmux }}
+          path: e2e-out
+
+  omarchy-hyprland:
+    name: E2E Arch + Hyprland (vkms, privileged container, tmux ${{ matrix.tmux }})
+    needs: linux-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        tmux: ["off", "on"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: e2e-linux-binary
+          path: bin
+      - name: Virtual KMS device (vkms)
+        run: |
+          sudo modprobe vkms || { sudo apt-get update -qq && sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" && sudo modprobe vkms; }
+          ls -l /dev/dri
+      - name: Run the must-pass in archlinux:latest under Hyprland
+        run: |
+          mkdir -p e2e-out
+          docker run --rm --privileged --device /dev/dri -e E2E_TMUX=${{ matrix.tmux }} -v "$PWD:/w:ro" -v "$PWD/e2e-out:/out" \
+            archlinux:latest bash /w/e2e/linux/hyprland-job.sh /w/bin/sparkdown /out
+      - name: Step summary
+        if: always()
+        run: cat e2e-out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-omarchy-hyprland-tmux-${{ matrix.tmux }}
+          path: e2e-out
+
+  summary:
+    name: E2E summary (all OSes)
+    if: always()
+    needs: [release-gate, macos, windows, ubuntu-webdriver, omarchy-hyprland]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: e2e-*
+          path: results
+      - name: Aggregate
+        run: python3 e2e/aggregate.py results
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-summary
+          path: results/summary.md
