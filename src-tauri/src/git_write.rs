@@ -258,6 +258,8 @@ pub(crate) fn classify(action: Action, out: &str) -> GitActionError {
         "network is unreachable",
         "operation timed out",
         "could not connect to server",
+        "couldn't connect to server",
+        "failed to connect to",
     ]) {
         (
             K::Network,
@@ -1056,6 +1058,7 @@ mod tests {
             ),
             GitErrorKind::Network
         );
+        assert_eq!(k(Action::Push, "fatal: unable to access 'http://127.0.0.1:9/r.git/': Failed to connect to 127.0.0.1 port 9 after 0 ms: Couldn't connect to server"), GitErrorKind::Network);
         assert_eq!(k(Action::Commit, "weird"), GitErrorKind::Other);
     }
 

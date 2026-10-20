@@ -77,9 +77,8 @@ def run(R, D, title, folder):
         return label(i)
 
     steps = []
-    if js("return document.getElementById('act-changes').getAttribute('aria-pressed')") != "true":
-        click("act-changes")
-    time.sleep(1)
+    # The block is driven without switching the sidebar to Changes: entering
+    # Changes puts the active tab in Diff, and later checks need the editor.
     click("btn-changes-refresh")
     end = time.time() + 20
     while time.time() < end and js("return document.getElementById('changes-git').hidden"):
