@@ -661,6 +661,37 @@ def main():
         return ("PASS" if ok else "FAIL"), f"saved A={saved}; before quit={before}; after relaunch={w} (gamma was closed, must stay closed)"
     R.run("restore", restore)
 
+    def geometry_stable():
+        """#112 (found on Paulo's Mac: +16x9 per relaunch): two more clean
+        ⌘Q + relaunch cycles; each window's real frame (System Events) and
+        its saved geometry must be identical every time."""
+        def live():
+            out = {}
+            for t in sorted(titled(["alpha", "beta"])):
+                out[t] = se(f'get {{position, size}} of window "{t}"')
+            return out
+
+        def saved():
+            ws = (fixtures.read_config().get("windows") or {})
+            return {k: v.get("geometry") for k, v in sorted(ws.items()) if v.get("folder")}
+
+        seen, cfg = [live()], []
+        for i in range(2):
+            subprocess.run(["pkill", "-x", "sleep"])
+            key("q")
+            if not wait_for(lambda: procs() == 0, 25):
+                return "FAIL", f"cycle {i + 1}: no clean ⌘Q; dialogs={dialogs()}"
+            cfg.append(saved())
+            launch()
+            wait_for(lambda: titled(["alpha", "beta"]) <= set(windows()), 40)
+            time.sleep(3)
+            seen.append(live())
+        shot("geometry-stable")
+        R.log(f"geometry-stable: live={seen} saved={cfg}")
+        ok = len(set(map(str, seen))) == 1 and cfg[0] == cfg[1] and all(cfg[0].values())
+        return ("PASS" if ok else "FAIL"), f"live frames before/after 2 relaunches={seen}; saved after each quit={cfg}"
+    R.run("geometry-stable", geometry_stable)
+
     # 0.4.0 must-pass step 3, as on Paulo's Mac: pre-existing tmux server
     # (tmux on), B's terminal split into two SparkDown panes with `sleep` in
     # the new one, a long-lived "agent" process in A's terminal, A unsaved,

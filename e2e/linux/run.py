@@ -158,6 +158,14 @@ class X11(Base):
     def foreground(self):
         return sh("xdotool", "getactivewindow", "getwindowname")
 
+    def geometry(self, title):
+        """Live outer geometry from X11: (x, y, width, height)."""
+        wid = self._wid(title)
+        if not wid:
+            return None
+        g = dict(l.split("=", 1) for l in sh("xdotool", "getwindowgeometry", "--shell", wid).split() if "=" in l)
+        return tuple(int(g.get(k, -1)) for k in ("X", "Y", "WIDTH", "HEIGHT"))
+
     def focus(self, title):
         wid = self._wid(title)
         if wid:

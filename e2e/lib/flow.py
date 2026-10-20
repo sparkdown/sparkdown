@@ -309,4 +309,38 @@ def run(R, D):
         R.run("reload-keeps-jobs", reload_keeps_jobs)
 
     R.run("restore", restore)
+
+    def geometry_stable():
+        """#112: two more clean quit + relaunch cycles. Every window must come
+        back at the same size and position: the saved geometry is identical
+        after each quit, and so is the live one after each relaunch."""
+        def saved():
+            ws = (fixtures.read_config().get("windows") or {})
+            return {k: v.get("geometry") for k, v in sorted(ws.items()) if v.get("folder")}
+
+        def live():
+            g = getattr(D, "geometry", None)
+            return {t: g(t) for t in sorted(titled("alpha", "beta"))} if g else None
+
+        cfg, seen = [], []
+        for i in range(2):
+            D.kill_job()
+            D.quit_keys("alpha" + SUF)
+            if not wait_for(lambda: D.procs() == 0, 25):
+                ds = D.dialogs()
+                for d in ds:
+                    D.cancel_dialog(d)
+                return "FAIL", f"cycle {i + 1}: no clean exit; prompts={ds}"
+            cfg.append(saved())
+            D.relaunch()
+            wait_for(lambda: titled("alpha", "beta") <= set(D.windows()), 60)
+            time.sleep(3)
+            seen.append(live())
+        D.shot("geometry-stable")
+        R.log(f"geometry-stable: saved={cfg} live={seen}")
+        if not cfg[0] or any(v is None for v in cfg[0].values()):
+            return "FAIL", f"no saved geometry to compare: {cfg[0]}"
+        ok = cfg[0] == cfg[1] and seen[0] == seen[1]
+        return ("PASS" if ok else "FAIL"), f"saved after quit 1={cfg[0]} quit 2={cfg[1]}; live after relaunch 1={seen[0]} 2={seen[1]}"
+    R.run("geometry-stable", geometry_stable)
     D.stop()
