@@ -204,6 +204,11 @@ class X11(Base):
     def quit_keys(self, title):
         self.keys(title, "ctrl+q", "ctrl", "q")
 
+    def focus_editor(self, title):
+        """Take focus out of a restored terminal: xterm keeps plain Ctrl+Q."""
+        if self._wd_handle(title):
+            self.wd.click(self.wd.find(".cm-content"))
+
     def save(self, title):
         if self._wd_handle(title):
             self.wd.click(self.wd.find(".cm-content"))
@@ -326,6 +331,13 @@ class Hypr(Base):
     def quit_keys(self, title):
         self.focus(title)
         self.wtype("-M", "ctrl", "q", "-m", "ctrl")
+
+    def focus_editor(self, title):
+        """No WebDriver here: Ctrl+` (passed to the app from a terminal)
+        hides the restored terminal, so plain Ctrl+Q reaches the app."""
+        self.focus(title)
+        self.wtype("-M", "ctrl", "grave", "-m", "ctrl")
+        time.sleep(1)
 
     def save(self, title):
         self.focus(title)

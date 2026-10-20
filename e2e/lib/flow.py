@@ -331,6 +331,12 @@ def run(R, D):
                 if hasattr(D, "wait_ready"):
                     R.log(f"geometry-stable: {t} ready={D.wait_ready(t)}")
             time.sleep(5)
+            # The relaunch restores alpha's terminal with focus, and the
+            # terminal keeps plain Ctrl+Q (only app keys a shell has no use
+            # for pass through). Quit from the editor, as `restore` does.
+            if hasattr(D, "focus_editor"):
+                D.focus_editor("alpha" + SUF)
+                time.sleep(1)
             D.quit_keys("alpha" + SUF)
             if not wait_for(lambda: D.procs() == 0, 25):
                 ds = D.dialogs()
