@@ -679,6 +679,19 @@ def main():
         for i in range(2):
             subprocess.run(["pkill", "-x", "sleep"])
             key("q")
+            # Runs last: a leftover unsaved edit or job prompt is answered
+            # (Quit / Don't Save); only the window frames are under test.
+            ds = wait_for(dialogs, 6)
+            for _ in range(4):
+                if not ds:
+                    break
+                btn = "Quit" if "Quit" in ds[0]["buttons"] else ("Don't Save" if "Don't Save" in ds[0]["buttons"] else None)
+                if not btn:
+                    break
+                R.log(f"geometry-stable: answering {btn!r} to {ds[0]['text'][:60]!r}")
+                click_dialog_button(ds[0], btn)
+                time.sleep(2)
+                ds = dialogs()
             if not wait_for(lambda: procs() == 0, 25):
                 return "FAIL", f"cycle {i + 1}: no clean ⌘Q; dialogs={dialogs()}"
             cfg.append(saved())
@@ -690,7 +703,6 @@ def main():
         R.log(f"geometry-stable: live={seen} saved={cfg}")
         ok = len(set(map(str, seen))) == 1 and cfg[0] == cfg[1] and all(cfg[0].values())
         return ("PASS" if ok else "FAIL"), f"live frames before/after 2 relaunches={seen}; saved after each quit={cfg}"
-    R.run("geometry-stable", geometry_stable)
 
     # 0.4.0 must-pass step 3, as on Paulo's Mac: pre-existing tmux server
     # (tmux on), B's terminal split into two SparkDown panes with `sleep` in
@@ -805,6 +817,16 @@ def main():
         return res
     if fixtures.TMUX:
         R.run("must-pass-3-relaunched", must_pass_3_relaunched)
+
+    # Last, so its relaunches can't disturb the must-pass steps' state.
+    def geometry_last():
+        subprocess.run(["pkill", "-x", "sleep"])
+        if procs() == 0:
+            launch()
+            wait_for(lambda: titled(["alpha", "beta"]) <= set(windows()), 40)
+            time.sleep(5)
+        return geometry_stable()
+    R.run("geometry-stable", geometry_last)
 
     R.manual("manual-gatekeeper", "Gatekeeper first launch of the signed, notarized build", "CI builds are unsigned; see e2e/README.md")
     R.manual("manual-git-signing-credentials", "Commit / Pull / Push with your real setup (#122): signed commit (gpg / ssh pinentry), Keychain / HTTPS credential helper, SSH agent key, and a locked key failing with the auth error instead of a prompt",
