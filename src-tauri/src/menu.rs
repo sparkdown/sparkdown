@@ -108,15 +108,20 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
         .accelerator("CmdOrCtrl+W")
         .build(app)?;
 
+    // #128: New Window sits with the folder items and shows its shortcut.
+    // The accelerator lives here only (not also on Window > New Window), so
+    // one key never maps to two items; both ids open an empty window.
     let file_new_window = MenuItemBuilder::with_id(
         format!("{}-file", crate::lifecycle::NEW_WINDOW_ID),
         "New Window",
     )
+    .accelerator("CmdOrCtrl+Shift+N")
     .build(app)?;
     let file_menu = SubmenuBuilder::new(app, "File")
         .item(&new_file)
-        .item(&file_new_window)
         .item(&new_tab)
+        .separator()
+        .item(&file_new_window)
         .item(&open_folder)
         .item(&open_remote)
         .item(&open_file)
@@ -247,9 +252,8 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
 
     // Multi-window (#65): New Window, then the open windows (appended by
     // lifecycle::refresh after the last separator).
-    let new_window = MenuItemBuilder::with_id(crate::lifecycle::NEW_WINDOW_ID, "New Window")
-        .accelerator("CmdOrCtrl+Shift+N")
-        .build(app)?;
+    let new_window =
+        MenuItemBuilder::with_id(crate::lifecycle::NEW_WINDOW_ID, "New Window").build(app)?;
     let window_menu = SubmenuBuilder::new(app, "Window")
         .item(&new_window)
         .separator()
@@ -324,6 +328,32 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 20, "parsed only {checked} menu ids");
+    }
+
+    #[test]
+    fn file_new_window_shows_its_shortcut_next_to_open_folder() {
+        // #128: one shared menu on every platform (macOS bar, Win/Linux
+        // popup), so this covers all three.
+        let rust = include_str!("menu.rs");
+        let at = rust
+            .find("\"{}-file\", crate::lifecycle::NEW_WINDOW_ID")
+            .unwrap();
+        let item = &rust[at..at + rust[at..].find(".build(app)").unwrap()];
+        assert!(item.contains("\"CmdOrCtrl+Shift+N\""));
+        assert_eq!(
+            rust.matches("\"CmdOrCtrl+Shift+N\"").count(),
+            1,
+            "one item per key"
+        );
+        let file = &rust[rust.find("SubmenuBuilder::new(app, \"File\")").unwrap()..];
+        let file = &file[..file.find(".build()").unwrap()];
+        let order: Vec<&str> = file
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix(".item(&"))
+            .map(|l| l.trim_end_matches(')'))
+            .collect();
+        let nw = order.iter().position(|i| *i == "file_new_window").unwrap();
+        assert_eq!(order.get(nw + 1), Some(&"open_folder"), "{order:?}");
     }
 
     #[test]
