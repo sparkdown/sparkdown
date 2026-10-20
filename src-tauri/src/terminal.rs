@@ -1568,11 +1568,8 @@ pub(crate) fn parse_proc_stat_pgrps(stat: &str) -> Option<(i32, i32)> {
 
 /// Ask tmux for the active pane's shell pid of `session`, then compare its
 /// tty's foreground process group with the shell's own. Blocking, bounded.
-fn tmux_job_state(session: &str) -> JobState {
-    tmux_job_state_with(session, &process_table)
-}
-
-/// [`tmux_job_state`] with the process table supplied (#113: shared per quit).
+///
+/// #113: the process table is supplied, so one quit check shares one read.
 fn tmux_job_state_with(session: &str, table: TableFn<'_>) -> JobState {
     let Some(tmux) = tmux_path() else {
         return JobState::Unknown("tmux not found".into());
@@ -1797,7 +1794,7 @@ pub(crate) fn tmux_state_from(
 /// Old shape kept for the live tmux test: the busy command, if any.
 #[cfg(test)]
 fn tmux_busy_command(session: &str) -> Option<String> {
-    match tmux_job_state(session) {
+    match tmux_job_state_with(session, &process_table) {
         JobState::Busy(c) => Some(c),
         _ => None,
     }
