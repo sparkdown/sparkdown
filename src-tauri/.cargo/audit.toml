@@ -1,0 +1,20 @@
+# cargo-audit configuration (read by `cargo audit` run from src-tauri/, as CI does).
+# Every ignore lists why there is no upstream fix and what lifts it.
+# Reviewed 2026-10-20. Re-check at each release.
+[advisories]
+ignore = [
+  # zvariant / zvariant_derive / zbus_names are "unmaintained": merged into zbus 6.
+  # Only path: tauri-plugin-single-instance 2.5.4 (latest stable, Linux D-Bus) -> zbus ^5.9.
+  # The only zbus-6 release of the plugin is 3.0.0-alpha. Informational, not a vulnerability.
+  # Lift: when a stable tauri-plugin-single-instance moves to zbus 6.
+  "RUSTSEC-2026-0370", # zvariant
+  "RUSTSEC-2026-0371", # zbus_names
+  "RUSTSEC-2026-0372", # zvariant_derive
+  # glib 0.18.5 VariantStrIter unsoundness (GHSA-wrw7-89jp-8q8g, fixed in glib 0.20).
+  # glib 0.18 is pinned by gtk 0.18 (gtk3-rs), which tauri/tao/wry/muda/webkit2gtk use on Linux.
+  # There is no gtk3 release on glib >= 0.20. SparkDown never uses glib::VariantStrIter.
+  # Lift: when Tauri's Linux stack leaves gtk3-rs.
+  "RUSTSEC-2024-0429",
+  # proc-macro-error 1.0.4 "unmaintained", build-time only via glib-macros 0.18 (same pin as above).
+  "RUSTSEC-2024-0370",
+]
