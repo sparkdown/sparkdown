@@ -381,7 +381,7 @@ class Hypr(Base):
         """No WebDriver here: Ctrl+` (passed to the app from a terminal)
         hides the restored terminal, so plain Ctrl+Q reaches the app."""
         self.focus(title)
-        self.wtype("-M", "ctrl", "grave", "-m", "ctrl")
+        self.wtype("-M", "ctrl", "-k", "grave", "-m", "ctrl")
         time.sleep(1)
 
     def save(self, title):
