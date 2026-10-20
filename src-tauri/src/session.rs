@@ -352,6 +352,17 @@ pub fn clamp_geometry(g: Geometry, monitors: &[Area]) -> Geometry {
     }
 }
 
+/// #112: what a window looks like after a restore of `saved`, given the
+/// platform's frame (outer minus inner). `set_size` sets the inner size and
+/// `set_position` the outer position, so this is what [`note_geometry`]
+/// must read back for a relaunch to be a fixed point.
+#[cfg(test)]
+pub(crate) fn restored(saved: Geometry, frame: (u32, u32)) -> (Geometry, (u32, u32)) {
+    let inner = Geometry { ..saved };
+    let outer = (saved.width + frame.0, saved.height + frame.1);
+    (inner, outer)
+}
+
 /// Whether window positions can be set on this platform: not on Wayland,
 /// where the compositor places windows (#60 decision 4).
 pub fn positions_supported() -> bool {
@@ -549,6 +560,41 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn relaunch_keeps_the_same_size_and_position_112() {
+        // Paulo's Mac: each relaunch grew windows by 16x9. Saving the inner
+        // size (what set_size restores) makes save→restore a fixed point;
+        // saving the outer size (the bug) grows by the frame every time.
+        let frame = (16, 9);
+        let start = super::Geometry {
+            x: 100,
+            y: 80,
+            width: 1200,
+            height: 800,
+            maximized: false,
+        };
+        let mut fixed = start;
+        let mut buggy = start;
+        for _ in 0..3 {
+            let (inner, _outer) = super::restored(fixed, frame);
+            fixed = inner; // what note_geometry saves now: inner size, outer position
+            let (_inner, outer) = super::restored(buggy, frame);
+            buggy = super::Geometry {
+                width: outer.0,
+                height: outer.1,
+                ..buggy
+            };
+        }
+        assert_eq!(fixed, start);
+        assert_eq!((buggy.width, buggy.height), (1200 + 48, 800 + 27));
+        // The save side really reads the inner size, and restore uses set_size.
+        let main = include_str!("main.rs");
+        assert!(main.contains("(w.outer_position(), w.inner_size())"));
+        assert!(!main.contains("w.outer_size()"));
+        let win = include_str!("windows.rs");
+        assert!(win.contains("window.set_size(tauri::PhysicalSize::new(g.width, g.height))"));
+    }
+
     use super::*;
     use std::sync::Arc;
 

@@ -322,4 +322,79 @@ def run(R, D):
         R.run("reload-keeps-jobs", reload_keeps_jobs)
 
     R.run("restore", restore)
+
+    def geometry_stable():
+        """#112: two more clean quit + relaunch cycles. Every window must come
+        back at the same size and position: the saved geometry is identical
+        after each quit, and so is the live one after each relaunch."""
+        def saved():
+            ws = (fixtures.read_config().get("windows") or {})
+            return {k: v.get("geometry") for k, v in sorted(ws.items()) if v.get("folder")}
+
+        def live():
+            g = getattr(D, "geometry", None)
+            return {t: g(t) for t in sorted(titled("alpha", "beta"))} if g else None
+
+        cfg, seen, retried = [], [], []
+        for i in range(2):
+            D.kill_job()
+            # A webview that is still starting after the relaunch can miss
+            # Ctrl+Q (the shortcut lives in its JS): let both finish loading.
+            for t in sorted(titled("alpha", "beta")):
+                if hasattr(D, "wait_ready"):
+                    R.log(f"geometry-stable: {t} ready={D.wait_ready(t)}")
+            time.sleep(5)
+            # The relaunch restores alpha's terminal with focus, and the
+            # terminal keeps plain Ctrl+Q (only app keys a shell has no use
+            # for pass through). Quit from the editor, as `restore` does.
+            if hasattr(D, "focus_editor"):
+                D.focus_editor("alpha" + SUF)
+                time.sleep(1)
+            D.quit_keys("alpha" + SUF)
+            if not wait_for(lambda: D.procs() == 0, 25):
+                ds = D.dialogs()
+                D.shot(f"geometry-no-exit-{i + 1}")
+                okw, wins = mcp.call(D.exe, A, "sparkdown_list_windows")
+                R.log(f"geometry-stable: no exit after Ctrl+Q; windows={D.windows()} prompts={ds} mcp={str(wins)[:300]}")
+                for d in ds:
+                    D.cancel_dialog(d)
+                # One retry, so a dropped key and a quit that hangs read differently.
+                D.quit_keys("alpha" + SUF)
+                if not wait_for(lambda: D.procs() == 0, 25):
+                    ds2 = D.dialogs()
+                    for d in ds2:
+                        D.cancel_dialog(d)
+                    return "FAIL", f"cycle {i + 1}: no clean exit after two Ctrl+Q; prompts={ds or ds2}"
+                R.log(f"geometry-stable: cycle {i + 1} exited on the second Ctrl+Q")
+                retried.append(i + 1)
+            cfg.append(saved())
+            D.relaunch()
+            wait_for(lambda: titled("alpha", "beta") <= set(D.windows()), 60)
+            time.sleep(3)
+            seen.append(live())
+        D.shot("geometry-stable")
+        R.log(f"geometry-stable: saved={cfg} live={seen}")
+        if not cfg[0] or any(v is None for v in cfg[0].values()):
+            return "FAIL", f"no saved geometry to compare: {cfg[0]}"
+        ok = cfg[0] == cfg[1] and seen[0] == seen[1]
+        if ok and retried:
+            return "PARTIAL", (f"sizes stable, but cycle(s) {retried} needed a second Ctrl+Q to quit; "
+                               f"saved={cfg}; live={seen}")
+        detail = f"saved after quit 1={cfg[0]} quit 2={cfg[1]}; live after relaunch 1={seen[0]} 2={seen[1]}"
+        if ok:
+            return "PASS", detail
+
+        def sizes(d, live=False):
+            if d is None:
+                return None
+            if live:
+                return {k: tuple(v)[2:] if v else None for k, v in d.items()}
+            return {k: (v or {}).get("width") and ((v or {}).get("width"), (v or {}).get("height")) for k, v in d.items()}
+        # #112 is size creep. On a bare X server a window larger than the
+        # screen can be moved by the WM when it is raised: report a
+        # position-only change as PARTIAL, never as a size pass.
+        if sizes(cfg[0]) == sizes(cfg[1]) and sizes(seen[0], True) == sizes(seen[1], True):
+            return "PARTIAL", "sizes identical across both relaunches; only the position moved (WM placement). " + detail
+        return "FAIL", detail
+    R.run("geometry-stable", geometry_stable)
     D.stop()

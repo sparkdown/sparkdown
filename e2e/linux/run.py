@@ -168,6 +168,14 @@ class X11(Base):
     def foreground(self):
         return sh("xdotool", "getactivewindow", "getwindowname")
 
+    def geometry(self, title):
+        """Live outer geometry from X11: (x, y, width, height)."""
+        wid = self._wid(title)
+        if not wid:
+            return None
+        g = dict(l.split("=", 1) for l in sh("xdotool", "getwindowgeometry", "--shell", wid).split() if "=" in l)
+        return tuple(int(g.get(k, -1)) for k in ("X", "Y", "WIDTH", "HEIGHT"))
+
     def focus(self, title):
         wid = self._wid(title)
         if wid:
@@ -205,6 +213,11 @@ class X11(Base):
 
     def quit_keys(self, title):
         self.keys(title, "ctrl+q", "ctrl", "q")
+
+    def focus_editor(self, title):
+        """Take focus out of a restored terminal: xterm keeps plain Ctrl+Q."""
+        if self._wd_handle(title):
+            self.wd.click(self.wd.find(".cm-content"))
 
     def save(self, title):
         if self._wd_handle(title):
@@ -416,6 +429,18 @@ class Hypr(Base):
     def quit_keys(self, title):
         self.focus(title)
         self.wtype("-M", "ctrl", "q", "-m", "ctrl")
+
+    def focus_editor(self, title):
+        """No WebDriver here: Ctrl+` (passed to the app from a terminal)
+        hides the restored terminal, so plain Ctrl+Q reaches the app. It is
+        a toggle, and the hidden drawer is restored hidden on the next
+        launch, so press it once only (no DOM here to check)."""
+        self.focus(title)
+        if getattr(self, "_term_hidden", False):
+            return
+        self.wtype("-M", "ctrl", "-k", "grave", "-m", "ctrl")
+        self._term_hidden = True
+        time.sleep(1)
 
     def save(self, title):
         self.focus(title)

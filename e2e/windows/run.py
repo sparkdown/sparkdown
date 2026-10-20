@@ -111,6 +111,11 @@ class Desktop:
     def quit_keys(self, title):
         self.keys(title, "ctrl", "q")
 
+    def focus_editor(self, title):
+        """Take focus out of a restored terminal: xterm keeps plain Ctrl+Q."""
+        self.handle(title)
+        self.wd.click(self.wd.find(".cm-content"))
+
     def save(self, title):
         self.handle(title)
         self.wd.click(self.wd.find(".cm-content"))
