@@ -266,6 +266,15 @@ def run(R, D):
     if D.wd is not None:
         R.run("webview-content", lambda: D.webview_check("alpha" + SUF, "alpha", EDIT))
         R.run("git-actions", lambda: git_actions.run(R, D, "alpha" + SUF, A))
+    if D.wd is not None and hasattr(D, "terminal_clipboard"):
+        def terminal_clipboard():
+            try:
+                return D.terminal_clipboard("alpha" + SUF)
+            finally:
+                # The check stops every `sleep`; later checks expect beta's job.
+                if fixtures.TMUX:
+                    D.start_job("beta" + SUF)
+        R.run("terminal-clipboard", terminal_clipboard)
     if D.wd is not None and hasattr(D, "explorer_delete"):
         R.run("explorer-delete", lambda: D.explorer_delete("alpha" + SUF, A))
 

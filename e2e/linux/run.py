@@ -271,6 +271,59 @@ class X11(Base):
         return ("PASS" if ok else "FAIL"), (f"sidebar shows {folder}={folder in text}; editor has the edit={edit in content}; "
                                             f"unsaved dot={dot}; WebDriver window handles={handles}")
 
+    def terminal_clipboard(self, title):
+        """#130: Omarchy's Super+V / Super+C reach SparkDown as plain
+        Ctrl+V / Ctrl+C. Real X key events (xdotool) into the terminal:
+        Ctrl+V pastes the clipboard, Shift+Insert pastes, and Ctrl+C with no
+        selection still interrupts the running job."""
+        import shutil
+        if not shutil.which("xclip"):
+            return "MANUAL", "xclip is not installed on this runner"
+        if not self._wd_handle(title):
+            return "MANUAL", "WebDriver can't reach the window"
+        self.kill_job()
+        out1, out2 = pathlib.Path("/tmp/sd130-ctrlv.txt"), pathlib.Path("/tmp/sd130-shiftins.txt")
+        for o in (out1, out2):
+            o.unlink(missing_ok=True)
+
+        def clip(text):
+            # xclip forks to keep serving the selection; run() returns then.
+            subprocess.run(["xclip", "-selection", "clipboard"], input=text, text=True, timeout=10)
+
+        def focus_term():
+            # As start_job: hide and show the drawer so the terminal is up.
+            self.wd.click(self.wd.find("#btn-terminal"))
+            time.sleep(1.5)
+            self.wd.click(self.wd.find("#btn-terminal"))
+            time.sleep(2)
+            ta = self.wd.find(".xterm-helper-textarea", wait=20)
+            self.wd.js("arguments[0].focus()", {wd.ELEM: ta})
+            sh("xdotool", "windowactivate", "--sync", self._wid(title))
+            time.sleep(1)
+
+        focus_term()
+        clip(f"echo SD130V > {out1}")
+        sh("xdotool", "key", "--clearmodifiers", "ctrl+v")
+        time.sleep(1)
+        sh("xdotool", "key", "Return")
+        v_ok = flow.wait_for(lambda: out1.exists() and "SD130V" in out1.read_text(), 10)
+        clip(f"echo SD130I > {out2}")
+        sh("xdotool", "key", "--clearmodifiers", "shift+Insert")
+        time.sleep(1)
+        sh("xdotool", "key", "Return")
+        i_ok = flow.wait_for(lambda: out2.exists() and "SD130I" in out2.read_text(), 10)
+        sh("xdotool", "type", "--delay", "40", "sleep 300")
+        sh("xdotool", "key", "Return")
+        started = flow.wait_for(self.job_alive, 10)
+        sh("xdotool", "key", "--clearmodifiers", "ctrl+c")
+        stopped = flow.wait_for(lambda: not self.job_alive(), 10)
+        self.shot("terminal-clipboard")
+        if not stopped:
+            self.kill_job()
+        ok = v_ok and i_ok and started and stopped
+        return ("PASS" if ok else "FAIL"), (f"Ctrl+V pasted={bool(v_ok)}; Shift+Insert pasted={bool(i_ok)}; "
+                                            f"Ctrl+C (no selection) interrupted sleep={bool(started and stopped)}")
+
     def explorer_delete(self, title, folder):
         """#121: explorer right-click → Delete… → confirm → the file is in
         the freedesktop trash (not gone for good) and its row is gone."""

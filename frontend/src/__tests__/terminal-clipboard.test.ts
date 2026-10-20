@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { clipboardAction, agentLaunchCommand } from '../terminal';
+import { clipboardAction, agentLaunchCommand, pasteOrCtrlV } from '../terminal';
 
 /** Build a minimal KeyboardEvent-like object for clipboardAction. */
 function key(k: string, mods: Partial<KeyboardEvent> = {}, type = 'keydown'): KeyboardEvent {
@@ -164,13 +164,57 @@ describe('clipboardAction', () => {
     expect(clipboardAction(key('v', { ctrlKey: true, shiftKey: true }), false)).toBe('paste');
   });
 
-  it('plain Ctrl+C stays with the terminal (SIGINT), even with a selection', () => {
+  it('Windows/macOS: plain Ctrl+C stays with the terminal (SIGINT), even with a selection', () => {
     expect(clipboardAction(key('c', { ctrlKey: true }), true)).toBeNull();
+    expect(clipboardAction(key('v', { ctrlKey: true }), true)).toBeNull();
   });
+
+  it('Shift+Insert pastes (Omarchy sends it to terminal-tagged windows)', () => {
+    expect(clipboardAction(key('Insert', { shiftKey: true }), false)).toBe('paste');
+    expect(clipboardAction(key('Insert', { shiftKey: true }), false, true)).toBe('paste');
+    expect(clipboardAction(key('Insert', { ctrlKey: true, shiftKey: true }), false, true)).toBeNull();
+  });
+
+  describe('Linux (#130: Omarchy Super+V/Super+C arrive as Ctrl+V/Ctrl+C)', () => {
+    it('Ctrl+V pastes if the clipboard has text, else falls back to ^V', () => {
+      expect(clipboardAction(key('v', { ctrlKey: true }), false, true)).toBe('paste-or-ctrl-v');
+      expect(clipboardAction(key('V', { ctrlKey: true }), true, true)).toBe('paste-or-ctrl-v');
+    });
+
+    it('Ctrl+C copies a selection, and is SIGINT (left to xterm) without one', () => {
+      expect(clipboardAction(key('c', { ctrlKey: true }), true, true)).toBe('copy');
+      expect(clipboardAction(key('c', { ctrlKey: true }), false, true)).toBeNull();
+    });
+
+    it('keeps Ctrl+Shift+C/V and leaves other Ctrl keys to the shell', () => {
+      expect(clipboardAction(key('c', { ctrlKey: true, shiftKey: true }), true, true)).toBe('copy');
+      expect(clipboardAction(key('v', { ctrlKey: true, shiftKey: true }), false, true)).toBe('paste');
+      for (const k of ['d', 'z', 'r', 'l', 'a']) {
+        expect(clipboardAction(key(k, { ctrlKey: true }), true, true)).toBeNull();
+      }
+      expect(clipboardAction(key('v', { ctrlKey: true, altKey: true }), false, true)).toBeNull();
+    });
+  });
+
 
   it('ignores keyup, Alt combos, and other keys', () => {
     expect(clipboardAction(key('c', { metaKey: true }, 'keyup'), true)).toBeNull();
     expect(clipboardAction(key('c', { metaKey: true, altKey: true }), true)).toBeNull();
     expect(clipboardAction(key('x', { metaKey: true }), true)).toBeNull();
+  });
+});
+
+describe('pasteOrCtrlV (#130)', () => {
+  it('writes the clipboard text when there is some', async () => {
+    const out: string[] = [];
+    expect(await pasteOrCtrlV(async () => 'echo hi', (d) => out.push(d))).toBe('pasted');
+    expect(out).toEqual(['echo hi']);
+  });
+
+  it('sends ^V when the clipboard is empty or unreadable (quoted-insert keeps working)', async () => {
+    const out: string[] = [];
+    expect(await pasteOrCtrlV(async () => '', (d) => out.push(d))).toBe('ctrl-v');
+    expect(await pasteOrCtrlV(async () => { throw new Error('denied'); }, (d) => out.push(d))).toBe('ctrl-v');
+    expect(out).toEqual(['\x16', '\x16']);
   });
 });

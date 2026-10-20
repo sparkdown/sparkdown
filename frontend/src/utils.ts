@@ -8,6 +8,13 @@ export function isMacOS(): boolean {
   return /mac/i.test(p);
 }
 
+/** True on Linux (not Android): terminal clipboard keys follow Omarchy's
+ *  universal Ctrl+V / Ctrl+C there (#130). */
+export function isLinux(): boolean {
+  const p = (navigator as any).userAgentData?.platform || navigator.platform || '';
+  return /linux/i.test(p) && !/android/i.test(navigator.userAgent || '');
+}
+
 export function isMarkdownFile(path: string | null): boolean {
   return !path || MD_EXT_RE.test(path);
 }
