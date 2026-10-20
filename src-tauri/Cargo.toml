@@ -31,8 +31,8 @@ notify = "8"
 minisign-verify = "0.2"
 # Remote SSH first connect (#24): SHA256 host-key fingerprints, shown the
 # same way ssh prints them. Both already in the tree (same versions).
-sha2 = "0.10"
-base64 = "0.22"
+sha2 = "0.11"
+base64 = "0.23"
 # In-app SSH key passphrase (#27): the passphrase lives only in buffers that
 # are wiped on drop. Tiny, no dependencies.
 zeroize = "1"
