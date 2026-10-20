@@ -1,6 +1,7 @@
 """Test folders and an isolated app config for one E2E run."""
 import json
 import os
+import tempfile
 import time
 import pathlib
 import subprocess
@@ -171,3 +172,66 @@ def tmux_split_idle_pane(name):
 
 def tmux_kill_pane(pane_id):
     subprocess.run([_tmux(), "kill-pane", "-t", pane_id], capture_output=True, timeout=10)
+
+
+WRAP_PY = """import pty, os, sys
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp('bash', ['bash', '--norc', '--noprofile', '-ic', sys.argv[1] + '; true'])
+while True:
+    try:
+        if not os.read(fd, 4096):
+            break
+    except OSError:
+        break
+os.waitpid(pid, 0)
+"""
+
+
+def _ps_row(pid):
+    p = subprocess.run(["ps", "-o", "pid=,pgid=,tpgid=,tty=,comm=", "-p", str(pid)], capture_output=True, text=True)
+    return p.stdout.strip()
+
+
+def nested_pty_job(session, log, job="sleep 301"):
+    """#110: like kiro-cli-term, start a python pty wrapper (in the
+    background) inside `session`'s pane: the pane's own tty stays idle, the
+    inner shell's tty runs `job` in the foreground. Returns (ok, detail).
+    `ok` is True only when the setup is the bug's exact shape (genuineness):
+    the session keeps its name and its client, the pane tty's foreground is
+    the pane shell itself, and the inner tty's foreground is sleep."""
+    wrap = os.path.join(tempfile.gettempdir(), "sd-e2e-wrap.py")
+    with open(wrap, "w") as f:
+        f.write(WRAP_PY)
+    subprocess.run([_tmux(), "send-keys", "-t", f"={session}:", f"python3 {wrap} '{job}' >/dev/null 2>&1 &", "Enter"],
+                   capture_output=True, timeout=10)
+    time.sleep(3)
+    d = subprocess.run([_tmux(), "list-panes", "-s", "-t", f"={session}", "-F", "#{session_name} #{pane_pid} #{session_attached}"],
+                       capture_output=True, text=True, timeout=10).stdout.split()
+    if len(d) < 3 or d[0] != session:
+        return False, f"session {session} not found as itself: {d}"
+    pane = d[1]
+    outer = _ps_row(pane).split()
+    sl = subprocess.run(["pgrep", "-f", f"^{job}$"], capture_output=True, text=True).stdout.split()
+    inner = [_ps_row(p).split() for p in sl]
+    log(f"nested-pty {session}: attached={d[2]} pane={outer} inner sleep={inner}")
+    if len(outer) < 4 or outer[2] != outer[0]:
+        return False, f"pane tty is not idle (pane row {outer}): not the bug's shape"
+    hit = [r for r in inner if len(r) >= 4 and r[2] == r[0] and r[3] != outer[3]]
+    if not hit:
+        return False, f"no sleep in the foreground of a nested tty: {inner}"
+    return True, f"pane {pane} on {outer[3]} idle (tpgid={outer[2]}); sleep {hit[0][0]} foreground on nested {hit[0][3]}; client attached={d[2]}"
+
+
+def stop_pane_job(session):
+    """Ctrl-C the pane's foreground job (the plain sleep), leaving its shell."""
+    subprocess.run([_tmux(), "send-keys", "-t", f"={session}:", "C-c"], capture_output=True, timeout=10)
+    time.sleep(1.5)
+
+
+def end_nested(session, job="sleep 301"):
+    subprocess.run(["pkill", "-f", f"^{job}$"])
+    subprocess.run(["pkill", "-f", "sd-e2e-wrap.py"])
+    time.sleep(1)
+    subprocess.run([_tmux(), "send-keys", "-t", f"={session}:", "sleep 300", "Enter"], capture_output=True, timeout=10)
+    time.sleep(2)

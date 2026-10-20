@@ -623,6 +623,21 @@ def main():
         R.run("tmux-split-pane", (lambda: split_check() if ready else ("FAIL", "setup failed")))
         R.run("tmux-transient-failure", (lambda: flap_check() if ready else ("FAIL", "setup failed")))
 
+        def nested_check():
+            s = fixtures.tmux_busy_session()
+            if not s:
+                return "FAIL", "setup: no busy sd-* session (B's sleep)"
+            fixtures.stop_pane_job(s)
+            ok, det = fixtures.nested_pty_job(s, R.log)
+            R.log(f"nested-pty setup: {ok} {det}")
+            if not ok:
+                fixtures.end_nested(s)
+                return "FAIL", f"setup is not the bug's shape: {det}"
+            res = quit_check(lambda: key("q"), "nested", ["still running", "sleep", "beta"])
+            fixtures.end_nested(s)
+            return res[0], f"{det}; {res[1]}"
+        R.run("tmux-nested-pty", (lambda: nested_check() if ready else ("FAIL", "setup failed")))
+
     def restore():
         subprocess.run(["pkill", "-x", "sleep"])
         cli(A)

@@ -24,6 +24,7 @@ CHECKS = {
     "cli-forward-keeps-b": "`sparkdown <A>` from another app with A and B open: one process, A focused, B's webview still shows B (frontend root + rendered text)",
     "open-with-keeps-b": "`open -a SparkDown <A>` (Apple Event) with A and B open: B stays on B, A focused, and a new window afterwards starts empty",
     "reload-keeps-jobs": "Both webviews reloaded (web-content process ended / location.reload): the quit prompt still lists every window's tmux job, and they survive a real Quit",
+    "tmux-nested-pty": "B's tmux pane wraps its shell in a nested pty (kiro-cli-term style, python pty wrapper); `sleep 301` is foreground on the inner tty: the quit prompt lists sleep — beta",
     "must-pass-3": "0.4.0 step 3 (Paulo's setup): split B with sleep, agent-like job in A, A unsaved, physical ⌘Q: combined prompt; with tmux, a real Quit leaves the sleep running",
     "must-pass-3-relaunched": "Step 3 after a relaunch (windows and B's split reattached to the surviving tmux sessions): physical ⌘Q still lists the sleep",
     "tmux-split-pane": "B's tmux window split (idle pane active, sleep in the other pane): quit prompt still lists sleep",

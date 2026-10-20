@@ -245,6 +245,23 @@ def run(R, D):
         R.run("tmux-split-pane", split_check)
         R.run("tmux-transient-failure", flap_check)
 
+        def nested_check():
+            """#110: B's pane wraps its shell in a nested pty (kiro-cli-term
+            style); the job runs on the inner tty. Quit must list it."""
+            s = fixtures.tmux_busy_session()
+            if not s:
+                return "FAIL", "setup: no busy sd-* session (B's sleep)"
+            fixtures.stop_pane_job(s)
+            ok, det = fixtures.nested_pty_job(s, R.log)
+            R.log(f"nested-pty setup: {ok} {det}")
+            if not ok:
+                fixtures.end_nested(s)
+                return "FAIL", f"setup is not the bug's shape: {det}"
+            res = quit_and_check("nested", 0, want=["still running", "sleep", "beta"])
+            fixtures.end_nested(s)
+            return res[0], f"{det}; {res[1]}"
+        R.run("tmux-nested-pty", nested_check)
+
     if D.wd is not None:
         R.run("webview-content", lambda: D.webview_check("alpha" + SUF, "alpha", EDIT))
 
