@@ -219,10 +219,20 @@ def run(R, D):
         old_tab = mcp.tab(ctx, gnote) if okc else None
         D.shot("close-folder-reopened")
         ok = g in w2 and len(w2) == n and mcp.norm(root) == mcp.norm(C) and old_tab is None
-        return ("PASS" if ok else "FAIL"), (f"job prompt and save prompt cancelled cleanly; closed → {w}; "
-                                            f"tmux sessions stopped={sorted(gsess) or 'n/a'}; reopened → {w2}, "
+        return ("PASS" if ok else "FAIL"), (f"job prompt and save prompt cancelled cleanly; closed -> {w}; "
+                                            f"tmux sessions stopped={sorted(gsess) or 'n/a'}; reopened -> {w2}, "
                                             f"root={root!r}, old notes.md tab restored={old_tab is not None}")
-    R.run("close-folder", close_folder)
+    def close_folder_checked():
+        res = close_folder()
+        if res[0] == "FAIL":
+            # Leave gamma as later checks expect it: no job, nothing unsaved.
+            for x in D.dialogs():
+                D.cancel_dialog(x)
+            D.kill_job()
+            if ("gamma" + SUF) in D.windows():
+                D.save("gamma" + SUF)
+        return res
+    R.run("close-folder", close_folder_checked)
 
     def red_close():
         D.close_window("gamma" + SUF)
@@ -431,13 +441,17 @@ def run(R, D):
         mid = D.windows()
         if b in mid or stray:
             return "FAIL", f"Close Folder on beta: windows={mid}; prompts={stray}"
-        time.sleep(3)
+        D.shot("close-folder-beta-closed")
+        # Let beta's webview finish reloading into the empty state.
+        time.sleep(8)
         D.quit_keys("alpha" + SUF)
-        if not wait_for(lambda: D.procs() == 0, 25):
+        if not wait_for(lambda: D.procs() == 0, 40):
             ds = D.dialogs()
+            D.shot("close-folder-no-exit")
+            info = f"windows={D.windows()} foreground={D.foreground()!r} procs={D.procs()}"
             for x in ds:
                 D.cancel_dialog(x)
-            return "FAIL", f"no clean exit; prompts={ds}"
+            return "FAIL", f"no clean exit; prompts={ds}; {info}"
         D.relaunch()
         wait_for(lambda: ("alpha" + SUF) in D.windows(), 60)
         time.sleep(4)
