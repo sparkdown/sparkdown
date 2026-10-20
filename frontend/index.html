@@ -98,6 +98,17 @@
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>
             </button>
           </div>
+          <div id="changes-git" class="changes-git" hidden>
+            <div class="changes-git-sync">
+              <span id="changes-git-branch" class="changes-git-branch"></span>
+              <button type="button" id="btn-git-pull" class="changes-git-btn" disabled>Pull</button>
+              <button type="button" id="btn-git-push" class="changes-git-btn" disabled>Push</button>
+            </div>
+            <textarea id="changes-commit-msg" class="changes-commit-msg" rows="2" placeholder="Commit message (Ctrl/⌘+Enter to commit)" aria-label="Commit message" spellcheck="true"></textarea>
+            <div id="changes-git-files"></div>
+            <button type="button" id="btn-git-commit" class="changes-git-btn changes-git-commit" disabled>Commit</button>
+            <div id="changes-git-status" class="changes-git-status" hidden></div>
+          </div>
           <div id="changes-panel" role="region" aria-label="Changes">
             <div id="changes-list"></div>
           </div>
