@@ -163,7 +163,7 @@ export class LifecycleController {
 /** The quit confirm's text, or null when no terminal is running (unsaved
  *  files alone get the usual save prompts). */
 /** How long the quit waits for the job check before it asks anyway (#99). */
-export const QUIT_STATUS_TIMEOUT_MS = 10_000;
+const QUIT_STATUS_TIMEOUT_MS = 10_000;
 
 /** The quit status, or, if the check fails or takes too long, a status that
  *  still makes the quit ask (#99): never read a failed check as "nothing
