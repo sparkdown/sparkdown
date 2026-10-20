@@ -21,6 +21,7 @@ export type EventMap = {
   [EVENTS.CONFIRM_CLOSE_TAB]: { tabId: string };
   [EVENTS.ALL_TABS_CLOSED]: Record<string, never>;
   [EVENTS.FILE_TREE_OPEN]: { path: string };
+  [EVENTS.FILE_TREE_DELETE]: { path: string; isDir: boolean };
   [EVENTS.TOC_GOTO_LINE]: { line: number };
   [EVENTS.TOC_SCROLL_PREVIEW]: { id: string };
   [EVENTS.INSERT_AT_CURSOR]: { text: string };

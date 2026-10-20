@@ -15,6 +15,7 @@ export const EVENTS = {
   CONFIRM_CLOSE_TAB: 'confirm-close-tab',
   ALL_TABS_CLOSED: 'all-tabs-closed',
   FILE_TREE_OPEN: 'file-tree-open',
+  FILE_TREE_DELETE: 'file-tree-delete',
   TOC_GOTO_LINE: 'toc-goto-line',
   TOC_SCROLL_PREVIEW: 'toc-scroll-preview',
   INSERT_AT_CURSOR: 'insert-at-cursor',

@@ -380,6 +380,8 @@ def run(R, D):
 
     if D.wd is not None:
         R.run("webview-content", lambda: D.webview_check("alpha" + SUF, "alpha", EDIT))
+    if D.wd is not None and hasattr(D, "explorer_delete"):
+        R.run("explorer-delete", lambda: D.explorer_delete("alpha" + SUF, A))
 
     def restore():
         D.kill_job()

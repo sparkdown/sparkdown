@@ -36,6 +36,7 @@ CHECKS = {
     "dock-reopen": "Dock click with no visible window brings a window back",
     "restore": "Clean quit + relaunch restores the open windows (a closed one stays closed)",
     "webview-content": "Web content (WebDriver): sidebar folder, editor text, unsaved marker",
+    "explorer-delete": "Explorer Delete… asks, then moves the file to the trash (#121)",
 }
 
 

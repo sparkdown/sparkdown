@@ -1,5 +1,6 @@
 import { listen } from './window-events';
-import { message } from '@tauri-apps/plugin-dialog';
+import { ask, message } from '@tauri-apps/plugin-dialog';
+import { deleteEntry } from './explorer-delete';
 import { EditorManager } from './editor';
 import { Toolbar } from './toolbar';
 import { Titlebar } from './titlebar';
@@ -450,6 +451,22 @@ export class App {
 
     this.bus.on(EVENTS.FILE_TREE_OPEN, (data) => {
       this.openFile(data.path);
+    });
+
+    // #121: explorer Delete — confirm, trash, then close clean tabs of it.
+    this.bus.on(EVENTS.FILE_TREE_DELETE, (data) => {
+      void (async () => {
+        const remote = (await api.remoteSession().catch(() => null)) != null;
+        await deleteEntry(data, remote, {
+          ask: (text, opts) => ask(text, opts),
+          deletePath: (p) => api.deletePath(p),
+          tabs: () => this.tabs.tabsOfOrigin(),
+          closeTab: (id) => this.tabs.closeTab(id),
+          markGone: (id) => this.tabs.setDiskConflict(id, true),
+          refresh: () => this.fileTree.refresh(),
+          showError: (text) => void message(text, { title: 'Delete', kind: 'error' }),
+        });
+      })();
     });
 
     this.bus.on(EVENTS.TOC_GOTO_LINE, (data) => {

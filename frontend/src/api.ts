@@ -97,6 +97,7 @@ export const api = {
     invoke<void>("append_crash_log", { entry }),
   copyText: (text: string) => invoke<void>("copy_text", { text }),
   copyFile: (path: string) => invoke<void>("copy_file", { path }),
+  deletePath: (path: string) => invoke<"trashed" | "deleted">("delete_path", { path }),
   listDirectory: (path: string, includeHidden = false) =>
     invoke<FileEntry[]>("list_directory", { path, includeHidden }),
   /** Every file under `root` (root-relative, `/`-separated) for Quick open.
