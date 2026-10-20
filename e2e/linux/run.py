@@ -286,7 +286,7 @@ class X11(Base):
             return "FAIL", "the new file never appeared in the explorer"
         items = self.wd.js("return [...document.querySelectorAll('.sd-ctxmenu-item')].map(e=>e.textContent)")
         clicked = self.wd.js("const i=[...document.querySelectorAll('.sd-ctxmenu-item')].find(e=>e.textContent==='Delete…');"
-                             "if(!i) return false; i.click(); return true;")
+                             "if(!i) return false; i.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0})); return true;")
         if not clicked:
             return "FAIL", f"no Delete… in the context menu: {items}"
         time.sleep(2)
