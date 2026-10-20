@@ -322,15 +322,32 @@ def run(R, D):
             g = getattr(D, "geometry", None)
             return {t: g(t) for t in sorted(titled("alpha", "beta"))} if g else None
 
-        cfg, seen = [], []
+        cfg, seen, retried = [], [], []
         for i in range(2):
             D.kill_job()
+            # A webview that is still starting after the relaunch can miss
+            # Ctrl+Q (the shortcut lives in its JS): let both finish loading.
+            for t in sorted(titled("alpha", "beta")):
+                if hasattr(D, "wait_ready"):
+                    R.log(f"geometry-stable: {t} ready={D.wait_ready(t)}")
+            time.sleep(5)
             D.quit_keys("alpha" + SUF)
             if not wait_for(lambda: D.procs() == 0, 25):
                 ds = D.dialogs()
+                D.shot(f"geometry-no-exit-{i + 1}")
+                okw, wins = mcp.call(D.exe, A, "sparkdown_list_windows")
+                R.log(f"geometry-stable: no exit after Ctrl+Q; windows={D.windows()} prompts={ds} mcp={str(wins)[:300]}")
                 for d in ds:
                     D.cancel_dialog(d)
-                return "FAIL", f"cycle {i + 1}: no clean exit; prompts={ds}"
+                # One retry, so a dropped key and a quit that hangs read differently.
+                D.quit_keys("alpha" + SUF)
+                if not wait_for(lambda: D.procs() == 0, 25):
+                    ds2 = D.dialogs()
+                    for d in ds2:
+                        D.cancel_dialog(d)
+                    return "FAIL", f"cycle {i + 1}: no clean exit after two Ctrl+Q; prompts={ds or ds2}"
+                R.log(f"geometry-stable: cycle {i + 1} exited on the second Ctrl+Q")
+                retried.append(i + 1)
             cfg.append(saved())
             D.relaunch()
             wait_for(lambda: titled("alpha", "beta") <= set(D.windows()), 60)
@@ -341,6 +358,9 @@ def run(R, D):
         if not cfg[0] or any(v is None for v in cfg[0].values()):
             return "FAIL", f"no saved geometry to compare: {cfg[0]}"
         ok = cfg[0] == cfg[1] and seen[0] == seen[1]
+        if ok and retried:
+            return "PARTIAL", (f"sizes stable, but cycle(s) {retried} needed a second Ctrl+Q to quit; "
+                               f"saved={cfg}; live={seen}")
         return ("PASS" if ok else "FAIL"), f"saved after quit 1={cfg[0]} quit 2={cfg[1]}; live after relaunch 1={seen[0]} 2={seen[1]}"
     R.run("geometry-stable", geometry_stable)
     D.stop()
