@@ -1,5 +1,8 @@
 use tauri::{
-    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
+    menu::{
+        AboutMetadata, CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder,
+        SubmenuBuilder,
+    },
     AppHandle, Wry,
 };
 
@@ -17,6 +20,26 @@ pub struct AppMenu {
 /// icon instead of showing a permanent in-window menu bar.
 pub struct AppMenuHandle(pub tauri::menu::Menu<Wry>);
 
+/// What SparkDown > About shows (#120): name, version, website and license.
+pub(crate) fn about_metadata(
+    name: &str,
+    version: &str,
+    copyright: Option<String>,
+    icon: Option<tauri::image::Image<'static>>,
+) -> AboutMetadata<'static> {
+    AboutMetadata {
+        name: Some(name.to_string()),
+        version: Some(version.to_string()),
+        comments: Some("Read every change your agent makes.".into()),
+        copyright,
+        license: Some("MIT".into()),
+        website: Some("https://sparkdown.dev".into()),
+        website_label: Some("sparkdown.dev".into()),
+        icon,
+        ..Default::default()
+    }
+}
+
 pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
     // Use the PREDEFINED Quit item (not a custom one). A custom item that
     // hijacks Cmd+Q disrupts AppKit's applicationShouldTerminate flow, so
@@ -33,7 +56,16 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
     let check_updates =
         MenuItemBuilder::with_id("check-updates", "Check for Updates...").build(app)?;
 
-    let app_menu = SubmenuBuilder::new(app, "SparkDown").about(None);
+    // #120: muda's About with no metadata does nothing on GTK and Windows
+    // (only macOS fills the panel from the bundle), so always pass it.
+    let pkg = app.package_info();
+    let about = about_metadata(
+        &pkg.name,
+        &pkg.version.to_string(),
+        app.config().bundle.copyright.clone(),
+        app.default_window_icon().map(|i| i.clone().to_owned()),
+    );
+    let app_menu = SubmenuBuilder::new(app, "SparkDown").about(Some(about));
     #[cfg(target_os = "macos")]
     let app_menu = app_menu.item(&check_updates);
     let app_menu = app_menu
@@ -322,6 +354,18 @@ mod tests {
             .collect();
         let nw = order.iter().position(|i| *i == "file_new_window").unwrap();
         assert_eq!(order.get(nw + 1), Some(&"open_folder"), "{order:?}");
+    }
+
+    #[test]
+    fn about_shows_name_and_version_on_every_platform() {
+        // #120: never `About(None)` (a no-op on Linux and Windows).
+        let rust = include_str!("menu.rs");
+        assert!(!rust.contains(&[".about(", "None)"].concat()));
+        let m = super::about_metadata("SparkDown", "0.4.1", None, None);
+        assert_eq!(m.name.as_deref(), Some("SparkDown"));
+        assert_eq!(m.version.as_deref(), Some("0.4.1"));
+        assert_eq!(m.license.as_deref(), Some("MIT"));
+        assert_eq!(m.website.as_deref(), Some("https://sparkdown.dev"));
     }
 
     #[test]
