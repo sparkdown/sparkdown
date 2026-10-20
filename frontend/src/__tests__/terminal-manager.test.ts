@@ -38,6 +38,7 @@ const api = vi.hoisted(() => ({
   mcpAgentInstalled: vi.fn(async (_bin: string) => false),
   mcpInstallAgent: vi.fn(async (_bin: string) => 'Installed'),
   copyText: vi.fn(async (_text: string) => {}),
+  readClipboardText: vi.fn(async () => 'pasted text'),
   remoteSession: vi.fn(
     async () => null as { host: string; path: string; home: string } | null,
   ),
@@ -902,17 +903,31 @@ describe('TerminalPane resize / write / paste', () => {
 
   it('clipboard keys: ⌘V pastes clipboard text into the pty; ⌘C copies the selection', async () => {
     const { pane, term } = await startedPane();
-    const readText = vi.fn(async () => 'pasted text');
-    Object.defineProperty(navigator, 'clipboard', {
-      value: { readText },
-      configurable: true,
-    });
-    const key = (k: string) =>
-      ({ type: 'keydown', key: k, metaKey: true, ctrlKey: false, shiftKey: false, altKey: false }) as KeyboardEvent;
+    const prevent = vi.fn();
+    const key = (k: string, mods: Partial<KeyboardEvent> = { metaKey: true }) =>
+      ({
+        type: 'keydown',
+        key: k,
+        metaKey: false,
+        ctrlKey: false,
+        shiftKey: false,
+        altKey: false,
+        preventDefault: prevent,
+        ...mods,
+      }) as KeyboardEvent;
 
+    // #130: the paste reads the clipboard through the core (WebKitGTK's
+    // navigator.clipboard can't), and cancels the native paste.
     expect(term.keyHandler!(key('v'))).toBe(false);
     await flush();
-    expect(readText).toHaveBeenCalled();
+    expect(api.readClipboardText).toHaveBeenCalled();
+    expect(api.terminalWrite).toHaveBeenCalledWith('p1', 'pasted text');
+    expect(prevent).toHaveBeenCalled();
+
+    // Shift+Insert pastes too.
+    vi.mocked(api.terminalWrite).mockClear();
+    expect(term.keyHandler!(key('Insert', { shiftKey: true }))).toBe(false);
+    await flush();
     expect(api.terminalWrite).toHaveBeenCalledWith('p1', 'pasted text');
 
     // ⌘C with no selection is left to xterm (never turns into a copy).
