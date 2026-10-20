@@ -185,6 +185,14 @@ export const api = {
   /** Branch + ahead/behind its upstream (status bar). */
   gitBranchStatus: (root: string) =>
     invoke<GitBranchStatus>("git_branch_status", { root }),
+  /** #122: commit `paths` (repo-relative; null = every change). Rejects
+   *  with a `GitActionError`. */
+  gitCommit: (root: string, message: string, paths: string[] | null) =>
+    invoke<GitActionResult>("git_commit", { root, message, paths }),
+  /** #122: pull the current branch from its upstream (user's own git). */
+  gitPull: (root: string) => invoke<GitActionResult>("git_pull", { root }),
+  /** #122: push the current branch to its upstream; never forced. */
+  gitPush: (root: string) => invoke<GitActionResult>("git_push", { root }),
   gitDiffFile: (root: string, path: string, untracked: boolean) =>
     invoke<string>("git_diff_file", { root, path, untracked }),
   /** Per changed file: +adds / −dels and a fingerprint of the change
@@ -329,6 +337,37 @@ export interface GitChange {
   /** A folder, not a file: an untracked nested git repo (`?? proj/`).
    *  Shown as a folder row, never opened as a tab (#47). */
   is_dir?: boolean;
+}
+
+/** Mirror of `GitErrorKind` in src-tauri/src/git_write.rs. */
+export type GitErrorKind =
+  | "empty_message"
+  | "nothing_to_commit"
+  | "not_a_repo"
+  | "detached"
+  | "no_upstream"
+  | "auth"
+  | "network"
+  | "conflict"
+  | "local_changes"
+  | "diverged"
+  | "rejected"
+  | "identity"
+  | "signing"
+  | "hook"
+  | "unsupported"
+  | "timeout"
+  | "other";
+
+/** A failed commit / pull / push (git_write.rs `GitActionError`). */
+export interface GitActionError {
+  kind: GitErrorKind;
+  message: string;
+  detail: string;
+}
+
+export interface GitActionResult {
+  summary: string;
 }
 
 /** Mirror of `GitBranchStatus` in src-tauri/src/git.rs. */
