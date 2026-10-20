@@ -1458,7 +1458,7 @@ pub(crate) fn remote_agent_cli_script(cmd_line: &str, bin: &str, secs: u64) -> S
          ( sleep {secs}; : > \"$sd_t\"; sd_kill TERM; sleep 2; sd_kill KILL ) </dev/null >/dev/null 2>&1 &\n\
          sd_w=$!\n\
          wait $sd_c; sd_s=$?\n\
-         kill $sd_w 2>/dev/null\n\
+         kill $sd_w 2>/dev/null; wait $sd_w 2>/dev/null\n\
          if [ -e \"$sd_t\" ]; then rm -f \"$sd_t\"; echo {CLI_TIMEOUT_MARK} >&2; exit 124; fi\n\
          exit $sd_s"
     )
