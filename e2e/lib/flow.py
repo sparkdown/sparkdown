@@ -446,6 +446,10 @@ def run(R, D):
         D.shot("close-folder-beta-closed")
         # Let beta's webview finish reloading into the empty state.
         time.sleep(8)
+        # Give alpha's page keyboard focus first (as `restore` does): a key
+        # sent to a freshly relaunched page that was never clicked is lost
+        # with or without Close Folder (checked locally on X11).
+        D.save("alpha" + SUF)
         D.quit_keys("alpha" + SUF)
         if not wait_for(lambda: D.procs() == 0, 40):
             ds = D.dialogs()
