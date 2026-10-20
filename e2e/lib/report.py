@@ -35,6 +35,7 @@ CHECKS = {
     "restore": "Clean quit + relaunch restores the open windows (a closed one stays closed)",
     "geometry-stable": "Two more quit + relaunch cycles: every window keeps the same size and position (#112)",
     "webview-content": "Web content (WebDriver): sidebar folder, editor text, unsaved marker",
+    "explorer-delete": "Explorer Delete… asks, then moves the file to the trash (#121)",
 }
 
 

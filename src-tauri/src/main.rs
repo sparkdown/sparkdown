@@ -561,6 +561,7 @@ fn main() {
             commands::is_directory,
             commands::copy_text,
             commands::copy_file,
+            commands::delete_path,
             commands::list_directory,
             file_index::list_workspace_files,
             commands::load_config,
