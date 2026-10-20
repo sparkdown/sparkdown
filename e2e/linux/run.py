@@ -33,6 +33,16 @@ def atspi_texts():
         return {}
 
 
+def atspi_dialogs(press=None):
+    """Open SparkDown dialogs over AT-SPI; with `press`, activate that button."""
+    try:
+        args = ["/usr/bin/python3", ATSPI] + (["--press", press] if press else [])
+        p = subprocess.run(args, capture_output=True, text=True, timeout=20)
+        return json.loads(p.stdout or "[]")
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def with_text(ds):
     if not ds:
         return ds
@@ -313,6 +323,41 @@ class X11(Base):
         ok = v_ok and i_ok and started and stopped
         return ("PASS" if ok else "FAIL"), (f"Ctrl+V pasted={bool(v_ok)}; Shift+Insert pasted={bool(i_ok)}; "
                                             f"Ctrl+C (no selection) interrupted sleep={bool(started and stopped)}")
+
+    def explorer_delete(self, title, folder):
+        """#121: explorer right-click → Delete… → confirm → the file is in
+        the freedesktop trash (not gone for good) and its row is gone."""
+        if not self._wd_handle(title):
+            return "MANUAL", "WebDriver can't reach the window"
+        f = pathlib.Path(folder) / "trash-me.md"
+        f.write_text("# trash me\n", encoding="utf-8")
+        row = flow.wait_for(lambda: self.wd.js(
+            "const r=[...document.querySelectorAll('[data-path]')].find(e=>e.dataset.path===arguments[0]);"
+            "if(!r) return false; r.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:40,clientY:120}));"
+            "return true;", str(f)), 20)
+        if not row:
+            return "FAIL", "the new file never appeared in the explorer"
+        items = self.wd.js("return [...document.querySelectorAll('.sd-ctxmenu-item')].map(e=>e.textContent)")
+        clicked = self.wd.js("const i=[...document.querySelectorAll('.sd-ctxmenu-item')].find(e=>e.textContent==='Delete…');"
+                             "if(!i) return false; i.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,button:0})); return true;")
+        if not clicked:
+            return "FAIL", f"no Delete… in the context menu: {items}"
+        time.sleep(2)
+        self.shot("delete-confirm")
+        seen = flow.wait_for(lambda: [d for d in atspi_dialogs("Move to Trash") if "Trash" in (d.get("text") or "")], 15)
+        gone = flow.wait_for(lambda: not f.exists(), 10)
+        uid = os.getuid()
+        trashed = [str(p) for p in list((pathlib.Path.home() / ".local/share/Trash/files").glob("trash-me*.md"))
+                   + list(pathlib.Path("/").glob(f".Trash-{uid}/files/trash-me*.md"))
+                   + list(pathlib.Path("/tmp").glob(f".Trash-{uid}/files/trash-me*.md"))]
+        still_row = self.wd.js("return [...document.querySelectorAll('[data-path]')].some(e=>e.dataset.path===arguments[0])", str(f))
+        self.shot("after-delete")
+        if not seen:
+            sh("xdotool", "key", "Escape")  # never leave a modal up for later checks
+            return ("PARTIAL" if not gone else "FAIL"), f"menu={items}; confirm not readable over AT-SPI; file gone={gone}"
+        ok = gone and bool(trashed) and not still_row
+        return ("PASS" if ok else "FAIL"), (f"menu={items}; confirm={seen[0].get('text', '')[:120]!r}; file gone={gone}; "
+                                            f"in trash={trashed}; row still shown={still_row}")
 
     def shot(self, name):
         self.n += 1

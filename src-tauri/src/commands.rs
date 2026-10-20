@@ -436,6 +436,70 @@ fn write_file_impl(path: &str, content: &str) -> Result<(), AppError> {
     Ok(crate::fsio::write_atomic(&safe_path, content.as_bytes())?)
 }
 
+/// What [`delete_path`] did: moved to the OS trash, or (remote, which has no
+/// trash) deleted for good. The frontend says which in its confirm (#121).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteOutcome {
+    Trashed,
+    Deleted,
+}
+
+/// #121: only something strictly inside this window's own folder can be
+/// deleted: never the folder itself, never anything outside it, and never
+/// from a window with no folder.
+pub(crate) fn check_deletable(
+    folder: Option<&crate::windows::FolderId>,
+    path: &str,
+) -> Result<(), String> {
+    let Some(f) = folder else {
+        return Err("This window has no folder open".into());
+    };
+    if !f.contains_local(path) {
+        return Err(format!("{path} is not inside this window's folder"));
+    }
+    // Inside both ways = the same folder.
+    let as_root = crate::windows::FolderId::Local {
+        path: path.to_string(),
+    };
+    let crate::windows::FolderId::Local { path: root } = f else {
+        return Err("This window's folder is remote".into());
+    };
+    if as_root.contains_local(root) {
+        return Err("Can't delete the open folder itself".into());
+    }
+    Ok(())
+}
+
+/// Delete a file or folder from the explorer (#121), after the frontend's
+/// confirm. Local: moved to the OS trash (macOS Trash, Windows Recycle Bin,
+/// freedesktop trash); if the trash fails the file is left alone, never
+/// removed for good. Remote: no trash over SSH, so files only, removed for
+/// good (the confirm says so).
+#[tauri::command]
+pub async fn delete_path(
+    webview_window: tauri::WebviewWindow,
+    path: String,
+) -> Result<DeleteOutcome, AppError> {
+    let label = webview_window.label().to_string();
+    crate::windows::spawn_scoped(label.clone(), move || {
+        if crate::remote::is_active() {
+            return crate::remote::delete_file(&path).map(|()| DeleteOutcome::Deleted);
+        }
+        let canon = validate_path(&path)?;
+        let canon_s = canon.to_string_lossy().to_string();
+        let folder = crate::windows::registry()
+            .get(&label)
+            .and_then(|e| e.folder.clone());
+        check_deletable(folder.as_ref(), &canon_s).map_err(AppError::InvalidPath)?;
+        trash::delete(&canon)
+            .map_err(|e| AppError::Other(format!("Couldn't move {path} to the trash: {e}")))?;
+        Ok(DeleteOutcome::Trashed)
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("delete task failed: {e}")))?
+}
+
 /// List the contents of a directory. Returns entries sorted with directories
 /// first, then files, alphabetical within each group. Skips hidden files
 /// (dot-prefixed) unless `include_hidden` is true. Detects circular symlinks.
@@ -1106,5 +1170,65 @@ mod tests {
         assert!(limiter.check(Path::new("/tmp/a.md")).is_ok());
         std::thread::sleep(std::time::Duration::from_millis(MIN_WRITE_INTERVAL_MS + 10));
         assert!(limiter.check(Path::new("/tmp/a.md")).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod delete_tests {
+    use super::*;
+    use crate::windows::FolderId;
+
+    fn local(p: &str) -> FolderId {
+        FolderId::Local { path: p.into() }
+    }
+
+    #[test]
+    fn deletes_only_strictly_inside_the_window_folder() {
+        let f = local("/w/proj");
+        assert!(check_deletable(Some(&f), "/w/proj/a.md").is_ok());
+        assert!(check_deletable(Some(&f), "/w/proj/sub/b.md").is_ok());
+        assert!(
+            check_deletable(Some(&f), "/w/proj").is_err(),
+            "the folder itself"
+        );
+        assert!(
+            check_deletable(Some(&f), "/w/proj/").is_err(),
+            "the folder itself"
+        );
+        assert!(
+            check_deletable(Some(&f), "/w/project/x.md").is_err(),
+            "a sibling prefix"
+        );
+        assert!(check_deletable(Some(&f), "/etc/passwd").is_err());
+        assert!(
+            check_deletable(None, "/w/proj/a.md").is_err(),
+            "no folder open"
+        );
+    }
+
+    #[test]
+    fn local_delete_moves_to_the_trash_not_gone_for_good() {
+        // The real OS trash, as the explorer uses it; the item is found in the
+        // trash (Linux/Windows can list it) and purged so no junk is left.
+        let name = format!("sparkdown-trash-test-{}.md", std::process::id());
+        let file = std::env::temp_dir().join(&name);
+        fs::write(&file, "x").unwrap();
+        if let Err(e) = trash::delete(&file) {
+            // A runner without a usable trash must not pass silently as
+            // "deleted": the file has to still be there.
+            assert!(file.exists(), "trash failed ({e}) yet the file is gone");
+            return;
+        }
+        assert!(!file.exists());
+        #[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+        {
+            let items: Vec<_> = trash::os_limited::list()
+                .unwrap()
+                .into_iter()
+                .filter(|i| i.name == name.as_str())
+                .collect();
+            assert_eq!(items.len(), 1, "the file is in the trash");
+            trash::os_limited::purge_all(items).unwrap();
+        }
     }
 }

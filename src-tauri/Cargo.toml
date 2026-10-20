@@ -37,6 +37,7 @@ base64 = "0.23"
 # are wiped on drop. Tiny, no dependencies.
 zeroize = "1"
 tauri-plugin-single-instance = "2"
+trash = "5"
 
 # macOS: install an applicationShouldTerminate: delegate hook so dock/menu
 # Quit can be intercepted (tao doesn't implement it). objc2 is already in the

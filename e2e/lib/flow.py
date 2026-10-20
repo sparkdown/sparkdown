@@ -273,6 +273,8 @@ def run(R, D):
                 if fixtures.TMUX:
                     D.start_job("beta" + SUF)
         R.run("terminal-clipboard", terminal_clipboard)
+    if D.wd is not None and hasattr(D, "explorer_delete"):
+        R.run("explorer-delete", lambda: D.explorer_delete("alpha" + SUF, A))
 
     def restore():
         D.kill_job()
