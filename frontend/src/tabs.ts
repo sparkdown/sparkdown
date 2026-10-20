@@ -266,6 +266,11 @@ export class TabManager {
    *  Comparison is separator- and drive-case-insensitive so a mixed-separator
    *  path (e.g. from a git-relative join on Windows) still matches the tab
    *  opened via the tree. */
+  /** Tabs of the active machine (#121: explorer Delete closes or flags them). */
+  tabsOfOrigin(origin: string | null = this.origin): Tab[] {
+    return this.tabs.filter((t) => t.origin === origin);
+  }
+
   findByPath(path: string, origin: string | null = this.origin): Tab | null {
     const target = normalizePathForCompare(path);
     return (

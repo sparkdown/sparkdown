@@ -683,7 +683,7 @@ export class FileTree {
     return el;
   }
 
-  /** Right-click menu: Open (files), Copy file, Copy name, Copy path. */
+  /** Right-click menu: Open (files), Copy file, Copy name, Copy path, Delete. */
   private attachContextMenu(el: HTMLElement, entry: FileEntry, isFile: boolean): void {
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
@@ -697,6 +697,8 @@ export class FileTree {
         { label: 'Copy', onClick: () => void api.copyFile(entry.path) },
         { label: 'Copy Name', onClick: () => void api.copyText(basename(entry.path)) },
         { label: 'Copy Path', onClick: () => void api.copyText(entry.path) },
+        // #121: confirmed, then to the trash (app.ts runs explorer-delete).
+        { label: 'Delete…', onClick: () => this.bus.emit(EVENTS.FILE_TREE_DELETE, { path: entry.path, isDir: !isFile }) },
       );
       showContextMenu(e.clientX, e.clientY, items);
     });

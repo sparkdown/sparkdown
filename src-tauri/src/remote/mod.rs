@@ -577,6 +577,45 @@ fn parse_read_payload(raw: &[u8], path: &str) -> Result<String, AppError> {
     )))
 }
 
+/// #121: a remote explorer delete may only name a file strictly inside the
+/// session's folder, spelled without `.`/`..` segments.
+pub(crate) fn remote_deletable(root: &str, path: &str) -> Result<(), String> {
+    validate_remote_path(path)?;
+    if path.split('/').any(|seg| seg == "." || seg == "..") {
+        return Err(format!("Refusing a relative path segment: {path}"));
+    }
+    let root = root.trim_end_matches('/');
+    let path = path.trim_end_matches('/');
+    if path == root || !path.starts_with(&format!("{root}/")) {
+        return Err(format!("{path} is not inside this window's folder"));
+    }
+    Ok(())
+}
+
+/// POSIX sh: remove one file (or symlink); refuse a directory (exit 3).
+pub(crate) fn remote_delete_script(path: &str) -> String {
+    let q = shell_quote(path);
+    format!("if [ -d {q} ] && [ ! -L {q} ]; then echo __SD_DIR__; exit 3; fi; rm -f -- {q}")
+}
+
+/// #121: delete a remote file for good (SSH has no trash).
+pub fn delete_file(path: &str) -> Result<(), AppError> {
+    let session = current_session().ok_or_else(|| AppError::Other("no remote session".into()))?;
+    remote_deletable(&session.path, path).map_err(AppError::InvalidPath)?;
+    let (code, out, err) =
+        ssh_run_status(&session.host, &remote_delete_script(path)).map_err(AppError::Other)?;
+    match code {
+        0 => Ok(()),
+        3 if out.contains("__SD_DIR__") => Err(AppError::InvalidPath(
+            "Deleting folders on a remote host isn't supported".into(),
+        )),
+        _ => Err(AppError::Other(format!(
+            "Couldn't delete {path}: {}",
+            err.trim()
+        ))),
+    }
+}
+
 pub fn write_file(path: &str, content: &str) -> Result<(), AppError> {
     let session = current_session().ok_or_else(|| AppError::Other("no remote session".into()))?;
     validate_remote_path(path).map_err(AppError::Other)?;
@@ -3610,4 +3649,43 @@ pub fn git_change_stats(
     let raw = ssh_run(&session.host, &script)?;
     let parsed = parse_remote_stats(&raw, hashed.len(), untracked.len());
     Ok(remote_stats_from(&changes, &hashed, &parsed))
+}
+
+#[cfg(test)]
+mod delete_tests {
+    use super::{remote_deletable, remote_delete_script};
+
+    #[test]
+    fn remote_delete_only_inside_the_folder() {
+        assert!(remote_deletable("/srv/p", "/srv/p/a.md").is_ok());
+        assert!(remote_deletable("/srv/p/", "/srv/p/d/a.md").is_ok());
+        assert!(remote_deletable("/srv/p", "/srv/p").is_err());
+        assert!(remote_deletable("/srv/p", "/srv/px/a.md").is_err());
+        assert!(remote_deletable("/srv/p", "/srv/p/../q/a.md").is_err());
+        assert!(remote_deletable("/srv/p", "relative.md").is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remote_delete_script_removes_files_and_refuses_folders() {
+        let dir = std::env::temp_dir().join(format!("sd-rdel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("it's a.md");
+        std::fs::write(&f, "x").unwrap();
+        let run = |p: &std::path::Path| {
+            crate::proc::command("sh")
+                .arg("-c")
+                .arg(remote_delete_script(p.to_str().unwrap()))
+                .output()
+                .unwrap()
+        };
+        assert!(run(&f).status.success());
+        assert!(!f.exists());
+        let d = dir.join("sub");
+        std::fs::create_dir(&d).unwrap();
+        let out = run(&d);
+        assert_eq!(out.status.code(), Some(3));
+        assert!(d.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
