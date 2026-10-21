@@ -15,6 +15,8 @@ export interface BuiltinCommandTargets {
   tabs: Pick<TabManager, 'activeTab' | 'getAllTabs'>;
   /** Workspace folder, or null. */
   root(): string | null;
+  /** This window has a folder open (Close Folder, #127). */
+  hasFolder(): boolean;
   setViewMode(mode: ViewMode): void;
   showSidebarView(view: SidebarView): void;
   openLinePrompt(): void;
@@ -66,6 +68,7 @@ export function registerBuiltinCommands(reg: CommandRegistry, t: BuiltinCommandT
     act('file.new', 'File: New file', ACTIONS.NEW_FILE),
     act('file.open', 'File: Open file…', ACTIONS.OPEN_FILE),
     act('file.openFolder', 'File: Open folder…', ACTIONS.OPEN_FOLDER),
+    act('file.closeFolder', 'File: Close folder', ACTIONS.CLOSE_FOLDER, { enabled: () => t.hasFolder() }),
     act('remote.openFolder', 'Remote: Open remote folder…', ACTIONS.OPEN_REMOTE),
     act('file.save', 'File: Save', ACTIONS.SAVE, { enabled: hasTab }),
     act('file.saveAs', 'File: Save as…', ACTIONS.SAVE_AS, { enabled: hasTab }),

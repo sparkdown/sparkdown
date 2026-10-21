@@ -69,6 +69,10 @@ export const api = {
    *  window that already has it (now focused), or null. */
   /** Window lifecycle (#65). */
   windowNew: () => invoke<void>("window_new"),
+  /** #127: what Close Folder would stop in this window (quit-status shape). */
+  windowCloseStatus: () => invoke<QuitStatus>("window_close_status"),
+  /** #127: tear down this window's folder (terminals, tmux, MCP, restore). */
+  windowCloseFolder: () => invoke<string[]>("window_close_folder"),
   windowClose: () => invoke<void>("window_close"),
   windowTakeMenu: () => invoke<string | null>("window_take_menu"),
   /** Running non-tmux terminals in every window (what a quit stops). */

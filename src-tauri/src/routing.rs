@@ -107,6 +107,28 @@ fn pending_opens() -> std::sync::MutexGuard<'static, HashMap<String, String>> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
+/// Close Folder (#127): take what is queued for `label` to open at start.
+pub fn take_pending_open(label: &str) -> Option<String> {
+    pending_opens().remove(label)
+}
+
+/// Queue `spec` for `label`'s (re)starting webview.
+pub fn queue_open(label: &str, spec: String) {
+    pending_opens().insert(label.to_string(), spec);
+}
+
+/// Whether a path queued for a window whose folder was just closed should
+/// be routed again: never the closed folder itself (it would reopen in
+/// the now-empty window), anything else yes.
+pub fn reroute_after_close(queued: Option<&FolderId>, closed: Option<&FolderId>) -> bool {
+    match (queued, closed) {
+        (Some(q), Some(c)) => q.key() != c.key(),
+        (Some(_), None) => true,
+        // Unresolvable now: let the route report it.
+        (None, _) => true,
+    }
+}
+
 /// The folder spec a request names, as seen from `caller`: `ssh://` is
 /// remote; a bare path is remote on the caller's live session, else local.
 fn folder_for(caller: Option<&str>, dir: &str) -> Result<(FolderId, String, String), String> {
@@ -307,6 +329,53 @@ pub fn route_forwarded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn close_folder_drops_a_queued_open_of_that_folder_only() {
+        let a = FolderId::Local {
+            path: "/p/a".into(),
+        };
+        let b = FolderId::Local {
+            path: "/p/b".into(),
+        };
+        assert!(!reroute_after_close(Some(&a), Some(&a)));
+        assert!(reroute_after_close(Some(&b), Some(&a)));
+        assert!(reroute_after_close(Some(&b), None));
+        assert!(reroute_after_close(None, Some(&a)));
+        queue_open("w-x", "/p/b".into());
+        assert_eq!(take_pending_open("w-x").as_deref(), Some("/p/b"));
+        assert_eq!(take_pending_open("w-x"), None);
+    }
+
+    #[test]
+    fn a_closed_folder_window_is_reused_for_the_next_open() {
+        // #127: after Close Folder the window keeps its w-<hash> label but
+        // is empty, so reopening the same folder from it lands "Here"
+        // (fresh), and from elsewhere it focuses nothing old.
+        let a = FolderId::Local {
+            path: "/p/a".into(),
+        };
+        let la = windows::label_for_folder(&a);
+        let mut reg = Registry::default();
+        reg.register(&la);
+        reg.register("w-other");
+        reg.set_folder(&la, Some(a.clone()), None).unwrap();
+        reg.set_folder(
+            "w-other",
+            Some(FolderId::Local {
+                path: "/p/o".into(),
+            }),
+            None,
+        )
+        .unwrap();
+        reg.close_folder(&la);
+        assert_eq!(decide(&reg, Some(&la), &a), Route::Here);
+        // From a busy window: a new window, never the stale label.
+        assert_eq!(
+            decide(&reg, Some("w-other"), &a),
+            Route::New(format!("{la}-2"))
+        );
+    }
 
     fn local(p: &str) -> FolderId {
         FolderId::Local { path: p.into() }

@@ -11,12 +11,19 @@ export interface LifecycleDeps {
   clearAgentContext(): Promise<void>;
   /** Unsubscribe all Tauri event listeners. */
   destroy(): void;
+  /** This window shows a folder (Close Folder is a no-op otherwise). */
+  hasFolder?(): boolean;
+  /** Stop every config save from now on (Close Folder, #127). */
+  suspendSaves?(): void;
+  /** Reload the webview into the empty state. */
+  reload?(): void;
 }
 
 /** Window close / quit: hide to the dock, or resolve unsaved work and exit. */
 export class LifecycleController {
   private quitting = false;
   private quitInFlight = false;
+  private closingFolder = false;
 
   constructor(
     private readonly ctx: AppContext,
@@ -137,6 +144,59 @@ export class LifecycleController {
     }
   }
 
+  /**
+   * File > Close Folder (#127): the same checks as closing the window, with
+   * Cancel: running terminals (this window only; tmux ones are stopped, not
+   * kept), then each unsaved tab. Then the core tears the folder down
+   * (terminals and tmux sessions, MCP route, watcher, remote session,
+   * session restore, registry) and this webview reloads into the empty
+   * Ctrl/⌘+Shift+N state. A reload on purpose: the core already forgot
+   * everything a reload could re-attach (#108), and nothing in this
+   * webview's memory survives it. True = the folder was closed.
+   */
+  async closeFolder(): Promise<boolean> {
+    if (this.quitting || this.closingFolder || this.quitInFlight) return false;
+    if (this.deps.hasFolder && !this.deps.hasFolder()) return false;
+    this.closingFolder = true;
+    try {
+      const status = await quitStatusOrUnchecked(api.windowCloseStatus());
+      const text = closeFolderConfirmText(status);
+      if (text) {
+        let go = false;
+        try {
+          go = await ask(text, {
+            title: "Close Folder",
+            kind: "warning",
+            okLabel: "Close Folder",
+            cancelLabel: "Cancel",
+          });
+        } catch {
+          go = false;
+        }
+        if (!go) return false;
+      }
+      if (!(await this.deps.resolveUnsavedChanges())) return false;
+      // Shared preferences (recents, layouts) are kept; the core drops the
+      // window's own section right after.
+      await this.deps.persistConfig();
+      this.quitting = true;
+      this.deps.suspendSaves?.();
+      this.deps.destroy();
+      try {
+        await this.deps.clearAgentContext();
+        await api.windowCloseFolder();
+      } finally {
+        // Listeners are gone either way: start this window over.
+        this.deps.reload?.();
+      }
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.closingFolder = false;
+    }
+  }
+
   /** Update relaunch (updater.ts): the same unsaved-changes prompt as Quit.
    *  false = cancelled, a save failed, or a quit is already under way. */
   async resolveBeforeRestart(): Promise<boolean> {
@@ -190,6 +250,40 @@ export async function quitStatusOrUnchecked(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** The Close Folder confirm's text, or null when no terminal of this
+ *  window is running (unsaved tabs get the usual save prompts). Unlike a
+ *  quit, tmux sessions do not keep running: Close Folder stops them. */
+export function closeFolderConfirmText(status: QuitStatus): string | null {
+  const all = status.busy;
+  if (all.length === 0) return null;
+  const busy = all.filter((b) => !b.unchecked);
+  const unchecked = all.filter((b) => b.unchecked);
+  const parts: string[] = [];
+  if (busy.length) {
+    const lines = busy
+      .slice(0, 8)
+      .map((b) => `• ${b.command}`)
+      .join("\n");
+    const more = busy.length > 8 ? `\n…and ${busy.length - 8} more` : "";
+    const n =
+      busy.length === 1
+        ? "A terminal in this folder is"
+        : `${busy.length} terminals in this folder are`;
+    parts.push(
+      `${n} still running:\n\n${lines}${more}\n\nClosing the folder will stop ${busy.length === 1 ? "it" : "them"}, including tmux sessions.`,
+    );
+  }
+  if (unchecked.length) {
+    parts.push(
+      `Couldn't check this folder's terminals for running programs (${unchecked[0].unchecked}). Closing the folder will stop them.`,
+    );
+  }
+  const question = busy.length
+    ? "Close the folder and stop them?"
+    : "Close the folder anyway?";
+  return `${parts.join("\n\n")}\n\n${question}`;
 }
 
 export function quitConfirmText(status: QuitStatus): string | null {

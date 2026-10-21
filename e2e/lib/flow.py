@@ -27,6 +27,17 @@ def wait_for(pred, secs=20, step=0.5):
     return pred()
 
 
+def _paths(v):
+    """Every string in an MCP answer (to find folder paths in it)."""
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, dict):
+        return [p for x in v.values() for p in _paths(x)]
+    if isinstance(v, list):
+        return [p for x in v for p in _paths(x)]
+    return []
+
+
 def run(R, D):
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="sd-e2e-"))
     F = fixtures.make_folders(tmp)
@@ -39,7 +50,7 @@ def run(R, D):
     D.shot("alpha")
     if not got:
         R.add("two-windows", "FAIL", f"the app did not open alpha: {D.windows()}")
-        for cid in ("one-process-focus", "window-menu", "empty-reuse", "mcp-isolation", "red-close", "quit-prompt", "restore"):
+        for cid in ("one-process-focus", "window-menu", "empty-reuse", "mcp-isolation", "close-folder", "red-close", "quit-prompt", "restore", "close-folder-relaunch"):
             R.add(cid, "FAIL", "not run: the app never opened its first window")
         return
 
@@ -118,6 +129,111 @@ def run(R, D):
     R.run("empty-reuse", empty_reuse)
 
     R.run("mcp-isolation", lambda: mcp.isolation_check(D.exe, {"alpha": A, "beta": B, "gamma": C}, R.log))
+
+    def close_folder():
+        """#127 File > Close Folder on gamma: its job prompt and its save
+        prompt both Cancel cleanly; a confirmed close empties the SAME
+        window, stops gamma's terminals (tmux sessions too) and frees the
+        folder; `sparkdown gamma` then reopens it fresh in that window."""
+        g = "gamma" + SUF
+        gnote = os.path.join(C, "notes.md")
+        if not hasattr(D, "command"):
+            return "MANUAL", "no command-palette driver on this OS"
+        tm0 = set(fixtures.tmux_sessions()) if fixtures.TMUX else set()
+        D.start_job(g)
+        gsess = (set(fixtures.tmux_sessions()) - tm0) if fixtures.TMUX else set()
+        mcp.call(D.exe, C, "sparkdown_open_file", {"path": gnote})
+        time.sleep(2)
+        mcp.call(D.exe, C, "sparkdown_edit_buffer", {"path": gnote, "content": f"# gamma\n\n{EDIT}\n"})
+        time.sleep(2)
+        if not D.job_alive():
+            return "FAIL", f"setup: could not start the {D.job_name} job in gamma's terminal"
+        n = len(D.windows())
+        R.log(f"close-folder: gamma tmux sessions={sorted(gsess)}")
+
+        def still_there(tag):
+            okc, ctx = mcp.context(D.exe, C)
+            t = mcp.tab(ctx, gnote) if okc else None
+            okb, buf = mcp.call(D.exe, C, "sparkdown_read_buffer", {"path": gnote})
+            kept = bool(t and t.get("dirty")) and EDIT in str(buf)
+            w = D.windows()
+            R.log(f"[{tag}] windows={w} kept={kept}")
+            return g in w and len(w) == n and kept
+
+        # 1) A job runs: the Close Folder prompt names it; Cancel keeps all.
+        D.command(g, "Close folder")
+        ds = wait_for(D.dialogs, 12)
+        D.shot("close-folder-job-prompt")
+        R.log("close-folder job prompt:", ds)
+        if not ds:
+            return "FAIL", "no prompt for gamma's running job"
+        d = ds[0]
+        missing = None
+        if d.get("text") is not None:
+            txt = d["text"].replace("\u2019", "'").lower()
+            missing = [x for x in ("close folder", D.job_name, "will stop") if x not in txt]
+        for x in ds:
+            D.cancel_dialog(x)
+        wait_for(lambda: not D.dialogs(), 8)
+        if missing:
+            return "FAIL", f"job prompt is missing {missing}: {d}"
+        if not (still_there("job-cancel") and D.job_alive()):
+            return "FAIL", "Cancel on the job prompt did not keep gamma, its edit and its job"
+        # 2) No job, an unsaved edit: the save prompt; Cancel keeps all.
+        D.kill_job()
+        D.command(g, "Close folder")
+        ds = wait_for(D.dialogs, 12)
+        D.shot("close-folder-save-prompt")
+        R.log("close-folder save prompt:", ds)
+        if not ds:
+            return "FAIL", "no unsaved-changes prompt for gamma's edit"
+        for x in ds:
+            D.cancel_dialog(x)
+        wait_for(lambda: not D.dialogs(), 8)
+        if not still_there("save-cancel"):
+            return "FAIL", "Cancel on the save prompt did not keep gamma and its edit"
+        # 3) Saved: Close Folder empties the same window, no prompt.
+        D.save(g)
+        D.command(g, "Close folder")
+        emptied = wait_for(lambda: g not in D.windows() and "SparkDown" in D.windows(), 15)
+        stray = D.dialogs()
+        for x in stray:
+            D.cancel_dialog(x)
+        w = D.windows()
+        D.shot("close-folder-empty")
+        if not emptied or len(w) != n or stray:
+            return "FAIL", f"after Close Folder: windows={w} (want {n}, gamma replaced by an empty window); prompts={stray}"
+        if fixtures.TMUX:
+            left = gsess & set(fixtures.tmux_sessions())
+            if left:
+                return "FAIL", f"gamma's tmux sessions survived Close Folder: {sorted(left)}"
+        okw, wins = mcp.call(D.exe, A, "sparkdown_list_windows")
+        if okw and mcp.norm(C) in {mcp.norm(x) for x in _paths(wins)}:
+            return "FAIL", f"the registry still binds gamma: {str(wins)[:300]}"
+        # 4) Reopen: the same (empty) window takes gamma, fresh.
+        time.sleep(3)
+        D.cli(C)
+        wait_for(lambda: g in D.windows(), 20)
+        w2 = D.windows()
+        okc, ctx = mcp.context(D.exe, C)
+        root = ctx.get("workspace_root") if okc and isinstance(ctx, dict) else None
+        old_tab = mcp.tab(ctx, gnote) if okc else None
+        D.shot("close-folder-reopened")
+        ok = g in w2 and len(w2) == n and mcp.norm(root) == mcp.norm(C) and old_tab is None
+        return ("PASS" if ok else "FAIL"), (f"job prompt and save prompt cancelled cleanly; closed -> {w}; "
+                                            f"tmux sessions stopped={sorted(gsess) or 'n/a'}; reopened -> {w2}, "
+                                            f"root={root!r}, old notes.md tab restored={old_tab is not None}")
+    def close_folder_checked():
+        res = close_folder()
+        if res[0] == "FAIL":
+            # Leave gamma as later checks expect it: no job, nothing unsaved.
+            for x in D.dialogs():
+                D.cancel_dialog(x)
+            D.kill_job()
+            if ("gamma" + SUF) in D.windows():
+                D.save("gamma" + SUF)
+        return res
+    R.run("close-folder", close_folder_checked)
 
     def red_close():
         D.close_window("gamma" + SUF)
@@ -444,4 +560,54 @@ def run(R, D):
             return "PARTIAL", "sizes identical across both relaunches; only the position moved (WM placement). " + detail
         return "FAIL", detail
     R.run("geometry-stable", geometry_stable)
+    def close_folder_relaunch():
+        """#127: a folder closed with Close Folder is not restored on relaunch."""
+        b = "beta" + SUF
+        if not hasattr(D, "command"):
+            return "MANUAL", "no command-palette driver on this OS"
+        if b not in D.windows():
+            return "FAIL", f"setup: beta is not open after the restore: {D.windows()}"
+        D.command(b, "Close folder")
+        wait_for(lambda: b not in D.windows(), 15)
+        stray = D.dialogs()
+        for x in stray:
+            D.cancel_dialog(x)
+        mid = D.windows()
+        if b in mid or stray:
+            return "FAIL", f"Close Folder on beta: windows={mid}; prompts={stray}"
+        D.shot("close-folder-beta-closed")
+        # Let beta's webview finish reloading into the empty state.
+        time.sleep(8)
+        # Give alpha's page keyboard focus first (as `restore` does): a key
+        # sent to a freshly relaunched page that was never clicked is lost
+        # with or without Close Folder (checked locally on X11).
+        D.save("alpha" + SUF)
+        D.quit_keys("alpha" + SUF)
+        how = "Ctrl+Q"
+        if not wait_for(lambda: D.procs() == 0, 15) and not D.dialogs():
+            # Hyprland has no pointer to give the relaunched page keyboard
+            # focus, so the key can be lost. Quit the other native way:
+            # close the empty window, then the last one (a quit on Linux
+            # and Windows; it runs the same quit flow).
+            how = f"{D.close_how} on each window"
+            R.log("close-folder-relaunch: Ctrl+Q did not quit; closing the windows instead")
+            for t in ("SparkDown", "alpha" + SUF):
+                if t in D.windows():
+                    D.close_window(t)
+                    time.sleep(3)
+        if not wait_for(lambda: D.procs() == 0, 40):
+            ds = D.dialogs()
+            D.shot("close-folder-no-exit")
+            info = f"windows={D.windows()} foreground={D.foreground()!r} procs={D.procs()}"
+            for x in ds:
+                D.cancel_dialog(x)
+            return "FAIL", f"no clean exit; prompts={ds}; {info}"
+        D.relaunch()
+        wait_for(lambda: ("alpha" + SUF) in D.windows(), 60)
+        time.sleep(4)
+        w = D.windows()
+        D.shot("close-folder-relaunched")
+        ok = ("alpha" + SUF) in w and b not in w
+        return ("PASS" if ok else "FAIL"), f"before quit={mid}; quit via {how}; after relaunch={w} (beta's folder was closed and must not come back)"
+    R.run("close-folder-relaunch", close_folder_relaunch)
     D.stop()

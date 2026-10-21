@@ -379,6 +379,17 @@ impl Registry {
         Ok(())
     }
 
+    /// Close Folder (#127): unbind `label` from its folder and clear its
+    /// unsaved flag, so the window is empty again (routes "Here"), the
+    /// folder is free for any window, and its routing token resolves to no
+    /// window. Returns the folder it had.
+    pub fn close_folder(&mut self, label: &str) -> Option<FolderId> {
+        let w = self.windows.get_mut(label)?;
+        w.display = None;
+        w.dirty = false;
+        w.folder.take()
+    }
+
     pub fn set_dirty(&mut self, label: &str, dirty: bool) {
         if let Some(w) = self.windows.get_mut(label) {
             w.dirty = dirty;
@@ -487,6 +498,33 @@ mod tests {
         r.set_folder("w-1", Some(local("/p")), None).unwrap();
         assert!(!r.is_empty_window("w-1"));
         assert!(!r.is_empty_window("missing"));
+    }
+
+    #[test]
+    fn close_folder_empties_the_window_and_frees_folder_and_token() {
+        let mut r = Registry::default();
+        r.register("w-a");
+        r.register("w-b");
+        let a = local("/p/a");
+        r.set_folder("w-a", Some(a.clone()), Some("/p/a".into()))
+            .unwrap();
+        r.set_dirty("w-a", true);
+        let tok = folder_token(&a);
+        assert_eq!(r.window_for_token(&tok).as_deref(), Some("w-a"));
+        assert_eq!(r.close_folder("w-a"), Some(a.clone()));
+        // Same label, now an empty window: a reopen routes "Here".
+        assert!(r.contains("w-a"));
+        assert!(r.is_empty_window("w-a"));
+        assert_eq!(r.get("w-a").unwrap().display, None);
+        // The old folder's agents no longer resolve to any window.
+        assert_eq!(r.window_for_token(&tok), None);
+        assert_eq!(r.window_for_local_path("/p/a/notes.md"), None);
+        // The folder is free: another window may take it.
+        r.set_folder("w-b", Some(a.clone()), None).unwrap();
+        assert_eq!(r.find_folder(&a).as_deref(), Some("w-b"));
+        // Nothing to close: no-op.
+        assert_eq!(r.close_folder("w-a"), None);
+        assert_eq!(r.close_folder("missing"), None);
     }
 
     #[test]

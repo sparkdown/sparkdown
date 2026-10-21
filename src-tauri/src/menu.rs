@@ -14,7 +14,12 @@ pub struct AppMenu {
     /// The Window submenu; its window list is rebuilt by lifecycle.rs.
     pub window_menu: tauri::menu::Submenu<Wry>,
     pub allow_html_js: CheckMenuItem<Wry>,
+    /// File > Close Folder (#127), enabled per focused window.
+    pub close_folder: tauri::menu::MenuItem<Wry>,
 }
+
+/// File > Close Folder, managed so lifecycle.rs can grey it out (#127).
+pub struct CloseFolderItem(pub tauri::menu::MenuItem<Wry>);
 
 /// Handle to the app menu so Windows/Linux can pop it up from the toolbar
 /// icon instead of showing a permanent in-window menu bar.
@@ -117,6 +122,11 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
     )
     .accelerator("CmdOrCtrl+Shift+N")
     .build(app)?;
+    // #127: closes this window's folder and leaves the window empty. Greyed
+    // out until the focused window has a folder (lifecycle.rs).
+    let close_folder = MenuItemBuilder::with_id("close-folder", "Close Folder")
+        .enabled(false)
+        .build(app)?;
     let file_menu = SubmenuBuilder::new(app, "File")
         .item(&new_file)
         .item(&new_tab)
@@ -125,6 +135,7 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
         .item(&open_folder)
         .item(&open_remote)
         .item(&open_file)
+        .item(&close_folder)
         .separator()
         .item(&save)
         .item(&save_as)
@@ -292,6 +303,7 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
         menu,
         window_menu,
         allow_html_js,
+        close_folder,
     })
 }
 

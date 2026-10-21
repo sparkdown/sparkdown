@@ -100,6 +100,12 @@ def _tmux():
     return next((t for t in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux") if os.path.exists(t)), "tmux")
 
 
+def tmux_sessions():
+    """Names of the sd-* tmux sessions that exist now."""
+    ls = subprocess.run([_tmux(), "ls", "-F", "#{session_name}"], capture_output=True, text=True)
+    return [s for s in ls.stdout.split() if s.startswith("sd-")]
+
+
 def tmux_busy_session():
     """Name of the sd-* tmux session whose pane runs a foreground job."""
     ls = subprocess.run([_tmux(), "ls", "-F", "#{session_name} #{pane_pid}"], capture_output=True, text=True)
