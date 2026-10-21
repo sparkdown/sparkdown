@@ -344,7 +344,7 @@ export interface GitChange {
 }
 
 /** Mirror of `GitErrorKind` in src-tauri/src/git_write.rs. */
-export type GitErrorKind =
+type GitErrorKind =
   | "empty_message"
   | "nothing_to_commit"
   | "not_a_repo"
