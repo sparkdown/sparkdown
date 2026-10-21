@@ -196,6 +196,21 @@ def run(R, D):
     R.run("quit-prompt", quit_prompt)
     R.run("quit-prompt-bg-occluded", lambda: quit_and_check("bgquit", int(os.environ.get("E2E_BG_WAIT", "45"))))
 
+    def quit_from_terminal():
+        """Ctrl+Q with alpha's terminal focused (beta's job running, alpha
+        unsaved): the terminal must not swallow it; the one combined prompt
+        appears and Cancel keeps everything."""
+        f = D.focus_terminal("alpha" + SUF)
+        R.log(f"quit-from-terminal: focus={f}")
+        if f not in (None, "terminal"):
+            return "FAIL", f"setup: couldn't focus alpha's terminal (focus is {f!r})"
+        D.shot("terminal-focused")
+        st, detail = quit_and_check("termquit", 0)
+        how = "confirmed in the DOM" if f == "terminal" else "via Ctrl+` (no DOM here; see the screenshot)"
+        return st, f"terminal focused ({how}); {detail}"
+    if hasattr(D, "focus_terminal"):
+        R.run("quit-from-terminal", quit_from_terminal)
+
     def wedged_check():
         """The job check can't finish: the tmux server is wedged (SIGSTOP),
         so every tmux call hangs while B's job keeps running. The quit must
@@ -322,6 +337,35 @@ def run(R, D):
         R.run("reload-keeps-jobs", reload_keeps_jobs)
 
     R.run("restore", restore)
+
+    def quit_from_terminal_relaunched():
+        """Right after the relaunch, nothing running and nothing unsaved:
+        Ctrl+Q from the (restored) terminal quits at once, no prompt."""
+        D.kill_job()
+        for t in sorted(titled("alpha", "beta")):
+            if hasattr(D, "wait_ready"):
+                D.wait_ready(t)
+        f = D.focus_terminal("alpha" + SUF)
+        R.log(f"quit-from-terminal-relaunched: focus={f}")
+        if f not in (None, "terminal"):
+            return "FAIL", f"setup: couldn't focus alpha's terminal (focus is {f!r})"
+        D.shot("relaunched-terminal-focused")
+        D.quit_keys("alpha" + SUF)
+        gone = wait_for(lambda: D.procs() == 0, 25)
+        if not gone:
+            ds = D.dialogs()
+            D.shot("relaunched-terminal-quit")
+            for d in ds:
+                D.cancel_dialog(d)
+            return "FAIL", f"Ctrl+Q from the terminal did not quit (prompts={ds}, windows={D.windows()})"
+        D.relaunch()
+        back = wait_for(lambda: titled("alpha", "beta") <= set(D.windows()), 60)
+        time.sleep(3)
+        how = "confirmed in the DOM" if f == "terminal" else "via Ctrl+` (no DOM here)"
+        return ("PASS" if back else "FAIL"), (f"terminal focused ({how}); Ctrl+Q quit with no prompt; "
+                                             f"relaunched again: {D.windows()}")
+    if hasattr(D, "focus_terminal"):
+        R.run("quit-from-terminal-relaunched", quit_from_terminal_relaunched)
 
     def geometry_stable():
         """#112: two more clean quit + relaunch cycles. Every window must come
