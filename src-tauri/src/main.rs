@@ -813,7 +813,10 @@ fn note_geometry(app: &tauri::AppHandle, label: &str) {
         }
         return;
     }
-    let (Ok(pos), Ok(size)) = (w.outer_position(), w.outer_size()) else {
+    // #112: save the inner size, the measure set_size restores (outer
+    // position, the measure set_position restores). Saving the outer size
+    // grew every window by its frame on each relaunch.
+    let (Ok(pos), Ok(size)) = (w.outer_position(), w.inner_size()) else {
         return;
     };
     app.state::<session::ConfigStore>().note_geometry(

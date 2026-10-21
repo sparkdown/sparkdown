@@ -728,6 +728,9 @@ pub fn create_window(
             })
             .collect();
         let g = crate::session::clamp_geometry(g, &monitors);
+        // #112: the saved size is the INNER size (main.rs note_geometry), and
+        // set_size sets the inner size (tao set_inner_size): one measure both
+        // ways, so a restore no longer grows the window by its frame.
         let _ = window.set_size(tauri::PhysicalSize::new(g.width, g.height));
         if crate::session::positions_supported() {
             let _ = window.set_position(tauri::PhysicalPosition::new(g.x, g.y));

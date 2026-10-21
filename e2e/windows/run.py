@@ -122,6 +122,10 @@ class Desktop:
         time.sleep(1)
         self.wd.type(inp, wd.KEYS["enter"])
         time.sleep(2)
+    def focus_editor(self, title):
+        """Take focus out of a restored terminal: xterm keeps plain Ctrl+Q."""
+        self.handle(title)
+        self.wd.click(self.wd.find(".cm-content"))
 
     def save(self, title):
         self.handle(title)
