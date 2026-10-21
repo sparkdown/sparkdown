@@ -116,6 +116,20 @@ class Desktop:
         self.handle(title)
         self.wd.click(self.wd.find(".cm-content"))
 
+    def focus_terminal(self, title):
+        """Keyboard focus in the window's terminal ('terminal' if confirmed)."""
+        js = ("const v=[...document.querySelectorAll('.xterm-helper-textarea')].find(t=>t.offsetParent!==null);"
+              "if(!v) return 'none'; v.focus();"
+              "return document.activeElement===v ? 'terminal' : String(document.activeElement && document.activeElement.className);")
+        self.focus(title)
+        got = self.wd.js(js)
+        if got == "none":
+            self.wd.click(self.wd.find("#btn-terminal"))
+            self.wd.find(".xterm-helper-textarea", wait=20)
+            time.sleep(2)
+        time.sleep(1)
+        return self.wd.js(js)
+
     def save(self, title):
         self.handle(title)
         self.wd.click(self.wd.find(".cm-content"))

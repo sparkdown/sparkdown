@@ -33,6 +33,8 @@ CHECKS = {
     "red-close": "Closing one window closes only that window",
     "dock-reopen": "Dock click with no visible window brings a window back",
     "restore": "Clean quit + relaunch restores the open windows (a closed one stays closed)",
+    "quit-from-terminal": "Ctrl+Q with the terminal focused: the combined job + unsaved prompt, Cancel keeps all (Windows/Linux)",
+    "quit-from-terminal-relaunched": "Right after a relaunch, Ctrl+Q from the focused terminal quits (nothing running, no prompt)",
     "geometry-stable": "Two more quit + relaunch cycles: every window keeps the same size and position (#112)",
     "webview-content": "Web content (WebDriver): sidebar folder, editor text, unsaved marker",
     "git-actions": "Changes view Commit / Pull / Push against a local bare remote: empty message blocked, commit, rejected push leaves the remote untouched, pull merges, push lands (#122)",

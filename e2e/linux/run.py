@@ -113,6 +113,11 @@ class Base:
         time.sleep(1)
 
 
+FOCUS_TERM_JS = ("const v=[...document.querySelectorAll('.xterm-helper-textarea')].find(t=>t.offsetParent!==null);"
+                 "if(!v) return 'none'; v.focus();"
+                 "return document.activeElement===v ? 'terminal' : String(document.activeElement && document.activeElement.className);")
+
+
 class X11(Base):
     close_how = "the in-app close button (×)"
 
@@ -218,6 +223,26 @@ class X11(Base):
         """Take focus out of a restored terminal: xterm keeps plain Ctrl+Q."""
         if self._wd_handle(title):
             self.wd.click(self.wd.find(".cm-content"))
+
+    def focus_terminal(self, title):
+        """Keyboard focus in the window's terminal. Returns 'terminal' when
+        the DOM confirms it, else what has focus."""
+        if not self._wd_handle(title):
+            self.focus(title)
+            sh("xdotool", "key", "--clearmodifiers", "ctrl+grave")
+            time.sleep(1.5)
+            sh("xdotool", "key", "--clearmodifiers", "ctrl+grave")
+            time.sleep(2)
+            return None
+        got = self.wd.js(FOCUS_TERM_JS)
+        if got == "none":
+            self.wd.click(self.wd.find("#btn-terminal"))
+            self.wd.find(".xterm-helper-textarea", wait=20)
+            time.sleep(2)
+            got = self.wd.js(FOCUS_TERM_JS)
+        sh("xdotool", "windowactivate", "--sync", self._wid(title))
+        time.sleep(1)
+        return self.wd.js(FOCUS_TERM_JS)
 
     def save(self, title):
         if self._wd_handle(title):
@@ -429,6 +454,18 @@ class Hypr(Base):
     def quit_keys(self, title):
         self.focus(title)
         self.wtype("-M", "ctrl", "q", "-m", "ctrl")
+
+    def focus_terminal(self, title):
+        """No DOM here: Ctrl+` twice (hide, show) leaves the terminal focused,
+        as start_job does. The screenshot shows the result."""
+        self.focus(title)
+        if not getattr(self, "_term_hidden", False):
+            self.wtype("-M", "ctrl", "-k", "grave", "-m", "ctrl")  # hide…
+            time.sleep(1.5)
+        self.wtype("-M", "ctrl", "-k", "grave", "-m", "ctrl")  # …show, focused
+        time.sleep(2)
+        self._term_hidden = False
+        return None
 
     def focus_editor(self, title):
         """No WebDriver here: Ctrl+` (passed to the app from a terminal)
