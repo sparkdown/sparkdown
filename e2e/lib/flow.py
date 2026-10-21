@@ -206,6 +206,9 @@ def run(R, D):
             return "FAIL", f"setup: couldn't focus alpha's terminal (focus is {f!r})"
         D.shot("terminal-focused")
         st, detail = quit_and_check("termquit", 0)
+        # Later checks type Ctrl+S into alpha's editor: give it focus back.
+        if hasattr(D, "focus_editor"):
+            D.focus_editor("alpha" + SUF)
         how = "confirmed in the DOM" if f == "terminal" else "via Ctrl+` (no DOM here; see the screenshot)"
         return st, f"terminal focused ({how}); {detail}"
     if hasattr(D, "focus_terminal"):

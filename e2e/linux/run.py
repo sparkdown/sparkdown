@@ -459,9 +459,10 @@ class Hypr(Base):
         """No DOM here: Ctrl+` twice (hide, show) leaves the terminal focused,
         as start_job does. The screenshot shows the result."""
         self.focus(title)
-        self.wtype("-M", "ctrl", "-k", "grave", "-m", "ctrl")
-        time.sleep(1.5)
-        self.wtype("-M", "ctrl", "-k", "grave", "-m", "ctrl")
+        if not getattr(self, "_term_hidden", False):
+            self.wtype("-M", "ctrl", "-k", "grave", "-m", "ctrl")  # hide…
+            time.sleep(1.5)
+        self.wtype("-M", "ctrl", "-k", "grave", "-m", "ctrl")  # …show, focused
         time.sleep(2)
         self._term_hidden = False
         return None
