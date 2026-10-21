@@ -1,6 +1,6 @@
 [package]
 name = "sparkdown"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 description = "A small, local markdown editor for you and your coding agents"
 authors = ["Paulo Vitor Justino Pereira"]

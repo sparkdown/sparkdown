@@ -5,6 +5,28 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
+## [0.4.1] — Unreleased
+
+Fixes and small features on top of 0.4.0.
+
+### New
+
+- **File > Close Folder** returns the window to the empty state. (#127, #138)
+- **Commit, Pull and Push** in the Changes view. (#122, #139)
+- **Explorer: Delete…** asks for confirmation and moves the item to the trash. (#121, #134)
+- **File > New Window** shows its shortcut and sits next to Open Folder. (#128, #133)
+
+### Fixed
+
+- **About** dialog works on Linux and Windows. (#120, #132)
+- **Linux terminal paste/copy:** `Ctrl+V` and `Shift+Insert` paste, and `Ctrl+C` copies when text is selected (fixes Omarchy `Super+V`). (#130, #135)
+- **Windows restore at exactly their saved size and position**, with no size creep on restart. (#112, #136)
+- **`Ctrl+Q` quits from a focused terminal** on Windows and Linux, with the usual prompt when there are unsaved edits or running jobs. (#140)
+
+### Removed
+
+- Unused early source art and its README mention. (#126, #131)
+
 ## [0.4.0] — Unreleased
 
 One window per folder: several projects side by side in one app, each window
