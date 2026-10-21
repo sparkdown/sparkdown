@@ -138,8 +138,8 @@ export function isBacktickKey(e: Pick<KeyboardEvent, 'key' | 'code'>): boolean {
  * Only app-level keys a shell has no real use for pass: the terminal
  * toggles (Ctrl+` / Ctrl+Shift+`), Open Folder (Ctrl+Alt+O), Open Remote
  * (Ctrl+Shift+O), Command Palette (Ctrl+Shift+P), Shortcuts
- * (Ctrl+Shift+H), Settings (Ctrl+,) and tab switching (Ctrl+Alt+←/→).
- * Plain Ctrl+letter, the clipboard (Ctrl+Shift+C/V) and the pane keys
+ * (Ctrl+Shift+H), Settings (Ctrl+,), Quit (Ctrl+Q) and tab switching
+ * (Ctrl+Alt+←/→). Other plain Ctrl+letter, the clipboard (Ctrl+Shift+C/V) and the pane keys
  * (Ctrl+Shift+D/E/W/[/]) stay with the terminal.
  */
 export function terminalPassesToApp(
@@ -154,7 +154,9 @@ export function terminalPassesToApp(
     return key === 'o' || key === 'arrowleft' || key === 'arrowright';
   }
   if (e.shiftKey) return key === 'o' || key === 'p' || key === 'h';
-  return key === ',';
+  // Ctrl+Q always quits, even from a focused terminal (as in VS Code): the
+  // shell loses XON, which nobody types by hand. Same quit flow and prompt.
+  return key === ',' || key === 'q';
 }
 
 /**
