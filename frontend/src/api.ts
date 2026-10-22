@@ -376,7 +376,14 @@ export interface GitActionError {
 }
 
 export interface GitActionResult {
+  /** git's first output line. */
   summary: string;
+  /** git's full output (stdout then stderr), for the Git output tab. */
+  output: string;
+  /** Pull / push: commits that moved; null when unknown or for commit. */
+  commits: number | null;
+  /** Pull / push: the upstream, such as `origin/main`. */
+  target: string | null;
 }
 
 /** Mirror of `GitBranchStatus` in src-tauri/src/git.rs. */

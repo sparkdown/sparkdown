@@ -18,6 +18,10 @@
   --border-light: #e6e8ec;
   --accent: #3f434c;
   --accent-hover: #2b2e35;
+  /* Label on an --accent fill (primary buttons). */
+  --accent-fg: #ffffff;
+  /* Status-bar warning text (a git error) on --statusbar-bg. */
+  --status-warning: #8a4b00;
   --text-muted: #6e7278;
   --text-subtle: #9a9ea6;
 
@@ -119,6 +123,8 @@
   --border-light: #262a32;
   --accent: #c3c8d2;
   --accent-hover: #d6dae2;
+  --accent-fg: #191b21;
+  --status-warning: #f0b45a;
   --text-muted: #99a0ad;
   --text-subtle: #6b7280;
 

@@ -12,13 +12,14 @@ Fixes and small features on top of 0.4.0.
 ### New
 
 - **File > Close Folder** returns the window to the empty state. (#127, #138)
-- **Commit, Pull and Push** in the Changes view. (#122, #139) Since #146 they are icons in the Changes header (Commit ✓, Pull ↓ with the behind count, Push ↑ with the ahead count, next to Refresh), and Commit opens a compact panel: message (⌘/Ctrl+Enter commits, Esc closes), files with checkboxes and select-all, and a Commit button. Pull and Push spin while running and end in a short inline note.
+- **Commit, Pull and Push** in the Changes view. (#122, #139) Since #146 they are icons in the Changes header (Commit ✓, Pull ↓ with the behind count, Push ↑ with the ahead count, next to Refresh), and Commit opens a compact panel: message (⌘/Ctrl+Enter commits, Esc closes), files with checkboxes and select-all, and a Commit button. Progress and results show in the status bar (a spinner with Committing… / Pulling… / Pushing…, then a short message such as “Pushed 2 commits to origin/main” that fades; errors stay in a warning colour until clicked), and a new **Git** tab in the bottom pane keeps the full output of every commit, pull and push in that window. Clicking the status message opens it. (#148)
 - **Explorer: Delete…** asks for confirmation and moves the item to the trash. (#121, #134)
 - **File > New Window** shows its shortcut and sits next to Open Folder. (#128, #133)
 - **Explorer right-click menu by context:** New File, New Folder, Delete…, Reveal in Finder / File Explorer / File Manager and Copy Path on files and folders (New File / New Folder create inside a folder, with the name typed inline in the tree); New File and New Folder on empty space. The webview's own menu (Reload, Inspect…) no longer appears; text fields and the editor keep Cut / Copy / Paste. (#145)
 
 ### Fixed
 
+- **Commit button contrast:** the enabled Commit button's label now meets WCAG AA in light and dark themes, and the disabled button is an outline, so the two states look clearly different. (#148)
 - **Save dialog for a new file** starts in the folder selected in the explorer, or the opened folder, instead of its parent. (#144)
 - **About** dialog works on Linux and Windows. (#120, #132)
 - **Linux terminal paste/copy:** `Ctrl+V` and `Shift+Insert` paste, and `Ctrl+C` copies when text is selected (fixes Omarchy `Super+V`). (#130, #135)

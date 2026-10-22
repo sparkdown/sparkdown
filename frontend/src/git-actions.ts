@@ -1,5 +1,6 @@
-import { api, type GitActionError, type GitBranchStatus, type GitChange } from './api';
+import { api, type GitActionError, type GitActionResult, type GitBranchStatus, type GitChange } from './api';
 import { escapeHtml } from './utils';
+import type { GitAction, GitReporter } from './git-output';
 
 /**
  * Commit / Pull / Push for the Changes view (#122, header icons since 0.4.1).
@@ -10,7 +11,9 @@ import { escapeHtml } from './utils';
  * closes), the changed files with checkboxes (all ticked, plus select-all)
  * and a Commit button that stays disabled until there is a message and a
  * file. The panel closes after a successful commit. Pull / Push spin while
- * running and end with a short inline toast. Without an upstream they are
+ * running; progress, the result and git's full output go to the status bar
+ * and the bottom pane's Git tab through {@link GitActionsOptions.report}
+ * (see git-output.ts). Without an upstream they are
  * greyed out with a tooltip saying why.
  *
  * Every action runs only on a click, through the core's separate write
@@ -32,7 +35,6 @@ export interface GitActionsDom {
   selectAll: HTMLInputElement;
   files: HTMLElement;
   commit: HTMLButtonElement;
-  status: HTMLElement;
 }
 
 export interface GitActionsOptions {
@@ -40,13 +42,11 @@ export interface GitActionsOptions {
   repoRoot(): string | null;
   /** Called after every action (success or failure) to refresh Changes. */
   refresh(): Promise<void> | void;
+  /** Status bar + Git output tab. */
+  report: GitReporter;
 }
 
-type Busy = 'commit' | 'pull' | 'push' | null;
-
-/** How long a toast stays up: success is short; an error stays longer and
- *  never hides while its Details are open. */
-export const TOAST_MS = { ok: 4000, error: 10000 } as const;
+type Busy = GitAction | null;
 
 function isGitActionError(e: unknown): e is GitActionError {
   return !!e && typeof e === 'object' && typeof (e as GitActionError).kind === 'string';
@@ -58,7 +58,6 @@ export class GitActions {
   private excluded = new Set<string>();
   private branch: GitBranchStatus | null = null;
   private busy: Busy = null;
-  private toastTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly dom: GitActionsDom,
@@ -138,13 +137,13 @@ export class GitActions {
     if (!root || this.busy) return;
     const message = this.dom.message.value;
     if (!message.trim()) {
-      this.showError({ kind: 'empty_message', message: 'Write a commit message first.', detail: '' });
+      this.opts.report.fail('commit', { kind: 'empty_message', message: 'Write a commit message first.', detail: '' });
       this.dom.message.focus();
       return;
     }
     const paths = this.selected();
     if (paths.length === 0) {
-      this.showError({ kind: 'nothing_to_commit', message: 'Select at least one file to commit.', detail: '' });
+      this.opts.report.fail('commit', { kind: 'nothing_to_commit', message: 'Select at least one file to commit.', detail: '' });
       return;
     }
     // Every change ticked: commit all (lets git pick up anything the view
@@ -174,20 +173,20 @@ export class GitActions {
 
   private async run(
     what: Exclude<Busy, null>,
-    call: () => Promise<{ summary: string }>,
+    call: () => Promise<GitActionResult>,
     onOk?: () => void,
   ): Promise<void> {
     if (this.busy) return;
     this.busy = what;
-    this.hideToast();
+    this.opts.report.start(what);
     this.sync();
     try {
       const r = await call();
       onOk?.();
-      const done = what === 'commit' ? 'Committed' : what === 'pull' ? 'Pulled' : 'Pushed';
-      this.showToast(r.summary ? `${done}: ${r.summary}` : done);
+      this.opts.report.done(what, r);
     } catch (e) {
-      this.showError(
+      this.opts.report.fail(
+        what,
         isGitActionError(e) ? e : { kind: 'other', message: 'Git reported an error.', detail: String(e) },
       );
     } finally {
@@ -199,46 +198,6 @@ export class GitActions {
         // The refresh shows its own error state.
       }
     }
-  }
-
-  private hideToast(): void {
-    if (this.toastTimer) clearTimeout(this.toastTimer);
-    this.toastTimer = null;
-    this.dom.status.hidden = true;
-  }
-
-  private armToast(ms: number): void {
-    if (this.toastTimer) clearTimeout(this.toastTimer);
-    this.toastTimer = setTimeout(() => {
-      this.toastTimer = null;
-      // Keep an error up while its Details are open; check again later.
-      if (this.dom.status.querySelector('details[open]')) this.armToast(ms);
-      else this.dom.status.hidden = true;
-    }, ms);
-  }
-
-  private showToast(msg: string): void {
-    const el = this.dom.status;
-    el.hidden = false;
-    el.dataset.tone = 'ok';
-    el.dataset.kind = '';
-    el.setAttribute('role', 'status');
-    el.innerHTML = escapeHtml(msg);
-    this.armToast(TOAST_MS.ok);
-  }
-
-  private showError(e: GitActionError): void {
-    const el = this.dom.status;
-    el.hidden = false;
-    el.dataset.tone = 'error';
-    el.dataset.kind = e.kind;
-    el.setAttribute('role', 'alert');
-    el.innerHTML =
-      `<span class="git-error-msg">${escapeHtml(e.message)}</span>` +
-      (e.detail
-        ? `<details class="git-error-detail"><summary>Details</summary><pre>${escapeHtml(e.detail)}</pre></details>`
-        : '');
-    this.armToast(TOAST_MS.error);
   }
 
   /** Enable / disable buttons, tooltips and counts without rebuilding lists. */
@@ -298,7 +257,6 @@ export class GitActions {
     this.dom.actions.hidden = !root;
     if (!root) {
       this.closePanel();
-      this.hideToast();
     }
     this.renderFiles();
     this.sync();

@@ -1,3 +1,4 @@
+import type { GitReporter } from '../git-output';
 import type { Tab } from '../tabs';
 import {
   ChangesView,
@@ -23,6 +24,8 @@ import { PreviewSearch } from '../preview-search';
 
 /** What the diff controller needs from the App. */
 export interface DiffDeps {
+  /** Status bar + Git output tab for Commit / Pull / Push. */
+  gitReporter: GitReporter;
   /** Re-run the tab-switch pipeline (editor, preview, status, diff pane). */
   applyTabSwitch(tab: Tab): void;
   /** A fresh status arrived: files still to review (activity badge). */
@@ -151,7 +154,6 @@ export class DiffController {
           selectAll: $('git-select-all') as HTMLInputElement,
           files: $('changes-git-files') as HTMLElement,
           commit: $('btn-git-commit-confirm') as HTMLButtonElement,
-          status: $('changes-git-status') as HTMLElement,
         },
         {
           repoRoot: () => this.changesView?.getRepoRoot() ?? null,
@@ -159,6 +161,7 @@ export class DiffController {
             await this.changesView?.refresh();
             await this.refreshBranch();
           },
+          report: this.deps.gitReporter,
         },
       );
     }
