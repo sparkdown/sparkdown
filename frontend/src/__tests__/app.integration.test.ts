@@ -61,6 +61,7 @@ import {
   setPendingFiles,
   quitCalls,
   dialogResponses,
+  saveCalls,
   emitTauriEvent,
   dragDropHandler,
   resetTauriMocks,
@@ -628,6 +629,19 @@ describe('App integration', () => {
 
       expect(vfs.get('/docs/new-note.md')).toBe('brand new');
       expect(tabTitles()).toEqual(['new-note.md']);
+    });
+
+    it('starts the Save dialog for an Untitled tab in the opened folder, not its parent', async () => {
+      directories.add('/projects/gamma');
+      await startApp();
+      emitTauriEvent('open-paths', { paths: ['/projects/gamma'] });
+      await flush();
+      emitTauriEvent(MENU.NEW_FILE);
+      await flush();
+      dialogResponses.save.push(null);
+      emitTauriEvent(MENU.SAVE);
+      await flush();
+      expect(saveCalls[saveCalls.length - 1]?.defaultPath).toBe('/projects/gamma/untitled.md');
     });
 
     it('keeps the tab modified when the user cancels Save As', async () => {

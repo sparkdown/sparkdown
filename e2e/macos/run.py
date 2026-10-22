@@ -828,6 +828,27 @@ def main():
         return geometry_stable()
     R.run("geometry-stable", geometry_last)
 
+    def save_dialog_dir():
+        # Untitled + Cmd+S: the Save sheet must start in alpha, not its parent.
+        if procs() == 0 or not wait_for(lambda: any(w.startswith("alpha") for w in windows()), 20):
+            return "FAIL", f"alpha is not open: {windows()}"
+        wa = next(w for w in windows() if w.startswith("alpha"))
+        se(f'perform action "AXRaise" of window "{wa}"')
+        key("n")
+        time.sleep(1)
+        key("s")
+        sheet = f'(first UI element of window "{wa}" whose role is "AXSheet")'
+        got = wait_for(lambda: se(f'value of every pop up button of {sheet}'), 10)
+        shot("save-dialog-dir")
+        osa('tell application "System Events" to key code 53')  # Esc = Cancel
+        time.sleep(1)
+        if not got:
+            return "PARTIAL", "the Save sheet opened but its Where popup could not be read"
+        parent = pathlib.Path(A).parent.name
+        ok = "alpha" in got and parent not in got.replace("alpha", "")
+        return ("PASS" if ok else "FAIL"), f"Where popup={got!r} (want alpha, not {parent})"
+    R.run("save-dialog-dir", save_dialog_dir)
+
     R.manual("manual-gatekeeper", "Gatekeeper first launch of the signed, notarized build", "CI builds are unsigned; see e2e/README.md")
     R.manual("manual-git-signing-credentials", "Commit / Pull / Push with your real setup (#122): signed commit (gpg / ssh pinentry), Keychain / HTTPS credential helper, SSH agent key, and a locked key failing with the auth error instead of a prompt",
              "needs the user's own keys, agent and credential helper; the Linux job covers the bare-remote flow")

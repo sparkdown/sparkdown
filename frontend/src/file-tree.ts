@@ -76,6 +76,9 @@ export class FileTree {
   private currentPath: string | null = null;
   // Normalized paths of the files open in tabs (the open-file dot).
   private openPaths = new Set<string>();
+  // The folder the user last picked in the tree: a clicked folder, or the
+  // folder of a clicked file. Save dialogs for Untitled tabs start here.
+  private selectedDir: string | null = null;
 
   // --- Virtualization state ---
   // The full flattened list of visible rows (the whole tree), and the children
@@ -222,6 +225,7 @@ export class FileTree {
     // force=true so a nested folder can still become the root.
     if (!force && this.rootPath && isUnderRoot(path, this.rootPath)) return;
     this.rootPath = path;
+    this.selectedDir = null;
     this.expandedDirs.clear();
     this.childrenCache.clear();
     this.updateTitle();
@@ -234,6 +238,7 @@ export class FileTree {
    *  machine's paths must not stay clickable). Shows the empty state. */
   clear(): void {
     this.rootPath = null;
+    this.selectedDir = null;
     this.expandedDirs.clear();
     this.childrenCache.clear();
     this.gitStatus.clear();
@@ -244,6 +249,20 @@ export class FileTree {
     this.flashedPaths.clear();
     this.updateTitle();
     if (this.rowLayer) void this.renderTree({ resetScroll: true });
+  }
+
+  /** Remember the folder the user picked in the tree (see selectedDir). */
+  selectDir(dir: string | null): void {
+    this.selectedDir = dir;
+  }
+
+  /** Where a Save dialog for a new file should start: the selected folder
+   *  if it is still under the root, else the root (null: no folder open). */
+  getSaveDir(): string | null {
+    const root = this.rootPath;
+    if (!root) return null;
+    const sel = this.selectedDir;
+    return sel && isUnderRoot(sel, root) ? sel : root;
   }
 
   /** Current tree root, or null if nothing is open. */
@@ -640,7 +659,9 @@ export class FileTree {
       }
       const wasDragging = this.attachDragHandler(el, entry.path);
       el.addEventListener('click', () => {
-        if (!wasDragging()) void this.toggleDir(entry.path);
+        if (wasDragging()) return;
+        this.selectedDir = entry.path;
+        void this.toggleDir(entry.path);
       });
       this.attachContextMenu(el, entry, false);
       return el;
@@ -674,6 +695,9 @@ export class FileTree {
       el.appendChild(dot);
     }
     const wasDragging = this.attachDragHandler(el, entry.path);
+    el.addEventListener('click', () => {
+      if (!wasDragging()) this.selectedDir = parentDir(entry.path);
+    });
     if (isText) {
       el.addEventListener('click', () => {
         if (!wasDragging()) this.bus.emit(EVENTS.FILE_TREE_OPEN, { path: entry.path });

@@ -497,3 +497,36 @@ describe('FileTree viewport sizing (#29)', () => {
     expect(row(`${ROOT}/f39.md`)).toBeDefined();
   });
 });
+
+describe('FileTree save dir (Save dialog start)', () => {
+  afterEach(() => { document.body.innerHTML = ''; });
+
+  it('is the root, then the clicked folder, then the folder of a clicked file', async () => {
+    listDirectory.mockReset();
+    listDirectory.mockImplementation(async (p: string) =>
+      p === ROOT
+        ? [{ name: 'docs', path: '/proj/docs', is_dir: true }, { name: 'a.md', path: FILE_A, is_dir: false }]
+        : [{ name: 'x.md', path: '/proj/docs/x.md', is_dir: false }],
+    );
+    const { tree } = mountTree();
+    expect(tree.getSaveDir()).toBeNull();
+    await tree.setRoot(ROOT);
+    expect(tree.getSaveDir()).toBe(ROOT);
+    row('/proj/docs')!.click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(tree.getSaveDir()).toBe('/proj/docs');
+    row(FILE_A)!.click();
+    expect(tree.getSaveDir()).toBe(ROOT);
+    row('/proj/docs/x.md')!.click();
+    expect(tree.getSaveDir()).toBe('/proj/docs');
+  });
+
+  it('falls back to the root when the selection is outside it', async () => {
+    listDirectory.mockReset();
+    listDirectory.mockResolvedValue([]);
+    const { tree } = mountTree();
+    await tree.setRoot(ROOT);
+    tree.selectDir('/elsewhere');
+    expect(tree.getSaveDir()).toBe(ROOT);
+  });
+});
