@@ -90,6 +90,11 @@ def run(R, D, title, folder):
     steps.append(f"New File inside folder={okf} opened in a tab={opened}")
     ok &= okf and opened
     D.shot("explorer-new-file")
+    # Close the new (clean, empty) tab so notes.md is active again: later
+    # checks save "the active tab" and expect notes.md.
+    if opened:
+        w.js("document.dispatchEvent(new KeyboardEvent('keydown',{key:'w',code:'KeyW',ctrlKey:true,bubbles:true,cancelable:true})); return 1;")
+        time.sleep(0.5)
 
     blocked = w.js(NATIVE, "#sidebar")
     kept = w.js(NATIVE, ".cm-content")
