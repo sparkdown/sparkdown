@@ -15,9 +15,11 @@ Fixes and small features on top of 0.4.0.
 - **Commit, Pull and Push** in the Changes view. (#122, #139)
 - **Explorer: Delete…** asks for confirmation and moves the item to the trash. (#121, #134)
 - **File > New Window** shows its shortcut and sits next to Open Folder. (#128, #133)
+- **Explorer right-click menu by context:** New File, New Folder, Delete…, Reveal in Finder / File Explorer / File Manager and Copy Path on files and folders (New File / New Folder create inside a folder, with the name typed inline in the tree); New File and New Folder on empty space. The webview's own menu (Reload, Inspect…) no longer appears; text fields and the editor keep Cut / Copy / Paste. (#PR2)
 
 ### Fixed
 
+- **Save dialog for a new file** starts in the folder selected in the explorer, or the opened folder, instead of its parent. (#144)
 - **About** dialog works on Linux and Windows. (#120, #132)
 - **Linux terminal paste/copy:** `Ctrl+V` and `Shift+Insert` paste, and `Ctrl+C` copies when text is selected (fixes Omarchy `Super+V`). (#130, #135)
 - **Windows restore at exactly their saved size and position**, with no size creep on restart. (#112, #136)
