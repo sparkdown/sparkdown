@@ -837,13 +837,33 @@ def main():
         key("n")
         time.sleep(1)
         key("s")
-        sheet = f'(first UI element of window "{wa}" whose role is "AXSheet")'
-        got = wait_for(lambda: se(f'value of every pop up button of {sheet}'), 10)
+        # The panel may be a sheet on alpha or its own window; its "Where"
+        # popup sits a few groups deep, so walk entire contents.
+        read = (
+            f'tell application "System Events" to tell process "{PROC}"',
+            'set out to ""',
+            'repeat with w in windows',
+            'try',
+            'set targets to (every UI element of w whose role is "AXSheet")',
+            'if (name of w as text) does not contain "SparkDown" then set end of targets to w',
+            'repeat with t in targets',
+            'repeat with e in (entire contents of t)',
+            'try',
+            'if role of e is "AXPopUpButton" then set out to out & (value of e as text) & "|"',
+            'end try',
+            'end repeat',
+            'end repeat',
+            'end try',
+            'end repeat',
+            'return out',
+            'end tell',
+        )
+        got = wait_for(lambda: osa(*read, timeout=90).strip("|"), 15, step=2)
         shot("save-dialog-dir")
         osa('tell application "System Events" to key code 53')  # Esc = Cancel
         time.sleep(1)
         if not got:
-            return "PARTIAL", "the Save sheet opened but its Where popup could not be read"
+            return "PARTIAL", "no Save panel popup could be read over Accessibility"
         parent = pathlib.Path(A).parent.name
         ok = "alpha" in got and parent not in got.replace("alpha", "")
         return ("PASS" if ok else "FAIL"), f"Where popup={got!r} (want alpha, not {parent})"
