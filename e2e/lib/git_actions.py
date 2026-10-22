@@ -110,7 +110,10 @@ def run(R, D, title, folder):
     # WebKitWebDriver under Xvfb can leave the document unfocused, where
     # focus() moves no activeElement; only judge focus when the page has it
     # (unit tests cover the autofocus itself).
-    focused = js("return !document.hasFocus() || (document.activeElement && document.activeElement.id === 'changes-commit-msg')")
+    # The check runs with the Changes view hidden (see above), where an
+    # element can't take focus; judge autofocus only when it's visible.
+    focused = js("const m=document.getElementById('changes-commit-msg');"
+                 "return !document.hasFocus() || !m.getClientRects().length || document.activeElement === m")
     disabled_empty = js("return document.getElementById('btn-git-commit-confirm').disabled")
     all_ticked = js("const b=[...document.querySelectorAll('#changes-git-files input')]; return b.length>0 && b.every(x=>x.checked) && document.getElementById('git-select-all').checked")
     js("document.getElementById('changes-commit-msg').dispatchEvent(new KeyboardEvent('keydown',"
