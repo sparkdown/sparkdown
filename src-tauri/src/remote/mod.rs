@@ -598,6 +598,95 @@ pub(crate) fn remote_delete_script(path: &str) -> String {
     format!("if [ -d {q} ] && [ ! -L {q} ]; then echo __SD_DIR__; exit 3; fi; rm -f -- {q}")
 }
 
+/// Explorer New File / New Folder: `parent` must be this window's folder or
+/// inside it (same rules as [`remote_deletable`], but the root itself is ok).
+pub(crate) fn remote_creatable(root: &str, parent: &str) -> Result<(), String> {
+    validate_remote_path(parent)?;
+    if parent.split('/').any(|seg| seg == "." || seg == "..") {
+        return Err(format!("Refusing a relative path segment: {parent}"));
+    }
+    let root = root.trim_end_matches('/');
+    let p = parent.trim_end_matches('/');
+    if p != root && !p.starts_with(&format!("{root}/")) {
+        return Err(format!("{parent} is not inside this window's folder"));
+    }
+    Ok(())
+}
+
+/// POSIX sh: create one empty file or folder, never replacing anything
+/// (exit 3 + marker when the name is taken; `set -C` closes the race).
+pub(crate) fn remote_create_script(path: &str, is_dir: bool) -> String {
+    let q = shell_quote(path);
+    let make = if is_dir {
+        format!("mkdir -- {q}")
+    } else {
+        format!("set -C; : > {q}")
+    };
+    format!("if [ -e {q} ] || [ -L {q} ]; then echo __SD_EXISTS__; exit 3; fi; {make}")
+}
+
+/// Explorer New File / New Folder on the remote host.
+pub fn create_entry(parent: &str, name: &str, is_dir: bool) -> Result<String, AppError> {
+    let session = current_session().ok_or_else(|| AppError::Other("no remote session".into()))?;
+    crate::commands::valid_entry_name(name).map_err(AppError::InvalidPath)?;
+    remote_creatable(&session.path, parent).map_err(AppError::InvalidPath)?;
+    let path = format!("{}/{}", parent.trim_end_matches('/'), name);
+    let (code, out, err) = ssh_run_status(&session.host, &remote_create_script(&path, is_dir))
+        .map_err(AppError::Other)?;
+    match code {
+        0 => Ok(path),
+        3 if out.contains("__SD_EXISTS__") => {
+            Err(AppError::Other(format!("“{name}” already exists")))
+        }
+        _ => Err(AppError::Other(format!(
+            "Couldn't create {path}: {}",
+            err.trim()
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod create_tests {
+    use super::*;
+
+    #[test]
+    fn remote_creatable_allows_root_and_inside_only() {
+        assert!(remote_creatable("/home/u/proj", "/home/u/proj").is_ok());
+        assert!(remote_creatable("/home/u/proj/", "/home/u/proj/docs").is_ok());
+        assert!(remote_creatable("/home/u/proj", "/home/u/projx").is_err());
+        assert!(remote_creatable("/home/u/proj", "/home/u").is_err());
+        assert!(remote_creatable("/home/u/proj", "/home/u/proj/../x").is_err());
+        assert!(remote_creatable("/home/u/proj", "rel").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_create_script_never_replaces() {
+        let dir = std::env::temp_dir().join(format!("sd_remote_create_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |p: &std::path::Path, d: bool| {
+            crate::proc::command("sh")
+                .arg("-c")
+                .arg(remote_create_script(p.to_str().unwrap(), d))
+                .output()
+                .unwrap()
+        };
+        let f = dir.join("it's a -n.md");
+        assert!(run(&f, false).status.success());
+        std::fs::write(&f, "keep").unwrap();
+        let again = run(&f, false);
+        assert_eq!(again.status.code(), Some(3));
+        assert!(String::from_utf8_lossy(&again.stdout).contains("__SD_EXISTS__"));
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "keep");
+        let d = dir.join("sub dir");
+        assert!(run(&d, true).status.success());
+        assert!(d.is_dir());
+        assert_eq!(run(&d, true).status.code(), Some(3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// #121: delete a remote file for good (SSH has no trash).
 pub fn delete_file(path: &str) -> Result<(), AppError> {
     let session = current_session().ok_or_else(|| AppError::Other("no remote session".into()))?;

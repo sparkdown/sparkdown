@@ -1,6 +1,8 @@
 export interface ContextMenuItem {
   label: string;
   onClick: () => void;
+  /** Draw a divider above this item. */
+  separatorBefore?: boolean;
 }
 
 let openMenu: HTMLElement | null = null;
@@ -23,6 +25,12 @@ export function showContextMenu(x: number, y: number, items: ContextMenuItem[]):
   const menu = document.createElement('div');
   menu.className = 'sd-ctxmenu';
   for (const item of items) {
+    if (item.separatorBefore && menu.childElementCount > 0) {
+      const sep = document.createElement('div');
+      sep.className = 'sd-ctxmenu-sep';
+      sep.setAttribute('role', 'separator');
+      menu.appendChild(sep);
+    }
     const el = document.createElement('div');
     el.className = 'sd-ctxmenu-item';
     el.textContent = item.label;
