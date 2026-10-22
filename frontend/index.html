@@ -94,21 +94,30 @@
         <section id="sidebar-changes" class="sidebar-view" aria-label="Changes" hidden>
           <div class="sidebar-head">
             <h2 class="sidebar-title">Changes</h2>
+            <div id="changes-git-actions" class="changes-git-actions" hidden>
+              <button type="button" id="btn-git-commit" class="sidebar-icon-btn git-icon-btn" title="Commit…" aria-label="Commit" aria-expanded="false" aria-controls="changes-commit-panel">
+                <svg class="git-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12.5 10 17.5 19 7"/></svg>
+              </button>
+              <button type="button" id="btn-git-pull" class="sidebar-icon-btn git-icon-btn" title="Pull" aria-label="Pull" disabled>
+                <svg class="git-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 4v15M6 13l6 6 6-6"/></svg>
+                <span id="git-pull-count" class="git-count" hidden></span>
+              </button>
+              <button type="button" id="btn-git-push" class="sidebar-icon-btn git-icon-btn" title="Push" aria-label="Push" disabled>
+                <svg class="git-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 20V5M6 11l6-6 6 6"/></svg>
+                <span id="git-push-count" class="git-count" hidden></span>
+              </button>
+            </div>
             <button type="button" id="btn-changes-refresh" class="sidebar-icon-btn" title="Refresh" aria-label="Refresh changes">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>
             </button>
           </div>
-          <div id="changes-git" class="changes-git" hidden>
-            <div class="changes-git-sync">
-              <span id="changes-git-branch" class="changes-git-branch"></span>
-              <button type="button" id="btn-git-pull" class="changes-git-btn" disabled>Pull</button>
-              <button type="button" id="btn-git-push" class="changes-git-btn" disabled>Push</button>
-            </div>
-            <textarea id="changes-commit-msg" class="changes-commit-msg" rows="2" placeholder="Commit message (Ctrl/⌘+Enter to commit)" aria-label="Commit message" spellcheck="true"></textarea>
-            <div id="changes-git-files"></div>
-            <button type="button" id="btn-git-commit" class="changes-git-btn changes-git-commit" disabled>Commit</button>
-            <div id="changes-git-status" class="changes-git-status" hidden></div>
+          <div id="changes-commit-panel" class="changes-commit-panel" role="group" aria-label="Commit" hidden>
+            <textarea id="changes-commit-msg" class="changes-commit-msg" rows="2" placeholder="Message (Ctrl/⌘+Enter to commit)" aria-label="Commit message" spellcheck="true"></textarea>
+            <label class="git-select-all"><input type="checkbox" id="git-select-all" checked /> <span id="git-select-all-label">All files</span></label>
+            <div id="changes-git-files" class="git-files"></div>
+            <button type="button" id="btn-git-commit-confirm" class="changes-git-btn changes-git-commit" disabled>Commit</button>
           </div>
+          <div id="changes-git-status" class="changes-git-toast" hidden></div>
           <div id="changes-panel" role="region" aria-label="Changes">
             <div id="changes-list"></div>
           </div>
