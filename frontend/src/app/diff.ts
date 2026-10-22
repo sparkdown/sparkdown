@@ -136,17 +136,21 @@ export class DiffController {
       },
     );
     $('btn-changes-refresh')?.addEventListener('click', () => void this.changesView?.refresh());
-    const gitRoot = $('changes-git');
-    if (gitRoot) {
+    const gitGroup = $('changes-git-actions');
+    if (gitGroup) {
       this.gitActions = new GitActions(
         {
-          root: gitRoot,
-          message: $('changes-commit-msg') as HTMLTextAreaElement,
-          commit: $('btn-git-commit') as HTMLButtonElement,
+          actions: gitGroup,
+          commitToggle: $('btn-git-commit') as HTMLButtonElement,
           pull: $('btn-git-pull') as HTMLButtonElement,
           push: $('btn-git-push') as HTMLButtonElement,
-          sync: $('changes-git-branch') as HTMLElement,
+          pullCount: $('git-pull-count') as HTMLElement,
+          pushCount: $('git-push-count') as HTMLElement,
+          panel: $('changes-commit-panel') as HTMLElement,
+          message: $('changes-commit-msg') as HTMLTextAreaElement,
+          selectAll: $('git-select-all') as HTMLInputElement,
           files: $('changes-git-files') as HTMLElement,
+          commit: $('btn-git-commit-confirm') as HTMLButtonElement,
           status: $('changes-git-status') as HTMLElement,
         },
         {

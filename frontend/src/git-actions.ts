@@ -2,24 +2,36 @@ import { api, type GitActionError, type GitBranchStatus, type GitChange } from '
 import { escapeHtml } from './utils';
 
 /**
- * Commit / Pull / Push for the Changes view (#122).
+ * Commit / Pull / Push for the Changes view (#122, header icons since 0.4.1).
  *
- * A message box + Commit button (with an optional per-file selection), and
- * Pull / Push for the current branch with its ahead/behind counts. Every
- * action runs only on a click, through the core's separate write runner
- * (the user's own git config, credentials, SSH agent, signing and hooks;
- * never an interactive prompt, never a force-push). Errors arrive typed
- * (`GitActionError.kind`) and are shown as one clear sentence plus git's
- * output under "Details". After each action the view refreshes.
+ * The Changes header carries icon buttons: Commit (✓), Pull (↓ + behind
+ * count), Push (↑ + ahead count), then Refresh. Commit opens a compact panel
+ * under the header: a message (autofocused; ⌘/Ctrl+Enter commits, Esc
+ * closes), the changed files with checkboxes (all ticked, plus select-all)
+ * and a Commit button that stays disabled until there is a message and a
+ * file. The panel closes after a successful commit. Pull / Push spin while
+ * running and end with a short inline toast. Without an upstream they are
+ * greyed out with a tooltip saying why.
+ *
+ * Every action runs only on a click, through the core's separate write
+ * runner (the user's own git config, credentials, SSH agent, signing and
+ * hooks; never an interactive prompt, never a force-push). Errors arrive
+ * typed (`GitActionError.kind`): one clear sentence plus git's output under
+ * "Details". After each action the view refreshes.
  */
 export interface GitActionsDom {
-  root: HTMLElement;
-  message: HTMLTextAreaElement;
-  commit: HTMLButtonElement;
+  /** The header icon group (hidden without a repo). */
+  actions: HTMLElement;
+  commitToggle: HTMLButtonElement;
   pull: HTMLButtonElement;
   push: HTMLButtonElement;
-  sync: HTMLElement;
+  pullCount: HTMLElement;
+  pushCount: HTMLElement;
+  panel: HTMLElement;
+  message: HTMLTextAreaElement;
+  selectAll: HTMLInputElement;
   files: HTMLElement;
+  commit: HTMLButtonElement;
   status: HTMLElement;
 }
 
@@ -32,6 +44,10 @@ export interface GitActionsOptions {
 
 type Busy = 'commit' | 'pull' | 'push' | null;
 
+/** How long a toast stays up: success is short; an error stays longer and
+ *  never hides while its Details are open. */
+export const TOAST_MS = { ok: 4000, error: 10000 } as const;
+
 function isGitActionError(e: unknown): e is GitActionError {
   return !!e && typeof e === 'object' && typeof (e as GitActionError).kind === 'string';
 }
@@ -42,22 +58,33 @@ export class GitActions {
   private excluded = new Set<string>();
   private branch: GitBranchStatus | null = null;
   private busy: Busy = null;
-  private chooseOpen = false;
+  private toastTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly dom: GitActionsDom,
     private readonly opts: GitActionsOptions,
   ) {
+    dom.commitToggle.addEventListener('click', () => (this.isPanelOpen() ? this.closePanel() : this.openPanel()));
     dom.commit.addEventListener('click', () => void this.commit());
     dom.pull.addEventListener('click', () => void this.pull());
     dom.push.addEventListener('click', () => void this.push());
     dom.message.addEventListener('input', () => this.sync());
-    dom.message.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    dom.panel.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        this.closePanel(true);
+      } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && e.target === dom.message) {
         e.preventDefault();
         e.stopPropagation();
         void this.commit();
       }
+    });
+    dom.selectAll.addEventListener('change', () => {
+      if (dom.selectAll.checked) this.excluded.clear();
+      else for (const c of this.changes) this.excluded.add(c.path);
+      this.renderFiles();
+      this.sync();
     });
     dom.files.addEventListener('change', (e) => {
       const box = e.target as HTMLInputElement;
@@ -67,9 +94,6 @@ export class GitActions {
       else this.excluded.add(path);
       this.sync();
     });
-    dom.files.addEventListener('toggle', (e) => {
-      this.chooseOpen = (e.target as HTMLDetailsElement).open;
-    }, true);
     this.render();
   }
 
@@ -83,12 +107,30 @@ export class GitActions {
 
   setBranch(status: GitBranchStatus | null): void {
     this.branch = status;
-    this.render();
+    this.sync();
   }
 
   /** The paths a Commit would include. */
   selected(): string[] {
     return this.changes.filter((c) => !this.excluded.has(c.path)).map((c) => c.path);
+  }
+
+  isPanelOpen(): boolean {
+    return !this.dom.panel.hidden;
+  }
+
+  openPanel(): void {
+    if (!this.opts.repoRoot()) return;
+    this.dom.panel.hidden = false;
+    this.dom.commitToggle.setAttribute('aria-expanded', 'true');
+    this.render();
+    this.dom.message.focus();
+  }
+
+  closePanel(refocus = false): void {
+    this.dom.panel.hidden = true;
+    this.dom.commitToggle.setAttribute('aria-expanded', 'false');
+    if (refocus) this.dom.commitToggle.focus();
   }
 
   async commit(): Promise<void> {
@@ -111,17 +153,23 @@ export class GitActions {
     await this.run('commit', () => api.gitCommit(root, message, all ? null : paths), () => {
       this.dom.message.value = '';
       this.excluded.clear();
+      this.closePanel();
     });
   }
 
   async pull(): Promise<void> {
     const root = this.opts.repoRoot();
-    if (root) await this.run('pull', () => api.gitPull(root));
+    if (root && this.canSync()) await this.run('pull', () => api.gitPull(root));
   }
 
   async push(): Promise<void> {
     const root = this.opts.repoRoot();
-    if (root) await this.run('push', () => api.gitPush(root));
+    if (root && this.canSync()) await this.run('push', () => api.gitPush(root));
+  }
+
+  private canSync(): boolean {
+    const b = this.branch;
+    return !!b?.branch && !b.detached && b.has_upstream;
   }
 
   private async run(
@@ -131,13 +179,13 @@ export class GitActions {
   ): Promise<void> {
     if (this.busy) return;
     this.busy = what;
-    this.showStatus(`${what === 'commit' ? 'Committing' : what === 'pull' ? 'Pulling' : 'Pushing'}…`, 'busy');
+    this.hideToast();
     this.sync();
     try {
       const r = await call();
       onOk?.();
       const done = what === 'commit' ? 'Committed' : what === 'pull' ? 'Pulled' : 'Pushed';
-      this.showStatus(r.summary ? `${done}: ${r.summary}` : done, 'ok');
+      this.showToast(r.summary ? `${done}: ${r.summary}` : done);
     } catch (e) {
       this.showError(
         isGitActionError(e) ? e : { kind: 'other', message: 'Git reported an error.', detail: String(e) },
@@ -153,13 +201,30 @@ export class GitActions {
     }
   }
 
-  private showStatus(msg: string, tone: 'ok' | 'busy'): void {
+  private hideToast(): void {
+    if (this.toastTimer) clearTimeout(this.toastTimer);
+    this.toastTimer = null;
+    this.dom.status.hidden = true;
+  }
+
+  private armToast(ms: number): void {
+    if (this.toastTimer) clearTimeout(this.toastTimer);
+    this.toastTimer = setTimeout(() => {
+      this.toastTimer = null;
+      // Keep an error up while its Details are open; check again later.
+      if (this.dom.status.querySelector('details[open]')) this.armToast(ms);
+      else this.dom.status.hidden = true;
+    }, ms);
+  }
+
+  private showToast(msg: string): void {
     const el = this.dom.status;
     el.hidden = false;
-    el.dataset.tone = tone;
+    el.dataset.tone = 'ok';
     el.dataset.kind = '';
     el.setAttribute('role', 'status');
     el.innerHTML = escapeHtml(msg);
+    this.armToast(TOAST_MS.ok);
   }
 
   private showError(e: GitActionError): void {
@@ -173,59 +238,75 @@ export class GitActions {
       (e.detail
         ? `<details class="git-error-detail"><summary>Details</summary><pre>${escapeHtml(e.detail)}</pre></details>`
         : '');
+    this.armToast(TOAST_MS.error);
   }
 
-  /** Enable / disable buttons and labels without rebuilding the lists. */
+  /** Enable / disable buttons, tooltips and counts without rebuilding lists. */
   private sync(): void {
     const d = this.dom;
     const busy = this.busy !== null;
     const n = this.selected().length;
-    d.commit.disabled = busy || n === 0;
+    const total = this.changes.length;
+    const hasMsg = !!d.message.value.trim();
+    d.commit.disabled = busy || n === 0 || !hasMsg;
     d.commit.textContent =
-      this.busy === 'commit' ? 'Committing…' : n === this.changes.length ? 'Commit' : `Commit ${n} of ${this.changes.length}`;
-    d.commit.title = d.message.value.trim() ? '' : 'Write a commit message first';
+      this.busy === 'commit' ? 'Committing…' : n === total ? 'Commit' : `Commit ${n} of ${total}`;
+    d.commit.title = !hasMsg ? 'Write a commit message first' : n === 0 ? 'Select at least one file' : '';
+    d.selectAll.checked = total > 0 && n === total;
+    d.selectAll.indeterminate = n > 0 && n < total;
+    d.selectAll.disabled = busy || total === 0;
+    setBusy(d.commitToggle, this.busy === 'commit');
+    d.commitToggle.disabled = busy || (total === 0 && !this.isPanelOpen());
+    d.commitToggle.title = total === 0 ? 'Nothing to commit' : 'Commit…';
+
     const b = this.branch;
-    const canSync = !!b?.branch && !b.detached && b.has_upstream;
+    const canSync = this.canSync();
     const why = !b?.branch
       ? 'No branch'
       : b.detached
         ? 'HEAD is detached'
         : !b.has_upstream
-          ? `${b.branch} has no upstream`
+          ? `${b.branch} has no upstream branch, so there is nothing to pull from or push to`
           : '';
     d.pull.disabled = busy || !canSync;
     d.push.disabled = busy || !canSync;
-    d.pull.title = why || `Pull ${b?.branch} from its upstream`;
-    d.push.title = why || `Push ${b?.branch} to its upstream (never forced)`;
-    d.pull.textContent = this.busy === 'pull' ? 'Pulling…' : canSync && b!.behind > 0 ? `Pull ↓${b!.behind}` : 'Pull';
-    d.push.textContent = this.busy === 'push' ? 'Pushing…' : canSync && b!.ahead > 0 ? `Push ↑${b!.ahead}` : 'Push';
+    setBusy(d.pull, this.busy === 'pull');
+    setBusy(d.push, this.busy === 'push');
+    const behind = canSync ? b!.behind : 0;
+    const ahead = canSync ? b!.ahead : 0;
+    d.pull.title = why || `Pull ${b?.branch} from its upstream${behind ? ` (${behind} behind)` : ''}`;
+    d.push.title = why || `Push ${b?.branch} to its upstream${ahead ? ` (${ahead} ahead)` : ''}, never forced`;
+    d.pull.setAttribute('aria-label', behind ? `Pull, ${behind} behind` : 'Pull');
+    d.push.setAttribute('aria-label', ahead ? `Push, ${ahead} ahead` : 'Push');
+    d.pullCount.hidden = behind === 0;
+    d.pullCount.textContent = behind ? String(behind) : '';
+    d.pushCount.hidden = ahead === 0;
+    d.pushCount.textContent = ahead ? String(ahead) : '';
+  }
+
+  private renderFiles(): void {
+    this.dom.files.innerHTML = this.changes
+      .map(
+        (c) =>
+          `<label class="git-file" title="${escapeHtml(c.path)}"><input type="checkbox" data-path="${escapeHtml(c.path)}"${this.excluded.has(c.path) ? '' : ' checked'} /> <span>${escapeHtml(c.path)}</span></label>`,
+      )
+      .join('');
   }
 
   private render(): void {
-    const d = this.dom;
     const root = this.opts.repoRoot();
-    d.root.hidden = !root;
-    const b = this.branch;
-    d.sync.innerHTML = !b?.branch
-      ? ''
-      : `<span class="git-branch">${escapeHtml(b.branch)}</span>` +
-        (b.detached
-          ? `<span class="git-ab">detached</span>`
-          : b.has_upstream
-            ? `<span class="git-ab" title="ahead / behind its upstream">↑${b.ahead} ↓${b.behind}</span>`
-            : `<span class="git-ab">no upstream</span>`);
-    if (this.changes.length === 0) {
-      d.files.innerHTML = '';
-    } else {
-      const rows = this.changes
-        .map(
-          (c) =>
-            `<label class="git-file"><input type="checkbox" data-path="${escapeHtml(c.path)}"${this.excluded.has(c.path) ? '' : ' checked'} /> <span>${escapeHtml(c.path)}</span></label>`,
-        )
-        .join('');
-      d.files.innerHTML =
-        `<details class="git-files"${this.chooseOpen ? ' open' : ''}><summary>Choose files</summary>${rows}</details>`;
+    this.dom.actions.hidden = !root;
+    if (!root) {
+      this.closePanel();
+      this.hideToast();
     }
+    this.renderFiles();
     this.sync();
   }
+}
+
+function setBusy(btn: HTMLElement, on: boolean): void {
+  btn.classList.toggle('is-busy', on);
+  if (on) btn.setAttribute('aria-busy', 'true');
+  else btn.removeAttribute('aria-busy');
 }
