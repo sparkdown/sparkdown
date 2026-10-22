@@ -500,6 +500,207 @@ pub async fn delete_path(
     .map_err(|e| AppError::Other(format!("delete task failed: {e}")))?
 }
 
+/// A single new file or folder name typed in the explorer: not empty, not
+/// `.`/`..`, no path separators or control characters, and nothing Windows
+/// can't store (so a repo stays checkout-able everywhere).
+pub(crate) fn valid_entry_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("A name is required".into());
+    }
+    if name == "." || name == ".." {
+        return Err(format!("“{name}” is not a valid name"));
+    }
+    if let Some(c) = name.chars().find(|c| {
+        c.is_control() || matches!(c, '/' | '\\' | '<' | '>' | ':' | '"' | '|' | '?' | '*')
+    }) {
+        return Err(format!("A name can't contain “{}”", c.escape_default()));
+    }
+    if name.ends_with(' ') || name.ends_with('.') {
+        return Err("A name can't end with a space or a dot".into());
+    }
+    Ok(())
+}
+
+/// Local half of [`create_entry`]: `parent` must be this window's folder or
+/// inside it; the new item is created exclusively (an existing name is an
+/// error, never overwritten). Returns the new item's path.
+pub(crate) fn create_entry_local(
+    folder: Option<&crate::windows::FolderId>,
+    parent: &str,
+    name: &str,
+    is_dir: bool,
+) -> Result<String, AppError> {
+    valid_entry_name(name).map_err(AppError::InvalidPath)?;
+    let canon = validate_path(parent)?;
+    if !canon.is_dir() {
+        return Err(AppError::InvalidPath(format!("Not a folder: {parent}")));
+    }
+    let Some(f) = folder else {
+        return Err(AppError::InvalidPath(
+            "This window has no folder open".into(),
+        ));
+    };
+    if !f.contains_local(&canon.to_string_lossy()) {
+        return Err(AppError::InvalidPath(format!(
+            "{parent} is not inside this window's folder"
+        )));
+    }
+    let target = Path::new(parent).join(name);
+    let made = if is_dir {
+        fs::create_dir(&target)
+    } else {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .map(|_| ())
+    };
+    match made {
+        Ok(()) => Ok(target.to_string_lossy().to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(AppError::Other(format!("“{name}” already exists")))
+        }
+        Err(e) => Err(AppError::Other(format!("Couldn't create “{name}”: {e}"))),
+    }
+}
+
+/// Explorer → New File / New Folder: create `name` inside `parent` (local or
+/// on the remote host). Never replaces an existing item.
+#[tauri::command]
+pub async fn create_entry(
+    webview_window: tauri::WebviewWindow,
+    parent: String,
+    name: String,
+    is_dir: bool,
+) -> Result<String, AppError> {
+    let label = webview_window.label().to_string();
+    crate::windows::spawn_scoped(label.clone(), move || {
+        if crate::remote::is_active() {
+            return crate::remote::create_entry(&parent, &name, is_dir);
+        }
+        let folder = crate::windows::registry()
+            .get(&label)
+            .and_then(|e| e.folder.clone());
+        create_entry_local(folder.as_ref(), &parent, &name, is_dir)
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("create task failed: {e}")))?
+}
+
+/// `file://` URI for a local absolute path (percent-encoding everything but
+/// unreserved characters and `/`), for the freedesktop FileManager1 call.
+#[cfg_attr(any(target_os = "macos", target_os = "windows"), allow(dead_code))]
+pub(crate) fn file_uri(path: &str) -> String {
+    let mut out = String::from("file://");
+    for b in path.as_bytes() {
+        match *b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Explorer → Reveal in Finder / File Explorer / file manager: show the item
+/// selected in the OS file manager. Local folders only.
+#[tauri::command]
+pub async fn reveal_path(
+    webview_window: tauri::WebviewWindow,
+    path: String,
+) -> Result<(), AppError> {
+    let label = webview_window.label().to_string();
+    crate::windows::spawn_scoped(label.clone(), move || {
+        if crate::remote::is_active() {
+            return Err(AppError::Other(
+                "Reveal isn't available for a remote folder".into(),
+            ));
+        }
+        let canon = validate_path(&path)?;
+        let folder = crate::windows::registry()
+            .get(&label)
+            .and_then(|e| e.folder.clone());
+        if !folder.is_some_and(|f| f.contains_local(&canon.to_string_lossy())) {
+            return Err(AppError::InvalidPath(format!(
+                "{path} is not inside this window's folder"
+            )));
+        }
+        reveal_impl(&canon)
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("reveal task failed: {e}")))?
+}
+
+fn reveal_impl(path: &Path) -> Result<(), AppError> {
+    let quiet = |c: &mut std::process::Command| {
+        c.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    };
+    #[cfg(target_os = "macos")]
+    {
+        let mut c = crate::proc::command("open");
+        c.arg("-R").arg(path);
+        quiet(&mut c);
+        let st = c.status()?;
+        if !st.success() {
+            return Err(AppError::Other("Finder couldn't show the item".into()));
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // explorer.exe exits 1 even on success; don't read its status.
+        // canonicalize() adds \\?\, which explorer doesn't understand.
+        let s = path.to_string_lossy();
+        let s = s.strip_prefix(r"\\?\").unwrap_or(&s).to_string();
+        let mut c = crate::proc::command("explorer.exe");
+        c.arg(format!("/select,{s}"));
+        quiet(&mut c);
+        let mut child = c.spawn()?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        // freedesktop FileManager1.ShowItems selects the item (Nautilus,
+        // Dolphin, Nemo, Thunar…); without it, open the containing folder.
+        let uri = file_uri(&path.to_string_lossy());
+        let mut c = crate::proc::command("dbus-send");
+        c.args([
+            "--session",
+            "--print-reply",
+            "--reply-timeout=3000",
+            "--dest=org.freedesktop.FileManager1",
+            "--type=method_call",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1.ShowItems",
+        ])
+        .arg(format!("array:string:{uri}"))
+        .arg("string:");
+        quiet(&mut c);
+        if c.status().map(|s| s.success()).unwrap_or(false) {
+            return Ok(());
+        }
+        let dir = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        let mut c = crate::proc::command("xdg-open");
+        c.arg(dir);
+        quiet(&mut c);
+        let mut child = c.spawn()?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
+    }
+}
+
 /// List the contents of a directory. Returns entries sorted with directories
 /// first, then files, alphabetical within each group. Skips hidden files
 /// (dot-prefixed) unless `include_hidden` is true. Detects circular symlinks.
@@ -1230,5 +1431,75 @@ mod delete_tests {
             assert_eq!(items.len(), 1, "the file is in the trash");
             trash::os_limited::purge_all(items).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod create_entry_tests {
+    use super::*;
+    use crate::windows::FolderId;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sd_create_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(d.join("sub")).unwrap();
+        d.canonicalize().unwrap()
+    }
+
+    fn folder(d: &Path) -> FolderId {
+        FolderId::Local {
+            path: d.to_string_lossy().to_string(),
+        }
+    }
+
+    #[test]
+    fn names_are_single_portable_segments() {
+        for ok in ["notes.md", "New Folder", ".env", "a-b_c"] {
+            assert!(valid_entry_name(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "", "  ", ".", "..", "a/b", "a\\b", "a:b", "x?", "trail.", "trail ", "a\nb",
+        ] {
+            assert!(valid_entry_name(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn creates_inside_root_and_subfolder_never_overwrites() {
+        let d = tmp("ok");
+        let f = folder(&d);
+        let root = d.to_string_lossy().to_string();
+        let p = create_entry_local(Some(&f), &root, "a.md", false).unwrap();
+        assert!(Path::new(&p).is_file());
+        fs::write(&p, "keep").unwrap();
+        let err = create_entry_local(Some(&f), &root, "a.md", false).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+        assert_eq!(fs::read_to_string(&p).unwrap(), "keep");
+        let sub = d.join("sub").to_string_lossy().to_string();
+        let nd = create_entry_local(Some(&f), &sub, "inner", true).unwrap();
+        assert!(Path::new(&nd).is_dir());
+        assert!(create_entry_local(Some(&f), &sub, "inner", true).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn refuses_outside_the_folder_or_without_one() {
+        let d = tmp("out");
+        let f = FolderId::Local {
+            path: d.join("sub").to_string_lossy().to_string(),
+        };
+        let root = d.to_string_lossy().to_string();
+        assert!(create_entry_local(Some(&f), &root, "x.md", false).is_err());
+        assert!(create_entry_local(None, &root, "x.md", false).is_err());
+        assert!(!d.join("x.md").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn file_uri_percent_encodes() {
+        assert_eq!(
+            file_uri("/home/u/a b/ü#.md"),
+            "file:///home/u/a%20b/%C3%BC%23.md"
+        );
     }
 }

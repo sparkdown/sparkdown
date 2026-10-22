@@ -1,11 +1,11 @@
 import { startDrag } from '@crabnebula/tauri-plugin-drag';
 import { EventBus } from './events';
-import { debounce, parentDir, basename, isUnderRoot, normalizePathForCompare } from './utils';
+import { debounce, parentDir, basename, isUnderRoot, normalizePathForCompare, isMacOS, isLinux } from './utils';
 import { TIMING, LAYOUT } from './constants';
 import { isTextFile } from './file-types';
 import { api, type FileEntry } from './api';
 import { EVENTS } from './event-names';
-import { showContextMenu } from './context-menu';
+import { showContextMenu, type ContextMenuItem } from './context-menu';
 
 // 32x32 PNG (data URL) used as the drag preview thumbnail. The plugin
 // requires a valid PNG — passing the dragged file's path causes the
@@ -32,10 +32,75 @@ export const TREE_CURRENT_CLASS = 'tree-current';
 /** A file open in a tab: brighter name; other tabs also get a small dot. */
 export const TREE_OPEN_CLASS = 'tree-open';
 
-/** One visible line in the flattened tree (a folder or a file). */
+/** One visible line in the flattened tree (a folder, a file, or the inline
+ *  name field of a New File / New Folder being created). */
 type TreeRow =
   | { kind: 'dir'; entry: FileEntry; depth: number; expanded: boolean }
-  | { kind: 'file'; entry: FileEntry; depth: number };
+  | { kind: 'file'; entry: FileEntry; depth: number }
+  | { kind: 'new'; depth: number };
+
+/** What was right-clicked in the explorer. */
+export type MenuTarget = { kind: 'file' | 'dir'; path: string } | { kind: 'empty' };
+
+export type ExplorerAction = 'new-file' | 'new-folder' | 'delete' | 'reveal' | 'copy-path';
+
+/** The OS file manager's name, for "Reveal in …". */
+export function revealLabel(os: 'mac' | 'windows' | 'linux'): string {
+  return os === 'mac' ? 'Reveal in Finder' : os === 'windows' ? 'Reveal in File Explorer' : 'Reveal in File Manager';
+}
+
+function currentOs(): 'mac' | 'windows' | 'linux' {
+  return isMacOS() ? 'mac' : isLinux() ? 'linux' : 'windows';
+}
+
+/**
+ * The explorer's right-click menu for a target. Files and folders: New
+ * File, New Folder, Delete…, Reveal (local only), Copy Path. Empty space:
+ * New File, New Folder. (No Rename: the app has none yet.)
+ */
+export function explorerMenu(
+  target: MenuTarget,
+  opts: { remote: boolean; os: 'mac' | 'windows' | 'linux' },
+): Array<{ action: ExplorerAction; label: string; separatorBefore?: boolean }> {
+  const items: Array<{ action: ExplorerAction; label: string; separatorBefore?: boolean }> = [
+    { action: 'new-file', label: 'New File' },
+    { action: 'new-folder', label: 'New Folder' },
+  ];
+  if (target.kind === 'empty') return items;
+  items.push({ action: 'delete', label: 'Delete…', separatorBefore: true });
+  if (!opts.remote) items.push({ action: 'reveal', label: revealLabel(opts.os), separatorBefore: true });
+  items.push({ action: 'copy-path', label: 'Copy Path', separatorBefore: opts.remote });
+  return items;
+}
+
+/** Where New File / New Folder from this target creates: inside a folder,
+ *  next to a file, at the root for empty space. */
+export function createParentFor(target: MenuTarget, root: string): string {
+  if (target.kind === 'dir') return target.path;
+  if (target.kind === 'file') return parentDir(target.path) ?? root;
+  return root;
+}
+
+/** Frontend mirror of the backend's name check, so a bad name is flagged
+ *  while typing. Returns the problem, or null when the name is fine. */
+export function entryNameError(name: string): string | null {
+  if (!name.trim()) return 'A name is required';
+  if (name === '.' || name === '..') return `“${name}” is not a valid name`;
+  // eslint-disable-next-line no-control-regex
+  const bad = /[\\/<>:"|?*\u0000-\u001f]/.exec(name);
+  if (bad) return `A name can't contain “${bad[0]}”`;
+  if (/[ .]$/.test(name)) return "A name can't end with a space or a dot";
+  return null;
+}
+
+/** An inline New File / New Folder in progress. */
+interface PendingCreate {
+  parent: string;
+  isDir: boolean;
+  draft: string;
+  error: string | null;
+  busy: boolean;
+}
 
 // Chevron pointing right; CSS turns it down for an expanded folder.
 const CHEVRON_SVG =
@@ -79,6 +144,12 @@ export class FileTree {
   // The folder the user last picked in the tree: a clicked folder, or the
   // folder of a clicked file. Save dialogs for Untitled tabs start here.
   private selectedDir: string | null = null;
+  // The New File / New Folder name field, if one is open.
+  private pending: PendingCreate | null = null;
+  // Set while renderViewport swaps rows, so the field's blur is ignored.
+  private swappingRows = false;
+  private isRemote: () => boolean = () => false;
+  private showError: (text: string) => void = (t) => console.error(t);
 
   // --- Virtualization state ---
   // The full flattened list of visible rows (the whole tree), and the children
@@ -134,6 +205,12 @@ export class FileTree {
     this.spacer.appendChild(this.rowLayer);
     this.viewport.appendChild(this.spacer);
     this.viewport.addEventListener('scroll', () => this.renderViewport(), { passive: true });
+    // Right-click on empty space below the rows: New File / New Folder in the root.
+    this.viewport.addEventListener('contextmenu', (e) => {
+      if (e.target instanceof Element && e.target.closest('.tree-item')) return;
+      e.preventDefault();
+      this.openMenu(e.clientX, e.clientY, { kind: 'empty' });
+    });
     // The virtualizer mounts only the rows that fit the viewport's height at
     // render time. A tree rendered while the sidebar is hidden (or another
     // activity view covers it) measures 0 and mounts only the overscan rows;
@@ -226,6 +303,7 @@ export class FileTree {
     if (!force && this.rootPath && isUnderRoot(path, this.rootPath)) return;
     this.rootPath = path;
     this.selectedDir = null;
+    this.pending = null;
     this.expandedDirs.clear();
     this.childrenCache.clear();
     this.updateTitle();
@@ -239,6 +317,7 @@ export class FileTree {
   clear(): void {
     this.rootPath = null;
     this.selectedDir = null;
+    this.pending = null;
     this.expandedDirs.clear();
     this.childrenCache.clear();
     this.gitStatus.clear();
@@ -249,6 +328,13 @@ export class FileTree {
     this.flashedPaths.clear();
     this.updateTitle();
     if (this.rowLayer) void this.renderTree({ resetScroll: true });
+  }
+
+  /** How the explorer menu learns the session is remote, and reports
+   *  errors (set by the App). */
+  configureActions(opts: { isRemote: () => boolean; showError: (text: string) => void }): void {
+    this.isRemote = opts.isRemote;
+    this.showError = opts.showError;
   }
 
   /** Remember the folder the user picked in the tree (see selectedDir). */
@@ -364,7 +450,7 @@ export class FileTree {
     }
     if (!stillWanted()) return;
     if (changed) this.rebuildRows();
-    const index = this.rows.findIndex((r) => normalizePathForCompare(r.entry.path) === target);
+    const index = this.rows.findIndex((r) => r.kind !== 'new' && normalizePathForCompare(r.entry.path) === target);
     if (index >= 0) {
       const top = index * ROW_H;
       const height = this.viewport.clientHeight || 0;
@@ -595,6 +681,13 @@ export class FileTree {
     };
     walk(this.rootEntries, 0);
 
+    const p = this.pending;
+    if (p) {
+      const at = rows.findIndex((r) => r.kind === 'dir' && r.entry.path === p.parent);
+      if (at >= 0) rows.splice(at + 1, 0, { kind: 'new', depth: rows[at].depth + 1 });
+      else rows.unshift({ kind: 'new', depth: 0 });
+    }
+
     this.rows = rows;
     this.spacer.style.height = `${rows.length * ROW_H}px`;
   }
@@ -618,12 +711,28 @@ export class FileTree {
       el.style.right = '0';
       frag.appendChild(el);
     }
-    this.rowLayer.replaceChildren(frag);
+    const hadFocus = !!this.pending && document.activeElement?.classList.contains('tree-new-input');
+    this.swappingRows = true;
+    try {
+      this.rowLayer.replaceChildren(frag);
+    } finally {
+      this.swappingRows = false;
+    }
+    if (hadFocus) this.focusPendingInput();
+  }
+
+  private focusPendingInput(): void {
+    const input = this.rowLayer.querySelector<HTMLInputElement>('.tree-new-input');
+    if (!input) return;
+    input.focus();
+    const end = input.value.length;
+    input.setSelectionRange(end, end);
   }
 
   /** Build the DOM element for one flattened row:
    *  [chevron] name [git badge] [open-file dot]. */
   private createRowElement(row: TreeRow): HTMLElement {
+    if (row.kind === 'new') return this.createPendingRow(row.depth);
     const { entry, depth } = row;
     const el = document.createElement('div');
     el.className = row.kind === 'dir' ? 'tree-item directory' : 'tree-item';
@@ -707,25 +816,167 @@ export class FileTree {
     return el;
   }
 
-  /** Right-click menu: Open (files), Copy file, Copy name, Copy path, Delete. */
+  /** Right-click on a file or folder row (see explorerMenu). */
   private attachContextMenu(el: HTMLElement, entry: FileEntry, isFile: boolean): void {
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      const items = [];
-      if (isFile) {
-        items.push({ label: 'Open', onClick: () => this.bus.emit(EVENTS.FILE_TREE_OPEN, { path: entry.path }) });
-      } else {
-        items.push({ label: 'Open Folder', onClick: () => void this.setRoot(entry.path, true) });
-      }
-      items.push(
-        { label: 'Copy', onClick: () => void api.copyFile(entry.path) },
-        { label: 'Copy Name', onClick: () => void api.copyText(basename(entry.path)) },
-        { label: 'Copy Path', onClick: () => void api.copyText(entry.path) },
-        // #121: confirmed, then to the trash (app.ts runs explorer-delete).
-        { label: 'Delete…', onClick: () => this.bus.emit(EVENTS.FILE_TREE_DELETE, { path: entry.path, isDir: !isFile }) },
-      );
-      showContextMenu(e.clientX, e.clientY, items);
+      e.stopPropagation();
+      this.openMenu(e.clientX, e.clientY, { kind: isFile ? 'file' : 'dir', path: entry.path });
     });
+  }
+
+  private openMenu(x: number, y: number, target: MenuTarget): void {
+    const root = this.rootPath;
+    if (!root) return;
+    const items: ContextMenuItem[] = explorerMenu(target, { remote: this.isRemote(), os: currentOs() }).map((it) => ({
+      label: it.label,
+      separatorBefore: it.separatorBefore,
+      onClick: () => this.runAction(it.action, target, root),
+    }));
+    showContextMenu(x, y, items);
+  }
+
+  private runAction(action: ExplorerAction, target: MenuTarget, root: string): void {
+    switch (action) {
+      case 'new-file':
+      case 'new-folder':
+        void this.beginCreate(createParentFor(target, root), action === 'new-folder');
+        return;
+      case 'delete':
+        if (target.kind === 'empty') return;
+        // #121: confirmed, then to the trash (app.ts runs explorer-delete).
+        this.bus.emit(EVENTS.FILE_TREE_DELETE, { path: target.path, isDir: target.kind === 'dir' });
+        return;
+      case 'reveal':
+        if (target.kind === 'empty') return;
+        api.revealPath(target.path).catch((err) => this.showError(`Couldn't reveal “${target.path}”: ${String(err)}`));
+        return;
+      case 'copy-path':
+        if (target.kind === 'empty') return;
+        void api.copyText(target.path);
+        return;
+    }
+  }
+
+  /**
+   * New File / New Folder: open an inline name field at the top of `parent`
+   * (expanding it first). Enter creates, Esc cancels, clicking away creates
+   * when a name was typed. A new file opens in a tab.
+   */
+  async beginCreate(parent: string, isDir: boolean): Promise<void> {
+    const root = this.rootPath;
+    if (!root || !isUnderRoot(parent, root)) return;
+    if (parent !== root && !this.expandedDirs.has(parent)) await this.toggleDir(parent);
+    if (this.rootPath !== root) return;
+    this.pending = { parent, isDir, draft: '', error: null, busy: false };
+    this.selectedDir = parent;
+    this.rebuildRows();
+    const idx = this.rows.findIndex((r) => r.kind === 'new');
+    const top = idx * ROW_H;
+    const h = this.viewport.clientHeight || 1;
+    if (top < this.viewport.scrollTop || top + ROW_H > this.viewport.scrollTop + h) {
+      this.viewport.scrollTop = Math.max(0, top - ROW_H * 2);
+    }
+    this.renderViewport();
+    this.focusPendingInput();
+  }
+
+  /** True while a New File / New Folder name field is open. */
+  isCreating(): boolean {
+    return this.pending !== null;
+  }
+
+  private cancelCreate(): void {
+    if (!this.pending) return;
+    this.pending = null;
+    this.rebuildRows();
+    this.renderViewport();
+  }
+
+  private async commitCreate(): Promise<void> {
+    const p = this.pending;
+    if (!p || p.busy) return;
+    const name = p.draft.trim();
+    if (!name) {
+      this.cancelCreate();
+      return;
+    }
+    const problem = entryNameError(name);
+    if (problem) {
+      p.error = problem;
+      this.renderViewport();
+      this.focusPendingInput();
+      return;
+    }
+    p.busy = true;
+    try {
+      const path = await api.createEntry(p.parent, name, p.isDir);
+      if (this.pending !== p) return;
+      this.pending = null;
+      this.rebuildRows();
+      this.renderViewport();
+      await this.refresh();
+      if (!p.isDir && isTextFile(name)) this.bus.emit(EVENTS.FILE_TREE_OPEN, { path });
+    } catch (err) {
+      if (this.pending !== p) return;
+      p.busy = false;
+      p.error = String(err).replace(/^(Error: )?(Invalid path: )?/, '');
+      this.renderViewport();
+      this.focusPendingInput();
+    }
+  }
+
+  private createPendingRow(depth: number): HTMLElement {
+    const p = this.pending!;
+    const el = document.createElement('div');
+    el.className = 'tree-item tree-new' + (p.isDir ? ' directory' : '');
+    el.style.paddingLeft = `${rowIndent(p.isDir ? 'dir' : 'file', depth)}px`;
+    el.setAttribute('role', 'treeitem');
+    const slot = document.createElement('span');
+    slot.className = 'tree-chevron';
+    el.appendChild(slot);
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'tree-new-input';
+    input.value = p.draft;
+    input.spellcheck = false;
+    input.placeholder = p.isDir ? 'Folder name' : 'File name';
+    input.setAttribute('aria-label', p.isDir ? 'New folder name' : 'New file name');
+    input.setAttribute('aria-invalid', String(!!p.error));
+    input.addEventListener('input', () => {
+      p.draft = input.value;
+      if (p.error) {
+        p.error = null;
+        input.setAttribute('aria-invalid', 'false');
+        el.querySelector('.tree-new-error')?.remove();
+      }
+    });
+    input.addEventListener('keydown', (e) => {
+      // Keep app shortcuts (Ctrl+S, Ctrl+W…) out of the name field.
+      e.stopPropagation();
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        void this.commitCreate();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        this.cancelCreate();
+      }
+    });
+    input.addEventListener('blur', () => {
+      if (this.swappingRows || this.pending !== p || p.busy) return;
+      if (p.draft.trim() && !p.error) void this.commitCreate();
+      else this.cancelCreate();
+    });
+    input.addEventListener('mousedown', (e) => e.stopPropagation());
+    el.appendChild(input);
+    if (p.error) {
+      const msg = document.createElement('div');
+      msg.className = 'tree-new-error';
+      msg.setAttribute('role', 'alert');
+      msg.textContent = p.error;
+      el.appendChild(msg);
+    }
+    return el;
   }
 
   private attachDragHandler(el: HTMLElement, path: string): () => boolean {
@@ -734,6 +985,9 @@ export class FileTree {
     let dragging = false;
 
     el.addEventListener('mousedown', (e) => {
+      // The preventDefault below keeps focus where it is, so close an open
+      // New File / New Folder field ourselves (its blur commits or cancels).
+      if (this.pending && document.activeElement instanceof HTMLElement) document.activeElement.blur();
       if (e.button !== 0) return;
       // Prevent WebKitGTK from focusing the row (GTK selected-row chrome
       // looks like the watcher flash). Click still fires; drag still starts.

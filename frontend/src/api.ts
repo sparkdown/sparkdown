@@ -100,6 +100,11 @@ export const api = {
   readClipboardText: () => invoke<string>("read_clipboard_text"),
   copyFile: (path: string) => invoke<void>("copy_file", { path }),
   deletePath: (path: string) => invoke<"trashed" | "deleted">("delete_path", { path }),
+  /** Explorer New File / New Folder; never replaces. Returns the new path. */
+  createEntry: (parent: string, name: string, isDir: boolean) =>
+    invoke<string>("create_entry", { parent, name, isDir }),
+  /** Show a local item selected in Finder / File Explorer / file manager. */
+  revealPath: (path: string) => invoke<void>("reveal_path", { path }),
   listDirectory: (path: string, includeHidden = false) =>
     invoke<FileEntry[]>("list_directory", { path, includeHidden }),
   /** Every file under `root` (root-relative, `/`-separated) for Quick open.

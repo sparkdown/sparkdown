@@ -243,6 +243,10 @@ export class App {
       document.getElementById('file-tree')!,
       document.getElementById('sidebar')!
     );
+    this.fileTree.configureActions({
+      isRemote: () => this.tabs.getOrigin() !== LOCAL_ORIGIN,
+      showError: (text) => void message(text, { title: 'Explorer', kind: 'error' }),
+    });
     this.toc.init(document.getElementById('app')!);
     this.shortcuts.init();
     // Static HTML tooltips and hints (index.html) in this platform's keys.
