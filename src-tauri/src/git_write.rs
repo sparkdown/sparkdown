@@ -89,10 +89,15 @@ impl GitActionError {
     }
 }
 
-/// What a successful action reports back (git's summary line(s)).
+/// What a successful action reports back: git's first summary line, its
+/// full output (for the Git output tab), and for pull / push how many
+/// commits moved and the upstream they moved to or from.
 #[derive(Serialize, Clone, Debug)]
 pub struct GitActionResult {
     pub summary: String,
+    pub output: String,
+    pub commits: Option<u32>,
+    pub target: Option<String>,
 }
 
 type ActionResult = Result<GitActionResult, GitActionError>;
@@ -540,18 +545,34 @@ pub(crate) fn commit_impl(
 fn summary(out: String) -> GitActionResult {
     GitActionResult {
         summary: out.lines().next().unwrap_or("").trim().to_string(),
+        output: out,
+        commits: None,
+        target: None,
     }
+}
+
+/// `origin/main` for an upstream (`refs/heads/` stripped from the merge ref).
+fn target_name(up: &Upstream) -> String {
+    format!("{}/{}", up.remote, up.merge.strip_prefix("refs/heads/").unwrap_or(&up.merge))
+}
+
+fn count(root: &Path, extra: ExtraEnv, range: &str) -> Option<u32> {
+    query(root, extra, &["rev-list", "--count", range])?.parse().ok()
 }
 
 /// Pull the current branch from its upstream with the user's own pull
 /// settings (merge / rebase / ff-only).
 pub(crate) fn pull_impl(root: &str, extra: ExtraEnv) -> ActionResult {
     let root = check_local(root)?;
-    upstream(&root, extra)?;
+    let up = upstream(&root, extra)?;
+    let before = query(&root, extra, &["rev-parse", "--verify", "-q", "HEAD"]);
     let o = user_git(&root, extra, &["pull", "--no-edit"], NETWORK_TIMEOUT)?;
     let t = text(&o);
     if o.status.success() {
-        Ok(summary(t))
+        let mut r = summary(t);
+        r.commits = before.and_then(|b| count(&root, extra, &format!("{b}..HEAD")));
+        r.target = Some(target_name(&up));
+        Ok(r)
     } else {
         Err(classify(Action::Pull, &t))
     }
@@ -565,14 +586,19 @@ pub(crate) fn push_impl(root: &str, extra: ExtraEnv) -> ActionResult {
     let refspec = format!("HEAD:{}", up.merge);
     debug_assert!(!refspec.starts_with('+'));
     let _ = &up.branch;
-    run_ok(
+    // Commits the upstream doesn't have yet (as last fetched).
+    let ahead = count(&root, extra, "@{upstream}..HEAD");
+    let mut r = run_ok(
         &root,
         extra,
         &["push", "--", &up.remote, &refspec],
         NETWORK_TIMEOUT,
         Action::Push,
     )
-    .map(summary)
+    .map(summary)?;
+    r.commits = ahead;
+    r.target = Some(target_name(&up));
+    Ok(r)
 }
 
 #[tauri::command]
@@ -872,7 +898,9 @@ mod tests {
         let env = sb.env();
         sb.commit_in(&sb.work, "b.md", "b\n", "b");
         assert_eq!(ahead_behind(&sb), (1, 0));
-        push_impl(&root(&sb), &env).unwrap();
+        let r = push_impl(&root(&sb), &env).unwrap();
+        assert_eq!(r.commits, Some(1));
+        assert_eq!(r.target.as_deref(), Some("origin/main"));
         assert_eq!(ahead_behind(&sb), (0, 0));
         let remote_head = sb.git(&sb.bare, &["rev-parse", "main"]);
         assert_eq!(remote_head, sb.git(&sb.work, &["rev-parse", "HEAD"]));
@@ -887,7 +915,10 @@ mod tests {
         sb.git(&other, &["push", "-q"]);
         sb.git(&sb.work, &["fetch", "-q"]);
         assert_eq!(ahead_behind(&sb), (0, 1));
-        pull_impl(&root(&sb), &env).unwrap();
+        let r = pull_impl(&root(&sb), &env).unwrap();
+        assert_eq!(r.commits, Some(1));
+        assert_eq!(r.target.as_deref(), Some("origin/main"));
+        assert!(!r.output.is_empty());
         assert_eq!(ahead_behind(&sb), (0, 0));
         assert!(sb.work.join("up.md").exists());
     }

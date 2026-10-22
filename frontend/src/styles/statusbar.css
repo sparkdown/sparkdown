@@ -161,3 +161,14 @@ button.status-item:focus-visible {
 .status-update-btn:hover {
   background: var(--bg-tertiary);
 }
+
+/* Git action feedback (git-output.ts): spinner while running, a success line
+   that fades, an error in the warning colour until clicked. */
+.status-git { display: inline-flex; align-items: center; gap: 5px; max-width: 40ch; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; transition: opacity 0.4s; }
+.status-git.is-fading { opacity: 0; }
+.status-git-spin { display: none; width: 9px; height: 9px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: status-git-spin 0.8s linear infinite; }
+.status-git[data-state='running'] .status-git-spin { display: inline-block; }
+.status-git[data-state='error'] { color: var(--status-warning); font-weight: 600; }
+.status-git-label { overflow: hidden; text-overflow: ellipsis; }
+@keyframes status-git-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .status-git-spin { animation: none; } }

@@ -584,7 +584,12 @@
   cursor: pointer;
 }
 .changes-git-btn:disabled { opacity: 0.5; cursor: default; }
-.changes-git-commit { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* Primary Commit: a filled accent button whose label uses --accent-fg (WCAG
+   AA on --accent in both themes, see theme-contrast.test.ts). Disabled it is
+   an outline with muted text, so the two states never look alike. */
+.changes-git-commit { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+.changes-git-commit:not(:disabled):hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.changes-git-commit:disabled { background: transparent; border-color: var(--border-light); color: var(--text-subtle); font-weight: 400; opacity: 0.7; }
 .changes-commit-msg {
   font: inherit;
   resize: vertical;
@@ -599,16 +604,15 @@
 .git-files { max-height: 160px; overflow: auto; }
 .git-file { display: flex; gap: 6px; align-items: center; padding: 1px 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .git-file span { overflow: hidden; text-overflow: ellipsis; }
-.changes-git-toast {
-  margin: 6px 14px;
-  padding: 5px 8px;
-  border: 1px solid var(--border-light);
-  border-radius: 5px;
-  font-size: 12px;
-  line-height: 1.5;
-  word-break: break-word;
-}
-.changes-git-toast[hidden] { display: none; }
-.changes-git-toast[data-tone='error'] { color: var(--danger, #d9534f); border-color: var(--danger, #d9534f); }
-.changes-git-toast[data-tone='ok'] { color: var(--text-subtle); }
-.changes-git-toast pre { white-space: pre-wrap; font-size: 11px; max-height: 160px; overflow: auto; margin: 4px 0 0; }
+
+/* Bottom pane: Terminals / Git tab strip and the Git output log. */
+.bottom-tabs { display: flex; gap: 2px; padding: 2px 8px 0; flex-shrink: 0; font-size: 11px; }
+.bottom-tab { font: inherit; padding: 3px 10px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-subtle); cursor: pointer; }
+.bottom-tab.active, .bottom-tab[aria-selected='true'] { color: var(--fg); border-bottom-color: var(--accent); }
+.git-output { flex: 1; min-height: 0; overflow: auto; padding: 6px 12px; font-size: 12px; }
+.git-output-empty { color: var(--text-subtle); }
+.git-output-entry { padding: 4px 0; border-bottom: 1px solid var(--border-light); }
+.git-output-head { display: flex; gap: 8px; align-items: baseline; }
+.git-output-time { color: var(--text-subtle); font-variant-numeric: tabular-nums; }
+.git-output-entry[data-state='error'] .git-output-msg { color: var(--status-warning); }
+.git-output-text { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font-size: 11px; }

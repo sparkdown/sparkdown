@@ -12,7 +12,8 @@ vi.mock('../api', () => ({
   },
 }));
 
-import { GitActions, TOAST_MS } from '../git-actions';
+import { GitActions } from '../git-actions';
+import { GitFeedback, STATUS_FADE_MS } from '../git-output';
 import type { GitBranchStatus, GitChange } from '../api';
 
 function make(root: string | null = '/repo') {
@@ -24,9 +25,12 @@ function make(root: string | null = '/repo') {
     </div>
     <div id="panel" hidden><textarea id="m"></textarea><input type="checkbox" id="all" />
       <div id="f"></div><button id="c"></button></div>
-    <div id="st" hidden></div>`;
+    <button id="st" class="hidden"><i class="status-git-spin"></i><span class="status-git-label"></span></button>
+    <div id="out"></div>`;
   const $ = (id: string) => document.getElementById(id)!;
   const refresh = vi.fn(async () => {});
+  const openOutput = vi.fn();
+  const fb = new GitFeedback({ status: $('st'), output: $('out') }, openOutput);
   const ga = new GitActions(
     {
       actions: $('acts'),
@@ -40,11 +44,10 @@ function make(root: string | null = '/repo') {
       selectAll: $('all') as HTMLInputElement,
       files: $('f'),
       commit: $('c') as HTMLButtonElement,
-      status: $('st'),
     },
-    { repoRoot: () => root, refresh },
+    { repoRoot: () => root, refresh, report: fb },
   );
-  return { ga, refresh, $ };
+  return { ga, refresh, $, fb, openOutput };
 }
 
 const changes = (...p: string[]) => p.map((path) => ({ path, status: 'modified', staged: false }) as GitChange);
@@ -62,6 +65,7 @@ const typeMsg = (el: HTMLElement, v: string) => {
 };
 const btn = (el: HTMLElement) => el as HTMLButtonElement;
 const box = (el: HTMLElement) => el as HTMLInputElement;
+const shown = (el: HTMLElement) => !el.classList.contains('hidden');
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe('GitActions header + commit panel (0.4.1)', () => {
@@ -104,7 +108,7 @@ describe('GitActions header + commit panel (0.4.1)', () => {
   });
 
   it('every file is ticked by default; unticking one makes select-all indeterminate and commits only the rest', async () => {
-    gitCommit.mockResolvedValue({ summary: '' });
+    gitCommit.mockResolvedValue({ summary: '', output: '', commits: null, target: null });
     const { ga, $ } = make();
     ga.setChanges(changes('a.md', 'b.md'));
     $('tog').click();
@@ -120,10 +124,10 @@ describe('GitActions header + commit panel (0.4.1)', () => {
     expect(gitCommit).toHaveBeenCalledWith('/repo', 'Only a', ['a.md']);
   });
 
-  it('⌘/Ctrl+Enter commits all, then the panel closes, the message clears and a toast shows', async () => {
+  it('⌘/Ctrl+Enter commits all, then the panel closes, the message clears and the status bar says so, then fades', async () => {
     vi.useFakeTimers();
-    gitCommit.mockResolvedValue({ summary: '[main abc] Msg' });
-    const { ga, $, refresh } = make();
+    gitCommit.mockResolvedValue({ summary: '[main abc1234] Msg', output: '[main abc1234] Msg\n 1 file changed', commits: null, target: null });
+    const { ga, $, refresh, fb } = make();
     ga.setChanges(changes('a.md', 'b.md'));
     $('tog').click();
     typeMsg($('m'), 'Msg');
@@ -133,11 +137,12 @@ describe('GitActions header + commit panel (0.4.1)', () => {
     expect(($('m') as HTMLTextAreaElement).value).toBe('');
     expect($('panel').hidden).toBe(true);
     expect(refresh).toHaveBeenCalled();
-    expect($('st').hidden).toBe(false);
-    expect($('st').dataset.tone).toBe('ok');
-    expect($('st').textContent).toContain('Committed');
-    vi.advanceTimersByTime(TOAST_MS.ok + 10);
-    expect($('st').hidden).toBe(true);
+    expect(shown($('st'))).toBe(true);
+    expect($('st').dataset.state).toBe('ok');
+    expect($('st').textContent).toBe('Committed abc1234: Msg');
+    expect(fb.log.all()[fb.log.all().length - 1]?.output).toContain('1 file changed');
+    vi.advanceTimersByTime(STATUS_FADE_MS + 500);
+    expect(shown($('st'))).toBe(false);
   });
 
   it('an empty message via the keyboard is blocked without calling git', async () => {
@@ -147,7 +152,8 @@ describe('GitActions header + commit panel (0.4.1)', () => {
     typeMsg($('m'), '   ');
     await ga.commit();
     expect(gitCommit).not.toHaveBeenCalled();
-    expect($('st').dataset.kind).toBe('empty_message');
+    expect($('st').dataset.state).toBe('error');
+    expect($('st').textContent).toBe('Write a commit message first.');
     expect($('panel').hidden).toBe(false);
   });
 
@@ -160,39 +166,56 @@ describe('GitActions header + commit panel (0.4.1)', () => {
     await ga.commit();
     expect($('panel').hidden).toBe(false);
     expect(($('m') as HTMLTextAreaElement).value).toBe('Msg');
-    expect($('st').dataset.kind).toBe('hook_failed');
+    expect($('st').textContent).toBe('A hook stopped the commit.');
   });
 
-  it('Pull / Push spin while running, then show a typed error toast with details', async () => {
+  it('Pull / Push spin while running, with a status-bar spinner, then a sticky error and the full output in the Git tab', async () => {
     let reject!: (e: unknown) => void;
     gitPush.mockReturnValue(new Promise((_, r) => (reject = r)));
-    const { ga, $, refresh } = make();
+    const { ga, $, refresh, fb, openOutput } = make();
     ga.setBranch(branch({ ahead: 1 }));
     $('push').click();
+    expect($('st').dataset.state).toBe('running');
+    expect($('st').textContent).toBe('Pushing…');
     expect($('push').classList.contains('is-busy')).toBe(true);
     expect($('push').getAttribute('aria-busy')).toBe('true');
     expect(btn($('pull')).disabled).toBe(true);
     reject({ kind: 'rejected', message: 'The remote rejected the push.', detail: '! [rejected] main -> main (fetch first)' });
     await flush();
     expect($('push').classList.contains('is-busy')).toBe(false);
-    expect($('st').dataset.kind).toBe('rejected');
-    expect($('st').getAttribute('role')).toBe('alert');
-    expect($('st').querySelector('pre')?.textContent).toContain('fetch first');
+    expect($('st').dataset.state).toBe('error');
+    expect($('st').textContent).toBe('The remote rejected the push.');
+    expect($('out').querySelector('pre')?.textContent).toContain('fetch first');
+    expect(fb.log.all()).toHaveLength(1);
     expect(refresh).toHaveBeenCalled();
+    expect(openOutput).not.toHaveBeenCalled();
   });
 
-  it('an error toast stays while its details are open', async () => {
+  it('an error stays in the status bar until clicked; the click opens the Git tab', async () => {
     vi.useFakeTimers();
     gitPull.mockRejectedValue({ kind: 'conflict', message: 'Pull stopped on a conflict.', detail: 'CONFLICT' });
-    const { ga, $ } = make();
+    const { ga, $, openOutput } = make();
     ga.setBranch(branch({ behind: 1 }));
     await ga.pull();
-    ($('st').querySelector('details') as HTMLDetailsElement).open = true;
-    vi.advanceTimersByTime(TOAST_MS.error + 10);
-    expect($('st').hidden).toBe(false);
-    ($('st').querySelector('details') as HTMLDetailsElement).open = false;
-    vi.advanceTimersByTime(TOAST_MS.error + 10);
-    expect($('st').hidden).toBe(true);
+    vi.advanceTimersByTime(STATUS_FADE_MS * 10);
+    expect(shown($('st'))).toBe(true);
+    expect($('st').dataset.state).toBe('error');
+    $('st').click();
+    expect(openOutput).toHaveBeenCalledTimes(1);
+    expect(shown($('st'))).toBe(false);
+  });
+
+  it('pull and push report how many commits moved and where', async () => {
+    gitPull.mockResolvedValue({ summary: 'Updating', output: 'Updating 1..3\nFast-forward', commits: 3, target: 'origin/main' });
+    gitPush.mockResolvedValue({ summary: 'To x', output: 'To x\n  a..b  HEAD -> main', commits: 2, target: 'origin/main' });
+    const { ga, $, fb } = make();
+    ga.setBranch(branch({ behind: 3, ahead: 2 }));
+    await ga.pull();
+    expect($('st').textContent).toBe('Pulled 3 commits from origin/main');
+    await ga.push();
+    expect($('st').textContent).toBe('Pushed 2 commits to origin/main');
+    expect(fb.log.all().map((e) => e.command)).toEqual(['git pull --no-edit', 'git push (never forced)']);
+    expect($('out').querySelectorAll('.git-output-entry')).toHaveLength(2);
   });
 
   it('shows behind/ahead counts only above 0 and greys out without an upstream', () => {
@@ -214,7 +237,7 @@ describe('GitActions header + commit panel (0.4.1)', () => {
   });
 
   it('pull calls git and refreshes; without an upstream it does nothing', async () => {
-    gitPull.mockResolvedValue({ summary: 'Fast-forward' });
+    gitPull.mockResolvedValue({ summary: 'Fast-forward', output: 'Fast-forward', commits: 1, target: 'origin/main' });
     const { ga, refresh } = make();
     ga.setBranch(branch({ has_upstream: false }));
     await ga.pull();

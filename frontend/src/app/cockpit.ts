@@ -32,6 +32,8 @@ export class CockpitController {
   private terminalVisible = false;
   /** Terminals Only: terminal fills the center column; editor/preview hidden. */
   private terminalsOnly = false;
+  /** Which bottom-pane tab shows: the terminals or the Git output log. */
+  private bottomTab: 'terminals' | 'git' = 'terminals';
 
   constructor(
     private readonly ctx: AppContext,
@@ -102,6 +104,68 @@ export class CockpitController {
     });
   }
 
+  private setDrawerVisible(on: boolean): void {
+    this.terminalVisible = on;
+    document.getElementById('terminal-panel')?.classList.toggle('hidden', !on);
+    // Resize gutter stays hidden in terminals-only (CSS); otherwise follows visibility.
+    document.getElementById('terminal-resize-handle')?.classList.toggle('hidden', !on || this.terminalsOnly);
+    document.getElementById('btn-terminal')?.classList.toggle('off', !on);
+    this.ctx.saveConfigSoon(); // remember drawer state across sessions
+  }
+
+  /** Wire the bottom pane's Terminals / Git tab strip. */
+  initBottomTabs(): void {
+    const term = document.getElementById('bottom-tab-terminals');
+    const git = document.getElementById('bottom-tab-git');
+    term?.addEventListener('click', () => {
+      this.selectBottomTab('terminals');
+      void this.openTerminals().then(() => this.terminals?.focusActive());
+    });
+    git?.addEventListener('click', () => this.selectBottomTab('git'));
+    document.getElementById('bottom-tabs')?.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      const next = this.bottomTab === 'git' ? term : git;
+      next?.click();
+      next?.focus();
+    });
+  }
+
+  getBottomTab(): 'terminals' | 'git' {
+    return this.bottomTab;
+  }
+
+  private selectBottomTab(tab: 'terminals' | 'git'): void {
+    this.bottomTab = tab;
+    const isGit = tab === 'git';
+    document.getElementById('terminal-host')?.classList.toggle('hidden', isGit);
+    document.getElementById('git-output')?.classList.toggle('hidden', !isGit);
+    for (const [id, on] of [
+      ['bottom-tab-terminals', !isGit],
+      ['bottom-tab-git', isGit],
+    ] as const) {
+      const b = document.getElementById(id);
+      b?.setAttribute('aria-selected', String(on));
+      b?.setAttribute('tabindex', on ? '0' : '-1');
+      b?.classList.toggle('active', on);
+    }
+    if (!isGit) this.terminals?.refitAll();
+  }
+
+  /**
+   * Show the Git output tab (a click on the status-bar git message). Opens
+   * the drawer if needed without starting a shell, and leaves keyboard focus
+   * where it was: the log is shown, never focused.
+   */
+  showGitOutput(): void {
+    if (this.terminalsOnly) {
+      this.terminalsOnly = false;
+      this.applyTerminalsOnlyLayout();
+    }
+    if (!this.terminalVisible) this.setDrawerVisible(true);
+    this.selectBottomTab('git');
+  }
+
   /** Show/hide the terminal drawer, lazy-creating the manager on first reveal. */
   async toggleTerminal(): Promise<void> {
     const panel = document.getElementById('terminal-panel');
@@ -115,14 +179,10 @@ export class CockpitController {
       this.applyTerminalsOnlyLayout();
     }
 
-    this.terminalVisible = !this.terminalVisible;
-    panel.classList.toggle('hidden', !this.terminalVisible);
-    // Resize gutter stays hidden in terminals-only (CSS); otherwise follows visibility.
-    handle.classList.toggle('hidden', !this.terminalVisible || this.terminalsOnly);
-    document.getElementById('btn-terminal')?.classList.toggle('off', !this.terminalVisible);
-    this.ctx.saveConfigSoon(); // remember drawer state across sessions
-
+    this.setDrawerVisible(!this.terminalVisible);
     if (!this.terminalVisible) return;
+    // ⌃` (or the toolbar) always reveals the terminals, never the Git log.
+    this.selectBottomTab('terminals');
 
     // First reveal arms the agent context bridge (see agent-context.ts)
     // and publishes right away so an agent started now sees current state.

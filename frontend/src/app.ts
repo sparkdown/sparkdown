@@ -40,6 +40,7 @@ import { onWindowFocus } from './window-events';
 import { api, type AppConfig, type FsChange } from './api';
 import { ACTIONS, EVENTS } from './event-names';
 import { initPerfTrace, span } from './perf-trace';
+import { GitFeedback } from './git-output';
 
 const DEFAULT_CONFIG: AppConfig = {
   theme: 'system',
@@ -93,6 +94,7 @@ export class App {
   private lifecycle!: LifecycleController;
   private agent!: AgentContextBridge;
   private cockpit!: CockpitController;
+  private gitFeedback!: GitFeedback;
   private diff!: DiffController;
   private viewMode!: ViewModeController;
   private workspace!: WorkspaceController;
@@ -181,7 +183,12 @@ export class App {
       closePristineUntitled: () => this.documents.closePristineUntitled(),
       defaultTerminalHeight: DEFAULT_CONFIG.terminal_height,
     });
+    this.gitFeedback = new GitFeedback(
+      { status: document.getElementById('status-git'), output: document.getElementById('git-output') },
+      () => this.cockpit.showGitOutput(),
+    );
     this.diff = new DiffController(this.ctx, {
+      gitReporter: this.gitFeedback,
       applyTabSwitch: (tab) => this.applyTabSwitch(tab),
       onChangeCount: (count) => this.activityBar.setChangeCount(count),
       onGitStatus: () => this.viewMode.refreshControl(),
@@ -270,6 +277,7 @@ export class App {
     this.workspace.registerWatcher();
     this.agent.registerMcpListeners();
     this.cockpit.initTerminalResize();
+    this.cockpit.initBottomTabs();
     this.diff.init();
     this.searchView.init();
     this.activityBar.init();

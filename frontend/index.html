@@ -117,7 +117,6 @@
             <div id="changes-git-files" class="git-files"></div>
             <button type="button" id="btn-git-commit-confirm" class="changes-git-btn changes-git-commit" disabled>Commit</button>
           </div>
-          <div id="changes-git-status" class="changes-git-toast" hidden></div>
           <div id="changes-panel" role="region" aria-label="Changes">
             <div id="changes-list"></div>
           </div>
@@ -215,7 +214,12 @@
       </div>
         <div id="terminal-resize-handle" class="resize-divider resize-divider--row hidden" role="separator" aria-orientation="horizontal" aria-label="Resize terminal"></div>
         <div id="terminal-panel" class="hidden" role="region" aria-label="Terminal">
-          <div id="terminal-host"></div>
+          <div id="bottom-tabs" class="bottom-tabs" role="tablist" aria-label="Bottom panel">
+            <button type="button" role="tab" id="bottom-tab-terminals" class="bottom-tab" aria-selected="true" aria-controls="terminal-host">Terminals</button>
+            <button type="button" role="tab" id="bottom-tab-git" class="bottom-tab" aria-selected="false" aria-controls="git-output" tabindex="-1">Git</button>
+          </div>
+          <div id="terminal-host" role="tabpanel" aria-labelledby="bottom-tab-terminals"></div>
+          <div id="git-output" class="git-output hidden" role="tabpanel" aria-labelledby="bottom-tab-git" tabindex="0"></div>
         </div>
       </div>
     </div>
@@ -226,6 +230,7 @@
       <span id="status-path" class="status-path" title="Click for path options">No file open</span>
       <i id="status-modified" class="status-dirty" aria-label="Saved"></i>
       <span id="status-branch" class="status-item status-branch hidden"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7M18 10.5c0 4-7 3-11 5.5"/></svg><span class="status-branch-name"></span></span>
+      <button type="button" id="status-git" class="status-item status-git hidden"><i class="status-git-spin" aria-hidden="true"></i><span class="status-git-label"></span></button>
       <button type="button" id="status-remote" class="status-item status-remote hidden" aria-haspopup="menu"><span class="status-remote-label"></span></button>
       <button type="button" id="status-agent" class="status-item status-agent hidden"><i class="status-agent-dot" aria-hidden="true"></i><span class="status-agent-label">Agent tools</span></button>
       <span class="status-spacer"></span>
