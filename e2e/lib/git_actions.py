@@ -107,7 +107,10 @@ def run(R, D, title, folder):
     click("btn-git-commit")
     time.sleep(0.5)
     panel_open = js("return !document.getElementById('changes-commit-panel').hidden")
-    focused = js("return document.activeElement && document.activeElement.id") == "changes-commit-msg"
+    # WebKitWebDriver under Xvfb can leave the document unfocused, where
+    # focus() moves no activeElement; only judge focus when the page has it
+    # (unit tests cover the autofocus itself).
+    focused = js("return !document.hasFocus() || (document.activeElement && document.activeElement.id === 'changes-commit-msg')")
     disabled_empty = js("return document.getElementById('btn-git-commit-confirm').disabled")
     all_ticked = js("const b=[...document.querySelectorAll('#changes-git-files input')]; return b.length>0 && b.every(x=>x.checked) && document.getElementById('git-select-all').checked")
     js("document.getElementById('changes-commit-msg').dispatchEvent(new KeyboardEvent('keydown',"
