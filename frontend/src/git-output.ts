@@ -26,7 +26,7 @@ const RUNNING: Record<GitAction, string> = {
 };
 
 /** The command line shown in the Git tab for each action. */
-export const GIT_COMMAND: Record<GitAction, string> = {
+const GIT_COMMAND: Record<GitAction, string> = {
   commit: 'git commit',
   pull: 'git pull --no-edit',
   push: 'git push (never forced)',
