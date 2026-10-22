@@ -1523,8 +1523,63 @@ pub fn run_agent_cli(
     Ok(crate::mcp::CliOutcome::Exited {
         code: Some(code),
         stdout,
-        stderr,
+        stderr: strip_job_noise(&stderr),
     })
+}
+
+/// Drop the shell's own job-termination reports from agent-CLI stderr, so
+/// they never reach a user-facing error. When the watchdog subshell is
+/// stopped after the CLI exits, macOS `/bin/sh` (bash) may print e.g.
+/// `/bin/sh: line 14:  2629 Terminated: 15  ( sleep 20; ... )`; other shells
+/// print `Terminated`, `[1]+ Terminated ...` or `zsh: terminated ...`.
+/// Only lines whose message (after an optional `<shell>: [line N:]` prefix,
+/// job number and pid) starts with `Terminated`/`terminated` are removed.
+pub(crate) fn strip_job_noise(stderr: &str) -> String {
+    fn is_noise(line: &str) -> bool {
+        let mut rest = line.trim();
+        // `<shell>: ` and `line N: ` prefixes.
+        for _ in 0..2 {
+            if let Some((head, tail)) = rest.split_once(": ") {
+                let h = head.trim();
+                let shellish = !h.is_empty()
+                    && !h.contains(char::is_whitespace)
+                    && (h.ends_with("sh") || h.contains('/'));
+                let lineno = h
+                    .strip_prefix("line ")
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+                if shellish || lineno {
+                    rest = tail.trim_start();
+                    continue;
+                }
+            }
+            break;
+        }
+        // `[1]+ ` job number, then a pid.
+        if let Some(r) = rest.strip_prefix('[') {
+            if let Some((n, tail)) = r.split_once(']') {
+                if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) {
+                    rest = tail.trim_start_matches(['+', '-']).trim_start();
+                }
+            }
+        }
+        let pid_end = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if pid_end > 0 && rest[pid_end..].starts_with(char::is_whitespace) {
+            rest = rest[pid_end..].trim_start();
+        }
+        let Some(after) = rest
+            .strip_prefix("Terminated")
+            .or_else(|| rest.strip_prefix("terminated"))
+        else {
+            return false;
+        };
+        after.is_empty() || after.starts_with(char::is_whitespace) || after.starts_with(": 15")
+    }
+    let kept: Vec<&str> = stderr.lines().filter(|l| !is_noise(l)).collect();
+    let mut out = kept.join("\n");
+    if stderr.ends_with('\n') && !out.is_empty() {
+        out.push('\n');
+    }
+    out
 }
 
 /// POSIX sh for [`run_agent_cli`]. The PATH probes discard their stderr
@@ -2543,7 +2598,9 @@ Host *.example.com
         assert_eq!(out.trim(), "added");
         let (code, _, err) = run("fail", 20);
         assert_eq!(code, Some(3));
-        assert_eq!(err.trim(), "Error: bad config");
+        // macOS /bin/sh may report the stopped watchdog ("Terminated: 15");
+        // run_agent_cli strips that, so compare what the user would see.
+        assert_eq!(strip_job_noise(&err).trim(), "Error: bad config");
         let t0 = std::time::Instant::now();
         let (_, _, err) = run("hang", 1);
         assert!(err.contains(CLI_TIMEOUT_MARK), "{err}");
@@ -2553,6 +2610,35 @@ Host *.example.com
             t0.elapsed()
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn strip_job_noise_drops_only_shell_termination_reports() {
+        let mac = "Error: bad config\n/bin/sh: line 14:  2629 Terminated: 15          ( sleep 20; : > \"$sd_t\"; sd_kill TERM; sleep 2; sd_kill KILL ) < /dev/null > /dev/null 2>&1\n";
+        assert_eq!(strip_job_noise(mac), "Error: bad config\n");
+        for noise in [
+            "Terminated",
+            "Terminated: 15",
+            "sh: line 3: 99 Terminated              sleep 5",
+            "bash: line 1: 1234 Terminated: 15 ( sleep 1 )",
+            "[1]+  Terminated              ( sleep 20 )",
+            "zsh: terminated  sleep 20",
+            "/usr/bin/bash: 77 Terminated sleep 3",
+        ] {
+            assert_eq!(strip_job_noise(noise), "", "{noise:?}");
+        }
+        // Real agent errors that merely mention the word stay.
+        for keep in [
+            "Error: bad config",
+            "Error: server terminated unexpectedly",
+            "TerminatedSessions: 2",
+            "warning: process Terminated by user",
+            "error: Terminated: 15 servers",
+        ] {
+            assert_eq!(strip_job_noise(keep), keep, "{keep:?}");
+        }
+        assert_eq!(strip_job_noise("a\nTerminated: 15\nb"), "a\nb");
+        assert_eq!(strip_job_noise(""), "");
     }
 
     #[test]

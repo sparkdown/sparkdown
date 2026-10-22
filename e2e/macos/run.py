@@ -837,12 +837,15 @@ def main():
         key("n")
         time.sleep(1)
         key("s")
-        # The panel may be a sheet on alpha or its own window; its "Where"
-        # popup sits a few groups deep, so walk entire contents.
+        # The panel may be a sheet on alpha, its own window, or (macOS 11+)
+        # hosted by the out-of-process "Open and Save Panel Service"; its
+        # "Where" popup sits a few groups deep, so walk entire contents.
         read = (
-            f'tell application "System Events" to tell process "{PROC}"',
+            'tell application "System Events"',
             'set out to ""',
-            'repeat with w in windows',
+            f'set procs to (every process whose name is "{PROC}" or name contains "Save Panel")',
+            'repeat with p in procs',
+            'repeat with w in (windows of p)',
             'try',
             'set targets to (every UI element of w whose role is "AXSheet")',
             'if (name of w as text) does not contain "SparkDown" then set end of targets to w',
@@ -855,6 +858,7 @@ def main():
             'end repeat',
             'end try',
             'end repeat',
+            'end repeat',
             'return out',
             'end tell',
         )
@@ -863,7 +867,8 @@ def main():
         osa('tell application "System Events" to key code 53')  # Esc = Cancel
         time.sleep(1)
         if not got:
-            return "PARTIAL", "no Save panel popup could be read over Accessibility"
+            # The screenshot shows the panel (and its Where popup) either way.
+            return "PARTIAL", "no Save panel popup could be read over Accessibility (see the save-dialog-dir screenshot)"
         parent = pathlib.Path(A).parent.name
         ok = "alpha" in got and parent not in got.replace("alpha", "")
         return ("PASS" if ok else "FAIL"), f"Where popup={got!r} (want alpha, not {parent})"
