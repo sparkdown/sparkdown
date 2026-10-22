@@ -41,6 +41,10 @@ def run(R, D, title, folder):
         while time.time() < end and not calls:
             calls = w.js("return (window.__sdSaveCalls || []).slice()") or []
             time.sleep(0.3)
+        # Close the (still pristine) Untitled tab so the earlier tab is
+        # active again: later checks save "the active tab" and expect notes.md.
+        key(w, "w")
+        time.sleep(0.5)
     finally:
         w.js(UNHOOK)
     if not calls:
