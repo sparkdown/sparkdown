@@ -1,4 +1,4 @@
-import { open, save, message } from '@tauri-apps/plugin-dialog';
+import { open, save as nativeSave, message } from '@tauri-apps/plugin-dialog';
 import type { PreviewPane } from '../preview';
 import { LOCAL_ORIGIN } from '../tabs';
 import { RemotePicker, type RemotePickerOptions } from '../remote-picker';
@@ -7,6 +7,20 @@ import { DIALOG_FILTERS } from '../file-types';
 import { api } from '../api';
 import type { AppContext } from './context';
 import { buildExportHtml } from './export-html';
+
+type SaveOptions = Parameters<typeof nativeSave>[0];
+
+/**
+ * The native Save dialog. The E2E suite (e2e/lib/save_dialog.py) installs
+ * `window.__sparkdownE2eSave` over WebDriver to see the options we pass and
+ * answer Cancel without a modal OS dialog: Tauri's IPC `invoke` is a
+ * non-writable property, so it can't be intercepted there. Nothing in the
+ * app sets it.
+ */
+function save(options: SaveOptions): Promise<string | null> {
+  const hook = (window as unknown as { __sparkdownE2eSave?: (o: SaveOptions) => Promise<string | null> }).__sparkdownE2eSave;
+  return typeof hook === 'function' ? hook(options) : nativeSave(options);
+}
 
 /** What document I/O needs from the preview. */
 export interface DocumentDeps {
