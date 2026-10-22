@@ -19,8 +19,7 @@ import {
   toRelativePath,
   joinPath,
   isUnderRoot,
-  type SyncPoint,
-} from '../utils';
+  type SyncPoint, defaultSavePath } from '../utils';
 
 describe('isMarkdownFile', () => {
   it('treats null/empty (untitled buffers) as markdown', () => {
@@ -411,5 +410,22 @@ describe('isUnderRoot (Windows)', () => {
 
   it('does not match a Windows sibling prefix', () => {
     expect(isUnderRoot('C:\\repo-old\\a.md', 'C:\\repo')).toBe(false);
+  });
+});
+
+describe('defaultSavePath (Save dialog start, #Mac 16e9543 test)', () => {
+  it('keeps an existing tab path', () => {
+    expect(defaultSavePath('/a/b.md', '/x', 'untitled.md')).toBe('/a/b.md');
+  });
+  it('puts an Untitled file in the given folder (POSIX and Windows)', () => {
+    expect(defaultSavePath(null, '/Users/p/proj', 'untitled.md')).toBe('/Users/p/proj/untitled.md');
+    expect(defaultSavePath(null, '/Users/p/proj/', 'untitled.md')).toBe('/Users/p/proj/untitled.md');
+    expect(defaultSavePath(null, 'C:\\Users\\p\\proj', 'untitled.md')).toBe('C:\\Users\\p\\proj\\untitled.md');
+    expect(defaultSavePath(null, 'C:\\', 'untitled.md')).toBe('C:\\untitled.md');
+    expect(defaultSavePath(null, '/', 'untitled.md')).toBe('/untitled.md');
+  });
+  it('never returns a folder path (the plugin would treat it as the dir and drop the name) or a relative dir', () => {
+    expect(defaultSavePath(null, null, 'untitled.md')).toBe('untitled.md');
+    expect(defaultSavePath(null, 'relative/dir', 'untitled.md')).toBe('untitled.md');
   });
 });

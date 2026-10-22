@@ -828,6 +828,52 @@ def main():
         return geometry_stable()
     R.run("geometry-stable", geometry_last)
 
+    def save_dialog_dir():
+        # Untitled + Cmd+S: the Save sheet must start in alpha, not its parent.
+        if procs() == 0 or not wait_for(lambda: any(w.startswith("alpha") for w in windows()), 20):
+            return "FAIL", f"alpha is not open: {windows()}"
+        wa = next(w for w in windows() if w.startswith("alpha"))
+        se(f'perform action "AXRaise" of window "{wa}"')
+        key("n")
+        time.sleep(1)
+        key("s")
+        # The panel may be a sheet on alpha, its own window, or (macOS 11+)
+        # hosted by the out-of-process "Open and Save Panel Service"; its
+        # "Where" popup sits a few groups deep, so walk entire contents.
+        read = (
+            'tell application "System Events"',
+            'set out to ""',
+            f'set procs to (every process whose name is "{PROC}" or name contains "Save Panel")',
+            'repeat with p in procs',
+            'repeat with w in (windows of p)',
+            'try',
+            'set targets to (every UI element of w whose role is "AXSheet")',
+            'if (name of w as text) does not contain "SparkDown" then set end of targets to w',
+            'repeat with t in targets',
+            'repeat with e in (entire contents of t)',
+            'try',
+            'if role of e is "AXPopUpButton" then set out to out & (value of e as text) & "|"',
+            'end try',
+            'end repeat',
+            'end repeat',
+            'end try',
+            'end repeat',
+            'end repeat',
+            'return out',
+            'end tell',
+        )
+        got = wait_for(lambda: osa(*read, timeout=90).strip("|"), 15, step=2)
+        shot("save-dialog-dir")
+        osa('tell application "System Events" to key code 53')  # Esc = Cancel
+        time.sleep(1)
+        if not got:
+            # The screenshot shows the panel (and its Where popup) either way.
+            return "PARTIAL", "no Save panel popup could be read over Accessibility (see the save-dialog-dir screenshot)"
+        parent = pathlib.Path(A).parent.name
+        ok = "alpha" in got and parent not in got.replace("alpha", "")
+        return ("PASS" if ok else "FAIL"), f"Where popup={got!r} (want alpha, not {parent})"
+    R.run("save-dialog-dir", save_dialog_dir)
+
     R.manual("manual-gatekeeper", "Gatekeeper first launch of the signed, notarized build", "CI builds are unsigned; see e2e/README.md")
     R.manual("manual-git-signing-credentials", "Commit / Pull / Push with your real setup (#122): signed commit (gpg / ssh pinentry), Keychain / HTTPS credential helper, SSH agent key, and a locked key failing with the auth error instead of a prompt",
              "needs the user's own keys, agent and credential helper; the Linux job covers the bare-remote flow")

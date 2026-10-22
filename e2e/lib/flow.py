@@ -7,6 +7,7 @@ import time
 
 import fixtures
 import git_actions
+import save_dialog
 import mcp
 
 SUF = " — SparkDown"
@@ -400,6 +401,7 @@ def run(R, D):
     if D.wd is not None:
         R.run("webview-content", lambda: D.webview_check("alpha" + SUF, "alpha", EDIT))
         R.run("git-actions", lambda: git_actions.run(R, D, "alpha" + SUF, A))
+        R.run("save-dialog-dir", lambda: save_dialog.run(R, D, "alpha" + SUF, A))
     if D.wd is not None and hasattr(D, "terminal_clipboard"):
         def terminal_clipboard():
             try:

@@ -330,3 +330,18 @@ export function mapYToLine(points: SyncPoint[], y: number): number {
   }
   return last.line;
 }
+
+/**
+ * The defaultPath for a native Save dialog. A tab with a path keeps it. An
+ * Untitled tab gets `<dir>/<name>` with an absolute dir (the explorer's
+ * selected folder, else the opened root): tauri-plugin-dialog splits a
+ * not-yet-existing path into directory + file name, but a bare relative
+ * name has an empty parent, so no directory is set at all and each OS falls
+ * back to its own last-used location (on macOS that showed the opened
+ * folder's parent). With no folder open the bare name is all we have.
+ */
+export function defaultSavePath(tabPath: string | null | undefined, dir: string | null | undefined, name: string): string {
+  if (tabPath) return tabPath;
+  if (dir && isAbsolutePath(dir)) return joinPath(dir, name);
+  return name;
+}

@@ -84,6 +84,9 @@ export const dialogResponses = {
   open: [] as Array<string | null>,
 };
 
+/** Options of every save() dialog shown (defaultPath etc.), in order. */
+export const saveCalls: Array<{ defaultPath?: string }> = [];
+
 /** Every 3-button prompt shown (title + text), in order. */
 export const messageCalls: Array<{ text: string; title?: string }> = [];
 
@@ -117,6 +120,7 @@ export function resetTauriMocks(): void {
   dialogResponses.message.length = 0;
   messageCalls.length = 0;
   dialogResponses.save.length = 0;
+  saveCalls.length = 0;
   dialogResponses.open.length = 0;
   messageLog.length = 0;
   eventHandlers.clear();
@@ -379,7 +383,10 @@ export const dialogMock = {
     }
     return undefined;
   },
-  save: async () => dialogResponses.save.shift() ?? null,
+  save: async (opts?: { defaultPath?: string }) => {
+    saveCalls.push({ defaultPath: opts?.defaultPath });
+    return dialogResponses.save.shift() ?? null;
+  },
   open: async () => dialogResponses.open.shift() ?? null,
 };
 

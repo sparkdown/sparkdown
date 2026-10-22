@@ -1,12 +1,26 @@
-import { open, save, message } from '@tauri-apps/plugin-dialog';
+import { open, save as nativeSave, message } from '@tauri-apps/plugin-dialog';
 import type { PreviewPane } from '../preview';
 import { LOCAL_ORIGIN } from '../tabs';
 import { RemotePicker, type RemotePickerOptions } from '../remote-picker';
-import { isPreviewable, stripMarkdownExt, dirname, basename } from '../utils';
+import { isPreviewable, stripMarkdownExt, dirname, basename, defaultSavePath } from '../utils';
 import { DIALOG_FILTERS } from '../file-types';
 import { api } from '../api';
 import type { AppContext } from './context';
 import { buildExportHtml } from './export-html';
+
+type SaveOptions = Parameters<typeof nativeSave>[0];
+
+/**
+ * The native Save dialog. The E2E suite (e2e/lib/save_dialog.py) installs
+ * `window.__sparkdownE2eSave` over WebDriver to see the options we pass and
+ * answer Cancel without a modal OS dialog: Tauri's IPC `invoke` is a
+ * non-writable property, so it can't be intercepted there. Nothing in the
+ * app sets it.
+ */
+function save(options: SaveOptions): Promise<string | null> {
+  const hook = (window as unknown as { __sparkdownE2eSave?: (o: SaveOptions) => Promise<string | null> }).__sparkdownE2eSave;
+  return typeof hook === 'function' ? hook(options) : nativeSave(options);
+}
 
 /** What document I/O needs from the preview. */
 export interface DocumentDeps {
@@ -243,7 +257,8 @@ export class DocumentController {
     if (!id) return false;
     if (!tab) return false;
     const content = id === this.ctx.tabs.activeTab()?.id ? this.ctx.editor.getContent() : tab.content;
-    const defaultPath = tab.path || 'untitled.md';
+    const sameOrigin = tab.origin === this.ctx.tabs.getOrigin();
+    const defaultPath = defaultSavePath(sameOrigin ? tab.path : null, this.ctx.fileTree.getSaveDir(), 'untitled.md');
     const filters = [{ name: 'Markdown', extensions: ['md', 'markdown', 'mkd'] }];
     const path =
       this.ctx.tabs.getOrigin() !== LOCAL_ORIGIN
@@ -253,7 +268,7 @@ export class DocumentController {
             filters,
             defaultName: basename(defaultPath),
             // A tab from another machine: its path means nothing here.
-            near: tab.path && tab.origin === this.ctx.tabs.getOrigin() ? tab.path : undefined,
+            near: defaultPath.includes('/') || defaultPath.includes('\\') ? defaultPath : undefined,
           })
         : await save({ filters, defaultPath });
     if (!path) return false;
@@ -302,9 +317,11 @@ export class DocumentController {
     await preview.renderImmediateForExport(this.ctx.editor.getContent());
     const html = preview.getRenderedHtml();
 
-    const defaultName = tab.path
-      ? stripMarkdownExt(tab.path, '.html')
-      : 'export.html';
+    const defaultName = defaultSavePath(
+      tab.path && tab.origin === this.ctx.tabs.getOrigin() ? stripMarkdownExt(tab.path, '.html') : null,
+      this.ctx.fileTree.getSaveDir(),
+      'export.html',
+    );
 
     const filters = [{ name: 'HTML', extensions: ['html'] }];
     const path = remote
@@ -314,7 +331,7 @@ export class DocumentController {
           confirmLabel: 'Export',
           filters,
           defaultName: basename(defaultName),
-          near: tab.path && tab.origin === this.ctx.tabs.getOrigin() ? tab.path : undefined,
+          near: defaultName.includes('/') || defaultName.includes('\\') ? defaultName : undefined,
         })
       : await save({ filters, defaultPath: defaultName });
 
