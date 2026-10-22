@@ -32,7 +32,7 @@ export interface GitActionsOptions {
 
 type Busy = 'commit' | 'pull' | 'push' | null;
 
-export function isGitActionError(e: unknown): e is GitActionError {
+function isGitActionError(e: unknown): e is GitActionError {
   return !!e && typeof e === 'object' && typeof (e as GitActionError).kind === 'string';
 }
 
