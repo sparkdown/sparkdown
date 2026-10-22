@@ -553,11 +553,17 @@ fn summary(out: String) -> GitActionResult {
 
 /// `origin/main` for an upstream (`refs/heads/` stripped from the merge ref).
 fn target_name(up: &Upstream) -> String {
-    format!("{}/{}", up.remote, up.merge.strip_prefix("refs/heads/").unwrap_or(&up.merge))
+    format!(
+        "{}/{}",
+        up.remote,
+        up.merge.strip_prefix("refs/heads/").unwrap_or(&up.merge)
+    )
 }
 
 fn count(root: &Path, extra: ExtraEnv, range: &str) -> Option<u32> {
-    query(root, extra, &["rev-list", "--count", range])?.parse().ok()
+    query(root, extra, &["rev-list", "--count", range])?
+        .parse()
+        .ok()
 }
 
 /// Pull the current branch from its upstream with the user's own pull

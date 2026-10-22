@@ -182,7 +182,7 @@ def run(R, D, title, folder):
     s = wait_status("ok")
     wait_idle("btn-git-pull")
     ok4 = pathlib.Path(folder, "theirs.md").exists()
-    steps.append(f"pull ok={ok4} ({s and s[3][:80]!r})")
+    steps.append(f"pull ok={ok4} status={s and s[2][:80]!r}")
     click("btn-git-push")
     s = wait_status("ok")
     wait_idle("btn-git-push")
