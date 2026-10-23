@@ -33,9 +33,10 @@ jobs:
       - name: Release workflows and scripts never enable the feature
         run: bash scripts/check-release-gate.sh
       - name: Install Tauri system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+        timeout-minutes: 8
+        run: >-
+          scripts/ci-apt-install.sh 3 150 libwebkit2gtk-4.1-dev libgtk-3-dev
+          libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
           toolchain: stable
@@ -67,9 +68,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Tauri system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+        timeout-minutes: 8
+        run: >-
+          scripts/ci-apt-install.sh 3 150 libwebkit2gtk-4.1-dev libgtk-3-dev
+          libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.22.2"
@@ -272,8 +274,9 @@ jobs:
           name: e2e-linux-binary
           path: bin
       - name: Virtual KMS device (vkms)
+        timeout-minutes: 8
         run: |
-          sudo modprobe vkms || { sudo apt-get update -qq && sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" && sudo modprobe vkms; }
+          sudo modprobe vkms || { scripts/ci-apt-install.sh 3 150 "linux-modules-extra-$(uname -r)" && sudo modprobe vkms; }
           ls -l /dev/dri
       - name: Run the must-pass in archlinux:latest under Hyprland
         run: |
