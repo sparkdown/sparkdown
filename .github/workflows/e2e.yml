@@ -224,8 +224,15 @@ jobs:
               echo "apt failed after 3 attempts" >&2
               exit 1
             fi
-            echo "apt attempt $attempt failed (exit 124 = timed out); retrying in 10s"
+            echo "apt attempt $attempt failed (exit 124 = timed out); retrying on another mirror in 10s"
             pgrep -a "apt|dpkg|unattended" || true
+            # Seen 2026-10-23: azure.archive.ubuntu.com served indexes fast but
+            # .debs at ~3 kB/s. Retry on the main archive (downloaded .debs stay cached).
+            if [ -f /etc/apt/apt-mirrors.txt ]; then
+              printf 'http://archive.ubuntu.com/ubuntu/\tpriority:1\n' | sudo tee /etc/apt/apt-mirrors.txt
+            fi
+            sudo sed -i 's#http://azure.archive.ubuntu.com/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
+              /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
             sleep 10
           done
           chmod +x bin/sparkdown && sudo install -m 755 bin/sparkdown /usr/local/bin/sparkdown
