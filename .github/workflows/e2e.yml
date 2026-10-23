@@ -208,12 +208,12 @@ jobs:
         timeout-minutes: 8
         run: |
           set -euo pipefail
-          APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
           PKGS=(libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libxdo3 librsvg2-common
             webkit2gtk-driver xvfb openbox xdotool wmctrl imagemagick dbus-x11 fonts-dejavu-core
             at-spi2-core libatk-adaptor python3-gi gir1.2-atspi-2.0 tmux xclip)
           for attempt in 1 2 3; do
-            if sudo timeout 150 apt-get "${APT_OPTS[@]}" update -qq &&
+            if sudo timeout 150 apt-get "${APT_OPTS[@]}" update &&
                sudo timeout 150 apt-get "${APT_OPTS[@]}" install -y -qq "${PKGS[@]}"; then
               break
             fi
@@ -221,7 +221,8 @@ jobs:
               echo "apt failed after 3 attempts" >&2
               exit 1
             fi
-            echo "apt attempt $attempt failed; retrying in 10s"
+            echo "apt attempt $attempt failed (exit 124 = timed out); retrying in 10s"
+            pgrep -a "apt|dpkg|unattended" || true
             sleep 10
           done
           chmod +x bin/sparkdown && sudo install -m 755 bin/sparkdown /usr/local/bin/sparkdown
