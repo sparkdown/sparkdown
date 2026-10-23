@@ -19,6 +19,7 @@ jobs:
   frontend:
     name: Frontend (typecheck, tests, audit)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: frontend
@@ -60,6 +61,7 @@ jobs:
   rust:
     name: Rust (fmt, clippy, tests) — Linux
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     defaults:
       run:
         working-directory: src-tauri
@@ -95,6 +97,7 @@ jobs:
     # suite on macOS too, including the cfg(target_os = "macos") tests of
     # the quit / close / reopen state machine (#88, #89, #90).
     runs-on: macos-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: src-tauri
@@ -123,6 +126,7 @@ jobs:
     # failing on lints we can't reproduce locally; it still catches the
     # compile errors that matter for the Windows paths.
     runs-on: windows-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: src-tauri
@@ -181,6 +185,7 @@ jobs:
   cargo-audit:
     name: Rust dependency audit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
