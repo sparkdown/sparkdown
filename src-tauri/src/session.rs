@@ -386,6 +386,9 @@ struct Inner {
     closed: Vec<(String, WindowSession)>,
     /// Preferences each window last loaded or saved (the merge base).
     given: HashMap<String, Map<String, Value>>,
+    /// Windows restored maximized that the WM hasn't reported maximized yet
+    /// (#154), with the time after which we stop waiting.
+    awaiting_max: HashMap<String, std::time::Instant>,
 }
 
 /// The one config writer. Managed by Tauri.
@@ -414,6 +417,7 @@ impl ConfigStore {
                 stored,
                 given: HashMap::new(),
                 closed: Vec::new(),
+                awaiting_max: HashMap::new(),
             }),
         };
         if text.is_some_and(|t| !t.contains("\"version\"")) {
@@ -478,6 +482,44 @@ impl ConfigStore {
                 },
             );
         }
+    }
+
+    /// A restored window is about to be maximized (#154). Until the WM
+    /// reports it maximized, geometry from its Moved/Resized events is a
+    /// transient (Hyprland sends the tiled size first) and is not saved. If
+    /// the WM never maximizes it, saving resumes after a few seconds.
+    pub fn expect_maximized(&self, label: &str) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        self.lock().awaiting_max.insert(label.to_string(), until);
+    }
+
+    /// One Moved/Resized event from window `label` (#154): the window's
+    /// state and its geometry (inner size, outer position) at that moment.
+    pub fn observe_geometry(
+        &self,
+        label: &str,
+        maximized: bool,
+        minimized: bool,
+        geometry: Geometry,
+    ) {
+        if maximized {
+            self.lock().awaiting_max.remove(label);
+            self.note_maximized(label);
+            return;
+        }
+        if minimized {
+            return;
+        }
+        {
+            let mut g = self.lock();
+            if let Some(until) = g.awaiting_max.get(label).copied() {
+                if std::time::Instant::now() < until {
+                    return;
+                }
+                g.awaiting_max.remove(label);
+            }
+        }
+        self.note_geometry(label, geometry);
     }
 
     pub fn note_maximized(&self, label: &str) {
@@ -573,6 +615,54 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hyprland_tiled_resize_before_maximize_keeps_the_saved_size_154() {
+        // Hyprland: a window restored maximized gets a Resized with its tiled
+        // size while is_maximized() is still false, then becomes maximized.
+        // The saved restore size must not become the tiled size.
+        let dir = std::env::temp_dir().join(format!("sd-154-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = super::ConfigStore::open(dir.join("config.json"));
+        let saved = super::Geometry {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            maximized: true,
+        };
+        store.note_geometry("w", saved);
+        let tiled = super::Geometry {
+            x: 21,
+            y: 21,
+            width: 1878,
+            height: 1038,
+            maximized: false,
+        };
+        // windows.rs restore: set_size, set_position, then maximize().
+        store.expect_maximized("w");
+        store.observe_geometry("w", false, false, tiled); // early tiled Resized
+        store.observe_geometry("w", true, false, saved); // now maximized
+        let got = store.stored().windows["w"].geometry.unwrap();
+        assert_eq!((got.width, got.height, got.maximized), (1920, 1080, true));
+
+        // Once confirmed maximized, an un-maximize and a normal resize save as before.
+        let user = super::Geometry {
+            x: 50,
+            y: 60,
+            width: 1000,
+            height: 700,
+            maximized: false,
+        };
+        store.observe_geometry("w", false, false, user);
+        assert_eq!(store.stored().windows["w"].geometry.unwrap(), user);
+
+        // A window not restored maximized saves every resize, unchanged.
+        store.observe_geometry("n", false, false, tiled);
+        assert_eq!(store.stored().windows["n"].geometry.unwrap(), tiled);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn relaunch_keeps_the_same_size_and_position_112() {
         // Paulo's Mac: each relaunch grew windows by 16x9. Saving the inner
