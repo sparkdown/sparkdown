@@ -208,13 +208,16 @@ jobs:
         timeout-minutes: 8
         run: |
           set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          # man-db's dpkg trigger can take minutes on hosted runners; we never read man pages here.
+          sudo rm -f /var/lib/man-db/auto-update
           APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=60)
           PKGS=(libwebkit2gtk-4.1-0 libayatana-appindicator3-1 libxdo3 librsvg2-common
             webkit2gtk-driver xvfb openbox xdotool wmctrl imagemagick dbus-x11 fonts-dejavu-core
             at-spi2-core libatk-adaptor python3-gi gir1.2-atspi-2.0 tmux xclip)
           for attempt in 1 2 3; do
             if sudo timeout 150 apt-get "${APT_OPTS[@]}" update &&
-               sudo timeout 150 apt-get "${APT_OPTS[@]}" install -y -qq "${PKGS[@]}"; then
+               sudo --preserve-env=DEBIAN_FRONTEND timeout 150 apt-get "${APT_OPTS[@]}" install -y "${PKGS[@]}"; then
               break
             fi
             if [ "$attempt" -eq 3 ]; then
