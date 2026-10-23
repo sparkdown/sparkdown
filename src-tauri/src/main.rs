@@ -808,21 +808,20 @@ fn note_geometry(app: &tauri::AppHandle, label: &str) {
         return;
     };
     let maximized = w.is_maximized().unwrap_or(false);
-    if maximized || w.is_minimized().unwrap_or(false) {
-        // Keep the restored size; just flag maximized.
-        if maximized {
-            app.state::<session::ConfigStore>().note_maximized(label);
-        }
-        return;
-    }
+    let minimized = w.is_minimized().unwrap_or(false);
     // #112: save the inner size, the measure set_size restores (outer
     // position, the measure set_position restores). Saving the outer size
     // grew every window by its frame on each relaunch.
     let (Ok(pos), Ok(size)) = (w.outer_position(), w.inner_size()) else {
+        if maximized {
+            app.state::<session::ConfigStore>().note_maximized(label);
+        }
         return;
     };
-    app.state::<session::ConfigStore>().note_geometry(
+    app.state::<session::ConfigStore>().observe_geometry(
         label,
+        maximized,
+        minimized,
         session::Geometry {
             x: pos.x,
             y: pos.y,

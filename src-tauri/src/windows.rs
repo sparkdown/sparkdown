@@ -736,6 +736,12 @@ pub fn create_window(
             let _ = window.set_position(tauri::PhysicalPosition::new(g.x, g.y));
         }
         if g.maximized {
+            // #154: until the WM reports it maximized, a Resized may carry a
+            // tiled size (Hyprland); don't let that replace the saved size.
+            use tauri::Manager;
+            if let Some(store) = app.try_state::<crate::session::ConfigStore>() {
+                store.expect_maximized(label);
+            }
             let _ = window.maximize();
         }
     }
