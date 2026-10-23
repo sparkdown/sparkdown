@@ -407,7 +407,12 @@ class X11(Base):
         trashed = [str(p) for p in list((pathlib.Path.home() / ".local/share/Trash/files").glob("trash-me*.md"))
                    + list(pathlib.Path("/").glob(f".Trash-{uid}/files/trash-me*.md"))
                    + list(pathlib.Path("/tmp").glob(f".Trash-{uid}/files/trash-me*.md"))]
-        still_row = self.wd.js("return [...document.querySelectorAll('[data-path]')].some(e=>e.dataset.path===arguments[0])", str(f))
+        # The file leaves the disk inside the backend's delete_path, before the
+        # IPC reply reaches the frontend and the tree refresh re-renders, so the
+        # row lingers briefly. Wait for the row to go instead of reading it once.
+        row_gone = flow.wait_for(lambda: not self.wd.js(
+            "return [...document.querySelectorAll('[data-path]')].some(e=>e.dataset.path===arguments[0])", str(f)), 10)
+        still_row = not row_gone
         self.shot("after-delete")
         if not seen:
             sh("xdotool", "key", "Escape")  # never leave a modal up for later checks
