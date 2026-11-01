@@ -54,7 +54,7 @@ jobs:
           set -o pipefail
           cargo test --bin sparkdown --features e2e-webdriver -- --exact windows::tests::e2e_build_passes_the_webdriver_args 2>&1 | tee -a ../release-gate-test.txt
       - if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-release-gate
           path: release-gate-test.txt
@@ -89,7 +89,7 @@ jobs:
           frontend/node_modules/.bin/tauri build --no-bundle
       - name: Shipped-style binary has no e2e-webdriver code path
         run: bash scripts/check-release-gate.sh src-tauri/target/release/sparkdown
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-linux-binary
           path: src-tauri/target/release/sparkdown
@@ -130,7 +130,7 @@ jobs:
       - name: Run the must-pass
         run: python3 e2e/macos/run.py src-tauri/target/release/bundle/macos/SparkDown.app e2e-out
       - if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-macos-tmux-${{ matrix.tmux }}
           path: e2e-out
@@ -179,7 +179,7 @@ jobs:
         shell: pwsh
         run: python e2e/windows/run.py "$env:GITHUB_WORKSPACE\src-tauri\target\release\sparkdown.exe" "$env:GITHUB_WORKSPACE\edgedriver\msedgedriver.exe" e2e-out
       - if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-windows
           path: e2e-out
@@ -251,7 +251,7 @@ jobs:
           xvfb-run -a -s "-screen 0 1920x1080x24" dbus-run-session -- bash -c \
             'openbox >/dev/null 2>&1 & sleep 1; python3 e2e/linux/run.py x11 /usr/local/bin/sparkdown e2e-out'
       - if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-ubuntu-tmux-${{ matrix.tmux }}
           path: e2e-out
@@ -287,7 +287,7 @@ jobs:
         if: always()
         run: cat e2e-out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
       - if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-omarchy-hyprland-tmux-${{ matrix.tmux }}
           path: e2e-out
@@ -308,7 +308,7 @@ jobs:
       - name: Aggregate
         run: python3 e2e/aggregate.py results
       - if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-summary
           path: results/summary.md
