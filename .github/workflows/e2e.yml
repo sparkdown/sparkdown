@@ -8,6 +8,11 @@ name: E2E (multi-window must-pass)
 # run, and the two share the concurrency group and cancel each other.
 on:
   workflow_dispatch:
+    inputs:
+      arch_snapshot:
+        description: Arch Linux Archive day (YYYY/MM/DD) for the Hyprland job, or "live"
+        required: false
+        default: "2026/10/28"
   pull_request:
     branches: [main]
 
@@ -20,6 +25,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # 2026/10/28 = Hyprland 0.56.2-4. 0.57.0 breaks the Arch job (0.4.2 issue).
+  ARCH_SNAPSHOT: ${{ github.event_name == 'workflow_dispatch' && inputs.arch_snapshot || '2026/10/28' }}
 
 jobs:
   release-gate:
@@ -61,7 +68,10 @@ jobs:
 
   linux-build:
     name: Linux build (release, default features)
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest became Ubuntu 26.04 in late Oct 2026, which drops
+    # webkit2gtk-driver (renamed webkitgtk-webdriver) and changes the libs this
+    # binary is built against. Keep build + WebDriver jobs on the last-green image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -187,7 +197,7 @@ jobs:
   ubuntu-webdriver:
     name: E2E Ubuntu (tauri-driver + WebKitWebDriver, X11, tmux ${{ matrix.tmux }})
     needs: linux-build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -281,7 +291,7 @@ jobs:
       - name: Run the must-pass in archlinux:latest under Hyprland
         run: |
           mkdir -p e2e-out
-          docker run --rm --privileged --device /dev/dri -e E2E_TMUX=${{ matrix.tmux }} -v "$PWD:/w:ro" -v "$PWD/e2e-out:/out" \
+          docker run --rm --privileged --device /dev/dri -e E2E_TMUX=${{ matrix.tmux }} -e ARCH_SNAPSHOT -v "$PWD:/w:ro" -v "$PWD/e2e-out:/out" \
             archlinux:latest bash /w/e2e/linux/hyprland-job.sh /w/bin/sparkdown /out
       - name: Step summary
         if: always()
