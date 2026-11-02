@@ -61,7 +61,10 @@ jobs:
 
   linux-build:
     name: Linux build (release, default features)
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest became Ubuntu 26.04 in late Oct 2026, which drops
+    # webkit2gtk-driver (renamed webkitgtk-webdriver) and changes the libs this
+    # binary is built against. Keep build + WebDriver jobs on the last-green image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -187,7 +190,7 @@ jobs:
   ubuntu-webdriver:
     name: E2E Ubuntu (tauri-driver + WebKitWebDriver, X11, tmux ${{ matrix.tmux }})
     needs: linux-build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
