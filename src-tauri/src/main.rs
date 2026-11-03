@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod askpass;
+mod cli;
 mod commands;
 mod config;
 mod context;
@@ -106,48 +107,11 @@ fn route_and_emit(app: &tauri::AppHandle, paths: &[String], new_window: bool) {
 /// Event for paths a second `sparkdown <path>…` launch forwarded (#51).
 const OPEN_PATHS_EVENT: &str = "open-paths";
 
-/// CLI flag forcing folders into a new window (#66).
-const NEW_WINDOW_FLAG: &str = "--new-window";
-
-/// Paths a second `sparkdown …` launch passed (#51), resolved against that
-/// launch's working directory (not ours). Flags are skipped; `--version`,
-/// `--help`, `--mcp-stdio` and the askpass helper never get here (they exit
-/// in `main` before the single-instance plugin starts).
-fn forwarded_paths(argv: &[String], cwd: &str) -> Vec<String> {
-    argv.iter()
-        .skip(1)
-        .filter(|a| !a.is_empty() && !a.starts_with('-'))
-        .map(|a| {
-            let p = std::path::Path::new(a);
-            let joined = if p.is_absolute() || cwd.is_empty() {
-                p.to_path_buf()
-            } else {
-                std::path::Path::new(cwd).join(p)
-            };
-            // `sparkdown .` → `<cwd>`, not `<cwd>/.`.
-            std::path::absolute(&joined)
-                .unwrap_or(joined)
-                .to_string_lossy()
-                .trim_end_matches(['/', '\\'])
-                .to_string()
-        })
-        .map(|p| {
-            if p.is_empty() {
-                "/".to_string()
-            } else if p.ends_with(':') {
-                format!("{p}\\") // `C:` alone would mean "the cwd on C:"
-            } else {
-                p
-            }
-        })
-        .collect()
-}
-
 /// A second launch (#51): bring the window forward and open its paths here.
 fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, cwd: String) {
-    let paths = forwarded_paths(&argv, &cwd);
+    let paths = cli::forwarded_paths(&argv, &cwd);
     // `sparkdown --new-window <folder>` (#66).
-    let new_window = argv.iter().skip(1).any(|a| a == NEW_WINDOW_FLAG);
+    let new_window = cli::wants_new_window(&argv);
     eprintln!("another launch handed over {} path(s)", paths.len());
     if paths.is_empty() {
         if let Some(window) = windows::target_window(app) {
@@ -263,27 +227,6 @@ pub(crate) fn is_allowed_navigation(url: &tauri::Url) -> bool {
     }
 }
 
-/// What `sparkdown <first arg>` should print and exit with, for the flags that
-/// must never open a window (#33): `--version`/`-V` and `--help`/`-h`. Only
-/// the first argument counts, so a file that happens to be named `--help`
-/// later on the command line still opens.
-fn cli_info(first_arg: Option<&str>) -> Option<String> {
-    let version = env!("CARGO_PKG_VERSION");
-    match first_arg? {
-        "--version" | "-V" => Some(format!("SparkDown {version}\n")),
-        "--help" | "-h" => Some(format!(
-            "SparkDown {version}: a Markdown editor and agent cockpit.\n\n\
-             Usage:\n  \
-             sparkdown [FILE|FOLDER]...   open files or a folder in the app\n                               (in the open window, if SparkDown is running)\n  \
-             sparkdown --new-window FOLDER  open FOLDER in a new window (focuses it if already open)\n  \
-             sparkdown --mcp-stdio        run the stdio MCP bridge for agent CLIs\n  \
-             sparkdown --version, -V      print the version and exit\n  \
-             sparkdown --help, -h         print this help and exit\n"
-        )),
-        _ => None,
-    }
-}
-
 /// Release Windows builds use the GUI subsystem, which starts with no
 /// console: attach to the parent's (the terminal that ran us) so `--version`
 /// output shows there. Redirected output (a pipe or file) works without it.
@@ -312,7 +255,7 @@ fn main() {
     // `--version` / `--help`: print and exit before any window, single-instance
     // or MCP logic runs (#33).
     let first = std::env::args().nth(1);
-    if let Some(text) = cli_info(first.as_deref()) {
+    if let Some(text) = cli::cli_info(first.as_deref()) {
         #[cfg(windows)]
         attach_parent_console();
         use std::io::Write;
@@ -909,42 +852,6 @@ mod tests {
     }
 
     #[test]
-    fn second_launch_paths_resolve_against_its_own_cwd() {
-        // #51: `sparkdown .` / `sparkdown notes` from another directory.
-        #[cfg(unix)]
-        {
-            let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-            assert_eq!(
-                super::forwarded_paths(&argv(&["sparkdown", "."]), "/home/u/proj"),
-                vec!["/home/u/proj"]
-            );
-            assert_eq!(
-                super::forwarded_paths(&argv(&["sparkdown", "notes", "a.md"]), "/home/u"),
-                vec!["/home/u/notes", "/home/u/a.md"]
-            );
-            assert_eq!(
-                super::forwarded_paths(&argv(&["/usr/bin/sparkdown", "/tmp/x/"]), "/home/u"),
-                vec!["/tmp/x"]
-            );
-            // Flags are not paths; a bare launch forwards nothing.
-            assert!(super::forwarded_paths(&argv(&["sparkdown", "--foo"]), "/h").is_empty());
-            assert!(super::forwarded_paths(&argv(&["sparkdown"]), "/h").is_empty());
-            assert_eq!(
-                super::forwarded_paths(&argv(&["sparkdown", "/"]), "/h"),
-                vec!["/"]
-            );
-        }
-        #[cfg(windows)]
-        {
-            let argv = vec!["sparkdown.exe".to_string(), "notes".to_string()];
-            assert_eq!(
-                super::forwarded_paths(&argv, r"C:\Users\u"),
-                vec![r"C:\Users\u\notes".to_string()]
-            );
-        }
-    }
-
-    #[test]
     fn dbus_address_guard() {
         assert!(super::dbus_address_looks_valid(
             "unix:path=/run/user/1000/bus"
@@ -955,28 +862,6 @@ mod tests {
         assert!(!super::dbus_address_looks_valid(""));
         assert!(!super::dbus_address_looks_valid("garbage"));
         assert!(!super::dbus_address_looks_valid("unix:"));
-    }
-
-    #[test]
-    fn version_and_help_flags_print_instead_of_opening_the_app() {
-        let v = super::cli_info(Some("--version")).unwrap();
-        assert_eq!(v, format!("SparkDown {}\n", env!("CARGO_PKG_VERSION")));
-        assert_eq!(super::cli_info(Some("-V")), Some(v));
-        let help = super::cli_info(Some("--help")).unwrap();
-        assert!(
-            help.contains("--mcp-stdio") && help.contains("--version"),
-            "{help}"
-        );
-        assert_eq!(super::cli_info(Some("-h")), Some(help));
-        // Anything else (files, folders, the MCP flag, nothing) is not ours.
-        for other in [
-            None,
-            Some("notes.md"),
-            Some("--mcp-stdio"),
-            Some("-psn_0_1"),
-        ] {
-            assert_eq!(super::cli_info(other), None, "{other:?}");
-        }
     }
 
     use super::is_allowed_navigation;

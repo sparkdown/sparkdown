@@ -314,9 +314,7 @@ pub fn route_forwarded(
                 }
             }
         } else {
-            let target = windows::registry()
-                .window_for_local_path(p)
-                .or(focused.clone());
+            let target = decide_file(&windows::registry(), focused.as_deref(), p);
             if let Some(t) = target {
                 focus(app, &t);
                 out.entry(t).or_default().push(p.clone());
@@ -326,9 +324,92 @@ pub fn route_forwarded(
     out
 }
 
+/// Where a forwarded file opens (#160, decision 3): the window whose open
+/// folder contains it, else the focused window as a plain tab. `None` means
+/// no window is open (a new empty window gets it; follow-up in #160).
+/// Parent folders are never opened for a file.
+pub fn decide_file(reg: &Registry, focused: Option<&str>, file: &str) -> Option<String> {
+    reg.window_for_local_path(file)
+        .or_else(|| focused.map(str::to_string))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reg_with(folders: &[(&str, Option<&str>)]) -> Registry {
+        let mut r = Registry::default();
+        for (label, folder) in folders {
+            r.register(label);
+            if let Some(f) = folder {
+                r.set_folder(
+                    label,
+                    Some(FolderId::Local {
+                        path: f.to_string(),
+                    }),
+                    Some(f.to_string()),
+                )
+                .unwrap();
+            }
+        }
+        r
+    }
+
+    #[test]
+    fn an_open_folder_focuses_its_window_even_from_another() {
+        let r = reg_with(&[("w-1", Some("/p/a")), ("w-2", Some("/p/b"))]);
+        let a = FolderId::Local {
+            path: "/p/a".into(),
+        };
+        assert_eq!(decide(&r, Some("w-2"), &a), Route::Focused("w-1".into()));
+        assert_eq!(
+            decide_with(&r, Some("w-2"), &a, true),
+            Route::Focused("w-1".into())
+        );
+        assert_eq!(
+            decide_with(&r, None, &a, false),
+            Route::Focused("w-1".into())
+        );
+        assert_eq!(decide(&r, Some("w-1"), &a), Route::Here);
+    }
+
+    #[test]
+    fn a_file_in_an_open_folder_goes_to_that_folders_window() {
+        let r = reg_with(&[
+            ("w-1", Some("/p/a")),
+            ("w-2", Some("/p/b")),
+            ("w-3", Some("/p/a/sub")),
+        ]);
+        assert_eq!(
+            decide_file(&r, Some("w-2"), "/p/a/x.md").as_deref(),
+            Some("w-1")
+        );
+        // Deepest open folder wins.
+        assert_eq!(
+            decide_file(&r, Some("w-2"), "/p/a/sub/y.md").as_deref(),
+            Some("w-3")
+        );
+    }
+
+    #[test]
+    fn a_file_outside_every_folder_is_a_tab_in_the_focused_window() {
+        let r = reg_with(&[("w-1", Some("/p/a")), ("w-2", None)]);
+        assert_eq!(
+            decide_file(&r, Some("w-1"), "/elsewhere/z.md").as_deref(),
+            Some("w-1")
+        );
+        // `/p/ab` is not inside `/p/a`.
+        assert_eq!(
+            decide_file(&r, Some("w-2"), "/p/ab/z.md").as_deref(),
+            Some("w-2")
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_window_open_has_no_target() {
+        let r = Registry::default();
+        assert_eq!(decide_file(&r, None, "/p/a/x.md"), None);
+    }
 
     #[test]
     fn close_folder_drops_a_queued_open_of_that_folder_only() {
