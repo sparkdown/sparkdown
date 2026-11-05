@@ -105,17 +105,21 @@ cat > "$ZD/.zshrc" <<'ZRC'
 zmodload zsh/datetime
 print -r -- "$EPOCHREALTIME $$" >> "$SDB_DIR/shell-ready.log"
 PS1='%# '
+# Only the shell whose pty the UI actually sized runs the test: the Tauri
+# drawer starts a shell at restore and replaces it when xterm.js attaches, so
+# "first shell wins" would cat into a discarded pty.
 if [[ -n "$SDB_CAT" && ! -e "$SDB_DIR/cat.lock" ]]; then
-  : > "$SDB_DIR/cat.lock"
-  # Wait until the terminal UI has attached and sized the pty (the Tauri
-  # drawer starts the shell before xterm.js attaches), then settle 1 s.
-  for _i in {1..300}; do _s=$(stty size 2>/dev/null); [[ -n $_s && $_s != "0 0" ]] && break; sleep 0.1; done
-  sleep 1
-  t0=$EPOCHREALTIME; cat "$SDB_CAT"; t1=$EPOCHREALTIME
-  # Cursor-position query: the emulator answers only after it has parsed
-  # every byte before it, so t2 = "terminal has consumed the whole file".
-  stty -icanon -echo; print -n $'\e[6n'; read -t 600 -d R reply; t2=$EPOCHREALTIME; stty icanon echo
-  print -r -- "$(( t2 - t0 )) $(( t1 - t0 )) $(stty size | tr ' ' x) reply=${#reply}" >> "$SDB_DIR/cat.log"
+  _ok=0
+  for _i in {1..300}; do _s=$(stty size 2>/dev/null); [[ -n $_s && $_s != "0 0" ]] && { _ok=1; break; }; sleep 0.1; done
+  if (( _ok )) && [[ ! -e "$SDB_DIR/cat.lock" ]]; then
+    : > "$SDB_DIR/cat.lock"
+    sleep 1
+    t0=$EPOCHREALTIME; cat "$SDB_CAT"; t1=$EPOCHREALTIME
+    # Cursor-position query: the emulator answers only after it has parsed
+    # every byte before it, so t2 = "terminal has consumed the whole file".
+    stty -icanon -echo; print -n $'\e[6n'; read -t 600 -d R reply; t2=$EPOCHREALTIME; stty icanon echo
+    print -r -- "$(( t2 - t0 )) $(( t1 - t0 )) $(stty size | tr ' ' x) reply=${#reply}" >> "$SDB_DIR/cat.log"
+  fi
 fi
 ZRC
 : > "$ZD/.zprofile"
