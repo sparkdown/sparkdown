@@ -1,0 +1,90 @@
+# SPIKE ONLY (spike/native-mac). Builds the native macOS prototype and
+# benchmarks it against the released Tauri build. Never merge to main.
+name: native-mac-spike
+on:
+  push:
+    branches: [spike/native-mac]
+  workflow_dispatch:
+    inputs:
+      runs: { description: "bench runs per scenario", default: "5" }
+      bench: { description: "run the benchmark", default: "true" }
+permissions:
+  contents: read
+concurrency:
+  group: native-mac-spike
+  cancel-in-progress: true
+env:
+  GHOSTTY_REF: v1.4.0
+  ZIG_VERSION: 0.17.0
+  TAURI_DMG_URL: https://github.com/sparkdown/sparkdown/releases/download/v0.4.1/SparkDown_0.4.1_aarch64.dmg
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode
+        run: |
+          X=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          sudo xcode-select -s "$X"
+          xcodebuild -version | tee xcode-version.txt
+          sw_vers; uname -m
+      - name: Metal toolchain
+        run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain || true
+      - name: Cache GhosttyKit
+        id: gk
+        uses: actions/cache@v4
+        with:
+          path: native-mac/vendor
+          key: ghosttykit-${{ env.GHOSTTY_REF }}-${{ hashFiles('xcode-version.txt', 'native-mac/scripts/build-ghosttykit.sh') }}
+      - uses: mlugg/setup-zig@v2
+        if: steps.gk.outputs.cache-hit != 'true'
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Build GhosttyKit from source
+        if: steps.gk.outputs.cache-hit != 'true'
+        run: native-mac/scripts/build-ghosttykit.sh
+      - name: Build app + dmg
+        run: native-mac/scripts/bundle.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SparkDownNative-spike
+          path: |
+            native-mac/dist/*.dmg
+            native-mac/vendor/GHOSTTY_COMMIT
+      - name: Zip .app
+        run: cd native-mac/dist && ditto -c -k --keepParent "SparkDown Native.app" SparkDownNative.app.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SparkDownNative-app
+          path: native-mac/dist/SparkDownNative.app.zip
+
+  bench:
+    needs: build
+    if: github.event_name == 'push' || inputs.bench == 'true'
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: SparkDownNative-spike, path: art }
+      - name: Fetch Tauri 0.4.1 dmg
+        run: curl -fsSL -o SparkDown_0.4.1_aarch64.dmg "$TAURI_DMG_URL" && ls -la *.dmg
+      - name: Machine info
+        run: |
+          sw_vers; sysctl -n machdep.cpu.brand_string hw.memsize hw.ncpu
+          system_profiler SPDisplaysDataType | head -30 || true
+          osascript -e 'tell application "System Events" to get name of first process' || echo "no accessibility"
+      - name: Bench (CI VM)
+        run: |
+          native-mac/bench/bench.sh --tauri SparkDown_0.4.1_aarch64.dmg \
+            --native art/dist/SparkDownNative_spike_aarch64.dmg \
+            --runs "${{ inputs.runs || '5' }}" --out "$PWD/bench-results"
+      - name: Results
+        if: always()
+        run: cat bench-results/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-results-ci
+          path: bench-results
