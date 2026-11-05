@@ -85,7 +85,7 @@ final class TerminalView: NSView, NSTextInputClient {
         cfg.userdata = Unmanaged.passUnretained(self).toOpaque()
         cfg.platform_tag = GHOSTTY_PLATFORM_MACOS
         cfg.platform = ghostty_platform_u(macos: ghostty_platform_macos_s(nsview: Unmanaged.passUnretained(self).toOpaque()))
-        cfg.scale_factor = NSScreen.main?.backingScaleFactor ?? 2
+        cfg.scale_factor = Double(NSScreen.main?.backingScaleFactor ?? 2)
         cfg.font_size = 13
         cfg.context = GHOSTTY_SURFACE_CONTEXT_SPLIT
         surface = (cwd ?? NSHomeDirectory()).withCString { dir in

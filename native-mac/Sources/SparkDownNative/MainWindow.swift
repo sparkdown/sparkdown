@@ -264,7 +264,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         outerSplit.delegate = self
         outerSplit.addArrangedSubview(side)
         outerSplit.addArrangedSubview(centerSplit)
-        outerSplit.setHoldingPriority(.defaultLow + 10, forSubviewAt: 0)
+        outerSplit.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 0)
         side.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
 
         let row = NSStackView(views: [activity, outerSplit])

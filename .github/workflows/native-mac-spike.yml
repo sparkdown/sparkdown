@@ -33,7 +33,7 @@ jobs:
         run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain || true
       - name: Cache GhosttyKit
         id: gk
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: native-mac/vendor
           key: ghosttykit-${{ env.GHOSTTY_REF }}-${{ hashFiles('xcode-version.txt', 'native-mac/scripts/build-ghosttykit.sh') }}
@@ -44,6 +44,12 @@ jobs:
       - name: Build GhosttyKit from source
         if: steps.gk.outputs.cache-hit != 'true'
         run: native-mac/scripts/build-ghosttykit.sh
+      - name: Save GhosttyKit cache
+        if: steps.gk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: native-mac/vendor
+          key: ${{ steps.gk.outputs.cache-primary-key }}
       - name: Build app + dmg
         run: native-mac/scripts/bundle.sh
       - uses: actions/upload-artifact@v4
