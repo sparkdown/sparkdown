@@ -10,7 +10,7 @@
 # config is backed up first and restored on exit. Nothing else is touched.
 set -o pipefail
 
-RUNS=5; CAT_RUNS=3; CAT_MB=100; OUT=""; COLD=1; TAURI=""; NATIVE=""
+ONLY=""; RUNS=5; CAT_RUNS=3; CAT_MB=100; OUT=""; COLD=1; TAURI=""; NATIVE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --tauri) TAURI="$2"; shift 2;;
@@ -20,6 +20,7 @@ while [ $# -gt 0 ]; do
     --cat-mb) CAT_MB="$2"; shift 2;;
     --out) OUT="$2"; shift 2;;
     --no-cold) COLD=0; shift;;
+    --only) ONLY="$2"; shift 2;;
     *) echo "unknown arg $1"; exit 2;;
   esac
 done
@@ -106,12 +107,15 @@ print -r -- "$EPOCHREALTIME $$" >> "$SDB_DIR/shell-ready.log"
 PS1='%# '
 if [[ -n "$SDB_CAT" && ! -e "$SDB_DIR/cat.lock" ]]; then
   : > "$SDB_DIR/cat.lock"
-  sleep 2   # let the terminal attach and size itself
+  # Wait until the terminal UI has attached and sized the pty (the Tauri
+  # drawer starts the shell before xterm.js attaches), then settle 1 s.
+  for _i in {1..300}; do _s=$(stty size 2>/dev/null); [[ -n $_s && $_s != "0 0" ]] && break; sleep 0.1; done
+  sleep 1
   t0=$EPOCHREALTIME; cat "$SDB_CAT"; t1=$EPOCHREALTIME
   # Cursor-position query: the emulator answers only after it has parsed
   # every byte before it, so t2 = "terminal has consumed the whole file".
   stty -icanon -echo; print -n $'\e[6n'; read -t 600 -d R reply; t2=$EPOCHREALTIME; stty icanon echo
-  print -r -- "$(( t2 - t0 )) $(( t1 - t0 )) ${LINES}x${COLUMNS}" >> "$SDB_DIR/cat.log"
+  print -r -- "$(( t2 - t0 )) $(( t1 - t0 )) $(stty size | tr ' ' x) reply=${#reply}" >> "$SDB_DIR/cat.log"
 fi
 ZRC
 : > "$ZD/.zprofile"
@@ -199,7 +203,8 @@ run() { # run <app> <scenario> <i> <cold 0|1>
       ;;
     cat)
       wait_lines "$W/run/cat.log" 1 300 && cats="$(awk '{print $1}' "$W/run/cat.log")" || detail="$detail cat-timeout"
-      detail="$detail pty_drain_s=$(awk '{print $2}' "$W/run/cat.log" 2>/dev/null) grid=$(awk '{print $3}' "$W/run/cat.log" 2>/dev/null)"
+      detail="$detail pty_drain_s=$(awk '{print $2}' "$W/run/cat.log" 2>/dev/null) grid=$(awk '{print $3, $4}' "$W/run/cat.log" 2>/dev/null)"
+      [ "$i" = 1 ] && tmo 15 screencapture -x "$OUT/screen-$app-cat.png" 2>/dev/null
       ;;
   esac
   local mb="" parts=""
@@ -225,6 +230,7 @@ cat "$OUT/sizes.csv" | tee -a "$LOG"
 # One throwaway launch each (first-launch work: LaunchServices, WebKit caches).
 for a in tauri native; do run "$a" start 0 0; done
 
+[ "$ONLY" = cat ] && RUNS=0
 for i in $(seq 1 "$RUNS"); do
   for a in tauri native; do
     [ "$COLD" = 1 ] && run "$a" start "$i" 1

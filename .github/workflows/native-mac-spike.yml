@@ -8,6 +8,8 @@ on:
     inputs:
       runs: { description: "bench runs per scenario", default: "5" }
       bench: { description: "run the benchmark", default: "true" }
+      only: { description: "only this scenario (cat) or empty", default: "" }
+      cat_runs: { description: "throughput runs", default: "3" }
 permissions:
   contents: read
 concurrency:
@@ -86,7 +88,8 @@ jobs:
         run: |
           native-mac/bench/bench.sh --tauri SparkDown_0.4.1_aarch64.dmg \
             --native art/dist/SparkDownNative_spike_aarch64.dmg \
-            --runs "${{ inputs.runs || '3' }}" --out "$PWD/bench-results"
+            --runs "${{ inputs.runs || '3' }}" --cat-runs "${{ inputs.cat_runs || '3' }}" \
+            ${{ inputs.only && format('--only {0}', inputs.only) || '' }} --out "$PWD/bench-results"
       - name: Results
         if: always()
         run: cat bench-results/summary.md >> "$GITHUB_STEP_SUMMARY" || true
