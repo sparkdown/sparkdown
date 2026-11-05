@@ -8,7 +8,7 @@
 # ZDOTDIR .zshrc stamps when the terminal's shell is ready and (throughput
 # runs) times `cat` of a large file inside the terminal. Your real SparkDown
 # config is backed up first and restored on exit. Nothing else is touched.
-set -uo pipefail
+set -o pipefail
 
 RUNS=5; CAT_RUNS=3; CAT_MB=100; OUT=""; COLD=1; TAURI=""; NATIVE=""
 while [ $# -gt 0 ]; do
@@ -39,7 +39,7 @@ fi
 
 # ---- apps -------------------------------------------------------------------
 stage() { # stage <app|dmg> <name> -> path of a private copy of the .app
-  local src="$1" name="$2" dst="$W/apps/$name"
+  local src="$1" name="$2"; local dst="$W/apps/$name"
   rm -rf "$dst"; mkdir -p "$dst"
   if [[ "$src" == *.dmg ]]; then
     local mnt; mnt="$(mktemp -d)"
