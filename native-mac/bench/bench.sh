@@ -102,12 +102,16 @@ FILES=("$FX/README.md" "$FX/docs/doc1.md" "$FX/docs/doc2.md" "$FX/docs/doc3.md" 
 ZD="$W/zdot"; mkdir -p "$ZD"
 cat > "$ZD/.zshrc" <<'ZRC'
 zmodload zsh/datetime
-print -r -- "$EPOCHREALTIME $$ $(stty size 2>/dev/null)" >> "$SDB_DIR/shell-ready.log"
+print -r -- "$EPOCHREALTIME $$" >> "$SDB_DIR/shell-ready.log"
 PS1='%# '
 if [[ -n "$SDB_CAT" && ! -e "$SDB_DIR/cat.lock" ]]; then
   : > "$SDB_DIR/cat.lock"
+  sleep 2   # let the terminal attach and size itself
   t0=$EPOCHREALTIME; cat "$SDB_CAT"; t1=$EPOCHREALTIME
-  print -r -- "$(( t1 - t0 )) $(stty size)" >> "$SDB_DIR/cat.log"
+  # Cursor-position query: the emulator answers only after it has parsed
+  # every byte before it, so t2 = "terminal has consumed the whole file".
+  stty -icanon -echo; print -n $'\e[6n'; read -t 600 -d R reply; t2=$EPOCHREALTIME; stty icanon echo
+  print -r -- "$(( t2 - t0 )) $(( t1 - t0 )) ${LINES}x${COLUMNS}" >> "$SDB_DIR/cat.log"
 fi
 ZRC
 : > "$ZD/.zprofile"
@@ -167,7 +171,7 @@ keystroke_split() { # Cmd+D in the focused terminal pane (both apps: split right
             -e 'delay 0.3' -e 'tell application "System Events" to keystroke "d" using command down' >>"$LOG" 2>&1
 }
 
-echo "app,scenario,run,cold,window_ms,interactive_ms,mem_mb,cat_s,detail" > "$CSV"
+echo "app,scenario,run,cold,window_ms,interactive_ms,mem_mb,cat_s,detail" > /dev/null; echo "app,scenario,run,cold,window_ms,interactive_ms,mem_mb,cat_s,detail" > "$CSV"
 run() { # run <app> <scenario> <i> <cold 0|1>
   local app="$1" sc="$2" i="$3" cold="$4" exe extra=() win="" inter="" mem="" cats="" detail=""
   [ "$app" = tauri ] && exe="$TAURI_EXE" || exe="$NATIVE_EXE"
@@ -186,22 +190,23 @@ run() { # run <app> <scenario> <i> <cold 0|1>
   fi
   [ "$i" = 0 ] && tmo 15 screencapture -x "$OUT/screen-$app-start.png" 2>/dev/null
   case "$sc" in
-    idle) sleep 10; mem="$("$PROBE" mem "$APPPID")";;
+    idle) sleep 10; mem="$("$PROBE" mem "$APPPID" "$t0")";;
     loaded)
       sleep 3; keystroke_split
       wait_lines "$W/run/shell-ready.log" 2 20 || detail="$detail no-2nd-terminal"
-      sleep 10; mem="$("$PROBE" mem "$APPPID")"
+      sleep 10; mem="$("$PROBE" mem "$APPPID" "$t0")"
       [ "$i" = 1 ] && tmo 15 screencapture -x "$OUT/screen-$app-loaded.png" 2>/dev/null
       ;;
     cat)
-      wait_lines "$W/run/cat.log" 1 600 && cats="$(awk '{print $1}' "$W/run/cat.log")" || detail="$detail cat-timeout"
-      detail="$detail grid=$(awk '{print $2"x"$3}' "$W/run/cat.log" 2>/dev/null)"
+      wait_lines "$W/run/cat.log" 1 300 && cats="$(awk '{print $1}' "$W/run/cat.log")" || detail="$detail cat-timeout"
+      detail="$detail pty_drain_s=$(awk '{print $2}' "$W/run/cat.log" 2>/dev/null) grid=$(awk '{print $3}' "$W/run/cat.log" 2>/dev/null)"
       ;;
   esac
   local mb="" parts=""
   if [ -n "$mem" ]; then mb="$(echo "$mem" | awk '{printf "%.1f", $1/1048576}')"; parts="$(echo "$mem" | cut -d' ' -f2)"; fi
   echo "$app,$sc,$i,$cold,$win,$inter,$mb,$cats,\"$detail $parts\"" >> "$CSV"
   log "$app $sc #$i cold=$cold window=${win}ms interactive=${inter}ms mem=${mb}MB cat=${cats}s $detail"
+  [ "$i" = 1 ] && cp "$W/run/app.log" "$OUT/app-$app-$sc.log" 2>/dev/null
   quit_app
 }
 

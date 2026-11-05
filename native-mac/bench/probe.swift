@@ -38,6 +38,12 @@ func name(_ pid: pid_t) -> String {
     return (String(cString: buf) as NSString).lastPathComponent
 }
 
+func startTime(_ pid: pid_t) -> Double {
+    var info = proc_bsdinfo()
+    let r = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+    return r > 0 ? Double(info.pbi_start_tvsec) + Double(info.pbi_start_tvusec) / 1e6 : 0
+}
+
 func isDescendant(_ p: pid_t, of root: pid_t) -> Bool {
     var cur = ppid(p), hops = 0
     while cur > 1 && hops < 64 { if cur == root { return true }; cur = ppid(cur); hops += 1 }
@@ -65,15 +71,22 @@ case "wait-window":
     }
     print("timeout"); exit(1)
 case "mem":
-    // mem <pid>: footprint of the app process plus XPC helpers it is
+    // mem <pid> [since]: footprint of the app process plus XPC helpers it is
     // responsible for (WebKit WebContent/Networking/GPU), excluding its child
     // processes (the shells in the terminals). Bytes, then a breakdown.
+    // WebKit's XPC services are launchd children; attribute them by
+    // responsibility, or (if that's unavailable) by being a WebKit process
+    // started after the app (`since`, epoch seconds).
     let root = Int32(args[2])!
+    let since = args.count > 3 ? Double(args[3])! : startTime(root)
     var total: UInt64 = footprint(root)
     var parts = ["\(name(root))=\(footprint(root))"]
-    if let resp = respFn {
-        for p in allPids() where p != root && resp(p) == root && !isDescendant(p, of: root) {
-            let f = footprint(p); total += f; parts.append("\(name(p))=\(f)")
+    for p in allPids() where p != root && !isDescendant(p, of: root) {
+        let n = name(p)
+        let byResp = respFn.map { $0(p) == root } ?? false
+        let byWebKit = n.hasPrefix("com.apple.WebKit") && startTime(p) >= since - 0.5
+        if byResp || byWebKit {
+            let f = footprint(p); total += f; parts.append("\(n)=\(f)")
         }
     }
     print("\(total) \(parts.joined(separator: ","))")

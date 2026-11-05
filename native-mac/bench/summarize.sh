@@ -18,4 +18,4 @@ echo "| Warm start → first window (ms) | $(stat tauri start 0 5) | $(stat nati
 echo "| Warm start → terminal shell ready (ms) | $(stat tauri start 0 6) | $(stat native start 0 6) |"
 echo "| Idle RAM, no folder (MB) | $(stat tauri idle '*' 7) | $(stat native idle '*' 7) |"
 echo "| RAM, 1 folder + 5 tabs + 2 terminals (MB) | $(stat tauri loaded '*' 7) | $(stat native loaded '*' 7) |"
-echo "| cat ${CAT_MB:-100} MB in terminal (s) | $(stat tauri cat '*' 8) | $(stat native cat '*' 8) |"
+echo "| cat 100 MB, until the terminal has parsed it all (s) | $(stat tauri cat '*' 8) | $(stat native cat '*' 8) |"

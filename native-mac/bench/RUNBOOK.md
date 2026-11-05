@@ -54,5 +54,11 @@ Results: `summary.md` (median, range, n), `runs.csv` (every run), `sizes.csv`,
 - RAM = `phys_footprint` (what Activity Monitor calls Memory) of the app process
   plus the XPC helpers it's responsible for (WebKit WebContent, Networking and
   GPU processes). Shells running in the terminals are excluded for both apps.
-- **Throughput**: the first terminal's shell runs `cat` on a 100 MB base64 text
-  file and times it inside zsh; the terminal grid size is recorded too.
+- **Throughput**: 2 s after the first terminal's shell starts, it `cat`s a
+  100 MB base64 text file, then sends a cursor-position query (`ESC[6n`). The
+  terminal answers only after it has parsed everything before it, so the time
+  to the answer is "terminal consumed 100 MB". The time for `cat` alone (pty
+  drain) and the grid size are in `runs.csv` as `pty_drain_s` / `grid`.
+- WebKit helpers are attributed by macOS responsibility, or failing that as
+  WebKit processes started after the app launched — so keep Safari and other
+  WebKit apps closed during the run.

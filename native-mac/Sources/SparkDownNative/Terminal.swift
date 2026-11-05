@@ -88,9 +88,16 @@ final class TerminalView: NSView, NSTextInputClient {
         cfg.scale_factor = Double(NSScreen.main?.backingScaleFactor ?? 2)
         cfg.font_size = 13
         cfg.context = GHOSTTY_SURFACE_CONTEXT_SPLIT
+        // Like the Tauri app: run $SHELL as a login shell (Ghostty would
+        // otherwise use the passwd shell).
+        let shell = ProcessInfo.processInfo.environment["SHELL"].flatMap { $0.isEmpty ? nil : $0 } ?? "/bin/zsh"
+        let command = "\(shell) -l"
         surface = (cwd ?? NSHomeDirectory()).withCString { dir in
-            cfg.working_directory = dir
-            return ghostty_surface_new(app, &cfg)
+            command.withCString { cmd in
+                cfg.working_directory = dir
+                cfg.command = cmd
+                return ghostty_surface_new(app, &cfg)
+            }
         }
         let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .inVisibleRect, .activeAlways, .mouseEnteredAndExited], owner: self)
         addTrackingArea(area)

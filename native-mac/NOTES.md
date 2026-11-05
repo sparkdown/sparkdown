@@ -36,3 +36,38 @@
 - All permissive; we'd need a THIRD_PARTY_NOTICES entry per lib (FTL requires
   an attribution credit in docs). No copyleft obligation if freetype is taken
   under FTL. Re-audit on every Ghostty bump.
+
+## What the prototype does / doesn't do
+Works (in code; CI-verified where the bench screenshots/rows show it):
+open folder (menu ⌘⌥O, welcome button, session restore), lazy explorer tree
+(dirs first, click to open/expand, top-level FS refresh), tabs (open, switch,
+⌘W close with save prompt, dirty dot, ⌘⌥←/→), plain-text markdown editor
+(NSTextView, undo, find bar) with live GFM preview (cmark-gfm → WKWebView,
+50 ms debounce), Edit/Split/Preview modes, ⌘S save, terminal drawer (⌃`)
+with libghostty panes, ⌘D/⌘⇧D split, pane closes when the shell exits,
+copy/paste, IME basics; Changes view (git status list, colored diff tab);
+status bar (branch, folder, Ln/Col, chars); session restore.
+
+Not done / known gaps: syntax highlighting & markdown editing helpers
+(CodeMirror features), mermaid/diagrams, preview search/TOC/images-relative
+paths, file ops (rename/delete/new in tree), recursive FS watching, nested
+split tree (one split direction per drawer), tmux persistence, agent chips,
+MCP server, remote/SSH folders, commit/push/pull/discard, settings, themes,
+command palette/quick open, multi-window, updater, signing/notarization,
+Windows/Linux (native = macOS only; the Tauri app would still be needed there).
+
+## Effort to reach parity (honest take)
+- The Tauri app is ~a cross-platform product: TS frontend (~40 modules) + Rust
+  core (git, remote, MCP, watcher, terminal/tmux, sessions, updater). A native
+  Mac app can reuse **none of the TS UI** but could keep the Rust core behind a
+  C ABI/uniffi (git, remote, MCP, session, search) — that is the only sane path.
+- Estimate at agent speed with a human reviewing on a Mac: core editor parity
+  (highlighting, markdown commands, preview features, file ops, watcher) 2–3
+  weeks; terminal parity on libghostty (splits tree, tmux attach, agent launch,
+  focus/keys polish, IME, links) 1–2 weeks plus ongoing breakage on every
+  Ghostty bump; Changes/commit/push/pull/askpass 1 week; remote folders, MCP,
+  settings, palette, multi-window, updater/signing/notarization 2–3 weeks.
+  Total ≈ 6–9 weeks to rough parity on macOS only, then a permanent second UI
+  codebase (Windows/Linux stay on Tauri), so every feature is built twice.
+- Human-time reality: double that for QA on real Macs, and the libghostty
+  internal API is the biggest long-term risk (unsupported, Zig-pinned).

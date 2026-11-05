@@ -139,7 +139,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         } else {
             showWelcome(true)
         }
-        if session.terminalVisible { setTerminal(visible: true) }
+        if session.terminalVisible {
+            DispatchQueue.main.async { [weak self] in self?.setTerminal(visible: true) }
+        }
         applyViewMode()
         applySidebarView()
     }
@@ -229,6 +231,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         tabsAndEditor.orientation = .vertical
         tabsAndEditor.spacing = 0
         tabBar.setContentHuggingPriority(.required, for: .vertical)
+        // Vertical NSStackViews center arranged views at their fitting width:
+        // pin both rows to the full width.
+        tabBar.widthAnchor.constraint(equalTo: tabsAndEditor.widthAnchor).isActive = true
+        editorSplit.widthAnchor.constraint(equalTo: tabsAndEditor.widthAnchor).isActive = true
         tabBar.onSelect = { [weak self] i in self?.activate(i) }
         tabBar.onClose = { [weak self] i in self?.close(at: i) }
         pin(tabsAndEditor, in: editorArea, insets: .init(top: 28, left: 0, bottom: 0, right: 0))
@@ -283,6 +289,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSTextVi
         pin(col, in: content)
         DispatchQueue.main.async {
             self.outerSplit.setPosition(240, ofDividerAt: 0)
+            self.editorSplit.setPosition(self.editorSplit.bounds.width / 2, ofDividerAt: 0)
         }
     }
 

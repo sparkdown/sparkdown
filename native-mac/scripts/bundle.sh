@@ -12,7 +12,10 @@ cp "$BIN" "$APP/Contents/MacOS/SparkDownNative"
 strip -x "$APP/Contents/MacOS/SparkDownNative" || true
 # libghostty finds its resources by the terminfo sentinel in Contents/Resources.
 cp -R vendor/share/terminfo "$APP/Contents/Resources/" 2>/dev/null || true
-cp -R vendor/share/ghostty "$APP/Contents/Resources/" 2>/dev/null || true
+# Only shell-integration is needed at runtime (themes/docs are skipped).
+mkdir -p "$APP/Contents/Resources/ghostty"
+cp -R vendor/share/ghostty/shell-integration "$APP/Contents/Resources/ghostty/" 2>/dev/null || true
+du -sh vendor/share/ghostty/* 2>/dev/null || true
 ICON="$HERE/../src-tauri/icons/icon.icns"
 [ -f "$ICON" ] && cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -34,4 +37,4 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 codesign --force --deep --sign - "$APP"
 hdiutil create -volname "SparkDown Native" -srcfolder "$APP" -ov -format UDZO "$OUT/SparkDownNative_spike_aarch64.dmg"
-du -sk "$APP" "$OUT"/*.dmg
+du -sk "$APP" "$OUT"/*.dmg; du -sk "$APP"/Contents/MacOS/* "$APP"/Contents/Resources/*
