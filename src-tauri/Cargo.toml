@@ -28,7 +28,7 @@ notify = "8"
 # Auto-update signature check (minisign, as written by `tauri signer sign`).
 # Pure Rust, no dependencies. Downloads use the system curl (updates.rs), so
 # the app carries no HTTP/TLS stack.
-minisign-verify = "0.2"
+minisign-verify = "0.3"
 # Remote SSH first connect (#24): SHA256 host-key fingerprints, shown the
 # same way ssh prints them. Both already in the tree (same versions).
 sha2 = "0.11"
