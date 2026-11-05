@@ -69,7 +69,7 @@ jobs:
     needs: build
     if: github.event_name == 'push' || inputs.bench == 'true'
     runs-on: macos-26
-    timeout-minutes: 120
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -82,10 +82,11 @@ jobs:
           system_profiler SPDisplaysDataType | head -30 || true
           osascript -e 'tell application "System Events" to get name of first process' || echo "no accessibility"
       - name: Bench (CI VM)
+        timeout-minutes: 55
         run: |
           native-mac/bench/bench.sh --tauri SparkDown_0.4.1_aarch64.dmg \
             --native art/dist/SparkDownNative_spike_aarch64.dmg \
-            --runs "${{ inputs.runs || '5' }}" --out "$PWD/bench-results"
+            --runs "${{ inputs.runs || '3' }}" --out "$PWD/bench-results"
       - name: Results
         if: always()
         run: cat bench-results/summary.md >> "$GITHUB_STEP_SUMMARY" || true

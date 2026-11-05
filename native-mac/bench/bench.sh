@@ -29,6 +29,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 W="$(mkdir -p "${TMPDIR:-/tmp}/sdbench" && cd -P "${TMPDIR:-/tmp}/sdbench" && pwd)"
 OUT="${OUT:-$W/results}"; mkdir -p "$OUT" "$W/apps"
 CSV="$OUT/runs.csv"; LOG="$OUT/bench.log"
+tmo() { local t="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$t" "$@"; }
 log() { echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG"; }
 
 # ---- probe helper -----------------------------------------------------------
@@ -43,7 +44,7 @@ stage() { # stage <app|dmg> <name> -> path of a private copy of the .app
   rm -rf "$dst"; mkdir -p "$dst"
   if [[ "$src" == *.dmg ]]; then
     local mnt; mnt="$(mktemp -d)"
-    hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$src" >/dev/null
+    tmo 120 hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$src" >/dev/null
     cp -R "$mnt"/*.app "$dst/"
     hdiutil detach "$mnt" >/dev/null
   else
@@ -162,7 +163,7 @@ quit_app() {
 }
 
 keystroke_split() { # Cmd+D in the focused terminal pane (both apps: split right)
-  osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $APPPID) to true" \
+  tmo 15 osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $APPPID) to true" \
             -e 'delay 0.3' -e 'tell application "System Events" to keystroke "d" using command down' >>"$LOG" 2>&1
 }
 
@@ -173,7 +174,7 @@ run() { # run <app> <scenario> <i> <cold 0|1>
   seed "$app" "$sc"
   rm -rf "$W/run"; mkdir -p "$W/run"
   [ "$sc" = cat ] && extra=(SDB_CAT="$BIG")
-  if [ "$cold" = 1 ]; then sync; sudo -n purge 2>/dev/null || detail="no-purge"; sleep 2; fi
+  if [ "$cold" = 1 ]; then sync; tmo 60 sudo -n purge 2>/dev/null || detail="no-purge"; sleep 2; fi
   local t0; t0="$("$PROBE" now)"
   launch "$exe" "${extra[@]}"
   local w; w="$("$PROBE" wait-window "$APPPID" 60)"
@@ -183,13 +184,14 @@ run() { # run <app> <scenario> <i> <cold 0|1>
       inter="$(head -1 "$W/run/shell-ready.log" | awk -v t0="$t0" '{printf "%.0f", ($1-t0)*1000}')"
     else detail="$detail no-shell"; fi
   fi
+  [ "$i" = 0 ] && tmo 15 screencapture -x "$OUT/screen-$app-start.png" 2>/dev/null
   case "$sc" in
     idle) sleep 10; mem="$("$PROBE" mem "$APPPID")";;
     loaded)
       sleep 3; keystroke_split
       wait_lines "$W/run/shell-ready.log" 2 20 || detail="$detail no-2nd-terminal"
       sleep 10; mem="$("$PROBE" mem "$APPPID")"
-      [ "$i" = 1 ] && screencapture -x "$OUT/screen-$app-loaded.png" 2>/dev/null
+      [ "$i" = 1 ] && tmo 15 screencapture -x "$OUT/screen-$app-loaded.png" 2>/dev/null
       ;;
     cat)
       wait_lines "$W/run/cat.log" 1 600 && cats="$(awk '{print $1}' "$W/run/cat.log")" || detail="$detail cat-timeout"
