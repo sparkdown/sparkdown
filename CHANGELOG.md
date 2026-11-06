@@ -5,6 +5,12 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
+## [Unreleased]
+
+### Fixed
+
+- **Agent tools under WSL (Windows):** a `wsl` shell in a SparkDown terminal keeps the terminal's agent-tool routing (`WSLENV`), and `$SPARKDOWN_MCP_SHIM` names SparkDown's program for registering it in Linux agents. See docs/windows.md. (#116)
+
 ## [0.4.1] — 2026-11-05
 
 Fixes and small features on top of 0.4.0.
