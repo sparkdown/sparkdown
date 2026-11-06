@@ -19,6 +19,7 @@ function mountBar(bus = new EventBus()): StatusBar {
       <span id="status-path"></span>
       <span id="status-modified"></span>
       <span id="status-words"></span>
+      <span id="status-reading-time"></span>
       <span id="status-chars"></span>
       <span id="status-lines"></span>
       <span id="status-cursor"></span>
@@ -112,5 +113,26 @@ describe('StatusBar character count', () => {
       selectedChars: 0,
     });
     expect(charsText()).toBe('12 chars');
+  });
+});
+
+
+describe('StatusBar reading time', () => {
+  it.each([[0, '0 min read'], [1, '1 min read'], [200, '1 min read'], [201, '2 min read'], [1284, '7 min read']])(
+    'estimates %i document words as %s', (words, text) => {
+      const bar = mountBar();
+      bar.updateCounts(words, 1);
+      expect(document.getElementById('status-reading-time')!.textContent).toBe(text);
+    },
+  );
+
+  it('refreshes with document counts, not with selection changes', () => {
+    const bus = new EventBus();
+    const bar = mountBar(bus);
+    bar.updateCounts(400, 20, 2000);
+    bus.emit(EVENTS.CURSOR_CHANGED, { line: 1, column: 1, chars: 2000, selectedChars: 10 });
+    expect(document.getElementById('status-reading-time')!.textContent).toBe('2 min read');
+    bar.updateCounts(0, 1);
+    expect(document.getElementById('status-reading-time')!.textContent).toBe('0 min read');
   });
 });
