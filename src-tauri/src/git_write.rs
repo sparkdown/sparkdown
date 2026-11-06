@@ -2105,6 +2105,9 @@ mod tests {
 
     #[test]
     fn fetch_after_rejected_push_shows_behind() {
+        let _session = crate::remote::TEST_SESSION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let sb = sandbox();
         let env = sb.env();
         let other = sb.other();
@@ -2870,6 +2873,17 @@ mod tests {
 
     #[test]
     fn discard_and_fetch_are_refused_in_remote_sessions() {
+        // Process-global session map: serialize against remote connect tests and
+        // always clear, even if an assert panics mid-body.
+        let _session = crate::remote::TEST_SESSION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        struct ClearSession;
+        impl Drop for ClearSession {
+            fn drop(&mut self) {
+                crate::remote::set_session_for_test(None);
+            }
+        }
         let sb = discard_sandbox();
         let t = FakeTrash::new(&sb);
         fs::write(sb.work.join("a.md"), "edited\n").unwrap();
@@ -2879,11 +2893,11 @@ mod tests {
             path: "/p".into(),
             home: "/home/u".into(),
         }));
+        let _clear = ClearSession;
         let e = discard(&sb, &t, &["a.md"]).unwrap_err();
         let env = sb.env();
         let pe = discard_preview_impl(&root(&sb), &["a.md".to_string()], &env).unwrap_err();
         let fe = fetch_impl(&root(&sb), &env).unwrap_err();
-        crate::remote::set_session_for_test(None);
         assert_eq!(e.kind, GitErrorKind::Unsupported);
         assert!(e.message.contains("remote sessions"), "{}", e.message);
         assert_eq!(pe.kind, GitErrorKind::Unsupported);
@@ -2912,6 +2926,13 @@ mod tests {
 
     #[test]
     fn rejected_push_is_typed_and_never_forced() {
+        // check_local → remote::is_active() keys off DEFAULT_LABEL "main".
+        // Remote connect tests install a session there under TEST_SESSION_LOCK;
+        // without this lock, a parallel suite run returns Unsupported instead of
+        // exercising the real non-fast-forward Rejected path.
+        let _session = crate::remote::TEST_SESSION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let sb = sandbox();
         let env = sb.env();
         let other = sb.other();
@@ -2932,6 +2953,9 @@ mod tests {
     fn force_in_user_push_refspec_config_is_not_used() {
         // A `+` refspec in remote.origin.push would force; our explicit
         // refspec overrides it.
+        let _session = crate::remote::TEST_SESSION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let sb = sandbox();
         let env = sb.env();
         sb.git(
