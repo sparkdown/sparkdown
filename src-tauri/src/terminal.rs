@@ -10,7 +10,8 @@
 //! common workflow: one agent session per terminal, several at once). All
 //! events carry the id so the frontend routes output to the right tab:
 //!   - keystrokes -> `terminal_write {id}`  -> that pty's stdin
-//!   - pty output -> `terminal://data` {id, chunk} -> that tab's xterm.js
+//!   - pty output -> raw UTF-8 batches on the pane's own Channel -> its xterm.js
+//!     (flow-controlled by `terminal_ack`; see terminal_stream.rs)
 //!   - shell/session exit -> `terminal://exit` {id}  (frontend closes that tab)
 
 // portable-pty's own `MasterPty` trait is renamed on import so the term stays
@@ -22,7 +23,7 @@ use portable_pty::{
 };
 use serde::Serialize;
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::PathBuf;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -241,6 +242,9 @@ pub struct Terminal {
     tmux_session: Option<String>,
     /// Remote terminal: the pty child is ssh; the remote shell is not visible.
     remote: bool,
+    /// Output flow control: `terminal_ack` returns credit. Dropping the
+    /// terminal (close/replace) closes it, releasing a waiting sender.
+    flow: crate::terminal_stream::FlowCloser,
 }
 
 /// All open terminals, keyed by frontend id.
@@ -385,13 +389,6 @@ impl TerminalState {
             let _ = t.killer.kill();
         }
     }
-}
-
-/// Payload for the `terminal://data` event: which terminal, and its output.
-#[derive(Serialize, Clone)]
-struct TermData {
-    id: String,
-    chunk: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -613,8 +610,10 @@ fn tmux_hide_status_line(cmd: &mut CommandBuilder, session: &str) {
     cmd.args(["set-option", "-t", &format!("={session}:"), "status", "off"]);
 }
 
-/// Spawn a shell in a new pty under `id`, rooted at `cwd`, streaming output via
-/// `terminal://data`. If `id` already exists it is replaced (old shell dropped).
+/// Spawn a shell in a new pty under `id`, rooted at `cwd`, streaming output as
+/// raw UTF-8 batches over `output` (this call's own Channel, so only the pane
+/// that started it receives them). If `id` already exists it is replaced (old
+/// shell dropped).
 ///
 /// When tmux is installed and `session` is provided, the pty runs
 /// `tmux new-session -A -s <session>` instead of a bare shell: the session
@@ -634,6 +633,7 @@ pub fn terminal_start(
     rows: u16,
     session: Option<String>,
     launch: Option<String>,
+    output: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Result<String, String> {
     // Replacing an id that's still live (a webview reload restarts ids at
     // `term-1` while the previous pty's threads are still running): silence and
@@ -817,7 +817,7 @@ pub fn terminal_start(
     // platform.
     drop(pane_side);
 
-    let mut reader = controller
+    let reader = controller
         .try_clone_reader()
         .map_err(|e| format!("clone reader failed: {e}"))?;
     let writer = controller
@@ -954,40 +954,34 @@ pub fn terminal_start(
         }
     }
 
+    // Reader thread → bounded queue → sender thread → this pane's Channel.
+    // The reader keeps multibyte characters whole (decode_pty_utf8); the
+    // sender coalesces what is queued into one raw-bytes message and waits
+    // for xterm's acks past a high-water mark (terminal_stream.rs). Exit is
+    // emitted after the last batch has been handed to the Channel.
+    let flow = crate::terminal_stream::OutputFlow::new();
     {
+        let (tx, rx) = crate::terminal_stream::queue();
+        std::thread::spawn(move || crate::terminal_stream::read_loop(reader, tx));
         let silenced = silenced.clone();
-        let label = label.clone();
+        let flow = flow.clone();
         std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            let mut pending: Vec<u8> = Vec::new();
-            let emit = |text: String| {
-                if !text.is_empty() && !silenced.load(Ordering::SeqCst) {
-                    let _ = app_for_thread.emit_to(
-                        label.as_str(),
-                        "terminal://data",
-                        TermData {
-                            id: id_for_thread.clone(),
-                            chunk: text,
-                        },
-                    );
-                }
-            };
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        pending.extend_from_slice(&buf[..n]);
-                        // Decode everything decodable now, keeping only a
-                        // genuinely incomplete trailing sequence for the next
-                        // read (flush=false).
-                        emit(decode_pty_utf8(&mut pending, false));
-                    }
-                    Err(_) => break,
-                }
-            }
-            // EOF: nothing more will arrive, so replace any leftover bytes
-            // (an interrupted multibyte tail) with U+FFFD rather than dropping.
-            emit(decode_pty_utf8(&mut pending, true));
+            crate::terminal_stream::send_loop(
+                rx,
+                &flow,
+                crate::terminal_stream::MAX_BATCH,
+                crate::terminal_stream::HIGH_WATER,
+                crate::terminal_stream::STALL_TIMEOUT,
+                |bytes| {
+                    // A replaced spawn falls silent: its output must not
+                    // bleed into the new tab (it can't anyway, its Channel
+                    // belongs to the old pane, but keep the old contract).
+                    !silenced.load(Ordering::SeqCst)
+                        && output
+                            .send(tauri::ipc::InvokeResponseBody::Raw(bytes))
+                            .is_ok()
+                },
+            );
             emit_exit();
         });
     }
@@ -1044,6 +1038,7 @@ pub fn terminal_start(
             shell_pid,
             tmux_session,
             remote: is_remote,
+            flow: crate::terminal_stream::FlowCloser(flow),
         },
     );
     Ok(mode.to_string())
@@ -1058,7 +1053,7 @@ pub fn terminal_start(
 /// next read — unless `flush` is set (EOF), when that tail is also replaced with
 /// U+FFFD so no bytes are silently dropped. Pure and side-effect-free apart from
 /// mutating `pending`, so it can be unit-tested directly.
-fn decode_pty_utf8(pending: &mut Vec<u8>, flush: bool) -> String {
+pub(crate) fn decode_pty_utf8(pending: &mut Vec<u8>, flush: bool) -> String {
     let mut out = String::new();
     loop {
         if pending.is_empty() {
@@ -1252,6 +1247,24 @@ pub fn terminal_write(
         // Err only if the writer thread has already gone (terminal closing);
         // nothing useful to do with the bytes then.
         let _ = term.input_tx.send(data.into_bytes());
+    }
+    Ok(())
+}
+
+/// xterm.js has parsed `bytes` more bytes of terminal `id`'s output: return
+/// that much send credit (see terminal_stream.rs). Unknown ids are ignored
+/// (the pane closed while its last batch was in flight).
+#[tauri::command]
+pub fn terminal_ack(
+    webview_window: tauri::WebviewWindow,
+    state: tauri::State<'_, TerminalState>,
+    id: String,
+    bytes: u64,
+) -> Result<(), String> {
+    let id = term_key(webview_window.label(), &id);
+    let guard = state.0.lock().map_err(|_| "terminal state poisoned")?;
+    if let Some(term) = guard.get(&id) {
+        term.flow.0.ack(bytes);
     }
     Ok(())
 }

@@ -18,8 +18,10 @@ const api = vi.hoisted(() => ({
       _rows: number,
       session: string | null,
       _launch: string | null,
+      _onOutput?: (bytes: Uint8Array) => void,
     ): Promise<string> => (session ? 'tmux' : 'shell'),
   ),
+  terminalAck: vi.fn(async (_id: string, _bytes: number) => {}),
   terminalClose: vi.fn(async (_id: string) => {}),
   terminalBusy: vi.fn(async (_id: string) => null as string | null),
   terminalWrite: vi.fn(async (_id: string, _data: string) => {}),
@@ -67,6 +69,8 @@ const terms = vi.hoisted(() => ({
     keyHandler: ((e: KeyboardEvent) => boolean) | null;
     dataHandler: ((d: string) => void) | null;
     selection: string;
+    written: (string | Uint8Array)[];
+    writeCallbacks: (() => void)[];
   }[],
 }));
 
@@ -93,6 +97,16 @@ vi.mock('@tauri-apps/api/event', () => ({
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class {
     fit() {}
+  },
+}));
+
+vi.mock('@xterm/addon-webgl', () => ({
+  WebglAddon: class {
+    activate() {}
+    dispose() {}
+    onContextLoss() {
+      return { dispose() {} };
+    }
   },
 }));
 
@@ -124,7 +138,13 @@ vi.mock('@xterm/xterm', () => ({
       this.dataHandler = h;
       return { dispose() {} };
     }
-    write() {}
+    written: (string | Uint8Array)[] = [];
+    /** Parse-complete callbacks, run by the test to simulate xterm. */
+    writeCallbacks: (() => void)[] = [];
+    write(data: string | Uint8Array, cb?: () => void) {
+      this.written.push(data);
+      if (cb) this.writeCallbacks.push(cb);
+    }
     focus() {}
     hasSelection() {
       return this.selection !== '';
@@ -795,17 +815,107 @@ describe('TerminalManager layout persistence + restore', () => {
 });
 
 describe('TerminalPane events', () => {
+  /** The output callback a pane handed to terminalStart (its own Channel). */
+  function outputOf(id: string): (bytes: Uint8Array) => void {
+    const calls = api.terminalStart.mock.calls.filter((c) => c[0] === id);
+    const call = calls[calls.length - 1]!;
+    return call[6]!;
+  }
+  const enc = (s: string) => new TextEncoder().encode(s);
+
   it('pty data for another id is not routed to this pane', async () => {
     const pane = new TerminalPane('p1', () => {});
     await pane.init(document.createElement('div'), '/cwd');
+    const term = last(terms.all)!;
+    const other = new TerminalPane('other', () => {});
+    await other.init(document.createElement('div'), '/cwd');
     let quick = false;
     const idle = pane.whenIdle(10, 200).then(() => (quick = true));
-    bus.emit('terminal://data', { id: 'other', chunk: 'x' });
+    outputOf('other')(enc('x'));
     await new Promise((r) => setTimeout(r, 80));
     expect(quick).toBe(false);
-    bus.emit('terminal://data', { id: 'p1', chunk: 'prompt$ ' });
+    expect(term.written).toEqual([]);
+    outputOf('p1')(enc('prompt$ '));
     await idle;
     expect(quick).toBe(true);
+    expect(term.written).toEqual([enc('prompt$ ')]);
+    pane.destroy();
+    other.destroy();
+  });
+
+  it('writes output bytes as-is and acks each batch only after xterm parsed it', async () => {
+    const pane = new TerminalPane('p1', () => {});
+    await pane.init(document.createElement('div'), '/cwd');
+    const term = last(terms.all)!;
+    api.terminalAck.mockClear();
+    // A multibyte char split across two batches is passed through untouched:
+    // xterm's own streaming UTF-8 decoder joins it.
+    const a = new Uint8Array([0x61, 0xe2, 0x9d]);
+    const b = new Uint8Array([0xaf, 0x62]);
+    outputOf('p1')(a);
+    outputOf('p1')(b);
+    expect(term.written).toEqual([a, b]);
+    expect(api.terminalAck).not.toHaveBeenCalled();
+    term.writeCallbacks[0]();
+    expect(api.terminalAck).toHaveBeenCalledWith('p1', 3);
+    term.writeCallbacks[1]();
+    expect(api.terminalAck).toHaveBeenLastCalledWith('p1', 2);
+    pane.destroy();
+  });
+
+  it('a destroyed pane ignores late output and sends no acks', async () => {
+    const pane = new TerminalPane('p1', () => {});
+    await pane.init(document.createElement('div'), '/cwd');
+    const term = last(terms.all)!;
+    outputOf('p1')(enc('before'));
+    pane.destroy();
+    api.terminalAck.mockClear();
+    term.writeCallbacks[0]();
+    outputOf('p1')(enc('after'));
+    expect(term.written).toEqual([enc('before')]);
+    expect(api.terminalAck).not.toHaveBeenCalled();
+  });
+
+  it('does not subscribe to the legacy global terminal://data event', async () => {
+    const pane = new TerminalPane('p1', () => {});
+    await pane.init(document.createElement('div'), '/cwd');
+    expect(bus.count('terminal://data')).toBe(0);
+    expect(bus.count('terminal://exit')).toBe(1);
+    pane.destroy();
+    expect(bus.count('terminal://exit')).toBe(0);
+  });
+
+  it('preserves write order across many batches for one pane', async () => {
+    const pane = new TerminalPane('p1', () => {});
+    await pane.init(document.createElement('div'), '/cwd');
+    const term = last(terms.all)!;
+    const batches = ['one', 'two', 'three', 'four'].map(enc);
+    for (const b of batches) outputOf('p1')(b);
+    expect(term.written).toEqual(batches);
+    pane.destroy();
+  });
+
+  it('routes live output per pane without cross-talk under interleaved delivery', async () => {
+    const a = new TerminalPane('a', () => {});
+    const b = new TerminalPane('b', () => {});
+    await a.init(document.createElement('div'), '/cwd');
+    await b.init(document.createElement('div'), '/cwd');
+    const termA = terms.all[terms.all.length - 2]!;
+    const termB = terms.all[terms.all.length - 1]!;
+    outputOf('a')(enc('A1'));
+    outputOf('b')(enc('B1'));
+    outputOf('a')(enc('A2'));
+    outputOf('b')(enc('B2'));
+    expect(termA.written).toEqual([enc('A1'), enc('A2')]);
+    expect(termB.written).toEqual([enc('B1'), enc('B2')]);
+    a.destroy();
+    b.destroy();
+  });
+
+  it('falls back to the DOM renderer in jsdom (no WebGL2)', async () => {
+    const pane = new TerminalPane('p1', () => {});
+    await pane.init(document.createElement('div'), '/cwd');
+    expect(pane.rendererKind).toBe('dom');
     pane.destroy();
   });
 });
