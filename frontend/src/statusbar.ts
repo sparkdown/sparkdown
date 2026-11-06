@@ -41,6 +41,7 @@ export class StatusBar {
   private modifiedEl!: HTMLElement;
   private wordsEl!: HTMLElement;
   private charsEl!: HTMLElement;
+  private readingTimeEl: HTMLElement | null = null;
   private linesEl!: HTMLElement;
   private cursorEl!: HTMLElement;
   private wrapEl!: HTMLElement;
@@ -64,6 +65,7 @@ export class StatusBar {
     this.modifiedEl = document.getElementById('status-modified')!;
     this.wordsEl = document.getElementById('status-words')!;
     this.charsEl = document.getElementById('status-chars')!;
+    this.readingTimeEl = document.getElementById('status-reading-time');
     this.linesEl = document.getElementById('status-lines')!;
     this.cursorEl = document.getElementById('status-cursor')!;
     this.wrapEl = document.getElementById('status-wrap')!;
@@ -182,6 +184,9 @@ export class StatusBar {
 
   updateCounts(words: number, lines: number, chars = 0, selectedChars = 0): void {
     this.wordsEl.textContent = `${words} words`;
+    if (this.readingTimeEl) {
+      this.readingTimeEl.textContent = `${Math.ceil(words / 200)} min read`;
+    }
     this.linesEl.textContent = `${lines} lines`;
     this.updateCharCount(chars, selectedChars);
   }
