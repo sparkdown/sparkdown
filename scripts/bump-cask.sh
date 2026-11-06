@@ -2,7 +2,8 @@
 # Bump the Homebrew cask in sparkdown/homebrew-tap to a released version.
 # Reads the sha256 of the published SparkDown_<version>_aarch64.dmg from the
 # real v<version> GitHub release (downloads it and hashes it), rewrites
-# version + sha256 in Casks/sparkdown.rb, and opens a PR against the tap.
+# version + sha256 in Casks/sparkdown.rb, ensures the `binary` stanza that
+# puts `sparkdown` on PATH (#160), and opens a PR against the tap.
 # It never creates, edits or deletes releases.
 #
 # Usage: bash scripts/bump-cask.sh <version> [--direct]
@@ -17,6 +18,8 @@ REPO="${SPARKDOWN_REPO:-sparkdown/sparkdown}"
 TAP="${SPARKDOWN_TAP:-sparkdown/homebrew-tap}"
 CASK="Casks/sparkdown.rb"
 ASSET="SparkDown_${VERSION}_aarch64.dmg"
+# Homebrew cask binary stanza: the launcher shipped inside the .app (#160).
+BINARY_LINE='  binary "#{appdir}/SparkDown.app/Contents/Resources/bin/sparkdown"'
 
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "error: version must be X.Y.Z, got '$VERSION'" >&2; exit 1; }
 
@@ -37,7 +40,25 @@ cd "$TMP/tap"
 sed -i.bak -E "s/^  version \"[^\"]+\"/  version \"$VERSION\"/; s/^  sha256 \"[0-9a-f]+\"/  sha256 \"$SHA\"/" "$CASK"
 rm -f "$CASK.bak"
 grep -q "version \"$VERSION\"" "$CASK" && grep -q "sha256 \"$SHA\"" "$CASK" || { echo "error: cask rewrite failed" >&2; exit 1; }
-if git diff --quiet; then echo "==> cask already at $VERSION"; exit 0; fi
+
+# Ensure the binary stanza exists (idempotent). Insert after the `app` line
+# when missing so `brew install --cask sparkdown` puts sparkdown on PATH.
+if ! grep -qE '^\s*binary "' "$CASK"; then
+  if grep -qE '^\s*app "SparkDown\.app"' "$CASK"; then
+    # Insert immediately after the app stanza.
+    awk -v line="$BINARY_LINE" '
+      { print }
+      /^\s*app "SparkDown\.app"/ && !done { print line; done=1 }
+    ' "$CASK" > "$CASK.tmp" && mv "$CASK.tmp" "$CASK"
+  else
+    echo "error: $CASK has no app \"SparkDown.app\" line to attach binary to" >&2
+    exit 1
+  fi
+fi
+grep -q 'binary "#{appdir}/SparkDown.app/Contents/Resources/bin/sparkdown"' "$CASK" \
+  || { echo "error: binary stanza missing after rewrite" >&2; exit 1; }
+
+if git diff --quiet; then echo "==> cask already at $VERSION with binary stanza"; exit 0; fi
 
 git config user.name "${GIT_AUTHOR_NAME:-paulovitorjp}"
 git config user.email "${GIT_AUTHOR_EMAIL:-paulovitorjp@users.noreply.github.com}"
@@ -49,5 +70,5 @@ else
   BRANCH="bump-sparkdown-$VERSION"
   git push -q origin "HEAD:refs/heads/$BRANCH"
   gh pr create --repo "$TAP" --head "$BRANCH" --title "sparkdown $VERSION" \
-    --body "Bump cask to v$VERSION (sha256 of $ASSET from the published release)."
+    --body "Bump cask to v$VERSION (sha256 of $ASSET from the published release). Ensures the \`binary\` stanza for \`sparkdown\` on PATH (#160)."
 fi

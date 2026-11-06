@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# SparkDown CLI launcher for macOS (#160).
+# Linked into /usr/local/bin or ~/.local/bin by SparkDown → Install 'sparkdown'
+# Command in PATH. Resolves relative paths against this process's cwd, then
+# opens the .app so a running instance receives documents via RunEvent::Opened
+# (same routing as the single-instance plugin).
+set -euo pipefail
+
+resolve() {
+  local p="$1"
+  if [[ "$p" == /* ]]; then
+    printf '%s\n' "$p"
+    return
+  fi
+  # Prefer realpath/python when available; else prefix $PWD.
+  if command -v realpath >/dev/null 2>&1; then
+    realpath -m "$p" 2>/dev/null && return
+  fi
+  printf '%s/%s\n' "$PWD" "$p"
+}
+
+args=()
+end_flags=0
+has_paths=0
+for a in "$@"; do
+  if [[ "$end_flags" -eq 1 ]]; then
+    args+=("$(resolve "$a")")
+    has_paths=1
+    continue
+  fi
+  case "$a" in
+    --) end_flags=1; args+=("$a") ;;
+    -*) args+=("$a") ;;
+    *) args+=("$(resolve "$a")"); has_paths=1 ;;
+  esac
+done
+
+# Locate SparkDown.app from this script: Contents/Resources/bin/sparkdown
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  dir="$(cd "$(dirname "$SELF")" && pwd)"
+  SELF="$(cd "$dir" && readlink "$(basename "$SELF")")"
+  [[ "$SELF" == /* ]] || SELF="$dir/$SELF"
+done
+BIN_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+CONTENTS="$(cd "$BIN_DIR/../.." && pwd)"
+APP="$(cd "$CONTENTS/.." && pwd)"
+
+# Prefer `open -a` with absolute document paths so a running app gets
+# RunEvent::Opened; fall back to exec'ing the bundle binary (dev / odd layouts).
+if [[ -d "$APP" && "${APP##*/}" == *.app ]]; then
+  APP_NAME="${APP##*/}"
+  APP_NAME="${APP_NAME%.app}"
+  if [[ "$has_paths" -eq 1 ]]; then
+    # Document opens: open -a App file1 file2
+    path_args=()
+    for a in "${args[@]}"; do
+      case "$a" in
+        -*) ;;
+        *) path_args+=("$a") ;;
+      esac
+    done
+    # Flags (e.g. --new-window) still need --args on a fresh launch.
+    flag_args=()
+    for a in "${args[@]}"; do
+      case "$a" in
+        --) break ;;
+        -*) flag_args+=("$a") ;;
+      esac
+    done
+    if [[ ${#flag_args[@]} -gt 0 ]]; then
+      open -a "$APP_NAME" "${path_args[@]}" --args "${flag_args[@]}"
+    else
+      open -a "$APP_NAME" "${path_args[@]}"
+    fi
+  else
+    if [[ ${#args[@]} -gt 0 ]]; then
+      open -a "$APP_NAME" --args "${args[@]}"
+    else
+      open -a "$APP_NAME"
+    fi
+  fi
+  exit 0
+fi
+
+MACOS_BIN="$CONTENTS/MacOS/sparkdown"
+if [[ -x "$MACOS_BIN" ]]; then
+  exec "$MACOS_BIN" "${args[@]}"
+fi
+
+echo "sparkdown: could not find SparkDown.app next to $SELF" >&2
+exit 1

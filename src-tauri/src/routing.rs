@@ -315,10 +315,22 @@ pub fn route_forwarded(
             }
         } else {
             let target = decide_file(&windows::registry(), focused.as_deref(), p);
-            if let Some(t) = target {
-                focus(app, &t);
-                out.entry(t).or_default().push(p.clone());
-            }
+            let label = match target {
+                Some(t) => t,
+                None => {
+                    // No window open: a new empty window with just this file
+                    // (#160 decision 3). Parent folders are never opened.
+                    let label = windows::registry().next_empty_label();
+                    if let Err(e) = windows::create_window(app, &label, None, true) {
+                        eprintln!("could not open a window for {p}: {e}");
+                        continue;
+                    }
+                    crate::lifecycle::refresh(app);
+                    label
+                }
+            };
+            focus(app, &label);
+            out.entry(label).or_default().push(p.clone());
         }
     }
     out
@@ -326,8 +338,8 @@ pub fn route_forwarded(
 
 /// Where a forwarded file opens (#160, decision 3): the window whose open
 /// folder contains it, else the focused window as a plain tab. `None` means
-/// no window is open (a new empty window gets it; follow-up in #160).
-/// Parent folders are never opened for a file.
+/// no window is open — [`route_forwarded`] then opens a new empty window
+/// with just that file. Parent folders are never opened for a file.
 pub fn decide_file(reg: &Registry, focused: Option<&str>, file: &str) -> Option<String> {
     reg.window_for_local_path(file)
         .or_else(|| focused.map(str::to_string))
@@ -407,8 +419,23 @@ mod tests {
 
     #[test]
     fn a_file_with_no_window_open_has_no_target() {
+        // decide_file returns None; route_forwarded opens a new empty window.
         let r = Registry::default();
         assert_eq!(decide_file(&r, None, "/p/a/x.md"), None);
+    }
+
+    #[test]
+    fn opened_and_single_instance_share_decide_file() {
+        // #160 decision 4: RunEvent::Opened and the single-instance forward
+        // must land in the same window. Both call route_forwarded → decide_file
+        // (see main.rs source test); this locks the pure rule they share.
+        let r = reg_with(&[("w-1", Some("/p/a")), ("w-2", Some("/p/b"))]);
+        let via_open = decide_file(&r, Some("w-2"), "/p/a/notes.md");
+        let via_si = decide_file(&r, Some("w-2"), "/p/a/notes.md");
+        assert_eq!(via_open.as_deref(), Some("w-1"));
+        assert_eq!(via_open, via_si);
+        let outside = decide_file(&r, Some("w-2"), "/elsewhere/z.md");
+        assert_eq!(outside.as_deref(), Some("w-2"));
     }
 
     #[test]

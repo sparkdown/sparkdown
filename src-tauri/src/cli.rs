@@ -27,6 +27,7 @@ pub fn cli_info(first_arg: Option<&str>) -> Option<String> {
              sparkdown --new-window FOLDER  open FOLDER in a new window (focuses it if already open)\n  \
              sparkdown -- PATH...         treat every following argument as a path\n  \
              sparkdown --mcp-stdio        run the stdio MCP bridge for agent CLIs\n  \
+             sparkdown --wait             keep the terminal until the app quits\n  \
              sparkdown --version, -V      print the version and exit\n  \
              sparkdown --help, -h         print this help and exit\n"
         )),
@@ -55,6 +56,35 @@ pub fn wants_new_window(argv: &[String]) -> bool {
         .skip(1)
         .take_while(|a| a.as_str() != END_OF_FLAGS)
         .any(|a| a == NEW_WINDOW_FLAG)
+}
+
+/// Keeps the launching process in the foreground (#160 decision 1).
+pub const WAIT_FLAG: &str = "--wait";
+
+/// Env set on the detached child so it does not detach again.
+pub const DETACHED_ENV: &str = "SPARKDOWN_DETACHED";
+
+/// Env set by the Windows console shim so the GUI skips its own detach.
+pub const FROM_SHIM_ENV: &str = "SPARKDOWN_FROM_SHIM";
+
+/// True when `--wait` appears before any `--`.
+pub fn wants_wait(argv: &[String]) -> bool {
+    argv.iter()
+        .skip(1)
+        .take_while(|a| a.as_str() != END_OF_FLAGS)
+        .any(|a| a == WAIT_FLAG)
+}
+
+/// Detach on first launch unless `--wait`, already detached, or launched by
+/// the Windows shim (#160 decision 1).
+pub fn should_detach(argv: &[String]) -> bool {
+    // Debug/`cargo run`: stay attached so logs stay in the terminal.
+    if cfg!(debug_assertions) {
+        return false;
+    }
+    !wants_wait(argv)
+        && std::env::var_os(DETACHED_ENV).is_none()
+        && std::env::var_os(FROM_SHIM_ENV).is_none()
 }
 
 /// Trim trailing separators; keep a root a root (`/`, `C:\`).
@@ -135,6 +165,23 @@ mod tests {
             "--new-window"
         ])));
         assert!(!wants_new_window(&argv(&["sparkdown", "a"])));
+    }
+
+    #[test]
+    fn wait_flag_only_counts_before_end_of_flags() {
+        assert!(wants_wait(&argv(&["sparkdown", "--wait"])));
+        assert!(wants_wait(&argv(&["sparkdown", "a", "--wait"])));
+        assert!(!wants_wait(&argv(&["sparkdown", "--", "--wait"])));
+        assert!(!wants_wait(&argv(&["sparkdown", "a"])));
+        let help = cli_info(Some("--help")).unwrap();
+        assert!(help.contains("--wait"), "{help}");
+    }
+
+    #[test]
+    fn should_detach_respects_wait_and_env() {
+        // Env is process-global; only assert the --wait side here.
+        assert!(!should_detach(&argv(&["sparkdown", "--wait"])));
+        assert!(!should_detach(&argv(&["sparkdown", "a", "--wait"])));
     }
 
     #[cfg(unix)]

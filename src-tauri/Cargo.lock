@@ -3747,6 +3747,7 @@ dependencies = [
  "arboard",
  "base64 0.23.1",
  "interprocess",
+ "libc",
  "minisign",
  "minisign-verify",
  "notify",

@@ -107,3 +107,119 @@ Function SdRecoverPreviousInstallDir
   Pop $R1
   Pop $R0
 FunctionEnd
+
+
+; ---------------------------------------------------------------------------
+; #160: add sparkdown to the user PATH (on by default), remove on uninstall.
+; UI installs: Finish-page checkbox (MUI_FINISHPAGE_SHOWREADME), checked by
+; default. Silent (/S): added automatically unless /SDNOPATH is passed.
+; The console shim ships as $INSTDIR\sparkdown-shim.exe (externalBin). We copy
+; it to $INSTDIR\bin\sparkdown.exe and put $INSTDIR\bin on PATH — not $INSTDIR
+; itself — because Windows is case-insensitive and SparkDown.exe would collide
+; with sparkdown.exe in the same folder.
+; Uses ${StrLoc} (initialized by Tauri's installer.nsi before hooks).
+; ---------------------------------------------------------------------------
+
+!define MUI_FINISHPAGE_SHOWREADME ""
+!define MUI_FINISHPAGE_SHOWREADME_TEXT "Add 'sparkdown' to the user PATH (recommended)"
+!define MUI_FINISHPAGE_SHOWREADME_FUNCTION SdFinishAddPath
+
+Var SdOldPath
+Var SdNewPath
+Var SdPathNeedle
+Var SdPathIdx
+Var SdPathLeft
+Var SdPathRight
+Var SdPathLen
+
+!define SD_PATH_REGKEY "Environment"
+!define SD_PATH_BIN "$INSTDIR\bin"
+
+Function SdInstallPathShim
+  ; Place a case-safe sparkdown.exe on PATH ($INSTDIR\bin), sourced from the
+  ; distinctly named externalBin next to the GUI.
+  CreateDirectory "${SD_PATH_BIN}"
+  IfFileExists "$INSTDIR\sparkdown-shim.exe" 0 sd_shim_missing
+    CopyFiles /SILENT "$INSTDIR\sparkdown-shim.exe" "${SD_PATH_BIN}\sparkdown.exe"
+    Return
+  sd_shim_missing:
+    DetailPrint "sparkdown-shim.exe missing; PATH entry skipped"
+FunctionEnd
+
+Function SdFinishAddPath
+  Call SdInstallPathShim
+  Call SdAppendUserPath
+FunctionEnd
+
+Function SdAppendUserPath
+  StrCpy $SdPathNeedle "${SD_PATH_BIN}"
+  ReadRegStr $SdOldPath HKCU "${SD_PATH_REGKEY}" "Path"
+  ; Already present? Search ;path; form.
+  StrCpy $0 ";$SdOldPath;"
+  ${StrLoc} $SdPathIdx "$0" ";$SdPathNeedle;" ">"
+  ${If} $SdPathIdx != ""
+    Return
+  ${EndIf}
+  ${If} $SdOldPath == ""
+    StrCpy $SdNewPath "$SdPathNeedle"
+  ${Else}
+    StrCpy $SdNewPath "$SdOldPath;$SdPathNeedle"
+  ${EndIf}
+  WriteRegExpandStr HKCU "${SD_PATH_REGKEY}" "Path" "$SdNewPath"
+  WriteRegStr HKCU "${SD_UNINSTKEY}" "SdPathDir" "$SdPathNeedle"
+  System::Call 'user32::SendMessageTimeout(i 0xffff, i 0x1A, i 0, t "Environment", i 0, i 5000, *i .r0)'
+FunctionEnd
+
+Function SdRemoveUserPath
+  ReadRegStr $SdPathNeedle HKCU "${SD_UNINSTKEY}" "SdPathDir"
+  ${If} $SdPathNeedle == ""
+    Return
+  ${EndIf}
+  ReadRegStr $SdOldPath HKCU "${SD_PATH_REGKEY}" "Path"
+  ${If} $SdOldPath == $SdPathNeedle
+    StrCpy $SdNewPath ""
+  ${Else}
+    ; Prefer removing ";dir" then "dir;" then bare "dir".
+    StrCpy $SdNewPath "$SdOldPath"
+    StrCpy $0 ";$SdPathNeedle"
+    ${StrLoc} $SdPathIdx "$SdNewPath" "$0" ">"
+    ${If} $SdPathIdx != ""
+      StrLen $SdPathLen "$0"
+      StrCpy $SdPathLeft "$SdNewPath" $SdPathIdx
+      IntOp $SdPathIdx $SdPathIdx + $SdPathLen
+      StrCpy $SdPathRight "$SdNewPath" "" $SdPathIdx
+      StrCpy $SdNewPath "$SdPathLeft$SdPathRight"
+    ${Else}
+      StrCpy $0 "$SdPathNeedle;"
+      ${StrLoc} $SdPathIdx "$SdNewPath" "$0" ">"
+      ${If} $SdPathIdx != ""
+        StrLen $SdPathLen "$0"
+        StrCpy $SdPathLeft "$SdNewPath" $SdPathIdx
+        IntOp $SdPathIdx $SdPathIdx + $SdPathLen
+        StrCpy $SdPathRight "$SdNewPath" "" $SdPathIdx
+        StrCpy $SdNewPath "$SdPathLeft$SdPathRight"
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+  WriteRegExpandStr HKCU "${SD_PATH_REGKEY}" "Path" "$SdNewPath"
+  DeleteRegValue HKCU "${SD_UNINSTKEY}" "SdPathDir"
+  System::Call 'user32::SendMessageTimeout(i 0xffff, i 0x1A, i 0, t "Environment", i 0, i 5000, *i .r0)'
+FunctionEnd
+
+!macro NSIS_HOOK_POSTINSTALL
+  ; Always stage bin\sparkdown.exe when the shim is present (even if PATH is
+  ; opted out — a later Repair / Finish check can still add PATH).
+  Call SdInstallPathShim
+  ; Silent installs have no Finish page: honour default-on unless /SDNOPATH.
+  IfSilent 0 sd_path_done
+    ClearErrors
+    ${GetParameters} $0
+    ${GetOptions} $0 "/SDNOPATH" $1
+    IfErrors 0 sd_path_done
+      Call SdAppendUserPath
+  sd_path_done:
+!macroend
+
+!macro NSIS_HOOK_PREUNINSTALL
+  Call SdRemoveUserPath
+!macroend
