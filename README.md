@@ -4,7 +4,7 @@
 
 A small markdown editor for you and your coding agents.
 
-Open the folder an agent works in, run the agent in the built-in terminal, and review what it changes: files update live, and the Changes view is a review queue with a diff that hides the noise. Built with [Tauri 2](https://tauri.app/) (Rust backend, the OS webview, no Electron). The macOS app is 4.2 MB installed (3 MB DMG), for Apple Silicon.
+Open the folder an agent works in, run the agent in the built-in terminal, and review what it changes: files update live, and the Changes view is a review queue with a diff that hides the noise. Built with [Tauri 2](https://tauri.app/) (Rust backend, the OS webview, no Electron). The macOS DMG is about 3.7 MB, for Apple Silicon.
 
 SparkDown is local-first and works with any agent CLI. It never hosts your files and never calls a vendor API: it watches the filesystem and runs `git`. No account, no telemetry: the only request it makes on its own is an update check on GitHub, at most once a day, with no identifier (see [Updates](#updates) to turn it off).
 
@@ -94,7 +94,13 @@ In the Changes list: `↑`/`↓` (or `j`/`k`) move, `Space` toggles reviewed, `E
 
 ## Install
 
-**macOS** (Apple Silicon, macOS 10.15+): download the DMG from [Releases](https://github.com/sparkdown/sparkdown/releases). On first launch, right-click the app → **Open** to clear Gatekeeper (the build is not notarized yet).
+**macOS** (Apple Silicon, macOS 10.15+): download the DMG from [Releases](https://github.com/sparkdown/sparkdown/releases), or install with Homebrew:
+
+```bash
+brew install --cask sparkdown/tap/sparkdown
+```
+
+On first launch, right-click the app → **Open** to clear Gatekeeper (the build is not notarized yet).
 
 **Linux / Omarchy**: see [docs/omarchy.md](docs/omarchy.md). In short, install from the `.deb`, not the AppImage:
 
@@ -236,7 +242,7 @@ Platform notes: [docs/omarchy.md](docs/omarchy.md) (Linux), [docs/windows.md](do
 
 | App | macOS bundle |
 | --- | --- |
-| SparkDown | 4.2 MB |
+| SparkDown | ~3.7 MB (DMG) |
 | Typora | ~80 MB |
 | VS Code | ~300 MB |
 
