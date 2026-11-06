@@ -1,5 +1,6 @@
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { SearchAddon, type ISearchOptions } from '@xterm/addon-search';
 import { listen, type UnlistenFn } from './window-events';
 import { ask } from '@tauri-apps/plugin-dialog';
 import { api, type RemoteSession } from './api';
@@ -26,6 +27,9 @@ import {
   type SplitDir,
 } from './split-layout';
 import type { TerminalLayout } from './types/TerminalLayout';
+import { isSafeHttpUrl, linksForBufferRow } from './terminal-links';
+import { TerminalSearch, type TerminalSearchTarget } from './terminal-search';
+import { TERMINAL_SCROLLBACK_DEFAULT, clampScrollback } from './terminal-scrollback';
 
 // Keep in sync with --font-mono in themes.css. xterm measures cells in
 // JS/canvas and needs a LITERAL font stack (a `var(--…)` never resolves).
@@ -92,11 +96,30 @@ export async function pasteOrCtrlV(
 /** Quiet time after the last container resize before a pane refits. */
 export const REFIT_DEBOUNCE_MS = 40;
 
-// Matches path-like tokens in terminal output: an optional ./ or a bare
-// dotted/slashed path ending in a file extension (or a src-style path). Kept
-// conservative to avoid turning ordinary prose into links.
-const PATH_RE =
-  /(?:\.\/)?(?:[\w.-]+\/)+[\w.-]+\.[A-Za-z0-9]+|(?:\.\/)?[\w.-]+\.[A-Za-z0-9]{1,8}/g;
+/** Most matches the find bar highlights (and counts exactly) per search. */
+export const TERMINAL_SEARCH_HIGHLIGHT_LIMIT = 1000;
+
+/** Find-match colours; the addon requires #RRGGBB backgrounds. */
+const SEARCH_DECORATIONS = {
+  dark: {
+    matchBackground: '#4b4122',
+    matchOverviewRuler: '#d8c89a',
+    activeMatchBackground: '#8a5a1c',
+    activeMatchColorOverviewRuler: '#ff9632',
+  },
+  light: {
+    matchBackground: '#f5e7a6',
+    matchOverviewRuler: '#8a6d1b',
+    activeMatchBackground: '#ffb870',
+    activeMatchColorOverviewRuler: '#c0392b',
+  },
+} satisfies Record<'dark' | 'light', NonNullable<ISearchOptions['decorations']>>;
+
+/** Open a terminal URL in the system browser; http/https only. */
+function openTerminalUrl(url: string): void {
+  if (!isSafeHttpUrl(url)) return;
+  void api.openExternal(url).catch((err) => console.error('Failed to open link:', err));
+}
 
 /**
  * One embedded terminal pane: an xterm.js view over a
@@ -108,6 +131,9 @@ export class TerminalPane {
   readonly id: string;
   private term: XTerm;
   private fit = new FitAddon();
+  private search = new SearchAddon({ highlightLimit: TERMINAL_SEARCH_HIGHLIGHT_LIMIT });
+  /** Find-bar listener for match index/count (null while the bar is closed). */
+  private onSearchResults: ((index: number, count: number) => void) | null = null;
   private unlisteners: UnlistenFn[] = [];
   private started = false;
   private exited = false;
@@ -138,6 +164,7 @@ export class TerminalPane {
     id: string,
     onOpenPath: (path: string) => void,
     onAction: ((action: TerminalPaneAction) => void) | null = null,
+    scrollback = TERMINAL_SCROLLBACK_DEFAULT,
   ) {
     this.id = id;
     this.onOpenPath = onOpenPath;
@@ -152,9 +179,17 @@ export class TerminalPane {
       // underscore bug was tmux running without a UTF-8 locale; see terminal.rs.)
       lineHeight: 1,
       allowProposedApi: true,
-      scrollback: 5000,
+      scrollback: clampScrollback(scrollback),
+      // OSC 8 hyperlinks: same http/https-only rule as detected URLs, never
+      // xterm's default confirm() + window.open inside the webview.
+      linkHandler: {
+        activate: (_e, uri) => openTerminalUrl(uri),
+        allowNonHttpProtocols: false,
+      },
     });
     this.term.loadAddon(this.fit);
+    this.term.loadAddon(this.search);
+    this.search.onDidChangeResults((r) => this.onSearchResults?.(r.resultIndex, r.resultCount));
 
     // Clipboard: xterm has no built-in copy/paste keys, and the Tauri webview
     // does not route ⌘C/⌘V to the terminal on its own. Copy goes through the
@@ -205,33 +240,53 @@ export class TerminalPane {
   }
 
   /**
-   * Detect file-path tokens in a rendered terminal line and expose them as
-   * clickable links (agent output like "Edited src/app.ts" → open it).
+   * Expose http(s) URLs and file-path tokens in terminal output as clickable
+   * links ("Edited src/app.ts" opens the file; a URL opens the browser).
+   * Matching spans soft-wrapped rows; a URL wins over any path inside it.
    * Uses xterm's built-in link-provider API — no extra addon/dependency.
    */
-  private registerPathLinks(): void {
+  private registerLinks(): void {
     this.term.registerLinkProvider({
-      provideLinks: (lineNumber, callback) => {
-        const line = this.term.buffer.active.getLine(lineNumber);
-        if (!line) return callback(undefined);
-        const text = line.translateToString(true);
-        const links = [];
-        for (const m of text.matchAll(PATH_RE)) {
-          if (m.index === undefined) continue;
-          const raw = m[0];
-          links.push({
-            // xterm ranges are 1-based, end inclusive.
-            range: {
-              start: { x: m.index + 1, y: lineNumber + 1 },
-              end: { x: m.index + raw.length, y: lineNumber + 1 },
+      // xterm passes a 1-based buffer row; getLine() is 0-based.
+      provideLinks: (bufferLineNumber, callback) => {
+        const links = linksForBufferRow(this.term.buffer.active, bufferLineNumber - 1).map(
+          (m) => ({
+            range: m.range,
+            text: m.text,
+            activate: (e: MouseEvent) => {
+              if (e.button !== 0) return;
+              if (m.kind === 'url') openTerminalUrl(m.text);
+              else this.onOpenPath(m.text);
             },
-            text: raw,
-            activate: () => this.onOpenPath(raw),
-          });
-        }
+          }),
+        );
         callback(links.length ? links : undefined);
       },
     });
+  }
+
+  /** Lines kept above the viewport; clamped to the allowed range. */
+  setScrollback(lines: number): void {
+    this.term.options.scrollback = clampScrollback(lines);
+  }
+
+  /** The find-bar target for this pane (xterm SearchAddon). */
+  searchTarget(): TerminalSearchTarget {
+    const decorations = () =>
+      SEARCH_DECORATIONS[document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'];
+    return {
+      findNext: (term, opts) => this.search.findNext(term, { ...opts, decorations: decorations() }),
+      findPrevious: (term, opts) =>
+        this.search.findPrevious(term, { ...opts, decorations: decorations() }),
+      clearSearch: () => {
+        this.search.clearDecorations();
+        this.term.clearSelection();
+      },
+      onResults: (cb) => {
+        this.onSearchResults = cb;
+      },
+      focusTerminal: () => this.focus(),
+    };
   }
 
   /** Notify the manager when this terminal's shell exits (to update the tab). */
@@ -281,7 +336,7 @@ export class TerminalPane {
     // embedded editor terminal and fast enough; dropping the addon also trims
     // the bundle.
 
-    this.registerPathLinks();
+    this.registerLinks();
 
     try {
       await document.fonts.ready;
@@ -835,6 +890,10 @@ export class TerminalManager {
    *  and no reattach is attempted. Takes effect for terminals opened after the
    *  change; existing panes keep their current backing. */
   private useTmux = true;
+  /** Scrollback lines per pane (user setting, clamped). Applies live. */
+  private scrollback = TERMINAL_SCROLLBACK_DEFAULT;
+  /** Each pane's find bar, built on first use and mounted in its card. */
+  private searches = new Map<string, TerminalSearch>();
   /** Login shell name ("zsh"/"bash"), resolved once for pane names. */
   private shellName = '';
   private store: LayoutStore | null = null;
@@ -1165,8 +1224,11 @@ export class TerminalManager {
     launch: string | null,
   ): { id: string; pane: TerminalPane; start: () => Promise<void> } {
     const id = `term-${++this.seq}`;
-    const pane = new TerminalPane(id, this.onOpenPath, (action) =>
-      this.onPaneAction(id, action),
+    const pane = new TerminalPane(
+      id,
+      this.onOpenPath,
+      (action) => this.onPaneAction(id, action),
+      this.scrollback,
     );
     this.panes.set(id, pane);
     this.meta.set(id, meta);
@@ -1213,6 +1275,8 @@ export class TerminalManager {
     const idx = order.indexOf(id);
     this.panes.delete(id);
     this.meta.delete(id);
+    this.searches.get(id)?.dispose();
+    this.searches.delete(id);
     this.cards.get(id)?.remove();
     this.cards.delete(id);
     const session = pane.sessionName;
@@ -1348,7 +1412,32 @@ export class TerminalManager {
       case 'focus-prev':
         this.focusNeighbor(-1);
         break;
+      case 'find':
+        this.openFind(id);
+        break;
     }
+  }
+
+  /** Open (or re-focus) the find bar on pane `id`, default the focused one.
+   *  Returns false when there is no pane to search. */
+  openFind(id: string | null = this.focusedId): boolean {
+    const pane = id ? this.panes.get(id) : undefined;
+    const body = id ? this.cards.get(id)?.querySelector<HTMLElement>('.terminal-pane-body') : null;
+    if (!id || !pane || !body) return false;
+    this.setFocused(id);
+    let search = this.searches.get(id);
+    if (!search) {
+      search = new TerminalSearch(body);
+      this.searches.set(id, search);
+    }
+    search.open(pane.searchTarget());
+    return true;
+  }
+
+  /** Scrollback lines for every pane (clamped); existing panes update live. */
+  setScrollback(lines: number): void {
+    this.scrollback = clampScrollback(lines);
+    for (const p of this.panes.values()) p.setScrollback(this.scrollback);
   }
 
   private setFocused(id: string): void {

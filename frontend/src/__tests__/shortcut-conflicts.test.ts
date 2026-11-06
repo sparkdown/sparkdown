@@ -21,18 +21,26 @@ function setPlatform(p: string): void {
 /** Deliberate shares: one key, two rows that are really one gesture. */
 const ALLOWED: Record<keyof typeof PLATFORMS, string[][]> = {
   // ⌘W closes the focused pane when a terminal has focus, else the tab.
-  macOS: [['Close Pane (asks if a program is running)', 'Close Tab']],
+  // ⌘F likewise opens the focused terminal's find bar, else the editor's.
+  macOS: [
+    ['Close Pane (asks if a program is running)', 'Close Tab'],
+    ['Find', 'Find in Terminal'],
+  ],
   // Ctrl+W closes the tab from the editor and deletes a word in a shell.
   // Ctrl+Shift+E is Split Down only in a focused terminal (documented in the
   // README as terminal-scoped); elsewhere it shows Files. Kept as before
   // pending a product call; remove the entry if Split Down gets its own key.
+  // Ctrl+Shift+F is Find in Terminal the same way (Windows Terminal's key;
+  // plain Ctrl+F stays the shell's forward-char), else Search in Files.
   Windows: [
     ['Close Tab', 'Delete Word (in the shell)'],
     ['Files', 'Split Down'],
+    ['Find in Terminal', 'Search in Files'],
   ],
   Linux: [
     ['Close Tab', 'Delete Word (in the shell)'],
     ['Files', 'Split Down'],
+    ['Find in Terminal', 'Search in Files'],
   ],
 };
 

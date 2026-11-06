@@ -36,6 +36,7 @@ vi.mock('../terminal', () => ({
   TerminalManager: class {
     setCwd() {}
     setUseTmux() {}
+    setScrollback() {}
     setAgentArgs() {}
     setOnEmpty() {}
     setOnTerminalsOnly() {}
@@ -2706,6 +2707,11 @@ describe('App integration', () => {
       const ev = new KeyboardEvent('keydown', { key: 'E', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true });
       pane.dispatchEvent(ev);
       expect(ev.defaultPrevented).toBe(false);
+      expect(pressed('act-changes')).toBe('true');
+      // Ctrl+Shift+F there is "find in terminal", not Search in Files.
+      const find = new KeyboardEvent('keydown', { key: 'F', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true });
+      pane.dispatchEvent(find);
+      expect(find.defaultPrevented).toBe(false);
       expect(pressed('act-changes')).toBe('true');
       pane.remove();
       ctrlShift('E'); // outside a terminal it opens Files again

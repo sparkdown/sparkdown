@@ -41,6 +41,7 @@ import { api, type AppConfig, type FsChange } from './api';
 import { ACTIONS, EVENTS } from './event-names';
 import { initPerfTrace, span } from './perf-trace';
 import { GitFeedback } from './git-output';
+import { TERMINAL_SCROLLBACK_DEFAULT } from './terminal-scrollback';
 
 const DEFAULT_CONFIG: AppConfig = {
   theme: 'system',
@@ -58,6 +59,7 @@ const DEFAULT_CONFIG: AppConfig = {
   show_hidden_files: false,
   enable_diagrams: true,
   use_tmux: true,
+  terminal_scrollback: TERMINAL_SCROLLBACK_DEFAULT,
   agent_context_enabled: true,
   agent_args: {},
   check_updates_automatically: true,
@@ -832,6 +834,7 @@ export class App {
         show_hidden_files: this.fileTree.isShowHidden(),
         enable_diagrams: this.config.enable_diagrams,
         use_tmux: this.config.use_tmux,
+        terminal_scrollback: this.config.terminal_scrollback ?? TERMINAL_SCROLLBACK_DEFAULT,
         agent_context_enabled: this.config.agent_context_enabled,
         agent_args: this.config.agent_args ?? {},
         check_updates_automatically: this.config.check_updates_automatically ?? true,

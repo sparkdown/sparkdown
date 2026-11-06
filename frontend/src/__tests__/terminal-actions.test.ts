@@ -13,18 +13,21 @@ function targets(terminalFocused: boolean) {
     closeTerminalPane: vi.fn(),
     focusTerminalPane: vi.fn((_d: 1 | -1) => {}),
     hasTerminalFocus: vi.fn(() => terminalFocused),
+    openTerminalFind: vi.fn(() => true),
   };
+  const panes = { openFind: vi.fn() };
   const tabs = { closeCurrent: vi.fn(), switchNext: vi.fn(), switchPrev: vi.fn() };
   const bus = new EventBus();
   const t = {
     bus,
     tabs,
     cockpit,
+    panes,
     listenTauri: (event: string, h: (e?: unknown) => void) => handlers.set(event, h),
   } as unknown as ActionTargets;
   registerMenuListeners(t);
   registerActionListeners(t);
-  return { bus, cockpit, tabs, fire: (event: string) => handlers.get(event)!() };
+  return { bus, cockpit, tabs, panes, fire: (event: string) => handlers.get(event)!() };
 }
 
 describe('terminal actions', () => {
@@ -53,5 +56,25 @@ describe('terminal actions', () => {
     expect(cockpit.splitTerminal.mock.calls).toEqual([['right'], ['down']]);
     expect(cockpit.closeTerminalPane).toHaveBeenCalledTimes(1);
     expect(cockpit.focusTerminalPane.mock.calls).toEqual([[1], [-1]]);
+  });
+
+  it('Find (menu ⌘F and shortcut) opens the terminal find bar when a terminal has focus', () => {
+    const { bus, cockpit, panes, fire } = targets(true);
+    fire(MENU.FIND);
+    bus.emit(ACTIONS.FIND);
+    expect(cockpit.openTerminalFind).toHaveBeenCalledTimes(2);
+    expect(panes.openFind).not.toHaveBeenCalled();
+  });
+
+  it('Find goes to the editor / preview otherwise, or when no pane can search', () => {
+    const { cockpit, panes, fire } = targets(false);
+    fire(MENU.FIND);
+    expect(cockpit.openTerminalFind).not.toHaveBeenCalled();
+    expect(panes.openFind).toHaveBeenCalledTimes(1);
+
+    const focused = targets(true);
+    focused.cockpit.openTerminalFind.mockReturnValue(false);
+    focused.fire(MENU.FIND);
+    expect(focused.panes.openFind).toHaveBeenCalledTimes(1);
   });
 });

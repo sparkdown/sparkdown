@@ -54,6 +54,12 @@ default_view_mode: DefaultViewMode | null, word_wrap: boolean, show_hidden_files
  */
 use_tmux: boolean, 
 /**
+ * Lines each embedded terminal keeps above the viewport. The frontend
+ * clamps it to 200..=50000 (frontend/src/terminal-scrollback.ts) so a
+ * hand-edited value can neither disable history nor exhaust memory.
+ */
+terminal_scrollback: number, 
+/**
  * Agent context bridge: mirror what the user is viewing (and the live
  * text of unsaved buffers) into a per-workspace temp dir that agents in
  * the embedded terminal read via $SPARKDOWN_CONTEXT. On by default; off

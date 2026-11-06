@@ -38,6 +38,7 @@ const api = vi.hoisted(() => ({
   mcpAgentInstalled: vi.fn(async (_bin: string) => false),
   mcpInstallAgent: vi.fn(async (_bin: string) => 'Installed'),
   copyText: vi.fn(async (_text: string) => {}),
+  openExternal: vi.fn(async (_url: string) => {}),
   readClipboardText: vi.fn(async () => 'pasted text'),
   remoteSession: vi.fn(
     async () => null as { host: string; path: string; home: string } | null,
@@ -67,6 +68,17 @@ const terms = vi.hoisted(() => ({
     keyHandler: ((e: KeyboardEvent) => boolean) | null;
     dataHandler: ((d: string) => void) | null;
     selection: string;
+    options: Record<string, unknown>;
+    linkProviders: { provideLinks(y: number, cb: (links: unknown) => void): void }[];
+    rows_: string[];
+  }[],
+}));
+
+/** Every SearchAddon created: calls made and a hook to fire result events. */
+const searches = vi.hoisted(() => ({
+  all: [] as {
+    calls: Array<[string, string, Record<string, unknown> | undefined]>;
+    fire: (index: number, count: number) => void;
   }[],
 }));
 
@@ -90,6 +102,34 @@ vi.mock('@tauri-apps/api/event', () => ({
   },
 }));
 
+vi.mock('@xterm/addon-search', () => ({
+  SearchAddon: class {
+    calls: Array<[string, string, Record<string, unknown> | undefined]> = [];
+    private listener: ((r: { resultIndex: number; resultCount: number }) => void) | null = null;
+    constructor() {
+      searches.all.push(this);
+    }
+    fire(resultIndex: number, resultCount: number) {
+      this.listener?.({ resultIndex, resultCount });
+    }
+    onDidChangeResults(l: (r: { resultIndex: number; resultCount: number }) => void) {
+      this.listener = l;
+      return { dispose() {} };
+    }
+    findNext(term: string, opts?: Record<string, unknown>) {
+      this.calls.push(['next', term, opts]);
+      return true;
+    }
+    findPrevious(term: string, opts?: Record<string, unknown>) {
+      this.calls.push(['prev', term, opts]);
+      return true;
+    }
+    clearDecorations() {
+      this.calls.push(['clear', '', undefined]);
+    }
+  },
+}));
+
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class {
     fit() {}
@@ -102,18 +142,31 @@ vi.mock('@xterm/xterm', () => ({
     cols = 80;
     rows = 24;
     element: HTMLElement | null = null;
-    buffer = { active: { getLine: () => null } };
+    rows_: string[] = [];
+    buffer = {
+      active: {
+        getLine: (y: number) => {
+          const text = this.rows_[y];
+          return text === undefined
+            ? undefined
+            : { isWrapped: false, translateToString: () => text };
+        },
+      },
+    };
     keyHandler: ((e: KeyboardEvent) => boolean) | null = null;
     dataHandler: ((d: string) => void) | null = null;
     selection = '';
-    constructor() {
+    linkProviders: { provideLinks(y: number, cb: (links: unknown) => void): void }[] = [];
+    constructor(opts: Record<string, unknown> = {}) {
+      this.options = { ...opts };
       terms.all.push(this);
     }
     loadAddon() {}
     attachCustomKeyEventHandler(h: (e: KeyboardEvent) => boolean) {
       this.keyHandler = h;
     }
-    registerLinkProvider() {
+    registerLinkProvider(p: { provideLinks(y: number, cb: (links: unknown) => void): void }) {
+      this.linkProviders.push(p);
       return { dispose() {} };
     }
     open(container: HTMLElement) {
@@ -165,6 +218,7 @@ beforeEach(() => {
   document.body.innerHTML = '';
   bus.handlers.clear();
   terms.all = [];
+  searches.all = [];
   observers.callbacks = [];
   for (const fn of Object.values(api)) fn.mockClear();
   api.terminalStart.mockImplementation(async (_i, _c, _w, _h, session) =>
@@ -1311,5 +1365,148 @@ describe('TerminalManager MCP install prompt at launch', () => {
     await flush();
     expect(api.mcpInstallAgent).toHaveBeenCalledWith('cursor-agent');
     expect(launched()).toEqual(['cursor-agent']);
+  });
+});
+
+describe('TerminalPane links', () => {
+  type Link = { text: string; range: unknown; activate: (e: { button: number }) => void };
+  const linksAt = async (row: number): Promise<Link[]> => {
+    const t = terms.all[0]!;
+    return await new Promise((resolve) =>
+      t.linkProviders[0]!.provideLinks(row, (links) => resolve((links as Link[]) ?? [])),
+    );
+  };
+
+  it('xterm row y (1-based) reads buffer line y-1; URLs open externally, paths in the app', async () => {
+    const opened: string[] = [];
+    const host = document.createElement('div');
+    document.body.append(host);
+    const mgr = new TerminalManager(host, (p) => opened.push(p));
+    mgr.setCwd('/repo');
+    await mgr.addTerminal();
+    await flush();
+    terms.all[0]!.rows_ = ['Edited src/app.ts', 'docs: https://sparkdown.dev/a). done'];
+
+    const first = await linksAt(1);
+    expect(first.map((l) => l.text)).toEqual(['src/app.ts']);
+    first[0]!.activate({ button: 0 });
+    expect(opened).toEqual(['src/app.ts']);
+
+    const second = await linksAt(2);
+    expect(second.map((l) => l.text)).toEqual(['https://sparkdown.dev/a']);
+    second[0]!.activate({ button: 2 }); // not a primary click
+    expect(api.openExternal).not.toHaveBeenCalled();
+    second[0]!.activate({ button: 0 });
+    expect(api.openExternal).toHaveBeenCalledWith('https://sparkdown.dev/a');
+    expect(opened).toEqual(['src/app.ts']);
+  });
+
+  it('OSC 8 hyperlinks open only http(s), through the same guard', async () => {
+    const { mgr } = makeManager();
+    await mgr.addTerminal();
+    const handler = terms.all[0]!.options.linkHandler as {
+      activate: (e: unknown, uri: string) => void;
+      allowNonHttpProtocols: boolean;
+    };
+    expect(handler.allowNonHttpProtocols).toBe(false);
+    handler.activate({}, 'javascript:alert(1)');
+    handler.activate({}, 'file:///etc/passwd');
+    expect(api.openExternal).not.toHaveBeenCalled();
+    handler.activate({}, 'https://sparkdown.dev/');
+    expect(api.openExternal).toHaveBeenCalledWith('https://sparkdown.dev/');
+  });
+});
+
+describe('TerminalPane scrollback', () => {
+  it('new panes use the configured, clamped value; live panes update', async () => {
+    const { mgr } = makeManager();
+    mgr.setScrollback(12_345);
+    await mgr.addTerminal();
+    expect(terms.all[0]!.options.scrollback).toBe(12_345);
+    mgr.setScrollback(10_000_000);
+    expect(terms.all[0]!.options.scrollback).toBe(50_000);
+    mgr.setScrollback(0);
+    expect(terms.all[0]!.options.scrollback).toBe(200);
+    mgr.setScrollback(Number.NaN);
+    expect(terms.all[0]!.options.scrollback).toBe(5000);
+  });
+});
+
+describe('TerminalManager find', () => {
+  const input = (host: HTMLElement, id: string) =>
+    card(host, id).querySelector<HTMLInputElement>('.sd-find-terminal .sd-find-input')!;
+
+  it('the find key opens a bar on that pane and never reaches the shell or page', async () => {
+    const { mgr, host } = makeManager();
+    await mgr.addTerminal();
+    await mgr.splitFocused('row');
+    const ev = keydown({ key: 'F', ctrlKey: true, shiftKey: true });
+    expect(terms.all[0]!.keyHandler!(ev)).toBe(false);
+    expect(ev.stopPropagation).toHaveBeenCalled();
+    expect(mgr.active()?.id).toBe('term-1');
+    expect(input(host, 'term-1')).toBeTruthy();
+    expect(document.activeElement).toBe(input(host, 'term-1'));
+    expect(card(host, 'term-2').querySelector('.sd-find-terminal')).toBeNull();
+    // Plain Ctrl+F stays the shell's forward-char.
+    expect(terms.all[0]!.keyHandler!(keydown({ key: 'f', ctrlKey: true }))).toBe(true);
+  });
+
+  it('typing searches; Enter / Shift+Enter step; the count follows results', async () => {
+    const { mgr, host } = makeManager();
+    await mgr.addTerminal();
+    expect(mgr.openFind()).toBe(true);
+    const box = input(host, 'term-1');
+    const count = card(host, 'term-1').querySelector('.sd-find-count')!;
+    const addon = searches.all[0]!;
+    box.value = 'err';
+    box.dispatchEvent(new Event('input'));
+    expect(last(addon.calls)).toMatchObject(['next', 'err', { incremental: true }]);
+    expect((last(addon.calls)![2] as { decorations?: unknown }).decorations).toBeTruthy();
+    addon.fire(0, 3);
+    expect(count.textContent).toBe('1 of 3');
+
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true });
+    const docSpy = vi.fn();
+    document.addEventListener('keydown', docSpy);
+    box.dispatchEvent(enter);
+    box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }));
+    document.removeEventListener('keydown', docSpy);
+    expect(addon.calls.slice(-2).map((c) => c[0])).toEqual(['next', 'prev']);
+    expect(docSpy).not.toHaveBeenCalled();
+
+    addon.fire(-1, 1000);
+    expect(count.textContent).toBe('1000+');
+    addon.fire(-1, 0);
+    expect(count.textContent).toBe('No results');
+  });
+
+  it('Escape closes the bar, clears highlights and returns focus to the terminal', async () => {
+    const { mgr, host } = makeManager();
+    await mgr.addTerminal();
+    mgr.openFind();
+    const pane = mgr.active()!;
+    const focus = vi.spyOn(pane, 'focus');
+    const box = input(host, 'term-1');
+    const docSpy = vi.fn();
+    document.addEventListener('keydown', docSpy);
+    box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    document.removeEventListener('keydown', docSpy);
+    expect(docSpy).not.toHaveBeenCalled();
+    expect(card(host, 'term-1').querySelector<HTMLElement>('.sd-find-terminal')!.style.display).toBe(
+      'none',
+    );
+    expect(last(searches.all[0]!.calls)![0]).toBe('clear');
+    expect(focus).toHaveBeenCalled();
+  });
+
+  it('the bar survives a re-render and goes away with its pane', async () => {
+    const { mgr, host } = makeManager();
+    await mgr.addTerminal();
+    mgr.openFind();
+    await mgr.splitFocused('row');
+    expect(card(host, 'term-1').querySelector('.sd-find-terminal')).toBeTruthy();
+    mgr.closeTerminal('term-1');
+    expect(host.querySelector('.sd-find-terminal')).toBeNull();
+    expect(mgr.openFind('term-1')).toBe(false);
   });
 });
