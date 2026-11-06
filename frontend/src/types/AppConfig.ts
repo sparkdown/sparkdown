@@ -98,4 +98,11 @@ mcp_install_prompt_dismissed: Array<string>,
  * one window is open. On Windows this also opens a discoverable,
  * user-only pipe (after a restart).
  */
-mcp_external_agents: boolean, };
+mcp_external_agents: boolean, 
+/**
+ * Fetch the current branch's upstream quietly in the background (on
+ * window focus, every few minutes while focused, and after a rejected
+ * push) so the Pull behind count is current (#175). Local repos only;
+ * never prompts for credentials. On by default (Settings → Git).
+ */
+git_background_fetch: boolean, };

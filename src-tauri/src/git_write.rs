@@ -20,7 +20,7 @@
 //! Failures are typed ([`GitErrorKind`]) so the UI can say "no upstream",
 //! "sign in failed", "conflicts" or "push rejected" instead of echoing stderr.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -28,6 +28,8 @@ use std::time::{Duration, Instant};
 
 /// How long a network action (pull / push) may run before it is killed.
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
+/// A background fetch (#175) is quiet and must never hang around.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(45);
 /// Commit runs hooks and signing (a pinentry may wait for the user).
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -48,8 +50,15 @@ pub enum GitErrorKind {
     Auth,
     /// The remote couldn't be reached (DNS, connection refused, timeout).
     Network,
-    /// The pull stopped with merge (or rebase) conflicts.
+    /// The pull stopped with conflicts (generic: the kind of stop is
+    /// unknown, e.g. classified from output alone).
     Conflict,
+    /// Pull merged and stopped on conflicts: the repo is left mid-merge
+    /// (`MERGE_HEAD`), never auto-aborted (#174).
+    MergeConflict,
+    /// Pull rebased (the user's `pull.rebase`) and a commit stopped on
+    /// conflicts: the repo is left mid-rebase, never auto-aborted (#174).
+    RebaseConflict,
     /// Local changes would be overwritten by the pull.
     LocalChanges,
     /// The branch and its upstream have diverged and git needs a strategy.
@@ -70,6 +79,10 @@ pub enum GitErrorKind {
     Other,
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// A failed git action: a kind for the UI, a sentence to show, and git's own
 /// output for the "details" disclosure.
 #[derive(Serialize, Clone, Debug)]
@@ -77,6 +90,10 @@ pub struct GitActionError {
     pub kind: GitErrorKind,
     pub message: String,
     pub detail: String,
+    /// Repo-relative files the error is about (the conflicted files of a
+    /// merge / rebase conflict). Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
 }
 
 impl GitActionError {
@@ -85,6 +102,7 @@ impl GitActionError {
             kind,
             message: message.into(),
             detail: detail.into(),
+            files: Vec::new(),
         }
     }
 }
@@ -214,6 +232,25 @@ fn run_ok(
     }
 }
 
+/// Run git for machine-readable output (`-z` / porcelain): stdout exactly
+/// as git wrote it. Never trimmed (porcelain status codes start with a
+/// space, and file names may start or end with one) and never mixed with
+/// stderr.
+fn run_stdout_raw(
+    root: &Path,
+    extra: ExtraEnv,
+    args: &[&str],
+    timeout: Duration,
+    action: Action,
+) -> Result<String, GitActionError> {
+    let o = user_git(root, extra, args, timeout)?;
+    if o.status.success() {
+        Ok(String::from_utf8_lossy(&o.stdout).into_owned())
+    } else {
+        Err(classify(action, &text(&o)))
+    }
+}
+
 /// Run a quiet query; `None` on failure.
 fn query(root: &Path, extra: ExtraEnv, args: &[&str]) -> Option<String> {
     let o = user_git(root, extra, args, Duration::from_secs(20)).ok()?;
@@ -227,6 +264,7 @@ pub(crate) enum Action {
     Commit,
     Pull,
     Push,
+    Discard,
 }
 
 /// Map git's (C-locale) output to a typed error. Pure, unit-tested.
@@ -327,7 +365,7 @@ pub(crate) fn classify(action: Action, out: &str) -> GitActionError {
             "need to specify how to reconcile",
         ])
     {
-        (K::Diverged, "Your branch and its upstream have diverged, and git needs to know whether to merge or rebase (set pull.rebase). Pull in the terminal to choose.".to_string())
+        (K::Diverged, "Your branch and its upstream have diverged, and git couldn't reconcile them with your pull settings. Pull in the terminal to choose how to merge or rebase.".to_string())
     } else if action == Action::Push
         && has(&[
             "[rejected]",
@@ -344,11 +382,17 @@ pub(crate) fn classify(action: Action, out: &str) -> GitActionError {
             K::NoUpstream,
             "This branch has no upstream yet.".to_string(),
         )
+    } else if has(&["index.lock", "unable to create", "another git process"]) {
+        (
+            K::Other,
+            "Another git process is using this repository (its index is locked). Wait for it to finish, or remove a stale .git/index.lock, then try again.".to_string(),
+        )
     } else if has(&["hook", "husky"]) {
         let which = match action {
             Action::Commit => "commit",
             Action::Push => "push",
             Action::Pull => "pull",
+            Action::Discard => "discard",
         };
         (
             K::Hook,
@@ -363,11 +407,15 @@ pub(crate) fn classify(action: Action, out: &str) -> GitActionError {
     GitActionError::new(kind, message, out.to_string())
 }
 
-fn check_local(root: &str) -> Result<PathBuf, GitActionError> {
+/// Why Commit / Pull / Push are off in a remote session.
+const SYNC_UNSUPPORTED: &str =
+    "Commit, Pull and Push aren't available in remote sessions yet. Use the terminal.";
+
+fn check_local(root: &str, unsupported: &str) -> Result<PathBuf, GitActionError> {
     if crate::remote::is_active() {
         return Err(GitActionError::new(
             GitErrorKind::Unsupported,
-            "Commit, Pull and Push aren't available in remote sessions yet. Use the terminal.",
+            unsupported,
             "",
         ));
     }
@@ -475,7 +523,7 @@ pub(crate) fn commit_impl(
             "",
         ));
     }
-    let root = check_local(root)?;
+    let root = check_local(root, SYNC_UNSUPPORTED)?;
     let top = query(&root, extra, &["rev-parse", "--show-toplevel"])
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
@@ -566,13 +614,152 @@ fn count(root: &Path, extra: ExtraEnv, range: &str) -> Option<u32> {
         .ok()
 }
 
-/// Pull the current branch from its upstream with the user's own pull
-/// settings (merge / rebase / ff-only).
+/// How the user's config says Pull reconciles a diverged branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PullConfig {
+    /// `branch.<name>.rebase` or `pull.rebase`, whichever applies.
+    rebase: Option<String>,
+    /// `pull.ff`.
+    ff: Option<String>,
+}
+
+impl PullConfig {
+    fn read(root: &Path, extra: ExtraEnv, branch: &str) -> Self {
+        let get =
+            |key: &str| query(root, extra, &["config", "--get", key]).filter(|s| !s.is_empty());
+        PullConfig {
+            rebase: get(&format!("branch.{branch}.rebase")).or_else(|| get("pull.rebase")),
+            ff: get("pull.ff"),
+        }
+    }
+
+    /// No strategy configured in any scope: Pull merges (#174).
+    fn is_unset(&self) -> bool {
+        self.rebase.is_none() && self.ff.is_none()
+    }
+
+    fn ff_only(&self) -> bool {
+        self.ff.as_deref().map(str::to_lowercase).as_deref() == Some("only")
+    }
+}
+
+/// The `git pull` arguments for a config: `-c pull.rebase=false` only when
+/// the user set neither `pull.rebase` nor `pull.ff`, so their own
+/// `pull.rebase=true|merges|interactive` or `pull.ff=only` always wins.
+pub(crate) fn pull_args(cfg: &PullConfig) -> Vec<&'static str> {
+    if cfg.is_unset() {
+        vec!["-c", "pull.rebase=false", "pull", "--no-edit"]
+    } else {
+        vec!["pull", "--no-edit"]
+    }
+}
+
+/// Is a rebase stopped in this repo (`rebase-merge` / `rebase-apply`)?
+fn rebase_in_progress(root: &Path, extra: ExtraEnv) -> bool {
+    ["rebase-merge", "rebase-apply"].iter().any(|d| {
+        query(root, extra, &["rev-parse", "--git-path", d])
+            .map(|p| {
+                let p = PathBuf::from(p);
+                if p.is_absolute() { p } else { root.join(p) }.is_dir()
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Is a merge stopped in this repo (`MERGE_HEAD`)?
+fn merge_in_progress(root: &Path, extra: ExtraEnv) -> bool {
+    query(root, extra, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_some()
+}
+
+/// Unmerged (conflicted) paths, repo-relative to the top level.
+fn conflicted_files(root: &Path, extra: ExtraEnv) -> Vec<String> {
+    let raw = run_stdout_raw(
+        root,
+        extra,
+        &[
+            "-c",
+            "core.quotepath=false",
+            "diff",
+            "--name-only",
+            "--diff-filter=U",
+            "-z",
+        ],
+        Duration::from_secs(20),
+        Action::Pull,
+    )
+    .unwrap_or_default();
+    let mut files: Vec<String> = raw
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    files.dedup();
+    files
+}
+
+fn files_word(n: usize) -> String {
+    if n == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{n} files")
+    }
+}
+
+/// A pull that stopped on conflicts: tell a merge from a rebase by the repo
+/// state git left behind, and name the conflicted files. Nothing is aborted.
+fn conflict_error(root: &Path, extra: ExtraEnv, output: &str) -> GitActionError {
+    let files = conflicted_files(root, extra);
+    let n = files.len();
+    let rebase = rebase_in_progress(root, extra);
+    let (kind, message) = if rebase {
+        (
+            GitErrorKind::RebaseConflict,
+            if n > 0 {
+                format!("Pull stopped rebasing on conflicts in {}. Resolve them, stage them, then run git rebase --continue (or git rebase --abort) in the terminal.", files_word(n))
+            } else {
+                "Pull stopped rebasing on conflicts. Resolve them, then run git rebase --continue (or git rebase --abort) in the terminal.".to_string()
+            },
+        )
+    } else if merge_in_progress(root, extra) || n > 0 {
+        (
+            GitErrorKind::MergeConflict,
+            if n > 0 {
+                format!(
+                    "Pull stopped on merge conflicts in {}. Resolve them, then commit.",
+                    files_word(n)
+                )
+            } else {
+                "Pull stopped on merge conflicts. Resolve them, then commit.".to_string()
+            },
+        )
+    } else {
+        return classify(Action::Pull, output);
+    };
+    let mut detail = output.to_string();
+    if n > 0 {
+        detail.push_str("\n\nConflicted files:\n");
+        for f in &files {
+            detail.push_str("  ");
+            detail.push_str(f);
+            detail.push('\n');
+        }
+    }
+    let mut e = GitActionError::new(kind, message, detail.trim_end().to_string());
+    e.files = files;
+    e
+}
+
+/// Pull the current branch from its upstream. With no pull strategy
+/// configured anywhere, a diverged branch is merged (`pull.rebase=false`
+/// semantics, #174); otherwise the user's merge / rebase / ff-only setting
+/// is used as in their terminal. Conflicts leave the repo mid-merge or
+/// mid-rebase for the user to finish.
 pub(crate) fn pull_impl(root: &str, extra: ExtraEnv) -> ActionResult {
-    let root = check_local(root)?;
+    let root = check_local(root, SYNC_UNSUPPORTED)?;
     let up = upstream(&root, extra)?;
+    let cfg = PullConfig::read(&root, extra, &up.branch);
     let before = query(&root, extra, &["rev-parse", "--verify", "-q", "HEAD"]);
-    let o = user_git(&root, extra, &["pull", "--no-edit"], NETWORK_TIMEOUT)?;
+    let o = user_git(&root, extra, &pull_args(&cfg), NETWORK_TIMEOUT)?;
     let t = text(&o);
     if o.status.success() {
         let mut r = summary(t);
@@ -580,14 +767,34 @@ pub(crate) fn pull_impl(root: &str, extra: ExtraEnv) -> ActionResult {
         r.target = Some(target_name(&up));
         Ok(r)
     } else {
-        Err(classify(Action::Pull, &t))
+        let e = classify(Action::Pull, &t);
+        match e.kind {
+            GitErrorKind::Conflict => Err(conflict_error(&root, extra, &t)),
+            GitErrorKind::Diverged if cfg.ff_only() => Err(GitActionError::new(
+                GitErrorKind::Diverged,
+                format!(
+                    "Your branch and {} have diverged, and your git config (pull.ff=only) allows only fast-forward pulls, so nothing changed. Merge or rebase in the terminal.",
+                    target_name(&up)
+                ),
+                t,
+            )),
+            _ => {
+                // A rebase / merge that stopped on conflicts is reported the
+                // same way even when git's wording wasn't recognised.
+                if rebase_in_progress(&root, extra) || merge_in_progress(&root, extra) {
+                    Err(conflict_error(&root, extra, &t))
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 }
 
 /// Push the current branch to its upstream. Never forced: an explicit
 /// `HEAD:<merge ref>` refspec without `+`, so a non-fast-forward is rejected.
 pub(crate) fn push_impl(root: &str, extra: ExtraEnv) -> ActionResult {
-    let root = check_local(root)?;
+    let root = check_local(root, SYNC_UNSUPPORTED)?;
     let up = upstream(&root, extra)?;
     let refspec = format!("HEAD:{}", up.merge);
     debug_assert!(!refspec.starts_with('+'));
@@ -605,6 +812,641 @@ pub(crate) fn push_impl(root: &str, extra: ExtraEnv) -> ActionResult {
     r.commits = ahead;
     r.target = Some(target_name(&up));
     Ok(r)
+}
+
+/// Why the background fetch is off in a remote session.
+const FETCH_UNSUPPORTED: &str = "Background fetch is off in remote sessions.";
+
+/// What a background fetch did (#175).
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FetchOutcome {
+    /// The upstream remote was fetched; the tracking ref is current.
+    Fetched,
+    /// Another fetch for this window was still running; nothing was done.
+    Busy,
+}
+
+/// Quietly fetch the current branch's upstream remote so the behind count
+/// is current (#175). Local repos with an upstream only; no tags, no prune,
+/// no submodules. Never prompts: on top of the runner's
+/// `GIT_TERMINAL_PROMPT=0`, both askpass programs are blanked (git then
+/// uses none), so a remote that needs credentials just fails and the
+/// caller stays silent. Times out after [`FETCH_TIMEOUT`].
+pub(crate) fn fetch_impl(root: &str, extra: ExtraEnv) -> Result<FetchOutcome, GitActionError> {
+    let root = check_local(root, FETCH_UNSUPPORTED)?;
+    let up = upstream(&root, extra)?;
+    let mut env: Vec<(&str, &str)> = vec![("GIT_ASKPASS", ""), ("SSH_ASKPASS", "")];
+    env.extend_from_slice(extra);
+    run_ok(
+        &root,
+        &env,
+        &[
+            "-c",
+            "credential.interactive=false",
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-prune",
+            "--no-recurse-submodules",
+            "--",
+            &up.remote,
+        ],
+        FETCH_TIMEOUT,
+        Action::Pull,
+    )?;
+    Ok(FetchOutcome::Fetched)
+}
+
+/// Windows with a background fetch running (one at a time per window).
+fn fetches_in_flight() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+/// Marks a window's fetch in flight; cleared on drop (also on a panic).
+struct InFlight(String);
+impl InFlight {
+    fn claim(label: &str) -> Option<Self> {
+        let mut set = fetches_in_flight()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        set.insert(label.to_string())
+            .then(|| InFlight(label.to_string()))
+    }
+}
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        let mut set = fetches_in_flight()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        set.remove(&self.0);
+    }
+}
+
+#[tauri::command]
+pub async fn git_fetch(
+    webview_window: tauri::WebviewWindow,
+    root: String,
+) -> Result<FetchOutcome, GitActionError> {
+    let label = webview_window.label().to_string();
+    let Some(guard) = InFlight::claim(&label) else {
+        return Ok(FetchOutcome::Busy);
+    };
+    crate::windows::spawn_scoped(label, move || {
+        let _guard = guard;
+        fetch_impl(&root, &[])
+    })
+    .await
+    .map_err(|e| GitActionError::new(GitErrorKind::Other, "The git task failed.", e.to_string()))?
+}
+
+// --- Discard (#172) ---------------------------------------------------------
+
+/// Why Discard is off in a remote session.
+const DISCARD_UNSUPPORTED: &str =
+    "Discard isn't available in remote sessions yet. Use the terminal on the remote host.";
+
+/// What Discard does to one changed file (#172).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscardAction {
+    /// Back to the last commit (index and work tree).
+    Revert,
+    /// The file has no committed version: unstaged if needed, then moved to
+    /// the OS trash (never deleted permanently).
+    Delete,
+}
+
+/// One row of the Discard confirmation, computed from a fresh status.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct DiscardItem {
+    /// Repo-relative path (to the top level), as in Changes.
+    pub path: String,
+    pub action: DiscardAction,
+    /// One sentence for the dialog ("Staged and unstaged changes: both are
+    /// reverted").
+    pub detail: String,
+    /// A staged rename's source, restored together with `path`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Some change is staged.
+    pub staged: bool,
+    /// Staged and unstaged changes (`MM`): both layers are reverted.
+    pub partially_staged: bool,
+    /// Untracked (`??`) in the fresh status.
+    pub untracked: bool,
+}
+
+/// One confirmed row sent back by the dialog: Discard re-plans from a fresh
+/// status and refuses a path whose plan no longer matches what the user
+/// confirmed (e.g. it became untracked, or a rename source changed).
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DiscardRequest {
+    pub path: String,
+    pub action: DiscardAction,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct DiscardFailure {
+    pub path: String,
+    pub message: String,
+}
+
+/// What a discard did: per path, so a partial failure is reported per file.
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct DiscardResult {
+    /// Paths now back to the last commit (or gone, for deletes).
+    pub discarded: Vec<String>,
+    /// Paths moved to the trash: normally among `discarded`, but also listed
+    /// when a later step for that path failed (it is then in `failed` too).
+    pub trashed: Vec<String>,
+    pub failed: Vec<DiscardFailure>,
+    /// git's output, for the Git tab.
+    pub output: String,
+}
+
+/// Moves one path to the OS trash (never follows a symlink: the link
+/// itself moves). The app passes the `trash` crate; tests a fake.
+pub(crate) type Trasher<'a> = &'a dyn Fn(&Path) -> Result<(), String>;
+
+/// The OS trash (Trash / Recycle Bin / freedesktop trash).
+pub(crate) fn os_trash(p: &Path) -> Result<(), String> {
+    trash::delete(p).map_err(|e| e.to_string())
+}
+
+/// A repo-relative path Discard may touch: not empty, relative, only plain
+/// components (no `..`, `.`, root or drive prefix), no NUL, and no parent
+/// directory that is a symlink or resolves outside the top level. The last
+/// component may itself be a symlink (a tracked link): it is never followed.
+pub(crate) fn check_discard_path(top: &Path, rel: &str) -> Result<(), String> {
+    use std::path::Component;
+    if rel.is_empty() || rel.contains('\0') || rel.contains('\\') {
+        return Err("invalid path".into());
+    }
+    let p = Path::new(rel);
+    if p.is_absolute() || rel.starts_with('/') {
+        return Err("path is absolute".into());
+    }
+    let comps: Vec<_> = p.components().collect();
+    if comps.is_empty() || !comps.iter().all(|c| matches!(c, Component::Normal(_))) {
+        return Err("path escapes the repository".into());
+    }
+    let top_canon = top
+        .canonicalize()
+        .map_err(|e| format!("can't resolve the repository: {e}"))?;
+    let mut dir = top.to_path_buf();
+    for c in &comps[..comps.len() - 1] {
+        dir.push(c.as_os_str());
+        match dir.symlink_metadata() {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err("path goes through a symbolic link".into())
+            }
+            Ok(m) if !m.is_dir() => return Err("a parent is not a folder".into()),
+            Ok(_) => {
+                let c = dir
+                    .canonicalize()
+                    .map_err(|e| format!("can't resolve a parent: {e}"))?;
+                if !c.starts_with(&top_canon) {
+                    return Err("path escapes the repository".into());
+                }
+            }
+            // A parent that no longer exists (a deleted folder) can't lead
+            // anywhere; git restores below the top level.
+            Err(_) => break,
+        }
+    }
+    Ok(())
+}
+
+/// One `git status --porcelain -z` record.
+#[derive(Clone, Debug)]
+struct StatusRec {
+    x: char,
+    y: char,
+    path: String,
+    orig: Option<String>,
+}
+
+fn status_records(top: &Path, extra: ExtraEnv) -> Result<Vec<StatusRec>, GitActionError> {
+    let raw = run_stdout_raw(
+        top,
+        extra,
+        &[
+            "-c",
+            "core.quotepath=false",
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+        ],
+        Duration::from_secs(60),
+        Action::Discard,
+    )?;
+    let mut out = Vec::new();
+    let mut fields = raw.split('\0');
+    while let Some(rec) = fields.next() {
+        let (Some(code), Some(path)) = (rec.get(..2), rec.get(3..)) else {
+            continue;
+        };
+        let mut cs = code.chars();
+        let x = cs.next().unwrap_or(' ');
+        let y = cs.next().unwrap_or(' ');
+        let orig = if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
+            fields.next().map(str::to_string)
+        } else {
+            None
+        };
+        if path.is_empty() || path.ends_with('/') {
+            continue; // nested repos (folders) are never discarded
+        }
+        out.push(StatusRec {
+            x,
+            y,
+            path: path.to_string(),
+            orig,
+        });
+    }
+    Ok(out)
+}
+
+fn has_head(top: &Path, extra: ExtraEnv) -> bool {
+    query(top, extra, &["rev-parse", "--verify", "-q", "HEAD"]).is_some()
+}
+
+/// The Discard row for one status record.
+fn plan_item(r: &StatusRec, head: bool) -> DiscardItem {
+    let staged = r.x != ' ' && r.x != '?';
+    let partially_staged = staged && r.y != ' ';
+    let item = |action, detail: &str, source: Option<String>| DiscardItem {
+        path: r.path.clone(),
+        action,
+        detail: detail.to_string(),
+        source,
+        staged,
+        partially_staged,
+        untracked: r.x == '?',
+    };
+    if r.x == '?' {
+        return item(DiscardAction::Delete, "Untracked: moved to the Trash", None);
+    }
+    if !head {
+        return item(
+            DiscardAction::Delete,
+            "New file (no commits yet): unstaged and moved to the Trash",
+            None,
+        );
+    }
+    if r.x == 'R' || r.y == 'R' {
+        let src = r.orig.clone().filter(|o| !o.is_empty());
+        let detail = match &src {
+            Some(o) => format!("Rename undone: {o} is restored, this file goes to the Trash"),
+            None => "Rename undone: this file goes to the Trash".to_string(),
+        };
+        return item(DiscardAction::Delete, &detail, src);
+    }
+    if r.x == 'A' || r.x == 'C' || r.y == 'A' {
+        return item(
+            DiscardAction::Delete,
+            "New file: unstaged and moved to the Trash",
+            None,
+        );
+    }
+    let detail = if r.x == 'U' || r.y == 'U' {
+        "Conflicted: reverted to the last commit"
+    } else if partially_staged {
+        "Staged and unstaged changes: both are reverted to the last commit"
+    } else if r.x == 'D' || r.y == 'D' {
+        "Deleted: restored from the last commit"
+    } else if staged {
+        "Staged changes: unstaged and reverted to the last commit"
+    } else {
+        "Reverted to the last commit"
+    };
+    item(DiscardAction::Revert, detail, None)
+}
+
+/// Validate, then plan every requested path against a fresh status. Paths
+/// that are invalid or no longer changed are returned as failures.
+fn plan_discard(
+    root: &str,
+    paths: &[String],
+    extra: ExtraEnv,
+) -> Result<(PathBuf, bool, Vec<DiscardItem>, Vec<DiscardFailure>), GitActionError> {
+    let root = check_local(root, DISCARD_UNSUPPORTED)?;
+    if paths.is_empty() {
+        return Err(GitActionError::new(
+            GitErrorKind::NothingToCommit,
+            "Select at least one file to discard.",
+            "",
+        ));
+    }
+    let top = query(&root, extra, &["rev-parse", "--show-toplevel"])
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            GitActionError::new(
+                GitErrorKind::NotARepo,
+                "This folder is not a git repository.",
+                "",
+            )
+        })?;
+    let head = has_head(&top, extra);
+    let recs = status_records(&top, extra)?;
+    let mut items = Vec::new();
+    let mut failed = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for p in paths {
+        if !seen.insert(p.as_str()) {
+            continue;
+        }
+        if let Err(why) = check_discard_path(&top, p) {
+            failed.push(DiscardFailure {
+                path: p.clone(),
+                message: format!("Refused: {why}."),
+            });
+            continue;
+        }
+        match recs.iter().find(|r| &r.path == p) {
+            Some(r) => {
+                let mut it = plan_item(r, head);
+                // `git rm --cached` leaves two records: a staged deletion and
+                // an untracked file with the same name. Reverting brings back
+                // HEAD's version over the file on disk, so say so.
+                if r.x == 'D' && recs.iter().any(|o| o.x == '?' && &o.path == p) {
+                    it.partially_staged = true;
+                    it.untracked = false;
+                    it.detail = "Staged deletion, file still on disk: both are reverted to the last commit (the file on disk is replaced)".into();
+                }
+                if let Some(src) = &it.source {
+                    if let Err(why) = check_discard_path(&top, src) {
+                        failed.push(DiscardFailure {
+                            path: p.clone(),
+                            message: format!("Refused (rename source {src}): {why}."),
+                        });
+                        continue;
+                    }
+                }
+                items.push(it);
+            }
+            None => failed.push(DiscardFailure {
+                path: p.clone(),
+                message: "Not changed any more (nothing to discard).".into(),
+            }),
+        }
+    }
+    Ok((top, head, items, failed))
+}
+
+/// The Discard confirmation's rows: what will happen to each path (#172).
+pub(crate) fn discard_preview_impl(
+    root: &str,
+    paths: &[String],
+    extra: ExtraEnv,
+) -> Result<Vec<DiscardItem>, GitActionError> {
+    let (_, _, items, failed) = plan_discard(root, paths, extra)?;
+    if items.is_empty() {
+        return Err(failure_error(&failed));
+    }
+    Ok(items)
+}
+
+fn failure_error(failed: &[DiscardFailure]) -> GitActionError {
+    let detail = failed
+        .iter()
+        .map(|f| format!("{}: {}", f.path, f.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let message = match failed {
+        [one] => format!("Couldn't discard {}: {}", one.path, one.message),
+        _ => format!("Couldn't discard {} files. See the details.", failed.len()),
+    };
+    GitActionError::new(GitErrorKind::Other, message, detail)
+}
+
+/// Move a work-tree file (or symlink) to the trash; a folder is refused.
+/// A path that is already gone is fine.
+fn trash_file(top: &Path, rel: &str, trasher: Trasher) -> Result<bool, String> {
+    let abs = top.join(rel);
+    match abs.symlink_metadata() {
+        Err(_) => Ok(false),
+        Ok(m) if m.is_dir() => Err("it is a folder; Discard never removes folders".into()),
+        Ok(_) => trasher(&abs).map(|_| true),
+    }
+}
+
+/// Discard the changes of `paths` (repo-relative to the top level, #172):
+/// tracked files go back to HEAD in both the index and the work tree
+/// (`git restore --source=HEAD --staged --worktree`, literal pathspecs, one
+/// file at a time); files with no committed version are unstaged and moved
+/// to the OS trash. Never `reset --hard`, never `clean`, never a recursive
+/// delete, never through a symlinked folder. Each path is re-checked
+/// against a fresh status first.
+pub(crate) fn discard_impl(
+    root: &str,
+    confirmed: &[DiscardRequest],
+    extra: ExtraEnv,
+    trasher: Trasher,
+) -> Result<DiscardResult, GitActionError> {
+    let paths: Vec<String> = confirmed.iter().map(|r| r.path.clone()).collect();
+    let (top, head, planned, mut failed) = plan_discard(root, &paths, extra)?;
+    let mut items = Vec::new();
+    for it in planned {
+        let same = confirmed
+            .iter()
+            .find(|r| r.path == it.path)
+            .is_some_and(|r| r.action == it.action && r.source == it.source);
+        if same {
+            items.push(it);
+        } else {
+            failed.push(DiscardFailure {
+                path: it.path.clone(),
+                message:
+                    "Changed since you confirmed; nothing was done. Review it and discard again."
+                        .into(),
+            });
+        }
+    }
+    let mut res = DiscardResult::default();
+    let mut log: Vec<String> = Vec::new();
+    for it in &items {
+        let (trashed, outcome) = discard_one(&top, head, it, extra, trasher, &mut log);
+        if trashed {
+            res.trashed.push(it.path.clone());
+        }
+        match outcome {
+            Ok(()) => res.discarded.push(it.path.clone()),
+            Err(message) => failed.push(DiscardFailure {
+                path: it.path.clone(),
+                message,
+            }),
+        }
+    }
+    // An error only when nothing at all changed on disk; any side effect
+    // (even a trashed file whose next step failed) comes back as a result so
+    // the app can reconcile its tabs.
+    if res.discarded.is_empty() && res.trashed.is_empty() {
+        let mut e = failure_error(&failed);
+        if !log.is_empty() {
+            e.detail = format!("{}\n\n{}", e.detail, log.join("\n"));
+        }
+        return Err(e);
+    }
+    res.failed = failed;
+    res.output = log.join("\n");
+    Ok(res)
+}
+
+/// Discard one planned path. Returns whether the file went to the trash
+/// (also when a later step failed, so the caller can report it) and the
+/// outcome. The index is always changed before the work tree: a failing git
+/// step (an index lock, a hook) leaves the file untouched on disk.
+fn discard_one(
+    top: &Path,
+    head: bool,
+    it: &DiscardItem,
+    extra: ExtraEnv,
+    trasher: Trasher,
+    log: &mut Vec<String>,
+) -> (bool, Result<(), String>) {
+    let git = |args: &[&str], log: &mut Vec<String>| -> Result<(), String> {
+        log.push(format!("$ git {}", args.join(" ")));
+        let o = user_git(top, extra, args, COMMIT_TIMEOUT).map_err(|e| e.message)?;
+        let t = text(&o);
+        if !t.is_empty() {
+            log.push(t.clone());
+        }
+        if o.status.success() {
+            Ok(())
+        } else {
+            Err(classify(Action::Discard, &t).message)
+        }
+    };
+    let path = it.path.as_str();
+    let trash = |log: &mut Vec<String>| -> Result<bool, String> {
+        let trashed = trash_file(top, path, trasher)
+            .map_err(|e| format!("Couldn't move it to the Trash: {e}"))?;
+        if trashed {
+            log.push(format!("moved {path} to the Trash"));
+        }
+        Ok(trashed)
+    };
+    match it.action {
+        DiscardAction::Revert => (
+            false,
+            git(
+                &[
+                    "--literal-pathspecs",
+                    "restore",
+                    "--source=HEAD",
+                    "--staged",
+                    "--worktree",
+                    "--",
+                    path,
+                ],
+                log,
+            ),
+        ),
+        // Untracked: re-checked as `??` by the fresh status in the plan.
+        DiscardAction::Delete if it.untracked => match trash(log) {
+            Ok(t) => (t, Ok(())),
+            Err(e) => (false, Err(e)),
+        },
+        DiscardAction::Delete => {
+            // 1. Index only: drop the entry that isn't in HEAD (and, for a
+            //    rename, put the source's entry back). The file on disk is
+            //    not touched, so a failure here changes nothing.
+            let unstage = if head {
+                let mut args = vec![
+                    "--literal-pathspecs",
+                    "restore",
+                    "--source=HEAD",
+                    "--staged",
+                    "--",
+                    path,
+                ];
+                if let Some(src) = &it.source {
+                    args.push(src);
+                }
+                git(&args, log)
+            } else {
+                git(
+                    &[
+                        "--literal-pathspecs",
+                        "rm",
+                        "--cached",
+                        "--quiet",
+                        "--ignore-unmatch",
+                        "--",
+                        path,
+                    ],
+                    log,
+                )
+            };
+            if let Err(e) = unstage {
+                return (false, Err(e));
+            }
+            // 2. The file (now untracked) goes to the trash; on failure it
+            //    stays where it is.
+            let trashed = match trash(log) {
+                Ok(t) => t,
+                Err(e) => {
+                    return (
+                        false,
+                        Err(format!("{e} (it was unstaged and is still on disk)")),
+                    )
+                }
+            };
+            // 3. A rename's source comes back on disk from the restored
+            //    index, unless a file already sits there (never overwritten).
+            if let Some(src) = &it.source {
+                if top.join(src).symlink_metadata().is_ok() {
+                    log.push(format!("kept the existing {src} on disk"));
+                } else if let Err(e) = git(
+                    &["--literal-pathspecs", "restore", "--worktree", "--", src],
+                    log,
+                ) {
+                    return (
+                        trashed,
+                        Err(format!(
+                            "Moved to the Trash, but {src} couldn't be restored: {e}"
+                        )),
+                    );
+                }
+            }
+            (trashed, Ok(()))
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn git_discard_preview(
+    webview_window: tauri::WebviewWindow,
+    root: String,
+    paths: Vec<String>,
+) -> Result<Vec<DiscardItem>, GitActionError> {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        discard_preview_impl(&root, &paths, &[])
+    })
+    .await
+    .map_err(|e| GitActionError::new(GitErrorKind::Other, "The git task failed.", e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn git_discard(
+    webview_window: tauri::WebviewWindow,
+    root: String,
+    items: Vec<DiscardRequest>,
+) -> Result<DiscardResult, GitActionError> {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        discard_impl(&root, &items, &[], &os_trash)
+    })
+    .await
+    .map_err(|e| GitActionError::new(GitErrorKind::Other, "The git task failed.", e.to_string()))?
 }
 
 #[tauri::command]
@@ -721,7 +1563,7 @@ mod tests {
         let global = base.join("gitconfig");
         fs::write(
             &global,
-            "[user]\n\tname = Test\n\temail = t@example.com\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n[pull]\n\trebase = false\n",
+            "[user]\n\tname = Test\n\temail = t@example.com\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n",
         )
         .unwrap();
         let sb = Sandbox {
@@ -938,7 +1780,7 @@ mod tests {
         sb.git(&other, &["push", "-q"]);
         sb.commit_in(&sb.work, "README.md", "ours\n", "ours");
         let e = pull_impl(&root(&sb), &env).unwrap_err();
-        assert_eq!(e.kind, GitErrorKind::Conflict, "{e:?}");
+        assert_eq!(e.kind, GitErrorKind::MergeConflict, "{e:?}");
     }
 
     #[test]
@@ -951,6 +1793,839 @@ mod tests {
         fs::write(sb.work.join("README.md"), "dirty\n").unwrap();
         let e = pull_impl(&root(&sb), &env).unwrap_err();
         assert_eq!(e.kind, GitErrorKind::LocalChanges, "{e:?}");
+    }
+
+    /// Diverge `sb.work` from its upstream: one commit on the remote
+    /// (`up.md`), `n` local ones (`l<i>.md`); the remote side is fetched.
+    fn diverge(sb: &Sandbox, n: u32) {
+        let other = sb.other();
+        sb.commit_in(&other, "up.md", "up\n", "upstream");
+        sb.git(&other, &["push", "-q"]);
+        for i in 0..n {
+            sb.commit_in(&sb.work, &format!("l{i}.md"), "l\n", "local");
+        }
+        sb.git(&sb.work, &["fetch", "-q"]);
+        assert_eq!(ahead_behind(sb), (n, 1));
+    }
+
+    #[test]
+    fn pull_args_merge_only_without_any_pull_config() {
+        let unset = PullConfig {
+            rebase: None,
+            ff: None,
+        };
+        assert_eq!(
+            pull_args(&unset),
+            ["-c", "pull.rebase=false", "pull", "--no-edit"]
+        );
+        for cfg in [
+            PullConfig {
+                rebase: Some("true".into()),
+                ff: None,
+            },
+            PullConfig {
+                rebase: Some("false".into()),
+                ff: None,
+            },
+            PullConfig {
+                rebase: None,
+                ff: Some("only".into()),
+            },
+        ] {
+            assert_eq!(pull_args(&cfg), ["pull", "--no-edit"], "{cfg:?}");
+        }
+    }
+
+    #[test]
+    fn pull_diverged_without_config_merges() {
+        let sb = sandbox();
+        let env = sb.env();
+        diverge(&sb, 2);
+        let r = pull_impl(&root(&sb), &env).unwrap();
+        assert_eq!(r.target.as_deref(), Some("origin/main"));
+        // A merge commit: two parents, and (behind, ahead) → (0, n + 1).
+        let parents = sb.git(&sb.work, &["rev-list", "--parents", "-n", "1", "HEAD"]);
+        assert_eq!(parents.split_whitespace().count(), 3, "{parents}");
+        assert_eq!(ahead_behind(&sb), (3, 0));
+        assert!(sb.work.join("up.md").exists());
+    }
+
+    #[test]
+    fn pull_diverged_with_ff_only_is_a_clear_error_and_leaves_head() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(&sb.work, &["config", "pull.ff", "only"]);
+        diverge(&sb, 1);
+        let head = sb.git(&sb.work, &["rev-parse", "HEAD"]);
+        let e = pull_impl(&root(&sb), &env).unwrap_err();
+        assert_eq!(e.kind, GitErrorKind::Diverged, "{e:?}");
+        assert!(e.message.contains("pull.ff=only"), "{}", e.message);
+        assert!(!e.message.contains("set pull.rebase"), "{}", e.message);
+        assert!(!e.detail.is_empty());
+        assert_eq!(sb.git(&sb.work, &["rev-parse", "HEAD"]), head);
+        assert_eq!(ahead_behind(&sb), (1, 1));
+    }
+
+    #[test]
+    fn pull_diverged_respects_pull_rebase_true() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(&sb.work, &["config", "pull.rebase", "true"]);
+        diverge(&sb, 2);
+        pull_impl(&root(&sb), &env).unwrap();
+        // Rebased: linear history on top of the upstream, no merge commit.
+        assert_eq!(ahead_behind(&sb), (2, 0));
+        let merges = sb.git(&sb.work, &["rev-list", "--merges", "--count", "HEAD"]);
+        assert_eq!(merges, "0");
+    }
+
+    #[test]
+    fn pull_respects_branch_rebase_config_too() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(&sb.work, &["config", "branch.main.rebase", "true"]);
+        diverge(&sb, 1);
+        pull_impl(&root(&sb), &env).unwrap();
+        assert_eq!(ahead_behind(&sb), (1, 0));
+        assert_eq!(
+            sb.git(&sb.work, &["rev-list", "--merges", "--count", "HEAD"]),
+            "0"
+        );
+    }
+
+    #[test]
+    fn pull_merge_conflict_is_typed_lists_files_and_stays_mid_merge() {
+        let sb = sandbox();
+        let env = sb.env();
+        let other = sb.other();
+        sb.commit_in(&other, "README.md", "theirs\n", "theirs");
+        sb.git(&other, &["push", "-q"]);
+        sb.commit_in(&sb.work, "README.md", "ours\n", "ours");
+        let e = pull_impl(&root(&sb), &env).unwrap_err();
+        assert_eq!(e.kind, GitErrorKind::MergeConflict, "{e:?}");
+        assert_eq!(e.files, vec!["README.md".to_string()]);
+        assert!(
+            e.message.contains("merge conflicts in 1 file"),
+            "{}",
+            e.message
+        );
+        assert!(e.detail.contains("CONFLICT"), "{}", e.detail);
+        assert!(
+            e.detail.contains("Conflicted files:\n  README.md"),
+            "{}",
+            e.detail
+        );
+        // No auto-abort: MERGE_HEAD is still there, the file is unmerged.
+        sb.git(&sb.work, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]);
+        let st = sb.git(&sb.work, &["status", "--porcelain"]);
+        assert!(st.starts_with("UU README.md"), "{st}");
+    }
+
+    #[test]
+    fn pull_rebase_conflict_is_typed_and_stays_mid_rebase() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(&sb.work, &["config", "pull.rebase", "true"]);
+        let other = sb.other();
+        sb.commit_in(&other, "README.md", "theirs\n", "theirs");
+        sb.git(&other, &["push", "-q"]);
+        sb.commit_in(&sb.work, "README.md", "ours\n", "ours");
+        let e = pull_impl(&root(&sb), &env).unwrap_err();
+        assert_eq!(e.kind, GitErrorKind::RebaseConflict, "{e:?}");
+        assert_eq!(e.files, vec!["README.md".to_string()]);
+        assert!(e.message.contains("rebasing"), "{}", e.message);
+        assert!(e.message.contains("git rebase --continue"), "{}", e.message);
+        assert!(rebase_in_progress(&sb.work, &env));
+        assert!(!merge_in_progress(&sb.work, &env));
+    }
+
+    #[test]
+    fn fetch_updates_the_behind_count_quietly() {
+        let sb = sandbox();
+        let env = sb.env();
+        let other = sb.other();
+        sb.commit_in(&other, "up.md", "up\n", "upstream");
+        sb.git(&other, &["push", "-q"]);
+        assert_eq!(ahead_behind(&sb), (0, 0), "nothing fetched yet");
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Fetched);
+        assert_eq!(ahead_behind(&sb), (0, 1));
+        // Fetch only: the work tree and HEAD did not move.
+        assert!(!sb.work.join("up.md").exists());
+    }
+
+    #[test]
+    fn fetch_after_rejected_push_shows_behind() {
+        let sb = sandbox();
+        let env = sb.env();
+        let other = sb.other();
+        sb.commit_in(&other, "x.md", "x\n", "theirs");
+        sb.git(&other, &["push", "-q"]);
+        sb.commit_in(&sb.work, "y.md", "y\n", "ours");
+        assert_eq!(
+            push_impl(&root(&sb), &env).unwrap_err().kind,
+            GitErrorKind::Rejected
+        );
+        fetch_impl(&root(&sb), &env).unwrap();
+        assert_eq!(ahead_behind(&sb), (1, 1));
+    }
+
+    #[test]
+    fn fetch_never_prompts_and_needs_an_upstream() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(
+            &sb.work,
+            &["remote", "set-url", "origin", "http://127.0.0.1:9/repo.git"],
+        );
+        let t = Instant::now();
+        let e = fetch_impl(&root(&sb), &env).unwrap_err();
+        assert!(
+            matches!(e.kind, GitErrorKind::Network | GitErrorKind::Auth),
+            "{e:?}"
+        );
+        assert!(t.elapsed() < FETCH_TIMEOUT);
+        sb.git(&sb.work, &["checkout", "-q", "-b", "feature"]);
+        assert_eq!(
+            fetch_impl(&root(&sb), &env).unwrap_err().kind,
+            GitErrorKind::NoUpstream
+        );
+    }
+
+    #[test]
+    fn one_fetch_in_flight_per_window() {
+        let a = InFlight::claim("test-window-a").expect("first claim");
+        assert!(InFlight::claim("test-window-a").is_none(), "second is busy");
+        let b = InFlight::claim("test-window-b");
+        assert!(b.is_some(), "other windows are independent");
+        drop(a);
+        assert!(
+            InFlight::claim("test-window-a").is_some(),
+            "released on drop"
+        );
+    }
+
+    // --- Discard (#172) ---
+
+    /// A fake trash: moves the path (never following a link) into the
+    /// sandbox's `trash/` folder and records what it got.
+    struct FakeTrash {
+        dir: PathBuf,
+        got: std::sync::Mutex<Vec<String>>,
+    }
+    impl FakeTrash {
+        fn new(sb: &Sandbox) -> Self {
+            let dir = sb.bare.parent().unwrap().join("trash");
+            fs::create_dir_all(&dir).unwrap();
+            FakeTrash {
+                dir,
+                got: Default::default(),
+            }
+        }
+        fn trash(&self, p: &Path) -> Result<(), String> {
+            let mut got = self.got.lock().unwrap();
+            let dest = self.dir.join(format!(
+                "{}-{}",
+                got.len(),
+                p.file_name().unwrap().to_string_lossy()
+            ));
+            fs::rename(p, &dest).map_err(|e| e.to_string())?;
+            got.push(p.file_name().unwrap().to_string_lossy().into_owned());
+            Ok(())
+        }
+        fn names(&self) -> Vec<String> {
+            self.got.lock().unwrap().clone()
+        }
+        /// Content of the n-th trashed item.
+        fn content(&self, n: usize, name: &str) -> String {
+            fs::read_to_string(self.dir.join(format!("{n}-{name}"))).unwrap()
+        }
+    }
+
+    /// Confirm what a fresh plan says for each path (as the dialog does),
+    /// then discard. Paths the plan refuses are sent as a plain revert.
+    fn confirmed(sb: &Sandbox, paths: &[&str]) -> Vec<DiscardRequest> {
+        let env = sb.env();
+        let owned: Vec<String> = paths.iter().map(|s| s.to_string()).collect();
+        let planned = plan_discard(&root(sb), &owned, &env)
+            .map(|(_, _, items, _)| items)
+            .unwrap_or_default();
+        owned
+            .into_iter()
+            .map(|path| match planned.iter().find(|i| i.path == path) {
+                Some(i) => DiscardRequest {
+                    path,
+                    action: i.action,
+                    source: i.source.clone(),
+                },
+                None => DiscardRequest {
+                    path,
+                    action: DiscardAction::Revert,
+                    source: None,
+                },
+            })
+            .collect()
+    }
+
+    fn discard(
+        sb: &Sandbox,
+        t: &FakeTrash,
+        paths: &[&str],
+    ) -> Result<DiscardResult, GitActionError> {
+        let env = sb.env();
+        discard_impl(&root(sb), &confirmed(sb, paths), &env, &|p: &Path| {
+            t.trash(p)
+        })
+    }
+
+    fn preview(sb: &Sandbox, paths: &[&str]) -> Vec<DiscardItem> {
+        let env = sb.env();
+        let paths: Vec<String> = paths.iter().map(|s| s.to_string()).collect();
+        discard_preview_impl(&root(sb), &paths, &env).unwrap()
+    }
+
+    /// Porcelain status with its leading status columns intact (a
+    /// trimmed " M x" would read as a staged "M  x").
+    fn status(sb: &Sandbox) -> String {
+        let env = sb.env();
+        run_stdout_raw(
+            &sb.work,
+            &env,
+            &["status", "--porcelain", "--untracked-files=all"],
+            Duration::from_secs(20),
+            Action::Discard,
+        )
+        .unwrap()
+        .trim_end()
+        .to_string()
+    }
+
+    /// A sandbox with a few committed files to change.
+    fn discard_sandbox() -> Sandbox {
+        let sb = sandbox();
+        sb.commit_in(&sb.work, "a.md", "a\n", "a");
+        sb.commit_in(&sb.work, "b.md", "b\n", "b");
+        fs::create_dir_all(sb.work.join("docs")).unwrap();
+        sb.commit_in(&sb.work, "docs/c.md", "c\n", "c");
+        sb
+    }
+
+    #[test]
+    fn discard_modified_reverts_and_leaves_the_rest() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        fs::write(sb.work.join("a.md"), "edited\n").unwrap();
+        fs::write(sb.work.join("b.md"), "keep me\n").unwrap();
+        fs::write(sb.work.join("new.md"), "untracked, keep\n").unwrap();
+        let p = preview(&sb, &["a.md"]);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].action, DiscardAction::Revert);
+        let r = discard(&sb, &t, &["a.md"]).unwrap();
+        assert_eq!(r.discarded, ["a.md"]);
+        assert!(r.failed.is_empty());
+        assert_eq!(fs::read_to_string(sb.work.join("a.md")).unwrap(), "a\n");
+        // Only the selected path was touched.
+        assert_eq!(
+            fs::read_to_string(sb.work.join("b.md")).unwrap(),
+            "keep me\n"
+        );
+        assert!(sb.work.join("new.md").exists());
+        assert_eq!(status(&sb), " M b.md\n?? new.md");
+        assert!(t.names().is_empty());
+    }
+
+    #[test]
+    fn discard_staged_and_partially_staged_revert_both_layers() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        fs::write(sb.work.join("a.md"), "staged\n").unwrap();
+        sb.git(&sb.work, &["add", "a.md"]);
+        fs::write(sb.work.join("b.md"), "staged\n").unwrap();
+        sb.git(&sb.work, &["add", "b.md"]);
+        fs::write(sb.work.join("b.md"), "staged and more\n").unwrap();
+        let p = preview(&sb, &["a.md", "b.md"]);
+        assert!(p[0].staged && !p[0].partially_staged, "{p:?}");
+        assert!(p[1].partially_staged, "{p:?}");
+        assert!(
+            p[1].detail.contains("Staged and unstaged"),
+            "{}",
+            p[1].detail
+        );
+        discard(&sb, &t, &["a.md", "b.md"]).unwrap();
+        assert_eq!(status(&sb), "");
+        assert_eq!(fs::read_to_string(sb.work.join("b.md")).unwrap(), "b\n");
+    }
+
+    #[test]
+    fn discard_deleted_and_staged_delete_restore_from_head() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        fs::remove_file(sb.work.join("a.md")).unwrap();
+        sb.git(&sb.work, &["rm", "-q", "b.md"]);
+        fs::remove_dir_all(sb.work.join("docs")).unwrap();
+        let p = preview(&sb, &["a.md", "b.md", "docs/c.md"]);
+        assert!(p.iter().all(|i| i.action == DiscardAction::Revert));
+        assert!(p[0].detail.starts_with("Deleted"), "{}", p[0].detail);
+        discard(&sb, &t, &["a.md", "b.md", "docs/c.md"]).unwrap();
+        assert_eq!(status(&sb), "");
+        assert_eq!(
+            fs::read_to_string(sb.work.join("docs/c.md")).unwrap(),
+            "c\n"
+        );
+    }
+
+    #[test]
+    fn discard_staged_rename_restores_both_halves() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        sb.git(&sb.work, &["mv", "a.md", "renamed.md"]);
+        assert_eq!(status(&sb), "R  a.md -> renamed.md");
+        let p = preview(&sb, &["renamed.md"]);
+        assert_eq!(p[0].source.as_deref(), Some("a.md"));
+        assert_eq!(p[0].action, DiscardAction::Delete);
+        let r = discard(&sb, &t, &["renamed.md"]).unwrap();
+        assert_eq!(r.trashed, ["renamed.md"]);
+        assert_eq!(status(&sb), "", "no new file left behind");
+        assert_eq!(fs::read_to_string(sb.work.join("a.md")).unwrap(), "a\n");
+        assert!(!sb.work.join("renamed.md").exists());
+        // The new file's content is recoverable from the trash.
+        assert_eq!(t.content(0, "renamed.md"), "a\n");
+    }
+
+    #[test]
+    fn discard_untracked_moves_to_trash_after_a_fresh_status_check() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        fs::write(sb.work.join("scratch.md"), "draft\n").unwrap();
+        fs::write(sb.work.join("other.md"), "other\n").unwrap();
+        let p = preview(&sb, &["scratch.md"]);
+        assert_eq!(p[0].action, DiscardAction::Delete);
+        assert!(p[0].untracked);
+        let r = discard(&sb, &t, &["scratch.md"]).unwrap();
+        assert_eq!(r.trashed, ["scratch.md"]);
+        assert!(!sb.work.join("scratch.md").exists());
+        assert_eq!(t.content(0, "scratch.md"), "draft\n");
+        assert_eq!(status(&sb), "?? other.md");
+    }
+
+    #[test]
+    fn discard_staged_add_unstages_and_trashes() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        fs::write(sb.work.join("added.md"), "new\n").unwrap();
+        sb.git(&sb.work, &["add", "added.md"]);
+        fs::write(sb.work.join("added.md"), "new, edited\n").unwrap();
+        let p = preview(&sb, &["added.md"]);
+        assert_eq!(p[0].action, DiscardAction::Delete);
+        discard(&sb, &t, &["added.md"]).unwrap();
+        assert_eq!(status(&sb), "");
+        assert_eq!(t.content(0, "added.md"), "new, edited\n");
+    }
+
+    #[test]
+    fn discard_glob_like_names_are_literal() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        sb.commit_in(&sb.work, "*.md", "star\n", "star");
+        fs::write(sb.work.join("*.md"), "star edited\n").unwrap();
+        fs::write(sb.work.join("a.md"), "a edited\n").unwrap();
+        discard(&sb, &t, &["*.md"]).unwrap();
+        assert_eq!(fs::read_to_string(sb.work.join("*.md")).unwrap(), "star\n");
+        assert_eq!(status(&sb), " M a.md", "the glob matched nothing else");
+    }
+
+    #[test]
+    fn discard_odd_file_names_unstaged_round_trip() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        let names = [
+            " lead.md",
+            "trail .md",
+            "a b[1].md",
+            "ção ✓.md",
+            ":(top)x.md",
+        ];
+        for n in names {
+            fs::write(sb.work.join(n), "orig\n").unwrap();
+            sb.git(&sb.work, &["--literal-pathspecs", "add", "--", n]);
+        }
+        sb.git(&sb.work, &["commit", "-q", "-m", "odd names"]);
+        for n in names {
+            fs::write(sb.work.join(n), "edited\n").unwrap();
+        }
+        let p = preview(&sb, &names);
+        assert_eq!(p.len(), names.len(), "{p:?}");
+        assert!(p.iter().all(|i| i.action == DiscardAction::Revert), "{p:?}");
+        let r = discard(&sb, &t, &names).unwrap();
+        assert!(r.failed.is_empty(), "{:?}", r.failed);
+        for n in names {
+            assert_eq!(
+                fs::read_to_string(sb.work.join(n)).unwrap(),
+                "orig\n",
+                "{n}"
+            );
+        }
+        assert_eq!(status(&sb), "");
+    }
+
+    #[test]
+    fn discard_a_conflicted_file_goes_back_to_head_and_stays_mid_merge() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        let env = sb.env();
+        let other = sb.other();
+        sb.commit_in(&other, "README.md", "theirs\n", "theirs");
+        sb.git(&other, &["push", "-q"]);
+        sb.commit_in(&sb.work, "README.md", "ours\n", "ours");
+        assert_eq!(
+            pull_impl(&root(&sb), &env).unwrap_err().kind,
+            GitErrorKind::MergeConflict
+        );
+        let p = preview(&sb, &["README.md"]);
+        assert!(p[0].detail.starts_with("Conflicted"), "{}", p[0].detail);
+        discard(&sb, &t, &["README.md"]).unwrap();
+        assert_eq!(
+            fs::read_to_string(sb.work.join("README.md")).unwrap(),
+            "ours\n"
+        );
+        assert!(
+            merge_in_progress(&sb.work, &env),
+            "the merge itself is not aborted"
+        );
+        assert!(conflicted_files(&sb.work, &env).is_empty());
+    }
+
+    #[test]
+    fn discard_rejects_escaping_paths() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        let outside = sb.bare.parent().unwrap().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("x.md"), "precious\n").unwrap();
+        let abs = outside.join("x.md").to_string_lossy().into_owned();
+        for bad in [
+            "../outside/x.md",
+            abs.as_str(),
+            "",
+            "./a.md",
+            "docs/../a.md",
+        ] {
+            let e = discard(&sb, &t, &[bad]).unwrap_err();
+            assert!(e.detail.contains("Refused"), "{bad}: {e:?}");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, sb.work.join("link")).unwrap();
+            let e = discard(&sb, &t, &["link/x.md"]).unwrap_err();
+            assert!(e.detail.contains("symbolic link"), "{e:?}");
+        }
+        assert_eq!(
+            fs::read_to_string(outside.join("x.md")).unwrap(),
+            "precious\n"
+        );
+        assert!(t.names().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discard_untracked_symlink_trashes_the_link_not_its_target() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        let target = sb.bare.parent().unwrap().join("target.md");
+        fs::write(&target, "target\n").unwrap();
+        std::os::unix::fs::symlink(&target, sb.work.join("ln.md")).unwrap();
+        discard(&sb, &t, &["ln.md"]).unwrap();
+        assert!(sb.work.join("ln.md").symlink_metadata().is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "target\n");
+    }
+
+    #[test]
+    fn discard_never_removes_a_folder() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        // An untracked nested repo is a folder row: never in the plan.
+        sb.git(&sb.work, &["init", "-q", "nested"]);
+        fs::write(sb.work.join("nested/f.md"), "f\n").unwrap();
+        let e = discard(&sb, &t, &["nested"]).unwrap_err();
+        assert!(e.detail.contains("Not changed"), "{e:?}");
+        assert!(sb.work.join("nested/f.md").exists());
+    }
+
+    #[test]
+    fn discard_partial_failure_is_reported_per_path() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        fs::write(sb.work.join("a.md"), "edited\n").unwrap();
+        let r = discard(&sb, &t, &["a.md", "not-changed.md", "../x"]).unwrap();
+        assert_eq!(r.discarded, ["a.md"]);
+        let failed: Vec<&str> = r.failed.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(failed, ["not-changed.md", "../x"]);
+    }
+
+    #[test]
+    fn discard_refuses_a_path_whose_plan_changed_since_confirmation() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        // scratch.md is confirmed as an untracked file to Trash...
+        fs::write(sb.work.join("scratch.md"), "draft\n").unwrap();
+        fs::write(sb.work.join("b.md"), "edited\n").unwrap();
+        let req = confirmed(&sb, &["scratch.md", "b.md"]);
+        assert_eq!(req[0].action, DiscardAction::Delete);
+        // ...but it was committed and edited (now a tracked revert) before
+        // Discard ran: the confirmation no longer describes it.
+        sb.git(&sb.work, &["add", "scratch.md"]);
+        sb.git(&sb.work, &["commit", "-q", "-m", "scratch"]);
+        fs::write(sb.work.join("scratch.md"), "newer work\n").unwrap();
+        let env = sb.env();
+        let r = discard_impl(&root(&sb), &req, &env, &|p: &Path| t.trash(p)).unwrap();
+        assert_eq!(r.discarded, ["b.md"]);
+        assert_eq!(r.failed.len(), 1);
+        assert_eq!(r.failed[0].path, "scratch.md");
+        assert!(
+            r.failed[0].message.contains("Changed since you confirmed"),
+            "{:?}",
+            r.failed
+        );
+        assert_eq!(
+            fs::read_to_string(sb.work.join("scratch.md")).unwrap(),
+            "newer work\n"
+        );
+        assert!(t.names().is_empty(), "nothing trashed");
+    }
+
+    #[test]
+    fn discard_rm_cached_says_the_file_on_disk_is_replaced() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        fs::write(sb.work.join("a.md"), "edited\n").unwrap();
+        sb.git(&sb.work, &["rm", "-q", "--cached", "a.md"]);
+        let p = preview(&sb, &["a.md"]);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!(p[0].action, DiscardAction::Revert);
+        assert!(
+            p[0].detail.contains("file on disk is replaced"),
+            "{}",
+            p[0].detail
+        );
+        discard(&sb, &t, &["a.md"]).unwrap();
+        assert_eq!(status(&sb), "");
+        assert_eq!(fs::read_to_string(sb.work.join("a.md")).unwrap(), "a\n");
+    }
+
+    #[test]
+    fn discard_request_wire_shape_matches_the_frontend() {
+        let r: DiscardRequest =
+            serde_json::from_str(r#"{"path":"n.md","action":"delete","source":"o.md"}"#).unwrap();
+        assert_eq!(r.action, DiscardAction::Delete);
+        assert_eq!(r.source.as_deref(), Some("o.md"));
+        let r: DiscardRequest =
+            serde_json::from_str(r#"{"path":"a.md","action":"revert"}"#).unwrap();
+        assert_eq!((r.action, r.source), (DiscardAction::Revert, None));
+        // An unknown action or a bare path string is refused at the boundary.
+        assert!(
+            serde_json::from_str::<DiscardRequest>(r#"{"path":"a.md","action":"remove"}"#).is_err()
+        );
+        assert!(serde_json::from_str::<Vec<DiscardRequest>>(r#"["a.md"]"#).is_err());
+        let item = serde_json::to_value(DiscardItem {
+            path: "a.md".into(),
+            action: DiscardAction::Revert,
+            detail: String::new(),
+            source: None,
+            staged: false,
+            partially_staged: false,
+            untracked: false,
+        })
+        .unwrap();
+        assert_eq!(item["action"], "revert");
+        assert!(item.get("source").is_none());
+    }
+
+    #[test]
+    fn discard_index_lock_is_a_typed_error() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        fs::write(sb.work.join("a.md"), "edited\n").unwrap();
+        fs::write(sb.work.join(".git/index.lock"), "").unwrap();
+        let e = discard(&sb, &t, &["a.md"]).unwrap_err();
+        assert!(e.message.contains("locked"), "{e:?}");
+        assert_eq!(
+            fs::read_to_string(sb.work.join("a.md")).unwrap(),
+            "edited\n"
+        );
+    }
+
+    #[test]
+    fn discard_trash_failure_keeps_the_file() {
+        let sb = discard_sandbox();
+        fs::write(sb.work.join("scratch.md"), "draft\n").unwrap();
+        let env = sb.env();
+        let e = discard_impl(
+            &root(&sb),
+            &confirmed(&sb, &["scratch.md"]),
+            &env,
+            &|_p: &Path| Err("no trash here".to_string()),
+        )
+        .unwrap_err();
+        assert!(e.message.contains("Trash"), "{e:?}");
+        assert!(
+            sb.work.join("scratch.md").exists(),
+            "never a permanent delete"
+        );
+    }
+
+    #[test]
+    fn discard_staged_add_with_an_index_lock_touches_nothing() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        fs::write(sb.work.join("added.md"), "new\n").unwrap();
+        sb.git(&sb.work, &["add", "added.md"]);
+        let req = confirmed(&sb, &["added.md"]);
+        fs::write(sb.work.join(".git/index.lock"), "").unwrap();
+        let env = sb.env();
+        let e = discard_impl(&root(&sb), &req, &env, &|p: &Path| t.trash(p)).unwrap_err();
+        assert!(e.message.contains("locked"), "{e:?}");
+        assert!(t.names().is_empty(), "nothing trashed");
+        assert_eq!(
+            fs::read_to_string(sb.work.join("added.md")).unwrap(),
+            "new\n"
+        );
+        fs::remove_file(sb.work.join(".git/index.lock")).unwrap();
+        assert_eq!(status(&sb), "A  added.md", "still staged");
+    }
+
+    #[test]
+    fn discard_staged_add_trash_failure_leaves_it_untracked_on_disk() {
+        let sb = discard_sandbox();
+        fs::write(sb.work.join("added.md"), "new\n").unwrap();
+        sb.git(&sb.work, &["add", "added.md"]);
+        let env = sb.env();
+        let e = discard_impl(
+            &root(&sb),
+            &confirmed(&sb, &["added.md"]),
+            &env,
+            &|_p: &Path| Err("no trash here".to_string()),
+        )
+        .unwrap_err();
+        assert!(e.message.contains("still on disk"), "{e:?}");
+        assert_eq!(
+            fs::read_to_string(sb.work.join("added.md")).unwrap(),
+            "new\n"
+        );
+        assert_eq!(status(&sb), "?? added.md");
+    }
+
+    #[test]
+    fn discard_reports_a_trashed_file_even_when_its_next_step_fails() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        sb.git(&sb.work, &["mv", "a.md", "renamed.md"]);
+        let req = confirmed(&sb, &["renamed.md"]);
+        let env = sb.env();
+        // The trash works, then the fake takes the index lock, so the
+        // rename source's restore (the step after it) fails.
+        let lock = sb.work.join(".git/index.lock");
+        let r = discard_impl(&root(&sb), &req, &env, &|p: &Path| {
+            t.trash(p)?;
+            fs::write(&lock, "").map_err(|e| e.to_string())
+        })
+        .unwrap();
+        fs::remove_file(&lock).unwrap();
+        assert_eq!(r.trashed, ["renamed.md"]);
+        assert!(r.discarded.is_empty());
+        assert_eq!(r.failed.len(), 1);
+        assert!(
+            r.failed[0].message.contains("couldn't be restored"),
+            "{:?}",
+            r.failed
+        );
+        assert_eq!(
+            t.content(0, "renamed.md"),
+            "a\n",
+            "recoverable from the trash"
+        );
+        // The index already has a.md back; restoring it is one git restore away.
+        assert_eq!(status(&sb), " D a.md");
+    }
+
+    #[test]
+    fn discard_with_no_head_unstages_and_trashes() {
+        let d = tempdir();
+        let base = d.path().canonicalize().unwrap();
+        let global = base.join("gitconfig");
+        fs::write(&global, "[user]\n\tname = T\n\temail = t@example.com\n").unwrap();
+        let g = global.to_string_lossy().into_owned();
+        let env = [
+            ("GIT_CONFIG_GLOBAL", g.as_str()),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ];
+        let repo = base.join("fresh");
+        fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let o = user_git(&repo, &env, args, Duration::from_secs(30)).unwrap();
+            assert!(o.status.success(), "{}", text(&o));
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        git(&["init", "-q"]);
+        fs::write(repo.join("first.md"), "first\n").unwrap();
+        fs::write(repo.join("keep.md"), "keep\n").unwrap();
+        git(&["add", "first.md", "keep.md"]);
+        let trash = base.join("trash");
+        fs::create_dir_all(&trash).unwrap();
+        let tr =
+            |p: &Path| fs::rename(p, trash.join(p.file_name().unwrap())).map_err(|e| e.to_string());
+        let req = [DiscardRequest {
+            path: "first.md".into(),
+            action: DiscardAction::Delete,
+            source: None,
+        }];
+        let r = discard_impl(&repo.to_string_lossy(), &req, &env, &tr).unwrap();
+        assert_eq!(r.trashed, ["first.md"]);
+        assert_eq!(git(&["status", "--porcelain"]), "A  keep.md");
+        assert_eq!(
+            fs::read_to_string(trash.join("first.md")).unwrap(),
+            "first\n"
+        );
+    }
+
+    #[test]
+    fn discard_and_fetch_are_refused_in_remote_sessions() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        fs::write(sb.work.join("a.md"), "edited\n").unwrap();
+        let _scope = crate::windows::enter("test-remote-discard");
+        crate::remote::set_session_for_test(Some(crate::remote::RemoteSession {
+            host: "h".into(),
+            path: "/p".into(),
+            home: "/home/u".into(),
+        }));
+        let e = discard(&sb, &t, &["a.md"]).unwrap_err();
+        let env = sb.env();
+        let pe = discard_preview_impl(&root(&sb), &["a.md".to_string()], &env).unwrap_err();
+        let fe = fetch_impl(&root(&sb), &env).unwrap_err();
+        crate::remote::set_session_for_test(None);
+        assert_eq!(e.kind, GitErrorKind::Unsupported);
+        assert!(e.message.contains("remote sessions"), "{}", e.message);
+        assert_eq!(pe.kind, GitErrorKind::Unsupported);
+        assert_eq!(fe.kind, GitErrorKind::Unsupported);
+        assert_eq!(
+            fs::read_to_string(sb.work.join("a.md")).unwrap(),
+            "edited\n"
+        );
+    }
+
+    #[test]
+    fn discard_source_never_resets_or_cleans() {
+        let src = include_str!("git_write.rs");
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        for bad in [
+            "\"reset\"",
+            "\"clean\"",
+            "\"--hard\"",
+            "remove_dir_all",
+            "remove_file",
+            "\"checkout\"",
+        ] {
+            assert!(!code.contains(bad), "discard must never use {bad}");
+        }
     }
 
     #[test]

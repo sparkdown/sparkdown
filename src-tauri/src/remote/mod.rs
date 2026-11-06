@@ -90,6 +90,12 @@ fn set_session(session: Option<RemoteSession>) {
     }
 }
 
+/// Tests: mark (or clear) a session for the current window scope only.
+#[cfg(test)]
+pub(crate) fn set_session_for_test(session: Option<RemoteSession>) {
+    set_session(session);
+}
+
 /// Labels of windows with a live session (shutdown releases them all).
 fn session_labels() -> Vec<String> {
     sessions().keys().cloned().collect()

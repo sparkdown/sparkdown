@@ -15,7 +15,7 @@ import { escapeHtml } from './utils';
  *   page, so each window has its own log). Nothing ever opens or focuses the
  *   tab by itself.
  */
-export type GitAction = 'commit' | 'pull' | 'push';
+export type GitAction = 'commit' | 'pull' | 'push' | 'discard';
 
 export const STATUS_FADE_MS = 5000;
 
@@ -23,6 +23,7 @@ const RUNNING: Record<GitAction, string> = {
   commit: 'Committing…',
   pull: 'Pulling…',
   push: 'Pushing…',
+  discard: 'Discarding…',
 };
 
 /** The command line shown in the Git tab for each action. */
@@ -30,6 +31,7 @@ const GIT_COMMAND: Record<GitAction, string> = {
   commit: 'git commit',
   pull: 'git pull --no-edit',
   push: 'git push (never forced)',
+  discard: 'git restore --source=HEAD --staged --worktree (new files to the Trash)',
 };
 
 function plural(n: number, word: string): string {
@@ -38,6 +40,7 @@ function plural(n: number, word: string): string {
 
 /** The short status-bar line for a successful action. */
 export function successMessage(what: GitAction, r: GitActionResult): string {
+  if (what === 'discard') return r.summary || 'Discarded changes';
   if (what === 'commit') {
     // `[main 1a2b3c4] subject` → `Committed 1a2b3c4: subject`
     const m = /^\[[^\]\s]+(?: \([^)]*\))? ([0-9a-f]{4,})\]\s*(.*)$/.exec(r.summary);
