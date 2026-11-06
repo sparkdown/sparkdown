@@ -410,11 +410,14 @@ export interface DiscardItem {
   staged: boolean;
   partially_staged: boolean;
   untracked: boolean;
+  /** Opaque token for exactly what was previewed (status, index, bytes on
+   *  disk). Sent back unchanged; the core refuses a row that differs. */
+  fingerprint: string;
 }
 
 /** One confirmed row sent back to git_discard (git_write.rs
  *  `DiscardRequest`): a path whose fresh plan differs is refused. */
-export type DiscardRequest = Pick<DiscardItem, "path" | "action" | "source">;
+export type DiscardRequest = Pick<DiscardItem, "path" | "action" | "source" | "fingerprint">;
 
 /** git_write.rs `DiscardResult`. */
 export interface DiscardResult {

@@ -388,6 +388,15 @@ export class ChangesView {
    */
   handleKey(e: KeyboardEvent, opts: { enter?: boolean } = {}): boolean {
     if (e.metaKey || e.ctrlKey || e.altKey) return false;
+    // #172: the Menu key / Shift+F10 on the focused list asks to discard the
+    // selected file (the confirmation dialog is the keyboard-safe step; the
+    // mouse context menu has no keyboard navigation).
+    if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+      const inList = !!e.target && e.target instanceof Node && this.listEl.contains(e.target);
+      if (!inList || !this.opts.onDiscard || !this.current) return false;
+      this.requestDiscard([this.current]);
+      return true;
+    }
     const t = e.target as HTMLElement | null;
     if (t && (t.closest?.('input, textarea, select, [contenteditable="true"]') || t.isContentEditable))
       return false;
@@ -449,6 +458,12 @@ export class ChangesView {
   private onContextMenu(e: MouseEvent): void {
     const row = (e.target as HTMLElement).closest<HTMLElement>('.change-row');
     const path = row?.dataset.path;
+    if (this.opts.onDiscard && !row && e.target === this.listEl) {
+      // Keyboard-initiated (Menu key / Shift+F10 on the list): handleKey
+      // already asked for the selected file; don't open a mouse menu too.
+      e.preventDefault();
+      return;
+    }
     if (!row || !path || !this.opts.onDiscard) return;
     e.preventDefault();
     const reason = this.opts.discardDisabledReason?.() ?? null;
@@ -637,7 +652,7 @@ export class ChangesView {
   private renderDiscardButton(c: GitChange): string {
     if (!this.opts.onDiscard) return '';
     const reason = this.opts.discardDisabledReason?.() ?? null;
-    const title = reason ?? 'Discard Changes…';
+    const title = reason ?? 'Discard Changes… (Shift+F10 on the selected file)';
     return (
       `<button type="button" class="change-discard" tabindex="-1" title="${escapeHtml(title)}" aria-label="${escapeHtml(`Discard changes in ${c.path}`)}"${reason ? ' aria-disabled="true"' : ''}>` +
       DISCARD_SVG +

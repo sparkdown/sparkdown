@@ -264,7 +264,12 @@ export async function runDiscard(
   try {
     result = await deps.discard(
       repoRoot,
-      items.map(({ path, action, source }) => ({ path, action, ...(source ? { source } : {}) })),
+      items.map(({ path, action, source, fingerprint }) => ({
+        path,
+        action,
+        ...(source ? { source } : {}),
+        fingerprint,
+      })),
     );
   } catch (e) {
     // The core errors only when nothing changed on disk, but never trust

@@ -79,10 +79,6 @@ pub enum GitErrorKind {
     Other,
 }
 
-fn is_false(b: &bool) -> bool {
-    !*b
-}
-
 /// A failed git action: a kind for the UI, a sentence to show, and git's own
 /// output for the "details" disclosure.
 #[derive(Serialize, Clone, Debug)]
@@ -937,7 +933,18 @@ pub struct DiscardItem {
     pub partially_staged: bool,
     /// Untracked (`??`) in the fresh status.
     pub untracked: bool,
+    /// Opaque token for exactly what was previewed: status letters, index
+    /// entries and the bytes on disk of `path` (and `source`). Sent back
+    /// with the confirmation; Discard refuses the row when it differs.
+    pub fingerprint: String,
+    /// The on-disk part of `fingerprint`, re-checked right before this
+    /// row's first change (backend only).
+    #[serde(skip)]
+    worktree: String,
 }
+
+const CHANGED_SINCE_CONFIRMED: &str =
+    "Changed since you confirmed; nothing was done. Review it and discard again.";
 
 /// One confirmed row sent back by the dialog: Discard re-plans from a fresh
 /// status and refuses a path whose plan no longer matches what the user
@@ -948,6 +955,8 @@ pub struct DiscardRequest {
     pub action: DiscardAction,
     #[serde(default)]
     pub source: Option<String>,
+    /// `DiscardItem::fingerprint` from the preview that was confirmed.
+    pub fingerprint: String,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -1078,6 +1087,124 @@ fn has_head(top: &Path, extra: ExtraEnv) -> bool {
     query(top, extra, &["rev-parse", "--verify", "-q", "HEAD"]).is_some()
 }
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// What is on disk at `rel` right now, as a short string: missing, a
+/// folder, a symlink (its target, never followed) or a regular file (its
+/// length and the SHA-256 of its bytes, streamed). This is change
+/// detection, not a lock: a write landing after this read still races.
+fn disk_state(top: &Path, rel: &str) -> String {
+    use sha2::{Digest, Sha256};
+    use std::io::ErrorKind;
+    let p = top.join(rel);
+    let m = match p.symlink_metadata() {
+        Ok(m) => m,
+        Err(e) if e.kind() == ErrorKind::NotFound => return "missing".into(),
+        Err(e) => return format!("unreadable:{:?}", e.kind()),
+    };
+    if m.file_type().is_symlink() {
+        return match std::fs::read_link(&p) {
+            Ok(t) => format!(
+                "link:{}",
+                hex(&Sha256::digest(t.as_os_str().as_encoded_bytes()))
+            ),
+            Err(e) => format!("unreadable:{:?}", e.kind()),
+        };
+    }
+    if m.is_dir() {
+        return "dir".into();
+    }
+    let mut f = match std::fs::File::open(&p) {
+        Ok(f) => f,
+        Err(e) => return format!("unreadable:{:?}", e.kind()),
+    };
+    // Opening follows a symlink: make sure the open file is the one
+    // `symlink_metadata` saw (it was not swapped in between).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match f.metadata() {
+            Ok(fm) if fm.ino() == m.ino() && fm.dev() == m.dev() => {}
+            _ => return "unstable".into(),
+        }
+    }
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut len: u64 = 0;
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                h.update(&buf[..n]);
+                len += n as u64;
+            }
+            Err(e) => return format!("unreadable:{:?}", e.kind()),
+        }
+    }
+    format!("file:{len}:{}", hex(&h.finalize()))
+}
+
+/// Index entries (`mode oid stage`, all stages) by repo-relative path.
+fn index_entries(
+    top: &Path,
+    extra: ExtraEnv,
+) -> Result<std::collections::HashMap<String, String>, GitActionError> {
+    let raw = run_stdout_raw(
+        top,
+        extra,
+        &["ls-files", "--stage", "-z"],
+        Duration::from_secs(60),
+        Action::Discard,
+    )?;
+    let mut map: std::collections::HashMap<String, String> = Default::default();
+    for rec in raw.split('\0').filter(|r| !r.is_empty()) {
+        if let Some((meta, path)) = rec.split_once('\t') {
+            let e = map.entry(path.to_string()).or_default();
+            e.push_str(meta);
+            e.push(';');
+        }
+    }
+    Ok(map)
+}
+
+/// The on-disk part of a row's fingerprint (`path`, then `source`).
+fn row_disk_state(top: &Path, it: &DiscardItem) -> String {
+    let mut s = disk_state(top, &it.path);
+    if let Some(src) = &it.source {
+        s.push('|');
+        s.push_str(&disk_state(top, src));
+    }
+    s
+}
+
+/// Fill in a planned row's fingerprint: everything Discard is about to act
+/// on for it, hashed (status letters, index entries, bytes on disk).
+fn seal(
+    top: &Path,
+    it: &mut DiscardItem,
+    recs: &[StatusRec],
+    index: &std::collections::HashMap<String, String>,
+) {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for r in recs.iter().filter(|r| r.path == it.path) {
+        h.update([r.x as u8, r.y as u8, 0]);
+        h.update(r.orig.as_deref().unwrap_or("").as_bytes());
+        h.update([0]);
+    }
+    for p in std::iter::once(&it.path).chain(it.source.as_ref()) {
+        h.update(p.as_bytes());
+        h.update([0]);
+        h.update(index.get(p).map(String::as_str).unwrap_or("-").as_bytes());
+        h.update([0]);
+    }
+    it.worktree = row_disk_state(top, it);
+    h.update(it.worktree.as_bytes());
+    it.fingerprint = hex(&h.finalize()[..16]);
+}
+
 /// The Discard row for one status record.
 fn plan_item(r: &StatusRec, head: bool) -> DiscardItem {
     let staged = r.x != ' ' && r.x != '?';
@@ -1090,6 +1217,8 @@ fn plan_item(r: &StatusRec, head: bool) -> DiscardItem {
         staged,
         partially_staged,
         untracked: r.x == '?',
+        fingerprint: String::new(),
+        worktree: String::new(),
     };
     if r.x == '?' {
         return item(DiscardAction::Delete, "Untracked: moved to the Trash", None);
@@ -1199,6 +1328,12 @@ fn plan_discard(
             }),
         }
     }
+    if !items.is_empty() {
+        let index = index_entries(&top, extra)?;
+        for it in &mut items {
+            seal(&top, it, &recs, &index);
+        }
+    }
     Ok((top, head, items, failed))
 }
 
@@ -1259,21 +1394,36 @@ pub(crate) fn discard_impl(
         let same = confirmed
             .iter()
             .find(|r| r.path == it.path)
-            .is_some_and(|r| r.action == it.action && r.source == it.source);
+            .is_some_and(|r| {
+                r.action == it.action && r.source == it.source && r.fingerprint == it.fingerprint
+            });
         if same {
             items.push(it);
         } else {
             failed.push(DiscardFailure {
                 path: it.path.clone(),
-                message:
-                    "Changed since you confirmed; nothing was done. Review it and discard again."
-                        .into(),
+                message: CHANGED_SINCE_CONFIRMED.into(),
             });
         }
     }
     let mut res = DiscardResult::default();
     let mut log: Vec<String> = Vec::new();
     for it in &items {
+        // Every row was checked against its confirmation above, before any
+        // change. Check this row's path and bytes on disk once more right
+        // before touching it, so an edit made while earlier rows ran is not
+        // lost. (Still not atomic: a write after this check races.)
+        let guard = check_discard_path(&top, &it.path).and_then(|()| match &it.source {
+            Some(src) => check_discard_path(&top, src),
+            None => Ok(()),
+        });
+        if guard.is_err() || row_disk_state(&top, it) != it.worktree {
+            failed.push(DiscardFailure {
+                path: it.path.clone(),
+                message: CHANGED_SINCE_CONFIRMED.into(),
+            });
+            continue;
+        }
         let (trashed, outcome) = discard_one(&top, head, it, extra, trasher, &mut log);
         if trashed {
             res.trashed.push(it.path.clone());
@@ -2056,11 +2206,13 @@ mod tests {
                     path,
                     action: i.action,
                     source: i.source.clone(),
+                    fingerprint: i.fingerprint.clone(),
                 },
                 None => DiscardRequest {
                     path,
                     action: DiscardAction::Revert,
                     source: None,
+                    fingerprint: String::new(),
                 },
             })
             .collect()
@@ -2392,6 +2544,120 @@ mod tests {
         assert!(t.names().is_empty(), "nothing trashed");
     }
 
+    /// Edits made while the confirmation is open must not be discarded
+    /// unseen: same status letters, different bytes on disk (#172).
+    #[test]
+    fn discard_refuses_rows_whose_content_changed_since_confirmation() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        fs::write(sb.work.join("a.md"), "edited\n").unwrap();
+        fs::write(sb.work.join("b.md"), "edited\n").unwrap();
+        fs::write(sb.work.join("scratch.md"), "draft\n").unwrap();
+        let req = confirmed(&sb, &["a.md", "b.md", "scratch.md"]);
+        // While the dialog is open: a.md gets newer work (still ` M`) and
+        // the untracked scratch.md is rewritten (still `??`).
+        fs::write(sb.work.join("a.md"), "newer work, never shown\n").unwrap();
+        fs::write(sb.work.join("scratch.md"), "newer draft\n").unwrap();
+        let env = sb.env();
+        let r = discard_impl(&root(&sb), &req, &env, &|p: &Path| t.trash(p)).unwrap();
+        assert_eq!(r.discarded, ["b.md"]);
+        let failed: Vec<&str> = r.failed.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(failed, ["a.md", "scratch.md"], "{:?}", r.failed);
+        assert!(r
+            .failed
+            .iter()
+            .all(|f| f.message.contains("Changed since you confirmed")));
+        assert_eq!(
+            fs::read_to_string(sb.work.join("a.md")).unwrap(),
+            "newer work, never shown\n"
+        );
+        assert_eq!(
+            fs::read_to_string(sb.work.join("scratch.md")).unwrap(),
+            "newer draft\n"
+        );
+        assert!(t.names().is_empty(), "nothing trashed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discard_refuses_an_untracked_file_swapped_for_a_symlink_since_confirmation() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        fs::write(sb.work.join("scratch.md"), "draft\n").unwrap();
+        let req = confirmed(&sb, &["scratch.md"]);
+        let target = sb.bare.parent().unwrap().join("precious.md");
+        fs::write(&target, "precious\n").unwrap();
+        fs::remove_file(sb.work.join("scratch.md")).unwrap();
+        std::os::unix::fs::symlink(&target, sb.work.join("scratch.md")).unwrap();
+        let env = sb.env();
+        let e = discard_impl(&root(&sb), &req, &env, &|p: &Path| t.trash(p)).unwrap_err();
+        assert!(e.detail.contains("Changed since you confirmed"), "{e:?}");
+        assert!(sb
+            .work
+            .join("scratch.md")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "precious\n");
+        assert!(t.names().is_empty());
+    }
+
+    #[test]
+    fn discard_refuses_a_restaged_file_since_confirmation() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        fs::write(sb.work.join("a.md"), "staged v1\n").unwrap();
+        sb.git(&sb.work, &["add", "a.md"]);
+        let req = confirmed(&sb, &["a.md"]);
+        // Same `M ` status, but a different staged blob (and work tree).
+        fs::write(sb.work.join("a.md"), "staged v2\n").unwrap();
+        sb.git(&sb.work, &["add", "a.md"]);
+        let env = sb.env();
+        let e = discard_impl(&root(&sb), &req, &env, &|p: &Path| t.trash(p)).unwrap_err();
+        assert!(e.detail.contains("Changed since you confirmed"), "{e:?}");
+        assert_eq!(status(&sb), "M  a.md");
+    }
+
+    #[test]
+    fn discard_rechecks_each_row_right_before_touching_it() {
+        let sb = discard_sandbox();
+        let t = FakeTrash::new(&sb);
+        fs::write(sb.work.join("scratch.md"), "draft\n").unwrap();
+        fs::write(sb.work.join("a.md"), "edited\n").unwrap();
+        let req = confirmed(&sb, &["scratch.md", "a.md"]);
+        let env = sb.env();
+        let a = sb.work.join("a.md");
+        // a.md passes the up-front check, then gets new work while the
+        // first row (scratch.md) is being trashed.
+        let r = discard_impl(&root(&sb), &req, &env, &|p: &Path| {
+            t.trash(p)?;
+            fs::write(&a, "typed meanwhile\n").map_err(|e| e.to_string())
+        })
+        .unwrap();
+        assert_eq!(r.discarded, ["scratch.md"]);
+        assert_eq!(r.failed.len(), 1);
+        assert_eq!(r.failed[0].path, "a.md");
+        assert_eq!(fs::read_to_string(&a).unwrap(), "typed meanwhile\n");
+    }
+
+    #[test]
+    fn discard_fingerprint_is_stable_and_tracks_content_index_and_kind() {
+        let sb = discard_sandbox();
+        fs::write(sb.work.join("a.md"), "edited\n").unwrap();
+        let fp = |sb: &Sandbox| preview(sb, &["a.md"])[0].fingerprint.clone();
+        let first = fp(&sb);
+        assert_eq!(first.len(), 32);
+        assert_eq!(fp(&sb), first, "same state, same token");
+        fs::write(sb.work.join("a.md"), "edited again\n").unwrap();
+        let second = fp(&sb);
+        assert_ne!(second, first, "new bytes");
+        fs::write(sb.work.join("a.md"), "edited\n").unwrap();
+        assert_eq!(fp(&sb), first, "content-based: back to the same bytes");
+        sb.git(&sb.work, &["add", "a.md"]);
+        assert_ne!(fp(&sb), first, "staged now (index entry and letters)");
+    }
+
     #[test]
     fn discard_rm_cached_says_the_file_on_disk_is_replaced() {
         let sb = discard_sandbox();
@@ -2413,16 +2679,25 @@ mod tests {
 
     #[test]
     fn discard_request_wire_shape_matches_the_frontend() {
-        let r: DiscardRequest =
-            serde_json::from_str(r#"{"path":"n.md","action":"delete","source":"o.md"}"#).unwrap();
+        let r: DiscardRequest = serde_json::from_str(
+            r#"{"path":"n.md","action":"delete","source":"o.md","fingerprint":"f1"}"#,
+        )
+        .unwrap();
         assert_eq!(r.action, DiscardAction::Delete);
         assert_eq!(r.source.as_deref(), Some("o.md"));
+        assert_eq!(r.fingerprint, "f1");
         let r: DiscardRequest =
-            serde_json::from_str(r#"{"path":"a.md","action":"revert"}"#).unwrap();
+            serde_json::from_str(r#"{"path":"a.md","action":"revert","fingerprint":"f2"}"#)
+                .unwrap();
         assert_eq!((r.action, r.source), (DiscardAction::Revert, None));
-        // An unknown action or a bare path string is refused at the boundary.
+        // An unknown action, a missing fingerprint or a bare path string is
+        // refused at the boundary.
+        assert!(serde_json::from_str::<DiscardRequest>(
+            r#"{"path":"a.md","action":"remove","fingerprint":"f"}"#
+        )
+        .is_err());
         assert!(
-            serde_json::from_str::<DiscardRequest>(r#"{"path":"a.md","action":"remove"}"#).is_err()
+            serde_json::from_str::<DiscardRequest>(r#"{"path":"a.md","action":"revert"}"#).is_err()
         );
         assert!(serde_json::from_str::<Vec<DiscardRequest>>(r#"["a.md"]"#).is_err());
         let item = serde_json::to_value(DiscardItem {
@@ -2433,10 +2708,14 @@ mod tests {
             staged: false,
             partially_staged: false,
             untracked: false,
+            fingerprint: "f".into(),
+            worktree: "file:2:secret-ish".into(),
         })
         .unwrap();
         assert_eq!(item["action"], "revert");
+        assert_eq!(item["fingerprint"], "f");
         assert!(item.get("source").is_none());
+        assert!(item.get("worktree").is_none(), "backend only");
     }
 
     #[test]
@@ -2572,10 +2851,13 @@ mod tests {
         fs::create_dir_all(&trash).unwrap();
         let tr =
             |p: &Path| fs::rename(p, trash.join(p.file_name().unwrap())).map_err(|e| e.to_string());
+        let planned =
+            discard_preview_impl(&repo.to_string_lossy(), &["first.md".into()], &env).unwrap();
         let req = [DiscardRequest {
             path: "first.md".into(),
             action: DiscardAction::Delete,
             source: None,
+            fingerprint: planned[0].fingerprint.clone(),
         }];
         let r = discard_impl(&repo.to_string_lossy(), &req, &env, &tr).unwrap();
         assert_eq!(r.trashed, ["first.md"]);

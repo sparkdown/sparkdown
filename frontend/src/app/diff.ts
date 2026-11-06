@@ -79,6 +79,8 @@ export class DiffController {
   /** Repo the fetcher last ran for on its own (first status of a repo). */
   private fetchedRepo: string | null = null;
   private windowFocused = typeof document !== 'undefined' && document.hasFocus?.() === true;
+  /** A Discard confirmation or run is in progress (#172). */
+  private discarding = false;
   private changesMode = false; // the sidebar is showing the Changes view
   // Diff pane: "reading" (meat-abridged) vs full verbatim. Reading by default,
   // matching the meat philosophy; the header control flips it (sticky across
@@ -520,6 +522,18 @@ export class DiffController {
 
   /** #172: confirm, discard, then sync open tabs and the Changes list. */
   private async discard(paths: string[]): Promise<void> {
+    // One confirmation at a time (a double click or Menu key + contextmenu
+    // must not stack two dialogs).
+    if (this.discarding) return;
+    this.discarding = true;
+    try {
+      await this.runDiscardFlow(paths);
+    } finally {
+      this.discarding = false;
+    }
+  }
+
+  private async runDiscardFlow(paths: string[]): Promise<void> {
     await runDiscard(this.changesView?.getRepoRoot() ?? null, paths, {
       isRemote: () => this.isRemote(),
       preview: (root, p) => api.gitDiscardPreview(root, p),

@@ -23,6 +23,7 @@ function item(path: string, action: DiscardItem['action'], extra: Partial<Discar
     staged: false,
     partially_staged: false,
     untracked: action === 'delete',
+    fingerprint: `fp:${path}`,
     ...extra,
   };
 }
@@ -108,15 +109,15 @@ describe('runDiscard (#172)', () => {
     expect(h.calls).toEqual([]);
   });
 
-  it('sends back exactly the confirmed rows (path, action, rename source)', async () => {
+  it('sends back exactly the confirmed rows (path, action, rename source, preview fingerprint)', async () => {
     const h = harness({
       items: [item('a.md', 'revert'), item('new.md', 'delete', { source: 'old.md', untracked: false })],
     });
     await runDiscard(ROOT, ['a.md', 'new.md'], h.deps);
     expect(h.sent).toEqual([
       [
-        { path: 'a.md', action: 'revert' },
-        { path: 'new.md', action: 'delete', source: 'old.md' },
+        { path: 'a.md', action: 'revert', fingerprint: 'fp:a.md' },
+        { path: 'new.md', action: 'delete', source: 'old.md', fingerprint: 'fp:new.md' },
       ],
     ]);
   });
@@ -203,7 +204,7 @@ describe('runDiscard (#172)', () => {
     await runDiscard(ROOT, ['a.md'], h.deps);
     const rows = h.sent[0];
     expect(rows.every((r) => typeof r === 'object' && (r.action === 'revert' || r.action === 'delete'))).toBe(true);
-    expect(Object.keys(rows[0]).sort()).toEqual(['action', 'path']);
+    expect(Object.keys(rows[0]).sort()).toEqual(['action', 'fingerprint', 'path']);
   });
 
   it('a file trashed whose next step failed: its clean tab closes, a dirty one keeps its text, the rename source is untouched', async () => {
