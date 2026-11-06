@@ -1517,8 +1517,11 @@ describe('TerminalManager find', () => {
     const { mgr, host } = makeManager();
     await mgr.addTerminal();
     mgr.openFind();
+    const focusedSearch = input(host, 'term-1');
+    focusedSearch.focus();
     await mgr.splitFocused('row');
     expect(card(host, 'term-1').querySelector('.sd-find-terminal')).toBeTruthy();
+    expect(document.activeElement).toBe(input(host, 'term-1'));
     // Re-open find on the focused pane, then close a sibling: layout re-render
     // must restore find-bar focus instead of stealing it for xterm.
     mgr.activate('term-2');

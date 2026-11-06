@@ -78,6 +78,33 @@ describe('SettingsDialog', () => {
     dialog.close();
   });
 
+  it('scrollback uses bounded numeric input and applies/persists via onChange', () => {
+    config.terminal_scrollback = 5000;
+    const dialog = new SettingsDialog();
+    dialog.toggle(host());
+    const settings = [...document.querySelectorAll('.settings-section')].find((el) =>
+      el.textContent?.includes('Scrollback lines'),
+    )!;
+    const input = settings.querySelector<HTMLInputElement>('input[type="number"]')!;
+    expect(document.querySelectorAll('[data-setting-scrollback]')).toHaveLength(1);
+    expect(input.min).toBe('200');
+    expect(input.max).toBe('50000');
+    input.value = '200';
+    input.dispatchEvent(new Event('change'));
+    expect(config.terminal_scrollback).toBe(200);
+    expect(changes).toBe(1);
+    // Temporary input must not snap to the 200-line minimum while typing.
+    input.value = '';
+    input.dispatchEvent(new Event('input'));
+    expect(changes).toBe(1);
+    input.value = '900';
+    input.dispatchEvent(new Event('change'));
+    expect(config.terminal_scrollback).toBe(900);
+    expect(changes).toBe(2);
+    expect(document.body.textContent).toContain('applied live');
+    dialog.close();
+  });
+
   it('instances are independent', () => {
     const a = new SettingsDialog();
     const b = new SettingsDialog();

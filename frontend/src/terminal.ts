@@ -309,6 +309,8 @@ export class TerminalPane {
     return this.started && !this.exited;
   }
 
+  onMountSettled?: () => void;
+
   /** True when the shell failed to spawn (the tab stays, error readable). */
   isStartFailed(): boolean {
     return this.startFailed;
@@ -336,6 +338,11 @@ export class TerminalPane {
     if (this.disposed) return;
     this.term.open(container);
     this.applyTheme();
+    // xterm queues textarea focus behind DOM insertion. Let the pane owner
+    // restore a still-intended Find focus after that native task completes.
+    setTimeout(() => {
+      if (!this.disposed) this.onMountSettled?.();
+    }, 0);
 
     // Render with xterm's built-in DOM renderer (no WebGL addon). The DOM
     // renderer draws each glyph with the system font, which is correct for an
@@ -871,6 +878,8 @@ export class TerminalManager {
   private tree: LayoutNode | null = null;
   /** The pane that has (or last had) keyboard focus. */
   private focusedId: string | null = null;
+  /** Search input temporarily owns keyboard focus across a split. */
+  private searchFocusId: string | null = null;
   /** Panes whose close confirmation is open (one dialog per pane). */
   private confirmingClose = new Set<string>();
   private seq = 0;
@@ -930,6 +939,12 @@ export class TerminalManager {
     this.host = host;
     this.onOpenPath = onOpenPath;
     this.host.addEventListener('click', (e) => this.onHostClick(e));
+    this.host.addEventListener('mousedown', (e) => {
+      const b = e.target instanceof Element ? e.target.closest<HTMLElement>('[data-act]') : null;
+      if (b?.dataset.act === 'split-right' || b?.dataset.act === 'split-down') {
+        this.onSplitPointer(e, b.dataset.act);
+      }
+    });
     // Track the focused pane: a click anywhere in a pane, or keyboard focus
     // entering its terminal.
     this.host.addEventListener('mousedown', (e) => this.focusFromEvent(e));
@@ -1201,6 +1216,11 @@ export class TerminalManager {
       remote: this.remote,
     };
     const session = this.buildSession(shell, num, opts.agentId);
+    if (!this.searchFocusId) {
+      this.searchFocusId = [...this.searches]
+        .find(([, search]) => search.ownsFocus(document.activeElement))?.[0] ?? null;
+    }
+    const preservingFind = this.searchFocusId !== null;
     const { id, pane, start } = this.createPane(meta, session, opts.launch ?? null);
     const order = paneIds(this.tree);
     const target =
@@ -1210,13 +1230,17 @@ export class TerminalManager {
     this.tree = this.tree
       ? splitPane(this.tree, target, id, opts.split?.dir ?? 'row')
       : leaf(id);
-    this.focusedId = id;
+    this.focusedId = preservingFind ? target : id;
     this.render();
     await start();
     // The shell exited while starting: closeTerminal already removed it.
     if (!this.panes.has(id)) return false;
+    // Mounting xterm blurs its sibling in a native webview, after render().
+    // Restore the old pane's search now that the new shell cannot steal it.
+    if (preservingFind) {
+      this.restoreSearchFocus();
+    } else if (this.focusedId === id) pane.focus();
     this.persist();
-    if (this.focusedId === id) pane.focus();
     return true;
   }
 
@@ -1250,6 +1274,7 @@ export class TerminalManager {
     // watches session liveness, so typing `exit` in the pane's shell closes
     // the pane even when the user's tmux.conf sets detach-on-destroy off.
     // closeTerminal then kills the sd-* session so it does not resurrect.
+    pane.onMountSettled = () => this.restoreSearchFocus();
     pane.setOnExit(() => {
       if (pane.isStartFailed()) {
         this.renderHeaders();
@@ -1440,6 +1465,16 @@ export class TerminalManager {
     return true;
   }
 
+  private restoreSearchFocus(): void {
+    const id = this.searchFocusId;
+    const search = id ? this.searches.get(id) : undefined;
+    const pane = id ? this.panes.get(id) : undefined;
+    if (id && search?.isOpen() && pane) {
+      this.setFocused(id);
+      search.open(pane.searchTarget());
+    }
+  }
+
   /** Scrollback lines for every pane (clamped); existing panes update live. */
   setScrollback(lines: number): void {
     this.scrollback = clampScrollback(lines);
@@ -1447,6 +1482,7 @@ export class TerminalManager {
   }
 
   private setFocused(id: string): void {
+    this.searchFocusId = null;
     if (this.focusedId === id || !this.panes.has(id)) return;
     this.focusedId = id;
     this.renderHeaders();
@@ -1456,6 +1492,25 @@ export class TerminalManager {
     const card = (e.target as HTMLElement | null)?.closest<HTMLElement>('.terminal-pane');
     const id = card?.dataset.termId;
     if (id) this.setFocused(id);
+  }
+
+  private onSplitPointer(e: MouseEvent, act: 'split-right' | 'split-down'): void {
+    const btn = e.target instanceof Element
+      ? e.target.closest<HTMLButtonElement>('[data-act]')
+      : null;
+    if (btn?.dataset.act !== act || e.button !== 0) return;
+    // The webview performs its initial focus task before dispatching click.
+    // Apply that button's action at mousedown while Find still owns intent.
+    e.preventDefault();
+    e.stopPropagation();
+    const id = btn.closest<HTMLElement>('.terminal-pane')?.dataset.termId;
+    if (!this.searchFocusId) return;
+    const pane = this.panes.get(this.searchFocusId);
+    const search = this.searches.get(this.searchFocusId);
+    if (id && pane && search?.isOpen()) {
+      void this.addTerminal({ split: { dir: act === 'split-right' ? 'row' : 'column', target: id } })
+        .then(() => this.restoreSearchFocus());
+    }
   }
 
   private onHostClick(e: MouseEvent): void {
@@ -1471,10 +1526,10 @@ export class TerminalManager {
     e.stopPropagation();
     switch (btn.dataset.act) {
       case 'split-right':
-        void this.addTerminal({ split: { dir: 'row', target: id } });
+        if (!this.searchFocusId) void this.addTerminal({ split: { dir: 'row', target: id } });
         break;
       case 'split-down':
-        void this.addTerminal({ split: { dir: 'column', target: id } });
+        if (!this.searchFocusId) void this.addTerminal({ split: { dir: 'column', target: id } });
         break;
       case 'close':
         void this.requestClose(id);
@@ -1522,17 +1577,17 @@ export class TerminalManager {
   /** Rebuild the grid DOM from the tree (cards are re-parented, never
    *  rebuilt, so each xterm keeps its state). */
   private render(): void {
-    const hadFocus = this.hasFocus();
-    // Find-bar focus lives inside the host too; restore it after re-parent
-    // instead of stealing keyboard focus back to xterm.
+    const activeElement = document.activeElement;
     const findId = this.focusedId;
-    const findHadFocus = !!findId && (this.searches.get(findId)?.hasFocus() ?? false);
+    // Snapshot the old search before reparenting blurs its DOM subtree.
+    const findHadFocus =
+      !!findId && this.searches.get(findId)?.ownsFocus(activeElement) === true;
+    const hadFocus = this.hasFocus();
     const root = this.tree ? this.buildNode(this.tree, '') : null;
     if (root) root.style.flex = '1 1 0px';
     this.host.replaceChildren(...(root ? [root] : []));
     this.renderHeaders();
     this.refitAll();
-    // Re-parenting blurs whatever had focus; give it back.
     if (!hadFocus) return;
     if (findHadFocus && findId) {
       const search = this.searches.get(findId);

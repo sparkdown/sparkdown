@@ -1,6 +1,12 @@
 import { api } from './api';
 import type { AgentMcpStatus, AppConfig } from './api';
 import { trapFocus, type ModalHandle } from './modal';
+import {
+  TERMINAL_SCROLLBACK_DEFAULT,
+  TERMINAL_SCROLLBACK_MAX,
+  TERMINAL_SCROLLBACK_MIN,
+  clampScrollback,
+} from './terminal-scrollback';
 
 /**
  * Settings modal. A small, focused preferences dialog —
@@ -117,6 +123,16 @@ function buildSettingsOverlay(host: SettingsHost, close: () => void): HTMLElemen
       checked: host.config.use_tmux,
       onToggle: (value) => {
         host.config.use_tmux = value;
+        host.onChange();
+      },
+    }),
+  );
+
+  section.appendChild(
+    scrollbackRow({
+      value: host.config.terminal_scrollback ?? TERMINAL_SCROLLBACK_DEFAULT,
+      onChange: (value) => {
+        host.config.terminal_scrollback = clampScrollback(value);
         host.onChange();
       },
     }),
@@ -442,6 +458,36 @@ function mcpInstallRow(
       render();
     },
   };
+}
+
+function scrollbackRow(spec: { value: number; onChange: (value: number) => void }): HTMLElement {
+  const row = document.createElement('label');
+  row.className = 'settings-row';
+  const text = document.createElement('div');
+  text.className = 'settings-row-text';
+  const label = document.createElement('div');
+  label.className = 'settings-row-label';
+  label.textContent = 'Scrollback lines';
+  const desc = document.createElement('div');
+  desc.className = 'settings-row-desc';
+  desc.textContent = `${TERMINAL_SCROLLBACK_MIN.toLocaleString()} to ${TERMINAL_SCROLLBACK_MAX.toLocaleString()} lines of history, applied live.`;
+  text.append(label, desc);
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.className = 'settings-text settings-number';
+  input.dataset.settingScrollback = '';
+  input.min = String(TERMINAL_SCROLLBACK_MIN);
+  input.max = String(TERMINAL_SCROLLBACK_MAX);
+  input.step = '100';
+  input.value = String(spec.value);
+  const save = () => {
+    if (!input.validity.valid || !input.value) return;
+    spec.onChange(input.valueAsNumber);
+    input.value = String(clampScrollback(input.valueAsNumber));
+  };
+  input.addEventListener('change', save);
+  row.append(text, input);
+  return row;
 }
 
 interface TextSpec {

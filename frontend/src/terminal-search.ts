@@ -68,8 +68,8 @@ export class TerminalSearch {
   }
 
   /** True when the find bar (or one of its controls) holds focus. */
-  hasFocus(): boolean {
-    return !!this.dom && this.dom.contains(document.activeElement);
+  ownsFocus(element: Element | null): boolean {
+    return !!element && !!this.dom && this.dom.contains(element);
   }
 
   private detachResults(): void {
