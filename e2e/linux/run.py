@@ -4,6 +4,7 @@
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -15,7 +16,9 @@ import wd  # noqa: E402
 from report import Report  # noqa: E402
 
 MODE, BIN, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
-R = Report(("Ubuntu (X11, WebKitWebDriver)" if MODE == "x11" else "Arch + Hyprland (vkms)") + fixtures.variant(), OUT)
+# E2E_HYPR_LEG=latest is the live-repo Hyprland leg (0.57+); pinned keeps the old name.
+HYPR_LABEL = "Arch + Hyprland latest (vkms)" if os.environ.get("E2E_HYPR_LEG") == "latest" else "Arch + Hyprland (vkms)"
+R = Report(("Ubuntu (X11, WebKitWebDriver)" if MODE == "x11" else HYPR_LABEL) + fixtures.variant(), OUT)
 SUF = flow.SUF
 DIALOG_TITLES = ("Quit SparkDown", "Unsaved Changes", "Close Folder")
 ATSPI = str(pathlib.Path(__file__).with_name("atspi_dialogs.py"))
@@ -83,6 +86,42 @@ def read_window_menu(names, dismiss):
 def sh(*args, timeout=30):
     p = subprocess.run(list(args), capture_output=True, text=True, timeout=timeout)
     return p.stdout.strip()
+
+
+def hypr_version():
+    """(major, minor, patch) of the running Hyprland, or None."""
+    try:
+        v = json.loads(sh("hyprctl", "version", "-j"))
+    except ValueError:
+        return None
+    m = re.match(r"v?(\d+)\.(\d+)(?:\.(\d+))?", v.get("version") or v.get("tag") or "")
+    return tuple(int(x or 0) for x in m.groups()) if m else None
+
+
+# Hyprland 0.57 reads only hyprland.lua (#168), and with a Lua config
+# `hyprctl dispatch` takes a Lua dispatcher expression; the legacy
+# `closewindow address:X` form fails (exit 7, no visible error).
+HYPR_LUA = (0, 57, 0)
+_ADDR = re.compile(r"0x[0-9a-fA-F]+")
+
+
+def hypr_dispatch(action, address, version):
+    """Close or focus the window at `address` with the dispatcher syntax this
+    Hyprland takes. A reply other than "ok" is logged, not swallowed."""
+    if not address or not _ADDR.fullmatch(address):
+        R.log(f"hyprctl {action}: no window address ({address!r})")
+        return False
+    if version and version >= HYPR_LUA:
+        sel = f'{{ window = "address:{address}" }}'
+        args = ["hyprctl", "dispatch", {"close": f"hl.dsp.window.close({sel})", "focus": f"hl.dsp.focus({sel})"}[action]]
+    else:
+        args = ["hyprctl", "dispatch", {"close": "closewindow", "focus": "focuswindow"}[action], f"address:{address}"]
+    p = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    out = (p.stdout + p.stderr).strip()
+    if p.returncode != 0 or out != "ok":
+        R.log(f"hyprctl dispatch {action} failed (rc={p.returncode}): {args[2:]} -> {out[:300]!r}")
+        return False
+    return True
 
 
 def is_main(t):
@@ -433,7 +472,17 @@ class X11(Base):
 
 
 class Hypr(Base):
-    close_how = "Hyprland closewindow (what Super+W does)"
+    close_how = "Hyprland window close dispatcher (what Super+W does)"
+
+    def __init__(self):
+        super().__init__()
+        self.ver = hypr_version()
+        R.log(f"Hyprland {self.ver}; dispatch syntax:", "lua" if self.ver and self.ver >= HYPR_LUA else "legacy")
+        # Show whether our config (not a generated default) is live: on 0.57
+        # an ignored hyprland.conf left focus_on_activate off (#168).
+        for name in ("misc.focus_on_activate", "misc:focus_on_activate"):
+            R.log(f"getoption {name}:", sh("hyprctl", "getoption", name, "-j")[:200])
+        R.log("configerrors:", sh("hyprctl", "configerrors")[:400])
 
     def _clients(self):
         try:
@@ -464,7 +513,7 @@ class Hypr(Base):
     def focus(self, title):
         a = self._addr(title)
         if a:
-            sh("hyprctl", "dispatch", "focuswindow", f"address:{a}")
+            hypr_dispatch("focus", a, self.ver)
         time.sleep(0.7)
 
     def wtype(self, *args):
@@ -518,8 +567,7 @@ class Hypr(Base):
         time.sleep(1)
 
     def close_window(self, title):
-        a = self._addr(title)
-        sh("hyprctl", "dispatch", "closewindow", f"address:{a}")
+        hypr_dispatch("close", self._addr(title), self.ver)
         time.sleep(1)
 
     def start_job(self, title):
@@ -536,14 +584,14 @@ class Hypr(Base):
         return with_text([{"name": c["title"], "id": c["address"], "text": None} for c in self._clients() if c["title"] in DIALOG_TITLES])
 
     def cancel_dialog(self, d):
-        sh("hyprctl", "dispatch", "focuswindow", f"address:{d['id']}")
+        hypr_dispatch("focus", d["id"], self.ver)
         time.sleep(0.5)
         self.wtype("-k", "Escape")
         time.sleep(1.5)
         if any(x["id"] == d["id"] for x in self.dialogs()):
             # Closing the dialog window answers it like Cancel (GTK delete-event).
             R.log("Escape didn't close the dialog; closing it via hyprctl")
-            sh("hyprctl", "dispatch", "closewindow", f"address:{d['id']}")
+            hypr_dispatch("close", d["id"], self.ver)
             time.sleep(1.5)
 
     def window_menu(self, names):
