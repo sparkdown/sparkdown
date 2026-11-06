@@ -183,7 +183,11 @@ export class TerminalPane {
       // OSC 8 hyperlinks: same http/https-only rule as detected URLs, never
       // xterm's default confirm() + window.open inside the webview.
       linkHandler: {
-        activate: (_e, uri) => openTerminalUrl(uri),
+        // xterm fires activate on any mouseup; only primary click opens.
+        activate: (e, uri) => {
+          if (e.button !== 0) return;
+          openTerminalUrl(uri);
+        },
         allowNonHttpProtocols: false,
       },
     });
@@ -249,12 +253,14 @@ export class TerminalPane {
     this.term.registerLinkProvider({
       // xterm passes a 1-based buffer row; getLine() is 0-based.
       provideLinks: (bufferLineNumber, callback) => {
+        // Dispose can race a late hover; never read a disposed terminal's buffer.
+        if (this.disposed) return callback(undefined);
         const links = linksForBufferRow(this.term.buffer.active, bufferLineNumber - 1).map(
           (m) => ({
             range: m.range,
             text: m.text,
             activate: (e: MouseEvent) => {
-              if (e.button !== 0) return;
+              if (this.disposed || e.button !== 0) return;
               if (m.kind === 'url') openTerminalUrl(m.text);
               else this.onOpenPath(m.text);
             },
@@ -1517,13 +1523,26 @@ export class TerminalManager {
    *  rebuilt, so each xterm keeps its state). */
   private render(): void {
     const hadFocus = this.hasFocus();
+    // Find-bar focus lives inside the host too; restore it after re-parent
+    // instead of stealing keyboard focus back to xterm.
+    const findId = this.focusedId;
+    const findHadFocus = !!findId && (this.searches.get(findId)?.hasFocus() ?? false);
     const root = this.tree ? this.buildNode(this.tree, '') : null;
     if (root) root.style.flex = '1 1 0px';
     this.host.replaceChildren(...(root ? [root] : []));
     this.renderHeaders();
     this.refitAll();
-    // Re-parenting blurs the terminal that had focus; give it back.
-    if (hadFocus) this.focusActive();
+    // Re-parenting blurs whatever had focus; give it back.
+    if (!hadFocus) return;
+    if (findHadFocus && findId) {
+      const search = this.searches.get(findId);
+      const pane = this.panes.get(findId);
+      if (search?.isOpen() && pane) {
+        search.open(pane.searchTarget());
+        return;
+      }
+    }
+    this.focusActive();
   }
 
   private buildNode(node: LayoutNode, path: string): HTMLElement {

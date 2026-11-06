@@ -1401,19 +1401,33 @@ describe('TerminalPane links', () => {
     expect(opened).toEqual(['src/app.ts']);
   });
 
-  it('OSC 8 hyperlinks open only http(s), through the same guard', async () => {
+  it('OSC 8 hyperlinks open only http(s) on primary click, through the same guard', async () => {
     const { mgr } = makeManager();
     await mgr.addTerminal();
     const handler = terms.all[0]!.options.linkHandler as {
-      activate: (e: unknown, uri: string) => void;
+      activate: (e: { button: number }, uri: string) => void;
       allowNonHttpProtocols: boolean;
     };
     expect(handler.allowNonHttpProtocols).toBe(false);
-    handler.activate({}, 'javascript:alert(1)');
-    handler.activate({}, 'file:///etc/passwd');
+    handler.activate({ button: 0 }, 'javascript:alert(1)');
+    handler.activate({ button: 0 }, 'file:///etc/passwd');
     expect(api.openExternal).not.toHaveBeenCalled();
-    handler.activate({}, 'https://sparkdown.dev/');
+    handler.activate({ button: 2 }, 'https://sparkdown.dev/');
+    expect(api.openExternal).not.toHaveBeenCalled();
+    handler.activate({ button: 0 }, 'https://sparkdown.dev/');
     expect(api.openExternal).toHaveBeenCalledWith('https://sparkdown.dev/');
+  });
+
+  it('a disposed pane ignores late link-provider callbacks', async () => {
+    const { mgr } = makeManager();
+    await mgr.addTerminal();
+    const t = terms.all[0]!;
+    t.rows_ = ['see https://sparkdown.dev/a'];
+    mgr.closeTerminal('term-1');
+    const links = await new Promise((resolve) =>
+      t.linkProviders[0]!.provideLinks(1, (l) => resolve(l ?? [])),
+    );
+    expect(links).toEqual([]);
   });
 });
 
@@ -1505,8 +1519,15 @@ describe('TerminalManager find', () => {
     mgr.openFind();
     await mgr.splitFocused('row');
     expect(card(host, 'term-1').querySelector('.sd-find-terminal')).toBeTruthy();
+    // Re-open find on the focused pane, then close a sibling: layout re-render
+    // must restore find-bar focus instead of stealing it for xterm.
+    mgr.activate('term-2');
+    mgr.openFind();
+    expect(document.activeElement).toBe(input(host, 'term-2'));
     mgr.closeTerminal('term-1');
+    expect(document.activeElement).toBe(input(host, 'term-2'));
+    mgr.closeTerminal('term-2');
     expect(host.querySelector('.sd-find-terminal')).toBeNull();
-    expect(mgr.openFind('term-1')).toBe(false);
+    expect(mgr.openFind('term-2')).toBe(false);
   });
 });
