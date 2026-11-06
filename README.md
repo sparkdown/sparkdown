@@ -240,13 +240,13 @@ Platform notes: [docs/omarchy.md](docs/omarchy.md) (Linux), [docs/windows.md](do
 
 ## Size comparison
 
-| App | macOS bundle |
+| App | Size on macOS |
 | --- | --- |
-| SparkDown | ~3.7 MB (DMG) |
-| Typora | ~80 MB |
-| VS Code | ~300 MB |
+| SparkDown | ~3.7 MB DMG download (v0.4.1, Apple Silicon) |
+| Typora | ~80 MB installed (approximate) |
+| VS Code | ~300 MB installed (approximate) |
 
-Tauri apps stay small because they use the operating system's webview instead of bundling Chromium.
+SparkDown's figure is the published Apple Silicon DMG on GitHub Releases (about 3.7 MB), not a measured installed `.app` size. Typora and VS Code are approximate installed sizes often cited for those apps, not download sizes. Tauri apps stay small because they use the operating system's webview instead of bundling Chromium.
 
 ## Security and privacy
 
