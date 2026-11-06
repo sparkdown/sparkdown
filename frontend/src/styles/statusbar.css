@@ -6,7 +6,10 @@
   display: flex;
   align-items: stretch;
   height: 26px;
-  padding: 0 4px;
+  /* Edge inset so the first/last item's text (and hover fill) clears the
+     window border. macOS gets more for its rounded window corners. */
+  --statusbar-inset: 8px;
+  padding: 0 var(--statusbar-inset);
   background: var(--statusbar-bg);
   border-top: 1px solid var(--border-light);
   font-size: 12px;
@@ -16,6 +19,10 @@
 }
 
 /* Every item fills the bar's height, so buttons get a full-height hover. */
+html.os-macos #status-bar {
+  --statusbar-inset: 12px;
+}
+
 #status-bar > * {
   display: flex;
   align-items: center;
