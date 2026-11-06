@@ -14,7 +14,8 @@ for p in sorted(root.rglob("results.json")):
     runs.append(json.loads(p.read_text(encoding="utf-8")))
 order = ["macOS · tmux off", "macOS · tmux on", "Windows · tmux off",
          "Ubuntu (X11, WebKitWebDriver) · tmux off", "Ubuntu (X11, WebKitWebDriver) · tmux on",
-         "Arch + Hyprland (vkms) · tmux off", "Arch + Hyprland (vkms) · tmux on"]
+         "Arch + Hyprland (vkms) · tmux off", "Arch + Hyprland (vkms) · tmux on",
+         "Arch + Hyprland latest (vkms) · tmux off", "Arch + Hyprland latest (vkms) · tmux on"]
 runs.sort(key=lambda r: order.index(r["os"]) if r["os"] in order else 99)
 ids = list(CHECKS)
 extra = []

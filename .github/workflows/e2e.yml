@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       arch_snapshot:
-        description: Arch Linux Archive day (YYYY/MM/DD) for the Hyprland job, or "live"
+        description: Arch Linux Archive day (YYYY/MM/DD) for the pinned Hyprland leg, or "live" (the latest leg always uses live)
         required: false
         default: "2026/10/28"
   pull_request:
@@ -25,8 +25,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # 2026/10/28 = Hyprland 0.56.2-4. 0.57.0 breaks the Arch job (0.4.2 issue).
-  ARCH_SNAPSHOT: ${{ github.event_name == 'workflow_dispatch' && inputs.arch_snapshot || '2026/10/28' }}
 
 jobs:
   release-gate:
@@ -267,7 +265,7 @@ jobs:
           path: e2e-out
 
   omarchy-hyprland:
-    name: E2E Arch + Hyprland (vkms, privileged container, tmux ${{ matrix.tmux }})
+    name: E2E Arch + Hyprland ${{ matrix.hyprland }} (vkms, privileged container, tmux ${{ matrix.tmux }})
     needs: linux-build
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -275,6 +273,13 @@ jobs:
       fail-fast: false
       matrix:
         tmux: ["off", "on"]
+        # pinned: Arch Linux Archive 2026/10/28 = Hyprland 0.56.2-4 (hyprland.conf,
+        # the pin from #167); a manual run can pick another day.
+        # latest: live repos = Hyprland 0.57+ (hyprland.lua, Lua dispatchers, #168).
+        hyprland: ["pinned", "latest"]
+    env:
+      ARCH_SNAPSHOT: ${{ matrix.hyprland == 'latest' && 'live' || (github.event_name == 'workflow_dispatch' && inputs.arch_snapshot || '2026/10/28') }}
+      E2E_HYPR_LEG: ${{ matrix.hyprland }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -291,7 +296,7 @@ jobs:
       - name: Run the must-pass in archlinux:latest under Hyprland
         run: |
           mkdir -p e2e-out
-          docker run --rm --privileged --device /dev/dri -e E2E_TMUX=${{ matrix.tmux }} -e ARCH_SNAPSHOT -v "$PWD:/w:ro" -v "$PWD/e2e-out:/out" \
+          docker run --rm --privileged --device /dev/dri -e E2E_TMUX=${{ matrix.tmux }} -e ARCH_SNAPSHOT -e E2E_HYPR_LEG -v "$PWD:/w:ro" -v "$PWD/e2e-out:/out" \
             archlinux:latest bash /w/e2e/linux/hyprland-job.sh /w/bin/sparkdown /out
       - name: Step summary
         if: always()
@@ -299,7 +304,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: e2e-omarchy-hyprland-tmux-${{ matrix.tmux }}
+          name: e2e-omarchy-hyprland-${{ matrix.hyprland }}-tmux-${{ matrix.tmux }}
           path: e2e-out
 
   summary:
