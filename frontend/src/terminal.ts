@@ -1,5 +1,6 @@
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { SearchAddon, type ISearchOptions } from '@xterm/addon-search';
 import { listen, type UnlistenFn } from './window-events';
 import { ask } from '@tauri-apps/plugin-dialog';
 import { api, type RemoteSession } from './api';
@@ -26,6 +27,9 @@ import {
   type SplitDir,
 } from './split-layout';
 import type { TerminalLayout } from './types/TerminalLayout';
+import { isSafeHttpUrl, linksForBufferRow } from './terminal-links';
+import { TerminalSearch, type TerminalSearchTarget } from './terminal-search';
+import { TERMINAL_SCROLLBACK_DEFAULT, clampScrollback } from './terminal-scrollback';
 
 // Keep in sync with --font-mono in themes.css. xterm measures cells in
 // JS/canvas and needs a LITERAL font stack (a `var(--…)` never resolves).
@@ -92,11 +96,46 @@ export async function pasteOrCtrlV(
 /** Quiet time after the last container resize before a pane refits. */
 export const REFIT_DEBOUNCE_MS = 40;
 
-// Matches path-like tokens in terminal output: an optional ./ or a bare
-// dotted/slashed path ending in a file extension (or a src-style path). Kept
-// conservative to avoid turning ordinary prose into links.
-const PATH_RE =
-  /(?:\.\/)?(?:[\w.-]+\/)+[\w.-]+\.[A-Za-z0-9]+|(?:\.\/)?[\w.-]+\.[A-Za-z0-9]{1,8}/g;
+/** Most matches the find bar highlights (and counts exactly) per search. */
+export const TERMINAL_SEARCH_HIGHLIGHT_LIMIT = 1000;
+
+/** Find-match colours; the addon requires #RRGGBB backgrounds. */
+const SEARCH_DECORATIONS = {
+  dark: {
+    matchBackground: '#4b4122',
+    matchOverviewRuler: '#d8c89a',
+    activeMatchBackground: '#8a5a1c',
+    activeMatchColorOverviewRuler: '#ff9632',
+  },
+  light: {
+    matchBackground: '#f5e7a6',
+    matchOverviewRuler: '#8a6d1b',
+    activeMatchBackground: '#ffb870',
+    activeMatchColorOverviewRuler: '#c0392b',
+  },
+} satisfies Record<'dark' | 'light', NonNullable<ISearchOptions['decorations']>>;
+
+/**
+ * Whether a link click should open a URL in the browser: the primary button
+ * with Ctrl (Cmd on macOS, where Ctrl+click is the context-menu click). A
+ * plain click only selects text, so a stray click never launches a browser.
+ */
+export function isUrlOpenClick(
+  e: Pick<MouseEvent, 'button' | 'ctrlKey' | 'metaKey'>,
+  mac: boolean,
+): boolean {
+  if (e.button !== 0) return false;
+  return mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+}
+
+/** Wheel pixels per scrolled line on a tmux pane (about one 12px row). */
+export const TMUX_WHEEL_ROW_PX = 16;
+
+/** Open a terminal URL in the system browser; http/https only. */
+function openTerminalUrl(url: string): void {
+  if (!isSafeHttpUrl(url)) return;
+  void api.openExternal(url).catch((err) => console.error('Failed to open link:', err));
+}
 
 /**
  * One embedded terminal pane: an xterm.js view over a
@@ -108,6 +147,9 @@ export class TerminalPane {
   readonly id: string;
   private term: XTerm;
   private fit = new FitAddon();
+  private search = new SearchAddon({ highlightLimit: TERMINAL_SEARCH_HIGHLIGHT_LIMIT });
+  /** Find-bar listener for match index/count (null while the bar is closed). */
+  private onSearchResults: ((index: number, count: number) => void) | null = null;
   private unlisteners: UnlistenFn[] = [];
   private started = false;
   private exited = false;
@@ -133,11 +175,21 @@ export class TerminalPane {
    *  actually gave us tmux ("tmux") or fell back to a plain shell ("shell"). */
   private session: string | null = null;
   private mode = 'shell';
+  /** Sub-line wheel pixels carried to the next wheel event (tmux panes). */
+  private wheelPx = 0;
+  /** A queued, not yet sent tmux wheel step; later wheel events add to it. */
+  private wheelQueued: { lines: number } | null = null;
+  /** A wheel-up may have put tmux in copy mode, which would swallow typing. */
+  private tmuxMaybeScrolled = false;
+  /** Serializes input behind tmux wheel calls so keys never overtake them. */
+  private ioQueue: Promise<void> | null = null;
+  private ioDepth = 0;
 
   constructor(
     id: string,
     onOpenPath: (path: string) => void,
     onAction: ((action: TerminalPaneAction) => void) | null = null,
+    scrollback = TERMINAL_SCROLLBACK_DEFAULT,
   ) {
     this.id = id;
     this.onOpenPath = onOpenPath;
@@ -152,9 +204,21 @@ export class TerminalPane {
       // underscore bug was tmux running without a UTF-8 locale; see terminal.rs.)
       lineHeight: 1,
       allowProposedApi: true,
-      scrollback: 5000,
+      scrollback: clampScrollback(scrollback),
+      // OSC 8 hyperlinks: same http/https-only rule as detected URLs, never
+      // xterm's default confirm() + window.open inside the webview.
+      linkHandler: {
+        // xterm fires activate on any mouseup; only Ctrl/Cmd+primary opens.
+        activate: (e, uri) => {
+          if (this.disposed || !isUrlOpenClick(e, isMacOS())) return;
+          openTerminalUrl(uri);
+        },
+        allowNonHttpProtocols: false,
+      },
     });
     this.term.loadAddon(this.fit);
+    this.term.loadAddon(this.search);
+    this.search.onDidChangeResults((r) => this.onSearchResults?.(r.resultIndex, r.resultCount));
 
     // Clipboard: xterm has no built-in copy/paste keys, and the Tauri webview
     // does not route ⌘C/⌘V to the terminal on its own. Copy goes through the
@@ -170,9 +234,7 @@ export class TerminalPane {
         e.preventDefault();
         void pasteOrCtrlV(
           () => api.readClipboardText(),
-          (data) => {
-            if (this.started) void api.terminalWrite(this.id, data);
-          },
+          (data) => this.writeInput(data),
         );
         return false;
       }
@@ -183,7 +245,7 @@ export class TerminalPane {
         void api
           .readClipboardText()
           .then((text) => {
-            if (text && this.started) void api.terminalWrite(this.id, text);
+            if (text) this.writeInput(text);
           })
           .catch(() => {});
         return false;
@@ -202,36 +264,62 @@ export class TerminalPane {
       if (terminalPassesToApp(e, isMacOS())) return false;
       return true;
     });
+    this.term.attachCustomWheelEventHandler((e) => this.handleWheel(e));
   }
 
   /**
-   * Detect file-path tokens in a rendered terminal line and expose them as
-   * clickable links (agent output like "Edited src/app.ts" → open it).
+   * Expose http(s) URLs and file-path tokens in terminal output as clickable
+   * links ("Edited src/app.ts" opens the file; a URL opens the browser).
+   * Matching spans soft-wrapped rows; a URL wins over any path inside it.
    * Uses xterm's built-in link-provider API — no extra addon/dependency.
    */
-  private registerPathLinks(): void {
+  private registerLinks(): void {
     this.term.registerLinkProvider({
-      provideLinks: (lineNumber, callback) => {
-        const line = this.term.buffer.active.getLine(lineNumber);
-        if (!line) return callback(undefined);
-        const text = line.translateToString(true);
-        const links = [];
-        for (const m of text.matchAll(PATH_RE)) {
-          if (m.index === undefined) continue;
-          const raw = m[0];
-          links.push({
-            // xterm ranges are 1-based, end inclusive.
-            range: {
-              start: { x: m.index + 1, y: lineNumber + 1 },
-              end: { x: m.index + raw.length, y: lineNumber + 1 },
+      // xterm passes a 1-based buffer row; getLine() is 0-based.
+      provideLinks: (bufferLineNumber, callback) => {
+        // Dispose can race a late hover; never read a disposed terminal's buffer.
+        if (this.disposed) return callback(undefined);
+        const links = linksForBufferRow(this.term.buffer.active, bufferLineNumber - 1).map(
+          (m) => ({
+            range: m.range,
+            text: m.text,
+            activate: (e: MouseEvent) => {
+              if (this.disposed || e.button !== 0) return;
+              // URLs leave the app, so they need Ctrl/Cmd; a path opens
+              // in the editor on a plain click, as before.
+              if (m.kind === 'url') {
+                if (isUrlOpenClick(e, isMacOS())) openTerminalUrl(m.text);
+              } else this.onOpenPath(m.text);
             },
-            text: raw,
-            activate: () => this.onOpenPath(raw),
-          });
-        }
+          }),
+        );
         callback(links.length ? links : undefined);
       },
     });
+  }
+
+  /** Lines kept above the viewport; clamped to the allowed range. */
+  setScrollback(lines: number): void {
+    this.term.options.scrollback = clampScrollback(lines);
+  }
+
+  /** The find-bar target for this pane (xterm SearchAddon). */
+  searchTarget(): TerminalSearchTarget {
+    const decorations = () =>
+      SEARCH_DECORATIONS[document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'];
+    return {
+      findNext: (term, opts) => this.search.findNext(term, { ...opts, decorations: decorations() }),
+      findPrevious: (term, opts) =>
+        this.search.findPrevious(term, { ...opts, decorations: decorations() }),
+      clearSearch: () => {
+        this.search.clearDecorations();
+        this.term.clearSelection();
+      },
+      onResults: (cb) => {
+        this.onSearchResults = cb;
+      },
+      focusTerminal: () => this.focus(),
+    };
   }
 
   /** Notify the manager when this terminal's shell exits (to update the tab). */
@@ -247,6 +335,8 @@ export class TerminalPane {
   isRunning(): boolean {
     return this.started && !this.exited;
   }
+
+  onMountSettled?: () => void;
 
   /** True when the shell failed to spawn (the tab stays, error readable). */
   isStartFailed(): boolean {
@@ -275,13 +365,18 @@ export class TerminalPane {
     if (this.disposed) return;
     this.term.open(container);
     this.applyTheme();
+    // xterm queues textarea focus behind DOM insertion. Let the pane owner
+    // restore a still-intended Find focus after that native task completes.
+    setTimeout(() => {
+      if (!this.disposed) this.onMountSettled?.();
+    }, 0);
 
     // Render with xterm's built-in DOM renderer (no WebGL addon). The DOM
     // renderer draws each glyph with the system font, which is correct for an
     // embedded editor terminal and fast enough; dropping the addon also trims
     // the bundle.
 
-    this.registerPathLinks();
+    this.registerLinks();
 
     try {
       await document.fonts.ready;
@@ -314,9 +409,7 @@ export class TerminalPane {
     if (this.disposed) return void exitUn();
     this.unlisteners.push(exitUn);
 
-    this.term.onData((data) => {
-      if (this.started) void api.terminalWrite(this.id, data);
-    });
+    this.term.onData((data) => this.writeInput(data));
 
     try {
       this.mode = await api.terminalStart(
@@ -415,8 +508,83 @@ export class TerminalPane {
   paste(text: string): void {
     if (!this.started) return;
     const session = this.sessionName;
-    if (session) void api.tmuxSendKeys(session, text).catch(() => {});
-    else void api.terminalWrite(this.id, text);
+    if (session) {
+      this.leaveTmuxScroll();
+      this.serialIo(() => api.tmuxSendKeys(session, text));
+    } else this.writeInput(text);
+  }
+
+  /** User input to the pty, after any pending tmux wheel step and after
+   *  leaving tmux copy mode (so the keys reach the shell, not copy mode). */
+  private writeInput(data: string): void {
+    if (!this.started) return;
+    this.leaveTmuxScroll();
+    this.serialIo(() => api.terminalWrite(this.id, data));
+  }
+
+  private leaveTmuxScroll(): void {
+    const session = this.sessionName;
+    if (!this.tmuxMaybeScrolled || !session) return;
+    this.tmuxMaybeScrolled = false;
+    // Input wins over scrolling not sent yet.
+    if (this.wheelQueued) this.wheelQueued.lines = 0;
+    this.wheelQueued = null;
+    this.chainIo(() => api.tmuxWheel(session, 0));
+  }
+
+  /** Run `op` now when nothing is queued, else after the queued ops. */
+  private serialIo(op: () => Promise<unknown>): void {
+    if (this.ioQueue) this.chainIo(op);
+    else void op().catch(() => {});
+  }
+
+  /** Queue `op` after every earlier queued op; later input waits for it. */
+  private chainIo(op: () => Promise<unknown>): void {
+    this.ioDepth++;
+    this.ioQueue = (this.ioQueue ?? Promise.resolve())
+      .then(op)
+      .then(
+        () => {},
+        () => {},
+      )
+      .then(() => {
+        if (--this.ioDepth === 0) this.ioQueue = null;
+      });
+  }
+
+  /**
+   * Mouse wheel on a tmux pane. tmux draws in xterm's alternate screen (no
+   * scrollback), where xterm.js turns the wheel into Up/Down keys: at a
+   * shell prompt that recalls history instead of scrolling. Route the wheel
+   * to tmux instead (copy-mode history, or Up/Down for a full-screen app).
+   * Plain shells and apps that enabled mouse reporting keep xterm's default.
+   * Returns false when handled (xterm then ignores the event).
+   */
+  handleWheel(e: WheelEvent): boolean {
+    const session = this.sessionName;
+    if (!session || !this.started || this.disposed) return true;
+    if (this.term.buffer.active.type !== 'alternate') return true;
+    if (this.term.modes.mouseTrackingMode !== 'none') return true;
+    e.preventDefault();
+    const unit =
+      e.deltaMode === 1 ? TMUX_WHEEL_ROW_PX : e.deltaMode === 2 ? TMUX_WHEEL_ROW_PX * this.term.rows : 1;
+    this.wheelPx += e.deltaY * unit;
+    const steps = Math.trunc(this.wheelPx / TMUX_WHEEL_ROW_PX);
+    if (steps === 0) return false;
+    this.wheelPx -= steps * TMUX_WHEEL_ROW_PX;
+    const lines = -steps; // wheel up (negative deltaY) scrolls back
+    if (lines > 0) this.tmuxMaybeScrolled = true;
+    if (this.wheelQueued) {
+      this.wheelQueued.lines += lines;
+      return false;
+    }
+    const step = { lines };
+    this.wheelQueued = step;
+    this.chainIo(async () => {
+      if (this.wheelQueued === step) this.wheelQueued = null;
+      if (step.lines !== 0 && !this.disposed) await api.tmuxWheel(session, step.lines);
+    });
+    return false;
   }
 
   /**
@@ -810,6 +978,8 @@ export class TerminalManager {
   private tree: LayoutNode | null = null;
   /** The pane that has (or last had) keyboard focus. */
   private focusedId: string | null = null;
+  /** Search input temporarily owns keyboard focus across a split. */
+  private searchFocusId: string | null = null;
   /** Panes whose close confirmation is open (one dialog per pane). */
   private confirmingClose = new Set<string>();
   private seq = 0;
@@ -835,6 +1005,10 @@ export class TerminalManager {
    *  and no reattach is attempted. Takes effect for terminals opened after the
    *  change; existing panes keep their current backing. */
   private useTmux = true;
+  /** Scrollback lines per pane (user setting, clamped). Applies live. */
+  private scrollback = TERMINAL_SCROLLBACK_DEFAULT;
+  /** Each pane's find bar, built on first use and mounted in its card. */
+  private searches = new Map<string, TerminalSearch>();
   /** Login shell name ("zsh"/"bash"), resolved once for pane names. */
   private shellName = '';
   private store: LayoutStore | null = null;
@@ -865,6 +1039,12 @@ export class TerminalManager {
     this.host = host;
     this.onOpenPath = onOpenPath;
     this.host.addEventListener('click', (e) => this.onHostClick(e));
+    this.host.addEventListener('mousedown', (e) => {
+      const b = e.target instanceof Element ? e.target.closest<HTMLElement>('[data-act]') : null;
+      if (b?.dataset.act === 'split-right' || b?.dataset.act === 'split-down') {
+        this.onSplitPointer(e, b.dataset.act);
+      }
+    });
     // Track the focused pane: a click anywhere in a pane, or keyboard focus
     // entering its terminal.
     this.host.addEventListener('mousedown', (e) => this.focusFromEvent(e));
@@ -1136,6 +1316,11 @@ export class TerminalManager {
       remote: this.remote,
     };
     const session = this.buildSession(shell, num, opts.agentId);
+    if (!this.searchFocusId) {
+      this.searchFocusId = [...this.searches]
+        .find(([, search]) => search.ownsFocus(document.activeElement))?.[0] ?? null;
+    }
+    const preservingFind = this.searchFocusId !== null;
     const { id, pane, start } = this.createPane(meta, session, opts.launch ?? null);
     const order = paneIds(this.tree);
     const target =
@@ -1145,13 +1330,17 @@ export class TerminalManager {
     this.tree = this.tree
       ? splitPane(this.tree, target, id, opts.split?.dir ?? 'row')
       : leaf(id);
-    this.focusedId = id;
+    this.focusedId = preservingFind ? target : id;
     this.render();
     await start();
     // The shell exited while starting: closeTerminal already removed it.
     if (!this.panes.has(id)) return false;
+    // Mounting xterm blurs its sibling in a native webview, after render().
+    // Restore the old pane's search now that the new shell cannot steal it.
+    if (preservingFind) {
+      this.restoreSearchFocus();
+    } else if (this.focusedId === id) pane.focus();
     this.persist();
-    if (this.focusedId === id) pane.focus();
     return true;
   }
 
@@ -1165,8 +1354,11 @@ export class TerminalManager {
     launch: string | null,
   ): { id: string; pane: TerminalPane; start: () => Promise<void> } {
     const id = `term-${++this.seq}`;
-    const pane = new TerminalPane(id, this.onOpenPath, (action) =>
-      this.onPaneAction(id, action),
+    const pane = new TerminalPane(
+      id,
+      this.onOpenPath,
+      (action) => this.onPaneAction(id, action),
+      this.scrollback,
     );
     this.panes.set(id, pane);
     this.meta.set(id, meta);
@@ -1182,6 +1374,7 @@ export class TerminalManager {
     // watches session liveness, so typing `exit` in the pane's shell closes
     // the pane even when the user's tmux.conf sets detach-on-destroy off.
     // closeTerminal then kills the sd-* session so it does not resurrect.
+    pane.onMountSettled = () => this.restoreSearchFocus();
     pane.setOnExit(() => {
       if (pane.isStartFailed()) {
         this.renderHeaders();
@@ -1213,6 +1406,8 @@ export class TerminalManager {
     const idx = order.indexOf(id);
     this.panes.delete(id);
     this.meta.delete(id);
+    this.searches.get(id)?.dispose();
+    this.searches.delete(id);
     this.cards.get(id)?.remove();
     this.cards.delete(id);
     const session = pane.sessionName;
@@ -1348,10 +1543,46 @@ export class TerminalManager {
       case 'focus-prev':
         this.focusNeighbor(-1);
         break;
+      case 'find':
+        this.openFind(id);
+        break;
     }
   }
 
+  /** Open (or re-focus) the find bar on pane `id`, default the focused one.
+   *  Returns false when there is no pane to search. */
+  openFind(id: string | null = this.focusedId): boolean {
+    const pane = id ? this.panes.get(id) : undefined;
+    const body = id ? this.cards.get(id)?.querySelector<HTMLElement>('.terminal-pane-body') : null;
+    if (!id || !pane || !body) return false;
+    this.setFocused(id);
+    let search = this.searches.get(id);
+    if (!search) {
+      search = new TerminalSearch(body);
+      this.searches.set(id, search);
+    }
+    search.open(pane.searchTarget());
+    return true;
+  }
+
+  private restoreSearchFocus(): void {
+    const id = this.searchFocusId;
+    const search = id ? this.searches.get(id) : undefined;
+    const pane = id ? this.panes.get(id) : undefined;
+    if (id && search?.isOpen() && pane) {
+      this.setFocused(id);
+      search.open(pane.searchTarget());
+    }
+  }
+
+  /** Scrollback lines for every pane (clamped); existing panes update live. */
+  setScrollback(lines: number): void {
+    this.scrollback = clampScrollback(lines);
+    for (const p of this.panes.values()) p.setScrollback(this.scrollback);
+  }
+
   private setFocused(id: string): void {
+    this.searchFocusId = null;
     if (this.focusedId === id || !this.panes.has(id)) return;
     this.focusedId = id;
     this.renderHeaders();
@@ -1361,6 +1592,25 @@ export class TerminalManager {
     const card = (e.target as HTMLElement | null)?.closest<HTMLElement>('.terminal-pane');
     const id = card?.dataset.termId;
     if (id) this.setFocused(id);
+  }
+
+  private onSplitPointer(e: MouseEvent, act: 'split-right' | 'split-down'): void {
+    const btn = e.target instanceof Element
+      ? e.target.closest<HTMLButtonElement>('[data-act]')
+      : null;
+    if (btn?.dataset.act !== act || e.button !== 0) return;
+    // The webview performs its initial focus task before dispatching click.
+    // Apply that button's action at mousedown while Find still owns intent.
+    e.preventDefault();
+    e.stopPropagation();
+    const id = btn.closest<HTMLElement>('.terminal-pane')?.dataset.termId;
+    if (!this.searchFocusId) return;
+    const pane = this.panes.get(this.searchFocusId);
+    const search = this.searches.get(this.searchFocusId);
+    if (id && pane && search?.isOpen()) {
+      void this.addTerminal({ split: { dir: act === 'split-right' ? 'row' : 'column', target: id } })
+        .then(() => this.restoreSearchFocus());
+    }
   }
 
   private onHostClick(e: MouseEvent): void {
@@ -1376,10 +1626,10 @@ export class TerminalManager {
     e.stopPropagation();
     switch (btn.dataset.act) {
       case 'split-right':
-        void this.addTerminal({ split: { dir: 'row', target: id } });
+        if (!this.searchFocusId) void this.addTerminal({ split: { dir: 'row', target: id } });
         break;
       case 'split-down':
-        void this.addTerminal({ split: { dir: 'column', target: id } });
+        if (!this.searchFocusId) void this.addTerminal({ split: { dir: 'column', target: id } });
         break;
       case 'close':
         void this.requestClose(id);
@@ -1427,14 +1677,27 @@ export class TerminalManager {
   /** Rebuild the grid DOM from the tree (cards are re-parented, never
    *  rebuilt, so each xterm keeps its state). */
   private render(): void {
+    const activeElement = document.activeElement;
+    const findId = this.focusedId;
+    // Snapshot the old search before reparenting blurs its DOM subtree.
+    const findHadFocus =
+      !!findId && this.searches.get(findId)?.ownsFocus(activeElement) === true;
     const hadFocus = this.hasFocus();
     const root = this.tree ? this.buildNode(this.tree, '') : null;
     if (root) root.style.flex = '1 1 0px';
     this.host.replaceChildren(...(root ? [root] : []));
     this.renderHeaders();
     this.refitAll();
-    // Re-parenting blurs the terminal that had focus; give it back.
-    if (hadFocus) this.focusActive();
+    if (!hadFocus) return;
+    if (findHadFocus && findId) {
+      const search = this.searches.get(findId);
+      const pane = this.panes.get(findId);
+      if (search?.isOpen() && pane) {
+        search.open(pane.searchTarget());
+        return;
+      }
+    }
+    this.focusActive();
   }
 
   private buildNode(node: LayoutNode, path: string): HTMLElement {

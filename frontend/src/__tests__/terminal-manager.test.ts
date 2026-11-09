@@ -27,6 +27,7 @@ const api = vi.hoisted(() => ({
   tmuxSessions: vi.fn(async (_prefix: string) => [] as string[]),
   tmuxKillSession: vi.fn(async (_session: string) => {}),
   tmuxSendKeys: vi.fn(async (_session: string, _text: string) => {}),
+  tmuxWheel: vi.fn(async (_session: string, _lines: number) => {}),
   detectAgents: vi.fn(
     async () => [] as { id: string; label: string; bin: string; found: boolean }[],
   ),
@@ -38,6 +39,7 @@ const api = vi.hoisted(() => ({
   mcpAgentInstalled: vi.fn(async (_bin: string) => false),
   mcpInstallAgent: vi.fn(async (_bin: string) => 'Installed'),
   copyText: vi.fn(async (_text: string) => {}),
+  openExternal: vi.fn(async (_url: string) => {}),
   readClipboardText: vi.fn(async () => 'pasted text'),
   remoteSession: vi.fn(
     async () => null as { host: string; path: string; home: string } | null,
@@ -65,8 +67,22 @@ const terms = vi.hoisted(() => ({
     cols: number;
     rows: number;
     keyHandler: ((e: KeyboardEvent) => boolean) | null;
+    wheelHandler: ((e: WheelEvent) => boolean) | null;
     dataHandler: ((d: string) => void) | null;
+    modes: { mouseTrackingMode: string };
+    buffer: { active: { type: 'normal' | 'alternate' } };
     selection: string;
+    options: Record<string, unknown>;
+    linkProviders: { provideLinks(y: number, cb: (links: unknown) => void): void }[];
+    rows_: string[];
+  }[],
+}));
+
+/** Every SearchAddon created: calls made and a hook to fire result events. */
+const searches = vi.hoisted(() => ({
+  all: [] as {
+    calls: Array<[string, string, Record<string, unknown> | undefined]>;
+    fire: (index: number, count: number) => void;
   }[],
 }));
 
@@ -90,6 +106,34 @@ vi.mock('@tauri-apps/api/event', () => ({
   },
 }));
 
+vi.mock('@xterm/addon-search', () => ({
+  SearchAddon: class {
+    calls: Array<[string, string, Record<string, unknown> | undefined]> = [];
+    private listener: ((r: { resultIndex: number; resultCount: number }) => void) | null = null;
+    constructor() {
+      searches.all.push(this);
+    }
+    fire(resultIndex: number, resultCount: number) {
+      this.listener?.({ resultIndex, resultCount });
+    }
+    onDidChangeResults(l: (r: { resultIndex: number; resultCount: number }) => void) {
+      this.listener = l;
+      return { dispose() {} };
+    }
+    findNext(term: string, opts?: Record<string, unknown>) {
+      this.calls.push(['next', term, opts]);
+      return true;
+    }
+    findPrevious(term: string, opts?: Record<string, unknown>) {
+      this.calls.push(['prev', term, opts]);
+      return true;
+    }
+    clearDecorations() {
+      this.calls.push(['clear', '', undefined]);
+    }
+  },
+}));
+
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class {
     fit() {}
@@ -102,18 +146,37 @@ vi.mock('@xterm/xterm', () => ({
     cols = 80;
     rows = 24;
     element: HTMLElement | null = null;
-    buffer = { active: { getLine: () => null } };
+    rows_: string[] = [];
+    modes = { mouseTrackingMode: 'none' };
+    buffer = {
+      active: {
+        type: 'normal' as 'normal' | 'alternate',
+        getLine: (y: number) => {
+          const text = this.rows_[y];
+          return text === undefined
+            ? undefined
+            : { isWrapped: false, translateToString: () => text };
+        },
+      },
+    };
     keyHandler: ((e: KeyboardEvent) => boolean) | null = null;
+    wheelHandler: ((e: WheelEvent) => boolean) | null = null;
     dataHandler: ((d: string) => void) | null = null;
     selection = '';
-    constructor() {
+    linkProviders: { provideLinks(y: number, cb: (links: unknown) => void): void }[] = [];
+    constructor(opts: Record<string, unknown> = {}) {
+      this.options = { ...opts };
       terms.all.push(this);
     }
     loadAddon() {}
     attachCustomKeyEventHandler(h: (e: KeyboardEvent) => boolean) {
       this.keyHandler = h;
     }
-    registerLinkProvider() {
+    attachCustomWheelEventHandler(h: (e: WheelEvent) => boolean) {
+      this.wheelHandler = h;
+    }
+    registerLinkProvider(p: { provideLinks(y: number, cb: (links: unknown) => void): void }) {
+      this.linkProviders.push(p);
       return { dispose() {} };
     }
     open(container: HTMLElement) {
@@ -150,6 +213,8 @@ import {
   agentLaunchCommand,
   paneLocation,
   REFIT_DEBOUNCE_MS,
+  TMUX_WHEEL_ROW_PX,
+  isUrlOpenClick,
   type LayoutStore,
 } from '../terminal';
 import type { TerminalLayout } from '../types/TerminalLayout';
@@ -165,6 +230,7 @@ beforeEach(() => {
   document.body.innerHTML = '';
   bus.handlers.clear();
   terms.all = [];
+  searches.all = [];
   observers.callbacks = [];
   for (const fn of Object.values(api)) fn.mockClear();
   api.terminalStart.mockImplementation(async (_i, _c, _w, _h, session) =>
@@ -1311,5 +1377,297 @@ describe('TerminalManager MCP install prompt at launch', () => {
     await flush();
     expect(api.mcpInstallAgent).toHaveBeenCalledWith('cursor-agent');
     expect(launched()).toEqual(['cursor-agent']);
+  });
+});
+
+describe('TerminalPane links', () => {
+  type Click = { button: number; ctrlKey?: boolean; metaKey?: boolean };
+  type Link = { text: string; range: unknown; activate: (e: Click) => void };
+  const linksAt = async (row: number): Promise<Link[]> => {
+    const t = terms.all[0]!;
+    return await new Promise((resolve) =>
+      t.linkProviders[0]!.provideLinks(row, (links) => resolve((links as Link[]) ?? [])),
+    );
+  };
+
+  it('xterm row y (1-based) reads buffer line y-1; URLs open externally, paths in the app', async () => {
+    const opened: string[] = [];
+    const host = document.createElement('div');
+    document.body.append(host);
+    const mgr = new TerminalManager(host, (p) => opened.push(p));
+    mgr.setCwd('/repo');
+    await mgr.addTerminal();
+    await flush();
+    terms.all[0]!.rows_ = ['Edited src/app.ts', 'docs: https://sparkdown.dev/a). done'];
+
+    const first = await linksAt(1);
+    expect(first.map((l) => l.text)).toEqual(['src/app.ts']);
+    first[0]!.activate({ button: 0 });
+    expect(opened).toEqual(['src/app.ts']);
+
+    const second = await linksAt(2);
+    expect(second.map((l) => l.text)).toEqual(['https://sparkdown.dev/a']);
+    second[0]!.activate({ button: 2 }); // not a primary click
+    expect(api.openExternal).not.toHaveBeenCalled();
+    second[0]!.activate({ button: 0, ctrlKey: true });
+    expect(api.openExternal).toHaveBeenCalledWith('https://sparkdown.dev/a');
+    expect(opened).toEqual(['src/app.ts']);
+  });
+
+  it('OSC 8 hyperlinks open only http(s) on primary click, through the same guard', async () => {
+    const { mgr } = makeManager();
+    await mgr.addTerminal();
+    const handler = terms.all[0]!.options.linkHandler as {
+      activate: (e: Click, uri: string) => void;
+      allowNonHttpProtocols: boolean;
+    };
+    expect(handler.allowNonHttpProtocols).toBe(false);
+    handler.activate({ button: 0, ctrlKey: true }, 'javascript:alert(1)');
+    handler.activate({ button: 0, ctrlKey: true }, 'file:///etc/passwd');
+    expect(api.openExternal).not.toHaveBeenCalled();
+    handler.activate({ button: 2, ctrlKey: true }, 'https://sparkdown.dev/');
+    handler.activate({ button: 0 }, 'https://sparkdown.dev/'); // plain click
+    expect(api.openExternal).not.toHaveBeenCalled();
+    handler.activate({ button: 0, ctrlKey: true }, 'https://sparkdown.dev/');
+    expect(api.openExternal).toHaveBeenCalledTimes(1);
+    expect(api.openExternal).toHaveBeenCalledWith('https://sparkdown.dev/');
+  });
+
+  it('box QA order: left, right, middle, then Ctrl+click opens exactly once', async () => {
+    const { mgr } = makeManager();
+    await mgr.addTerminal();
+    await flush();
+    terms.all[0]!.rows_ = ['see https://example.com/comfort-qa'];
+    const [link] = await linksAt(1);
+    expect(link!.text).toBe('https://example.com/comfort-qa');
+    link!.activate({ button: 0 }); // plain left click: selection only
+    link!.activate({ button: 2 }); // right
+    link!.activate({ button: 1 }); // middle
+    link!.activate({ button: 1, ctrlKey: true }); // Ctrl+middle
+    link!.activate({ button: 0, metaKey: true }); // Super/Meta is not Ctrl off Mac
+    expect(api.openExternal).not.toHaveBeenCalled();
+    link!.activate({ button: 0, ctrlKey: true });
+    expect(api.openExternal).toHaveBeenCalledTimes(1);
+    expect(api.openExternal).toHaveBeenCalledWith('https://example.com/comfort-qa');
+  });
+
+  it('a disposed pane ignores late link-provider callbacks', async () => {
+    const { mgr } = makeManager();
+    await mgr.addTerminal();
+    const t = terms.all[0]!;
+    t.rows_ = ['see https://sparkdown.dev/a'];
+    mgr.closeTerminal('term-1');
+    const links = await new Promise((resolve) =>
+      t.linkProviders[0]!.provideLinks(1, (l) => resolve(l ?? [])),
+    );
+    expect(links).toEqual([]);
+  });
+});
+
+describe('TerminalPane scrollback', () => {
+  it('new panes use the configured, clamped value; live panes update', async () => {
+    const { mgr } = makeManager();
+    mgr.setScrollback(12_345);
+    await mgr.addTerminal();
+    expect(terms.all[0]!.options.scrollback).toBe(12_345);
+    mgr.setScrollback(10_000_000);
+    expect(terms.all[0]!.options.scrollback).toBe(50_000);
+    mgr.setScrollback(0);
+    expect(terms.all[0]!.options.scrollback).toBe(200);
+    mgr.setScrollback(Number.NaN);
+    expect(terms.all[0]!.options.scrollback).toBe(5000);
+  });
+});
+
+describe('TerminalManager find', () => {
+  const input = (host: HTMLElement, id: string) =>
+    card(host, id).querySelector<HTMLInputElement>('.sd-find-terminal .sd-find-input')!;
+
+  it('the find key opens a bar on that pane and never reaches the shell or page', async () => {
+    const { mgr, host } = makeManager();
+    await mgr.addTerminal();
+    await mgr.splitFocused('row');
+    const ev = keydown({ key: 'F', ctrlKey: true, shiftKey: true });
+    expect(terms.all[0]!.keyHandler!(ev)).toBe(false);
+    expect(ev.stopPropagation).toHaveBeenCalled();
+    expect(mgr.active()?.id).toBe('term-1');
+    expect(input(host, 'term-1')).toBeTruthy();
+    expect(document.activeElement).toBe(input(host, 'term-1'));
+    expect(card(host, 'term-2').querySelector('.sd-find-terminal')).toBeNull();
+    // Plain Ctrl+F stays the shell's forward-char.
+    expect(terms.all[0]!.keyHandler!(keydown({ key: 'f', ctrlKey: true }))).toBe(true);
+  });
+
+  it('typing searches; Enter / Shift+Enter step; the count follows results', async () => {
+    const { mgr, host } = makeManager();
+    await mgr.addTerminal();
+    expect(mgr.openFind()).toBe(true);
+    const box = input(host, 'term-1');
+    const count = card(host, 'term-1').querySelector('.sd-find-count')!;
+    const addon = searches.all[0]!;
+    box.value = 'err';
+    box.dispatchEvent(new Event('input'));
+    expect(last(addon.calls)).toMatchObject(['next', 'err', { incremental: true }]);
+    expect((last(addon.calls)![2] as { decorations?: unknown }).decorations).toBeTruthy();
+    addon.fire(0, 3);
+    expect(count.textContent).toBe('1 of 3');
+
+    const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true });
+    const docSpy = vi.fn();
+    document.addEventListener('keydown', docSpy);
+    box.dispatchEvent(enter);
+    box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }));
+    document.removeEventListener('keydown', docSpy);
+    expect(addon.calls.slice(-2).map((c) => c[0])).toEqual(['next', 'prev']);
+    expect(docSpy).not.toHaveBeenCalled();
+
+    addon.fire(-1, 1000);
+    expect(count.textContent).toBe('1000+');
+    addon.fire(-1, 0);
+    expect(count.textContent).toBe('No results');
+  });
+
+  it('Escape closes the bar, clears highlights and returns focus to the terminal', async () => {
+    const { mgr, host } = makeManager();
+    await mgr.addTerminal();
+    mgr.openFind();
+    const pane = mgr.active()!;
+    const focus = vi.spyOn(pane, 'focus');
+    const box = input(host, 'term-1');
+    const docSpy = vi.fn();
+    document.addEventListener('keydown', docSpy);
+    box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    document.removeEventListener('keydown', docSpy);
+    expect(docSpy).not.toHaveBeenCalled();
+    expect(card(host, 'term-1').querySelector<HTMLElement>('.sd-find-terminal')!.style.display).toBe(
+      'none',
+    );
+    expect(last(searches.all[0]!.calls)![0]).toBe('clear');
+    expect(focus).toHaveBeenCalled();
+  });
+
+  it('the bar survives a re-render and goes away with its pane', async () => {
+    const { mgr, host } = makeManager();
+    await mgr.addTerminal();
+    mgr.openFind();
+    const focusedSearch = input(host, 'term-1');
+    focusedSearch.focus();
+    await mgr.splitFocused('row');
+    expect(card(host, 'term-1').querySelector('.sd-find-terminal')).toBeTruthy();
+    expect(document.activeElement).toBe(input(host, 'term-1'));
+    // Re-open find on the focused pane, then close a sibling: layout re-render
+    // must restore find-bar focus instead of stealing it for xterm.
+    mgr.activate('term-2');
+    mgr.openFind();
+    expect(document.activeElement).toBe(input(host, 'term-2'));
+    mgr.closeTerminal('term-1');
+    expect(document.activeElement).toBe(input(host, 'term-2'));
+    mgr.closeTerminal('term-2');
+    expect(host.querySelector('.sd-find-terminal')).toBeNull();
+    expect(mgr.openFind('term-2')).toBe(false);
+  });
+});
+
+describe('terminal URL click gate', () => {
+  it('Linux/Windows: only Ctrl+primary; macOS: only Cmd+primary', () => {
+    const c = (button: number, ctrlKey = false, metaKey = false) => ({ button, ctrlKey, metaKey });
+    expect(isUrlOpenClick(c(0, true), false)).toBe(true);
+    expect(isUrlOpenClick(c(0), false)).toBe(false);
+    expect(isUrlOpenClick(c(1, true), false)).toBe(false);
+    expect(isUrlOpenClick(c(2, true), false)).toBe(false);
+    expect(isUrlOpenClick(c(0, false, true), false)).toBe(false);
+    expect(isUrlOpenClick(c(0, false, true), true)).toBe(true);
+    // Ctrl+click on a Mac is the context-menu click.
+    expect(isUrlOpenClick(c(0, true), true)).toBe(false);
+    expect(isUrlOpenClick(c(0, true, true), true)).toBe(false);
+  });
+});
+
+describe('TerminalPane wheel on tmux panes', () => {
+  const wheel = (deltaY: number) =>
+    new WheelEvent('wheel', { deltaY, deltaMode: 0, cancelable: true });
+
+  async function tmuxPane() {
+    const { mgr } = makeManager({ tmux: true });
+    await mgr.addTerminal();
+    await flush();
+    const t = terms.all[0]!;
+    const session = api.terminalStart.mock.calls[0]![4]!;
+    expect(session).toMatch(/^sd-/);
+    return { mgr, t, session };
+  }
+
+  it('wheel up in tmux scrolls tmux history and never types into the shell', async () => {
+    const { t, session } = await tmuxPane();
+    t.buffer.active.type = 'alternate'; // tmux draws in the alternate screen
+    const ev = wheel(-3 * TMUX_WHEEL_ROW_PX);
+    expect(t.wheelHandler!(ev)).toBe(false); // xterm must not send Up keys
+    expect(ev.defaultPrevented).toBe(true);
+    await flush();
+    expect(api.tmuxWheel).toHaveBeenCalledWith(session, 3);
+    expect(api.terminalWrite).not.toHaveBeenCalled();
+    expect(api.tmuxSendKeys).not.toHaveBeenCalled();
+    t.wheelHandler!(wheel(2 * TMUX_WHEEL_ROW_PX));
+    await flush();
+    expect(api.tmuxWheel).toHaveBeenLastCalledWith(session, -2);
+  });
+
+  it('small trackpad deltas accumulate into whole lines', async () => {
+    const { t, session } = await tmuxPane();
+    t.buffer.active.type = 'alternate';
+    t.wheelHandler!(wheel(-TMUX_WHEEL_ROW_PX / 2));
+    await flush();
+    expect(api.tmuxWheel).not.toHaveBeenCalled();
+    t.wheelHandler!(wheel(-TMUX_WHEEL_ROW_PX / 2));
+    await flush();
+    expect(api.tmuxWheel).toHaveBeenCalledWith(session, 1);
+  });
+
+  it('typing after a wheel-up leaves copy mode first, then writes, in order', async () => {
+    const { t, session } = await tmuxPane();
+    t.buffer.active.type = 'alternate';
+    const order: string[] = [];
+    let release!: () => void;
+    api.tmuxWheel.mockImplementation(async (_s: string, n: number) => {
+      order.push(`wheel ${n}`);
+      if (n > 0) await new Promise<void>((r) => (release = r));
+    });
+    api.terminalWrite.mockImplementation(async (_id: string, d: string) => {
+      order.push(`write ${d}`);
+    });
+    t.wheelHandler!(wheel(-TMUX_WHEEL_ROW_PX));
+    await flush();
+    t.dataHandler!('l');
+    t.dataHandler!('s');
+    await flush();
+    // Keys wait for the in-flight wheel call: nothing overtakes it.
+    expect(order).toEqual(['wheel 1']);
+    release();
+    await flush();
+    expect(order).toEqual(['wheel 1', 'wheel 0', 'write l', 'write s']);
+    expect(api.tmuxWheel).toHaveBeenCalledWith(session, 0);
+    api.tmuxWheel.mockImplementation(async () => {});
+    api.terminalWrite.mockImplementation(async () => {});
+  });
+
+  it('plain shells, the normal buffer and mouse-reporting apps keep xterm defaults', async () => {
+    const { t } = await tmuxPane();
+    t.buffer.active.type = 'normal';
+    expect(t.wheelHandler!(wheel(-50))).toBe(true);
+    t.buffer.active.type = 'alternate';
+    t.modes.mouseTrackingMode = 'any';
+    expect(t.wheelHandler!(wheel(-50))).toBe(true);
+    await flush();
+    expect(api.tmuxWheel).not.toHaveBeenCalled();
+
+    terms.all = [];
+    const { mgr } = makeManager({ tmux: false });
+    await mgr.addTerminal();
+    await flush();
+    const plain = terms.all[0]!;
+    plain.buffer.active.type = 'alternate'; // e.g. less in a plain shell
+    expect(plain.wheelHandler!(wheel(-50))).toBe(true);
+    await flush();
+    expect(api.tmuxWheel).not.toHaveBeenCalled();
   });
 });

@@ -1199,6 +1199,90 @@ fn tmux_send_keys_impl(session: &str, text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// tmux argv for one mouse-wheel step in session `session`'s active pane.
+///
+/// SparkDown's tmux sessions run without tmux's `mouse` option (so xterm
+/// selection, copy and link clicks keep working), and tmux draws in the
+/// outer terminal's alternate screen, which has no scrollback. xterm.js
+/// would turn the wheel into Up/Down keys, which recall shell history at the
+/// prompt. This mirrors tmux's own `WheelUpPane` binding instead:
+///
+/// * `lines > 0` (wheel up): an app that owns the screen (alternate screen
+///   or mouse mode, e.g. vim or less) gets Up keys; otherwise enter copy mode
+///   (`-e`: leaving it again at the bottom) and scroll tmux's history.
+/// * `lines < 0` (wheel down): scroll down in copy mode; Down keys only to an
+///   alternate-screen app; nothing at a plain prompt.
+/// * `lines == 0`: leave copy mode before the user types (no-op otherwise).
+fn tmux_wheel_args(session: &str, lines: i32) -> Vec<String> {
+    let t = format!("={session}:");
+    let n = lines.unsigned_abs().min(100).to_string();
+    let app = "#{||:#{alternate_on},#{mouse_any_flag}}";
+    let (cond, then, other): (&str, String, Option<String>) = if lines > 0 {
+        (
+            app,
+            format!("send-keys -t {t} -N {n} Up"),
+            Some(format!(
+                "copy-mode -e -t {t} ; send-keys -t {t} -X -N {n} scroll-up"
+            )),
+        )
+    } else if lines < 0 {
+        (
+            "#{pane_in_mode}",
+            format!("send-keys -t {t} -X -N {n} scroll-down"),
+            Some(format!(
+                "if-shell -F -t {t} '{app}' 'send-keys -t {t} -N {n} Down'"
+            )),
+        )
+    } else {
+        (
+            "#{pane_in_mode}",
+            format!("send-keys -t {t} -X cancel"),
+            None,
+        )
+    };
+    let mut argv = vec![
+        "if-shell".to_string(),
+        "-F".to_string(),
+        "-t".to_string(),
+        t.clone(),
+        cond.to_string(),
+        then,
+    ];
+    argv.extend(other);
+    argv
+}
+
+/// Mouse-wheel step on a tmux-backed pane (see [`tmux_wheel_args`]).
+#[tauri::command]
+pub async fn tmux_wheel(
+    webview_window: tauri::WebviewWindow,
+    session: String,
+    lines: i32,
+) -> Result<(), String> {
+    validate_own_session(&session)?;
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        tmux_wheel_impl(&session, lines)
+    })
+    .await
+    .map_err(|e| format!("tmux_wheel task failed: {e}"))?
+}
+
+fn tmux_wheel_impl(session: &str, lines: i32) -> Result<(), String> {
+    let argv = tmux_wheel_args(session, lines);
+    if crate::remote::is_active() {
+        return crate::remote::tmux_run(&argv);
+    }
+    let Some(tmux) = tmux_path() else {
+        return Err("tmux not found".into());
+    };
+    crate::proc::command(tmux)
+        .args(&argv)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("tmux wheel: {e}"))?;
+    Ok(())
+}
+
 /// Kill a tmux session (the explicit close action — detach is just dropping
 /// the pty). Best-effort.
 ///
@@ -3117,6 +3201,95 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&show.stdout).trim(), "status off");
         assert!(has.status.success());
         assert!(!prefix.status.success());
+    }
+
+    #[test]
+    fn tmux_wheel_args_never_type_at_a_plain_prompt() {
+        let up = tmux_wheel_args("sd-ab-zsh-1", 3);
+        assert_eq!(&up[..4], ["if-shell", "-F", "-t", "=sd-ab-zsh-1:"]);
+        assert_eq!(up[4], "#{||:#{alternate_on},#{mouse_any_flag}}");
+        assert_eq!(up[5], "send-keys -t =sd-ab-zsh-1: -N 3 Up");
+        assert!(
+            up[6].starts_with("copy-mode -e -t =sd-ab-zsh-1: ;"),
+            "{up:?}"
+        );
+        let down = tmux_wheel_args("sd-ab-zsh-1", -2);
+        assert_eq!(down[4], "#{pane_in_mode}");
+        assert!(down[6].contains("-N 2 Down"), "{down:?}");
+        let cancel = tmux_wheel_args("sd-ab-zsh-1", 0);
+        assert_eq!(cancel.len(), 6);
+        assert_eq!(cancel[5], "send-keys -t =sd-ab-zsh-1: -X cancel");
+        // A runaway delta is capped.
+        assert!(tmux_wheel_args("sd-ab-zsh-1", 100_000)[5].contains("-N 100 "));
+    }
+
+    /// Live: at a shell prompt the wheel scrolls tmux history (copy mode)
+    /// and never types into the shell; cancel/scroll-to-bottom leave it.
+    #[test]
+    #[cfg(unix)]
+    fn tmux_wheel_scrolls_history_on_real_tmux() {
+        if crate::proc::command("tmux").arg("-V").output().is_err() {
+            return;
+        }
+        let sock = format!("sdwheel-{}", std::process::id());
+        let name = "sd-wheel-sh-1";
+        let run = |args: &[String]| {
+            crate::proc::command("tmux")
+                .args(["-L", &sock, "-f", "/dev/null"])
+                .args(args)
+                .output()
+                .expect("tmux")
+        };
+        let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let created = run(&s(&[
+            "new-session",
+            "-d",
+            "-s",
+            name,
+            "-x",
+            "80",
+            "-y",
+            "10",
+            "sh -c 'seq 1 400; exec cat'",
+        ]));
+        if !created.status.success() {
+            return; // no usable tmux server here (e.g. sandboxed CI)
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        let fmt = |f: &str| {
+            let out = run(&s(&[
+                "display-message",
+                "-p",
+                "-t",
+                &format!("={name}:"),
+                f,
+            ]));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let cap = || {
+            let out = run(&s(&["capture-pane", "-p", "-t", &format!("={name}:")]));
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        let before = cap();
+        run(&tmux_wheel_args(name, 5));
+        std::thread::sleep(Duration::from_millis(200));
+        let in_mode = fmt("#{pane_in_mode}");
+        let pos = fmt("#{scroll_position}");
+        run(&tmux_wheel_args(name, 0));
+        std::thread::sleep(Duration::from_millis(200));
+        let after_cancel = fmt("#{pane_in_mode}");
+        run(&tmux_wheel_args(name, 3));
+        run(&tmux_wheel_args(name, -3));
+        std::thread::sleep(Duration::from_millis(200));
+        let after_down = fmt("#{pane_in_mode}");
+        let after = cap();
+        let _ = run(&s(&["kill-server"]));
+        assert_eq!(in_mode, "1", "wheel up enters copy mode");
+        assert_eq!(pos, "5", "scrolled 5 lines of tmux history");
+        assert_eq!(after_cancel, "0", "cancel leaves copy mode");
+        assert_eq!(after_down, "0", "-e: scrolling back to the bottom exits");
+        // Nothing reached the program (cat would echo any Up/Down bytes).
+        assert_eq!(before, after);
     }
 
     #[test]

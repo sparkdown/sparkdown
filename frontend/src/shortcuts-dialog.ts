@@ -66,6 +66,7 @@ function shortcutSections(): Array<{ section: string; items: Array<[string, stri
         [terminalPaneShortcut('close-pane'), 'Close Pane (asks if a program is running)'],
         [terminalPaneShortcut('focus-next'), 'Next Pane'],
         [terminalPaneShortcut('focus-prev'), 'Previous Pane'],
+        [terminalPaneShortcut('find'), 'Find in Terminal'],
         // #42: on Windows/Linux plain Ctrl+W stays with the shell.
         ...(isMacOS() ? [] : [['Ctrl+W', 'Delete Word (in the shell)'] as [string, string]]),
       ],

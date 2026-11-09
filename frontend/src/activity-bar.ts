@@ -155,12 +155,13 @@ export class ActivityBar {
     const key = shortcutKey(e);
     const view = SIDEBAR_VIEWS.find((v) => VIEW_INFO[v].key.toLowerCase() === key);
     if (!view) return;
-    // Ctrl+Shift+E is also "split down" while a terminal pane has focus
-    // (Windows/Linux pane keys, terminal.ts). The focused context wins, as in
-    // VS Code: let the terminal have it. Files stays reachable from the
-    // activity bar, the palette and the View menu.
+    // Ctrl+Shift+E / Ctrl+Shift+F are also "split down" / "find in terminal"
+    // while a terminal pane (or its find bar) has focus (Windows/Linux pane
+    // keys, terminal.ts). The focused context wins, as in VS Code: let the
+    // terminal have it. Files and Search stay reachable from the activity
+    // bar, the palette and the View menu.
     const target = e.target as Element | null;
-    if (key === 'e' && target?.closest?.('#terminal-host')) return;
+    if ((key === 'e' || key === 'f') && target?.closest?.('#terminal-host')) return;
     e.preventDefault();
     e.stopPropagation();
     this.request(view, 'shortcut');

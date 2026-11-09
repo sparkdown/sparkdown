@@ -1,6 +1,12 @@
 import { api } from './api';
 import type { AgentMcpStatus, AppConfig } from './api';
 import { trapFocus, type ModalHandle } from './modal';
+import {
+  TERMINAL_SCROLLBACK_DEFAULT,
+  TERMINAL_SCROLLBACK_MAX,
+  TERMINAL_SCROLLBACK_MIN,
+  clampScrollback,
+} from './terminal-scrollback';
 
 /**
  * Settings modal. A small, focused preferences dialog —
@@ -47,6 +53,11 @@ export class SettingsDialog {
     const open = this.open;
     if (!open) return;
     this.open = null;
+    // Closing (×, Escape, backdrop) must not drop a typed but uncommitted
+    // number: commit it the way blur would have.
+    for (const el of open.overlay.querySelectorAll<HTMLInputElement>('[data-commit-on-close]')) {
+      el.dispatchEvent(new Event('change'));
+    }
     document.removeEventListener('keydown', open.onKey);
     open.overlay.remove();
     open.modal.release();
@@ -117,6 +128,16 @@ function buildSettingsOverlay(host: SettingsHost, close: () => void): HTMLElemen
       checked: host.config.use_tmux,
       onToggle: (value) => {
         host.config.use_tmux = value;
+        host.onChange();
+      },
+    }),
+  );
+
+  section.appendChild(
+    scrollbackRow({
+      value: host.config.terminal_scrollback ?? TERMINAL_SCROLLBACK_DEFAULT,
+      onChange: (value) => {
+        host.config.terminal_scrollback = clampScrollback(value);
         host.onChange();
       },
     }),
@@ -467,6 +488,51 @@ function mcpInstallRow(
       render();
     },
   };
+}
+
+function scrollbackRow(spec: { value: number; onChange: (value: number) => void }): HTMLElement {
+  const row = document.createElement('label');
+  row.className = 'settings-row';
+  const text = document.createElement('div');
+  text.className = 'settings-row-text';
+  const label = document.createElement('div');
+  label.className = 'settings-row-label';
+  label.textContent = 'Scrollback lines';
+  const desc = document.createElement('div');
+  desc.className = 'settings-row-desc';
+  desc.textContent = `${TERMINAL_SCROLLBACK_MIN.toLocaleString()} to ${TERMINAL_SCROLLBACK_MAX.toLocaleString()} lines of history, applied live. tmux-backed terminals scroll tmux's own history instead.`;
+  text.append(label, desc);
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.className = 'settings-text settings-number';
+  input.dataset.settingScrollback = '';
+  input.min = String(TERMINAL_SCROLLBACK_MIN);
+  input.max = String(TERMINAL_SCROLLBACK_MAX);
+  // Any whole number of lines: a coarser step made in-range values such as
+  // 350 a stepMismatch, so validity failed and the change was dropped.
+  input.step = '1';
+  input.value = String(spec.value);
+  const save = () => {
+    // Empty or unparsable: keep the last saved value. Out of range: clamp
+    // (and show the clamped value) instead of silently ignoring the edit.
+    const typed = input.valueAsNumber;
+    if (!Number.isFinite(typed)) {
+      input.value = String(spec.value);
+      return;
+    }
+    const lines = clampScrollback(typed);
+    input.value = String(lines);
+    if (lines === spec.value) return;
+    spec.value = lines;
+    spec.onChange(lines);
+  };
+  input.dataset.commitOnClose = '';
+  input.addEventListener('change', save);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') save();
+  });
+  row.append(text, input);
+  return row;
 }
 
 interface TextSpec {

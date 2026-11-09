@@ -74,9 +74,10 @@ export class CockpitController {
     this.terminals?.applyTheme();
   }
 
-  /** Push tmux / agent-args settings to a live manager. */
+  /** Push tmux / agent-args / scrollback settings to a live manager. */
   applySettings(): void {
     this.terminals?.setUseTmux(this.ctx.config.use_tmux);
+    this.terminals?.setScrollback(this.ctx.config.terminal_scrollback);
     this.terminals?.setAgentArgs(this.ctx.config.agent_args ?? {});
   }
 
@@ -237,6 +238,7 @@ export class CockpitController {
         // Root new shells at the open folder so agent and panes share a cwd.
         this.terminals.setCwd(this.ctx.fileTree.getRoot() ?? this.ctx.baseDir);
         this.terminals.setUseTmux(this.ctx.config.use_tmux);
+        this.terminals.setScrollback(this.ctx.config.terminal_scrollback);
         this.terminals.setAgentArgs(this.ctx.config.agent_args ?? {});
         // Reattach tmux sessions that survived a previous run (so a running
         // agent is right where the user left it); otherwise open one fresh
@@ -316,6 +318,11 @@ export class CockpitController {
   /** Move focus to the next (1) / previous (-1) terminal pane. */
   focusTerminalPane(delta: 1 | -1): void {
     if (this.terminalVisible) this.terminals?.focusNeighbor(delta);
+  }
+
+  /** Open the focused terminal pane's find bar; false when none is open. */
+  openTerminalFind(): boolean {
+    return this.terminalVisible && (this.terminals?.openFind() ?? false);
   }
 
   /** Whether keyboard focus is in a terminal pane (routes ⌘W to the pane). */

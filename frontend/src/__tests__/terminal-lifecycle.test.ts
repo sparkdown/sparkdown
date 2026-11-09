@@ -56,6 +56,7 @@ vi.mock('@xterm/xterm', () => ({
     buffer = { active: { getLine: () => null } };
     loadAddon() {}
     attachCustomKeyEventHandler() {}
+    attachCustomWheelEventHandler() {}
     registerLinkProvider() {
       return { dispose() {} };
     }

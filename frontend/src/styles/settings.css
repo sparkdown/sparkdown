@@ -302,3 +302,7 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.settings-number {
+  width: 7rem;
+}

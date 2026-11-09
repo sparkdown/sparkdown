@@ -78,6 +78,106 @@ describe('SettingsDialog', () => {
     dialog.close();
   });
 
+  it('scrollback uses bounded numeric input and applies/persists via onChange', () => {
+    config.terminal_scrollback = 5000;
+    const dialog = new SettingsDialog();
+    dialog.toggle(host());
+    const settings = [...document.querySelectorAll('.settings-section')].find((el) =>
+      el.textContent?.includes('Scrollback lines'),
+    )!;
+    const input = settings.querySelector<HTMLInputElement>('input[type="number"]')!;
+    expect(document.querySelectorAll('[data-setting-scrollback]')).toHaveLength(1);
+    expect(input.min).toBe('200');
+    expect(input.max).toBe('50000');
+    input.value = '200';
+    input.dispatchEvent(new Event('change'));
+    expect(config.terminal_scrollback).toBe(200);
+    expect(changes).toBe(1);
+    // Temporary input must not snap to the 200-line minimum while typing.
+    input.value = '';
+    input.dispatchEvent(new Event('input'));
+    expect(changes).toBe(1);
+    input.value = '900';
+    input.dispatchEvent(new Event('change'));
+    expect(config.terminal_scrollback).toBe(900);
+    expect(changes).toBe(2);
+    expect(document.body.textContent).toContain('applied live');
+    dialog.close();
+  });
+
+  const scrollbackInput = () =>
+    document.querySelector<HTMLInputElement>('[data-setting-scrollback]')!;
+  /** Type into the field the way a user does: replace, then input events. */
+  const typeInto = (input: HTMLInputElement, text: string) => {
+    input.focus();
+    input.value = '';
+    for (const ch of text) {
+      input.value += ch;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  };
+
+  it('box QA: typing 350 then Tab saves 350 (no step mismatch drop)', () => {
+    config.terminal_scrollback = 5000;
+    const dialog = new SettingsDialog();
+    dialog.toggle(host());
+    const input = scrollbackInput();
+    typeInto(input, '350');
+    // An in-range whole number must be valid; a step of 100 based at the
+    // 200 minimum made 350 a stepMismatch and the save silently returned.
+    expect(input.validity.stepMismatch).toBe(false);
+    input.dispatchEvent(new Event('change')); // Tab / blur commits
+    expect(config.terminal_scrollback).toBe(350);
+    expect(changes).toBe(1);
+    dialog.close();
+    // Reopen: shows the saved value, not the default.
+    dialog.toggle(host());
+    expect(scrollbackInput().value).toBe('350');
+    dialog.close();
+  });
+
+  it('Enter commits; closing with Escape commits a typed, uncommitted value', () => {
+    config.terminal_scrollback = 5000;
+    const dialog = new SettingsDialog();
+    dialog.toggle(host());
+    let input = scrollbackInput();
+    typeInto(input, '1234');
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(config.terminal_scrollback).toBe(1234);
+    expect(changes).toBe(1);
+    typeInto(input, '777');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(dialog.isOpen).toBe(false);
+    expect(config.terminal_scrollback).toBe(777);
+    expect(changes).toBe(2);
+    // Closing again with nothing typed does not re-save.
+    dialog.toggle(host());
+    input = scrollbackInput();
+    dialog.close();
+    expect(changes).toBe(2);
+  });
+
+  it('out-of-range values clamp (and show the clamp); junk keeps the saved value', () => {
+    config.terminal_scrollback = 5000;
+    const dialog = new SettingsDialog();
+    dialog.toggle(host());
+    const input = scrollbackInput();
+    typeInto(input, '10');
+    input.dispatchEvent(new Event('change'));
+    expect(config.terminal_scrollback).toBe(200);
+    expect(input.value).toBe('200');
+    typeInto(input, '999999');
+    input.dispatchEvent(new Event('change'));
+    expect(config.terminal_scrollback).toBe(50_000);
+    expect(input.value).toBe('50000');
+    typeInto(input, '');
+    input.dispatchEvent(new Event('change'));
+    expect(config.terminal_scrollback).toBe(50_000);
+    expect(input.value).toBe('50000');
+    expect(changes).toBe(2);
+    dialog.close();
+  });
+
   it('Settings → Git → "Fetch in the background" is on by default and writes the config (#175)', () => {
     const dialog = new SettingsDialog();
     dialog.toggle(host());

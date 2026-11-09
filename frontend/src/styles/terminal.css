@@ -229,6 +229,16 @@
   position: relative;
 }
 
+/* Find bar (terminal-search.ts) floats over the pane's top-right corner,
+   above xterm's layers; display is toggled inline. */
+.sd-find-terminal {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  margin: 0;
+  z-index: 20;
+}
+
 .terminal-pane-host {
   position: absolute;
   /* Spacing via inset, NOT padding: the FitAddon measures this element's

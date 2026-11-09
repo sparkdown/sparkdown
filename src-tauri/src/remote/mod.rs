@@ -1724,6 +1724,17 @@ pub fn tmux_send_keys(session: &str, text: &str) -> Result<(), String> {
     ssh_run(&sess.host, &cmd).map(|_| ())
 }
 
+/// Run one tmux command (argv after `tmux`) on the remote host.
+pub fn tmux_run(argv: &[String]) -> Result<(), String> {
+    let sess = current_session().ok_or_else(|| "no remote session".to_string())?;
+    let mut cmd = String::from("tmux");
+    for a in argv {
+        cmd.push(' ');
+        cmd.push_str(&shell_quote(a));
+    }
+    ssh_run(&sess.host, &cmd).map(|_| ())
+}
+
 pub fn tmux_kill_session(session: &str) -> Result<(), String> {
     let Some(sess) = current_session() else {
         return Ok(());
