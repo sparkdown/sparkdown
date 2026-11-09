@@ -1,16 +1,21 @@
 # Terminal comfort — box QA (Linux)
 
-Prep tip: `prep/terminal-comfort` (includes `f49a094` + whitespace trim).
+Prep tip: `prep/terminal-comfort` (includes `f49a094`, whitespace trim, and the box-retest fixes for Settings save, Ctrl/Cmd-only URL opens and tmux wheel scrolling).
 Do **not** merge this PR until Sparky reports a passing box test and Paulo gives the go.
 
-## Binary
+## Binary (standalone: frontend bundled, no vite / dev server)
+
+The retest binary embeds the built frontend (`cargo build --features tauri/custom-protocol`),
+so it loads `tauri://localhost` and needs **no** `npm run dev` / port 1420.
 
 | Item | Path |
 |---|---|
-| Debug binary (built on this box from prep) | `/workspace/prep/terminal-comfort/bin/sparkdown-debug` |
-| Same build artifact (Cargo target) | `/workspace/build-env/target-comfort/debug/sparkdown` |
-| SHA-256 | `e64663397bba9a88d86efb5c4dfbf14cd1110849bf7483c8354ca34cd6dea437` |
+| Standalone debug binary | `/workspace/prep/terminal-comfort/bin/sparkdown-standalone` |
+| SHA-256 | `/workspace/prep/terminal-comfort/bin/sparkdown-standalone.sha256` |
+| Built from | PR #184 head (see `git -C /workspace/prep/terminal-comfort log -1`) |
 | Record-only `xdg-open` | `/workspace/local-night/gui-test/opener/xdg-open` (appends `http(s)` URLs to `/workspace/local-night/gui-test/external-opens.log`) |
+
+The old `bin/sparkdown-debug` (e646633…) is a dev-server build of the previous head: do not use it for the retest.
 
 ### Rebuild (if the binary is missing)
 
@@ -20,98 +25,108 @@ export RUSTUP_TOOLCHAIN=stable
 export PATH="/home/box/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PATH"
 export CARGO_INCREMENTAL=0
 export CARGO_BUILD_JOBS=1
-export CARGO_TARGET_DIR=/workspace/build-env/target-comfort
+export CARGO_TARGET_DIR=/workspace/build-env/target-comfort-fix
 
 cd /workspace/prep/terminal-comfort/frontend
 npm test
-npm run build
+npm run build            # must run first: the binary embeds frontend/dist
 
 cd /workspace/prep/terminal-comfort/src-tauri
-cargo build
+cargo build --features tauri/custom-protocol
 mkdir -p /workspace/prep/terminal-comfort/bin
-cp -f /workspace/build-env/target-comfort/debug/sparkdown /workspace/prep/terminal-comfort/bin/sparkdown-debug
+cp -f "$CARGO_TARGET_DIR/debug/sparkdown" /workspace/prep/terminal-comfort/bin/sparkdown-standalone
 ```
 
-## Launch with a fresh XDG config root (X display)
+## Launch with fresh roots (X display)
 
-This box already has `DISPLAY=:4`. Use a **new** config root so you do not touch a real user profile.
+Use your own display and **new** roots. A private `TMUX_TMPDIR` keeps the app's tmux
+server away from any other tmux server on the box.
 
 ```bash
 source /workspace/build-env/env.sh
-export DISPLAY=:4
-export XDG_CONFIG_HOME=/tmp/sparkdown-comfort-qa-config
-export XDG_DATA_HOME=/tmp/sparkdown-comfort-qa-data
-export XDG_CACHE_HOME=/tmp/sparkdown-comfort-qa-cache
-rm -rf "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
-mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" /tmp/sparkdown-comfort-qa-project
-# Put the record-only opener first on PATH so link opens are logged, not sent to a browser.
+export DISPLAY=:2
+R=/tmp/sparkdown-comfort-qa
+tmux -S "$R/tmux/tmux-$(id -u)/default" kill-server 2>/dev/null
+rm -rf "$R"; mkdir -p "$R"/{config,data,cache,tmux,runtime,project}; chmod 700 "$R/tmux" "$R/runtime"
+export XDG_CONFIG_HOME=$R/config XDG_DATA_HOME=$R/data XDG_CACHE_HOME=$R/cache XDG_RUNTIME_DIR=$R/runtime TMUX_TMPDIR=$R/tmux
 export PATH=/workspace/local-night/gui-test/opener:$PATH
 : > /workspace/local-night/gui-test/external-opens.log
 
-/workspace/prep/terminal-comfort/bin/sparkdown-debug /tmp/sparkdown-comfort-qa-project
+/workspace/prep/terminal-comfort/bin/sparkdown-standalone "$R/project"
 ```
 
-Config file the app writes (Linux / Tauri `app_config_dir`):
-
-```text
-$XDG_CONFIG_HOME/com.sparkdown.editor/config.json
-# e.g. /tmp/sparkdown-comfort-qa-config/com.sparkdown.editor/config.json
-```
-
-Confirm the key after Settings changes:
+Config file: `$XDG_CONFIG_HOME/com.sparkdown.editor/config.json`.
 
 ```bash
-python3 -c "import json; p='/tmp/sparkdown-comfort-qa-config/com.sparkdown.editor/config.json'; c=json.load(open(p)); print('terminal_scrollback=', c.get('terminal_scrollback')); print('path=', p)"
+python3 -c "import json,os; p=os.environ['XDG_CONFIG_HOME']+'/com.sparkdown.editor/config.json'; c=json.load(open(p)); print('terminal_scrollback=', c.get('terminal_scrollback'), 'use_tmux=', c.get('use_tmux'))"
 ```
 
-## Four checks
+tmux state of the app's pane (same shell as above):
 
-### 1) Settings scrollback persists across a restart
+```bash
+tmux -S "$TMUX_TMPDIR/tmux-$(id -u)/default" display -p -t "$(tmux -S "$TMUX_TMPDIR/tmux-$(id -u)/default" ls -F '#S' | head -1)" 'in_mode=#{pane_in_mode} pos=#{scroll_position}'
+```
 
-1. Open Settings (`Ctrl+,`).
-2. Find the single **Terminal scrollback** field (`[data-setting-scrollback]`).
-3. Set it to a non-default value in range 200..50000 (e.g. `350`), leave the field so the debounced save runs (Tab or close Settings), wait ~1s.
-4. Confirm the live file shows that value (command above).
-5. Quit the app fully, launch again with the **same** `XDG_CONFIG_HOME` / `XDG_DATA_HOME`.
-6. Pass if Settings still shows `350` **and** `config.json` still has `"terminal_scrollback": 350`.
+## Retest checks (what changed after the e646633 FAIL)
 
-### 2) Link clicks (record-only opener)
+### 1) Settings scrollback persists
 
-With `PATH` including `/workspace/local-night/gui-test/opener` and an empty `external-opens.log`:
+Root cause of the FAIL: the field had `step=100` based at `min=200`, so `350` was a
+`stepMismatch`; the save handler bailed on `!validity.valid` and the value was dropped.
+Now any whole number commits (Tab/blur, **Enter**, or closing Settings with ×/Escape);
+out-of-range values clamp to 200..50000 and the field shows the clamp. A committed
+Settings change is written to `config.json` immediately (no 2 s debounce).
 
-1. In the terminal pane, print a plain https URL, e.g. `printf 'see https://example.com/comfort-qa\n'`.
-2. **Plain left click** the URL (no Ctrl/Cmd).
-3. **Ctrl+click** (Linux) or **Cmd+click** the same URL.
-4. Inspect `/workspace/local-night/gui-test/external-opens.log`.
+1. `Ctrl+,` → **Scrollback lines** → select all, type `350`, press **Tab**, close Settings.
+2. Pass: `config.json` shows `terminal_scrollback= 350` within ~1 s; reopening Settings shows `350`.
+3. Quit (`Ctrl+Q`), relaunch with the same roots. Pass: Settings still `350`, config still `350`.
 
-**QA gate to report:** plain left click does nothing; Ctrl/Cmd+click opens (one `https://…` line in the log).
+### 2) Link clicks
 
-**Code note (prep tip):** current handlers open on primary `button === 0` with no modifier check (`frontend/src/terminal.ts` OSC8 + detected-link `activate`). Report **actual** behavior vs the gate above; do not pass the gate if plain left click already opens.
+Root cause: URL activation required only the primary button, so the **plain left click**
+opened (the 2nd open in the old log was the Ctrl+click). Right and middle clicks already
+did not open. Now a URL opens only on **Ctrl+click** (Linux/Windows) or **Cmd+click** (macOS).
+File paths in terminal output still open in the editor on a plain click (unchanged).
 
-Right/middle click must not open. Only `http`/`https` may open.
+1. In the terminal: `printf 'see https://example.com/comfort-qa\n'`.
+2. Hover (underline + hand pointer), then: plain left click, right click, middle click, Ctrl+click.
+3. Pass: `external-opens.log` has exactly **one** line, `https://example.com/comfort-qa`, and it appears only after the Ctrl+click.
 
-### 3) Find (`Ctrl+Shift+F`, Enter / Shift+Enter, Escape)
+Note: on X11 a middle click is a *primary-selection paste* into the terminal (standard X11
+terminal behavior, like xterm/GNOME Terminal). If you had text selected anywhere, it is
+typed at the prompt. That is expected, not a link open.
 
-1. Focus a terminal pane and generate several matches (e.g. print `FIND_ALPHA` four times).
-2. `Ctrl+Shift+F` — Find bar opens and its input is focused.
-3. Type the query — match count updates (e.g. `1 of 4`).
-4. `Enter` — next match; `Shift+Enter` — previous match.
-5. `Escape` — Find closes; focus returns to the terminal.
-6. Pass if all of the above hold on this box WebKit build.
+### 3) Find (unchanged; regression check)
 
-### 4) Scrollback retention
+`Ctrl+Shift+F` focuses the input; type a query (e.g. `FIND_ALPHA` ×4 → `1 of 4`/`1 of 5`
+including the echoed command); Enter / Shift+Enter move; Escape closes and returns focus to the terminal.
 
-1. With scrollback set (default 5000 or the value from check 1), emit more lines than the viewport (e.g. `seq 1 400`).
-2. Scroll up (mouse wheel or scrollbar) and confirm earlier lines are still visible.
-3. Optional: lower scrollback in Settings and confirm the buffer truncates toward the new cap (xterm behavior).
-4. Pass if history above the viewport is retained up to the configured limit after the output burst.
+### 4) Scrollback / mouse wheel
 
-## Local automated evidence already recorded (not a substitute for the four checks)
+Root cause: with `use_tmux` on (the default) tmux draws in xterm's **alternate screen**,
+which has no scrollback, and tmux runs without its `mouse` option. xterm.js then turns the
+wheel into Up/Down **keys**, so the wheel recalled shell history at the prompt (that can
+look like a pasted path) and never scrolled; "394" was just the visible viewport.
+Now the wheel on a tmux pane scrolls **tmux's own history** (copy mode, tmux
+`history-limit`, default 2000), leaves copy mode when you scroll back to the bottom or
+start typing, and never types at a prompt. Full-screen apps inside tmux (vim, less) still
+get Up/Down. The Settings value applies to xterm's buffer, i.e. plain shells (`use_tmux` off).
 
-- Frontend: **857** tests / **61** files; `npm run build` OK — `/tmp/prep-logs/terminal-comfort-frontend.log`
-- Rust: app **420** passed, **0** failed, **7** ignored; CLI **2**; MCP **2** — `/tmp/prep-logs/terminal-comfort-cargo-test.log`
-- Clippy: `cargo clippy --all-targets -- -D warnings` exit 0 — `/tmp/prep-logs/terminal-comfort-clippy.log`
-- `git diff --check` vs `origin/main`: PASS on tip after whitespace trim commit
+With tmux on (default):
+1. `seq 1 400`, wheel up. Pass: the view scrolls (a `[n/393]` copy-mode marker top-right), keeps going to `1`, and nothing appears at the prompt.
+2. Wheel back down to the bottom. Pass: the marker disappears (copy mode left).
+3. Wheel up a little, type `echo hi` + Enter. Pass: it runs in the shell (not swallowed by copy mode).
+
+With tmux off (Settings → turn off tmux, then open a **new** terminal tab):
+4. Scrollback 350, `seq 1 1000`, wheel to the top. Pass: oldest visible line is ~640–660 (350 lines above the viewport), not `1`.
+5. Lower scrollback to 200 (Enter), wheel to the top again. Pass: the oldest line number rises (~790), live, without reopening the terminal.
+
+## Local automated evidence (not a substitute for the box retest)
+
+- Frontend: **866** tests / **61** files; `tsc && vite build` OK
+- Rust: app **422** passed, **0** failed, **7** ignored (incl. a live tmux wheel test on a private socket); CLI **2**; MCP **2**
+- `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`: pass
+- Native run of the standalone binary (fresh Xvfb, fresh XDG + tmux roots, own WebDriver port, real X pointer/wheel events via xdotool): all checks above pass, harness `/workspace/local-night/gui-test/fix184/run.py`, results `tmux-results.json` and `restart-plain-results.json` in that folder
 
 ## Out of scope for this box pass
 

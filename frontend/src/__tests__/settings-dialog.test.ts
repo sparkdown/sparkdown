@@ -105,6 +105,79 @@ describe('SettingsDialog', () => {
     dialog.close();
   });
 
+  const scrollbackInput = () =>
+    document.querySelector<HTMLInputElement>('[data-setting-scrollback]')!;
+  /** Type into the field the way a user does: replace, then input events. */
+  const typeInto = (input: HTMLInputElement, text: string) => {
+    input.focus();
+    input.value = '';
+    for (const ch of text) {
+      input.value += ch;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  };
+
+  it('box QA: typing 350 then Tab saves 350 (no step mismatch drop)', () => {
+    config.terminal_scrollback = 5000;
+    const dialog = new SettingsDialog();
+    dialog.toggle(host());
+    const input = scrollbackInput();
+    typeInto(input, '350');
+    // An in-range whole number must be valid; a step of 100 based at the
+    // 200 minimum made 350 a stepMismatch and the save silently returned.
+    expect(input.validity.stepMismatch).toBe(false);
+    input.dispatchEvent(new Event('change')); // Tab / blur commits
+    expect(config.terminal_scrollback).toBe(350);
+    expect(changes).toBe(1);
+    dialog.close();
+    // Reopen: shows the saved value, not the default.
+    dialog.toggle(host());
+    expect(scrollbackInput().value).toBe('350');
+    dialog.close();
+  });
+
+  it('Enter commits; closing with Escape commits a typed, uncommitted value', () => {
+    config.terminal_scrollback = 5000;
+    const dialog = new SettingsDialog();
+    dialog.toggle(host());
+    let input = scrollbackInput();
+    typeInto(input, '1234');
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(config.terminal_scrollback).toBe(1234);
+    expect(changes).toBe(1);
+    typeInto(input, '777');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(dialog.isOpen).toBe(false);
+    expect(config.terminal_scrollback).toBe(777);
+    expect(changes).toBe(2);
+    // Closing again with nothing typed does not re-save.
+    dialog.toggle(host());
+    input = scrollbackInput();
+    dialog.close();
+    expect(changes).toBe(2);
+  });
+
+  it('out-of-range values clamp (and show the clamp); junk keeps the saved value', () => {
+    config.terminal_scrollback = 5000;
+    const dialog = new SettingsDialog();
+    dialog.toggle(host());
+    const input = scrollbackInput();
+    typeInto(input, '10');
+    input.dispatchEvent(new Event('change'));
+    expect(config.terminal_scrollback).toBe(200);
+    expect(input.value).toBe('200');
+    typeInto(input, '999999');
+    input.dispatchEvent(new Event('change'));
+    expect(config.terminal_scrollback).toBe(50_000);
+    expect(input.value).toBe('50000');
+    typeInto(input, '');
+    input.dispatchEvent(new Event('change'));
+    expect(config.terminal_scrollback).toBe(50_000);
+    expect(input.value).toBe('50000');
+    expect(changes).toBe(2);
+    dialog.close();
+  });
+
   it('instances are independent', () => {
     const a = new SettingsDialog();
     const b = new SettingsDialog();

@@ -115,6 +115,22 @@ const SEARCH_DECORATIONS = {
   },
 } satisfies Record<'dark' | 'light', NonNullable<ISearchOptions['decorations']>>;
 
+/**
+ * Whether a link click should open a URL in the browser: the primary button
+ * with Ctrl (Cmd on macOS, where Ctrl+click is the context-menu click). A
+ * plain click only selects text, so a stray click never launches a browser.
+ */
+export function isUrlOpenClick(
+  e: Pick<MouseEvent, 'button' | 'ctrlKey' | 'metaKey'>,
+  mac: boolean,
+): boolean {
+  if (e.button !== 0) return false;
+  return mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+}
+
+/** Wheel pixels per scrolled line on a tmux pane (about one 12px row). */
+export const TMUX_WHEEL_ROW_PX = 16;
+
 /** Open a terminal URL in the system browser; http/https only. */
 function openTerminalUrl(url: string): void {
   if (!isSafeHttpUrl(url)) return;
@@ -159,6 +175,15 @@ export class TerminalPane {
    *  actually gave us tmux ("tmux") or fell back to a plain shell ("shell"). */
   private session: string | null = null;
   private mode = 'shell';
+  /** Sub-line wheel pixels carried to the next wheel event (tmux panes). */
+  private wheelPx = 0;
+  /** A queued, not yet sent tmux wheel step; later wheel events add to it. */
+  private wheelQueued: { lines: number } | null = null;
+  /** A wheel-up may have put tmux in copy mode, which would swallow typing. */
+  private tmuxMaybeScrolled = false;
+  /** Serializes input behind tmux wheel calls so keys never overtake them. */
+  private ioQueue: Promise<void> | null = null;
+  private ioDepth = 0;
 
   constructor(
     id: string,
@@ -183,9 +208,9 @@ export class TerminalPane {
       // OSC 8 hyperlinks: same http/https-only rule as detected URLs, never
       // xterm's default confirm() + window.open inside the webview.
       linkHandler: {
-        // xterm fires activate on any mouseup; only primary click opens.
+        // xterm fires activate on any mouseup; only Ctrl/Cmd+primary opens.
         activate: (e, uri) => {
-          if (e.button !== 0) return;
+          if (this.disposed || !isUrlOpenClick(e, isMacOS())) return;
           openTerminalUrl(uri);
         },
         allowNonHttpProtocols: false,
@@ -209,9 +234,7 @@ export class TerminalPane {
         e.preventDefault();
         void pasteOrCtrlV(
           () => api.readClipboardText(),
-          (data) => {
-            if (this.started) void api.terminalWrite(this.id, data);
-          },
+          (data) => this.writeInput(data),
         );
         return false;
       }
@@ -222,7 +245,7 @@ export class TerminalPane {
         void api
           .readClipboardText()
           .then((text) => {
-            if (text && this.started) void api.terminalWrite(this.id, text);
+            if (text) this.writeInput(text);
           })
           .catch(() => {});
         return false;
@@ -241,6 +264,7 @@ export class TerminalPane {
       if (terminalPassesToApp(e, isMacOS())) return false;
       return true;
     });
+    this.term.attachCustomWheelEventHandler((e) => this.handleWheel(e));
   }
 
   /**
@@ -261,8 +285,11 @@ export class TerminalPane {
             text: m.text,
             activate: (e: MouseEvent) => {
               if (this.disposed || e.button !== 0) return;
-              if (m.kind === 'url') openTerminalUrl(m.text);
-              else this.onOpenPath(m.text);
+              // URLs leave the app, so they need Ctrl/Cmd; a path opens
+              // in the editor on a plain click, as before.
+              if (m.kind === 'url') {
+                if (isUrlOpenClick(e, isMacOS())) openTerminalUrl(m.text);
+              } else this.onOpenPath(m.text);
             },
           }),
         );
@@ -382,9 +409,7 @@ export class TerminalPane {
     if (this.disposed) return void exitUn();
     this.unlisteners.push(exitUn);
 
-    this.term.onData((data) => {
-      if (this.started) void api.terminalWrite(this.id, data);
-    });
+    this.term.onData((data) => this.writeInput(data));
 
     try {
       this.mode = await api.terminalStart(
@@ -483,8 +508,83 @@ export class TerminalPane {
   paste(text: string): void {
     if (!this.started) return;
     const session = this.sessionName;
-    if (session) void api.tmuxSendKeys(session, text).catch(() => {});
-    else void api.terminalWrite(this.id, text);
+    if (session) {
+      this.leaveTmuxScroll();
+      this.serialIo(() => api.tmuxSendKeys(session, text));
+    } else this.writeInput(text);
+  }
+
+  /** User input to the pty, after any pending tmux wheel step and after
+   *  leaving tmux copy mode (so the keys reach the shell, not copy mode). */
+  private writeInput(data: string): void {
+    if (!this.started) return;
+    this.leaveTmuxScroll();
+    this.serialIo(() => api.terminalWrite(this.id, data));
+  }
+
+  private leaveTmuxScroll(): void {
+    const session = this.sessionName;
+    if (!this.tmuxMaybeScrolled || !session) return;
+    this.tmuxMaybeScrolled = false;
+    // Input wins over scrolling not sent yet.
+    if (this.wheelQueued) this.wheelQueued.lines = 0;
+    this.wheelQueued = null;
+    this.chainIo(() => api.tmuxWheel(session, 0));
+  }
+
+  /** Run `op` now when nothing is queued, else after the queued ops. */
+  private serialIo(op: () => Promise<unknown>): void {
+    if (this.ioQueue) this.chainIo(op);
+    else void op().catch(() => {});
+  }
+
+  /** Queue `op` after every earlier queued op; later input waits for it. */
+  private chainIo(op: () => Promise<unknown>): void {
+    this.ioDepth++;
+    this.ioQueue = (this.ioQueue ?? Promise.resolve())
+      .then(op)
+      .then(
+        () => {},
+        () => {},
+      )
+      .then(() => {
+        if (--this.ioDepth === 0) this.ioQueue = null;
+      });
+  }
+
+  /**
+   * Mouse wheel on a tmux pane. tmux draws in xterm's alternate screen (no
+   * scrollback), where xterm.js turns the wheel into Up/Down keys: at a
+   * shell prompt that recalls history instead of scrolling. Route the wheel
+   * to tmux instead (copy-mode history, or Up/Down for a full-screen app).
+   * Plain shells and apps that enabled mouse reporting keep xterm's default.
+   * Returns false when handled (xterm then ignores the event).
+   */
+  handleWheel(e: WheelEvent): boolean {
+    const session = this.sessionName;
+    if (!session || !this.started || this.disposed) return true;
+    if (this.term.buffer.active.type !== 'alternate') return true;
+    if (this.term.modes.mouseTrackingMode !== 'none') return true;
+    e.preventDefault();
+    const unit =
+      e.deltaMode === 1 ? TMUX_WHEEL_ROW_PX : e.deltaMode === 2 ? TMUX_WHEEL_ROW_PX * this.term.rows : 1;
+    this.wheelPx += e.deltaY * unit;
+    const steps = Math.trunc(this.wheelPx / TMUX_WHEEL_ROW_PX);
+    if (steps === 0) return false;
+    this.wheelPx -= steps * TMUX_WHEEL_ROW_PX;
+    const lines = -steps; // wheel up (negative deltaY) scrolls back
+    if (lines > 0) this.tmuxMaybeScrolled = true;
+    if (this.wheelQueued) {
+      this.wheelQueued.lines += lines;
+      return false;
+    }
+    const step = { lines };
+    this.wheelQueued = step;
+    this.chainIo(async () => {
+      if (this.wheelQueued === step) this.wheelQueued = null;
+      if (step.lines !== 0 && !this.disposed) await api.tmuxWheel(session, step.lines);
+    });
+    return false;
   }
 
   /**

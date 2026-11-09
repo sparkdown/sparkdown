@@ -27,6 +27,7 @@ const api = vi.hoisted(() => ({
   tmuxSessions: vi.fn(async (_prefix: string) => [] as string[]),
   tmuxKillSession: vi.fn(async (_session: string) => {}),
   tmuxSendKeys: vi.fn(async (_session: string, _text: string) => {}),
+  tmuxWheel: vi.fn(async (_session: string, _lines: number) => {}),
   detectAgents: vi.fn(
     async () => [] as { id: string; label: string; bin: string; found: boolean }[],
   ),
@@ -66,7 +67,10 @@ const terms = vi.hoisted(() => ({
     cols: number;
     rows: number;
     keyHandler: ((e: KeyboardEvent) => boolean) | null;
+    wheelHandler: ((e: WheelEvent) => boolean) | null;
     dataHandler: ((d: string) => void) | null;
+    modes: { mouseTrackingMode: string };
+    buffer: { active: { type: 'normal' | 'alternate' } };
     selection: string;
     options: Record<string, unknown>;
     linkProviders: { provideLinks(y: number, cb: (links: unknown) => void): void }[];
@@ -143,8 +147,10 @@ vi.mock('@xterm/xterm', () => ({
     rows = 24;
     element: HTMLElement | null = null;
     rows_: string[] = [];
+    modes = { mouseTrackingMode: 'none' };
     buffer = {
       active: {
+        type: 'normal' as 'normal' | 'alternate',
         getLine: (y: number) => {
           const text = this.rows_[y];
           return text === undefined
@@ -154,6 +160,7 @@ vi.mock('@xterm/xterm', () => ({
       },
     };
     keyHandler: ((e: KeyboardEvent) => boolean) | null = null;
+    wheelHandler: ((e: WheelEvent) => boolean) | null = null;
     dataHandler: ((d: string) => void) | null = null;
     selection = '';
     linkProviders: { provideLinks(y: number, cb: (links: unknown) => void): void }[] = [];
@@ -164,6 +171,9 @@ vi.mock('@xterm/xterm', () => ({
     loadAddon() {}
     attachCustomKeyEventHandler(h: (e: KeyboardEvent) => boolean) {
       this.keyHandler = h;
+    }
+    attachCustomWheelEventHandler(h: (e: WheelEvent) => boolean) {
+      this.wheelHandler = h;
     }
     registerLinkProvider(p: { provideLinks(y: number, cb: (links: unknown) => void): void }) {
       this.linkProviders.push(p);
@@ -203,6 +213,8 @@ import {
   agentLaunchCommand,
   paneLocation,
   REFIT_DEBOUNCE_MS,
+  TMUX_WHEEL_ROW_PX,
+  isUrlOpenClick,
   type LayoutStore,
 } from '../terminal';
 import type { TerminalLayout } from '../types/TerminalLayout';
@@ -1369,7 +1381,8 @@ describe('TerminalManager MCP install prompt at launch', () => {
 });
 
 describe('TerminalPane links', () => {
-  type Link = { text: string; range: unknown; activate: (e: { button: number }) => void };
+  type Click = { button: number; ctrlKey?: boolean; metaKey?: boolean };
+  type Link = { text: string; range: unknown; activate: (e: Click) => void };
   const linksAt = async (row: number): Promise<Link[]> => {
     const t = terms.all[0]!;
     return await new Promise((resolve) =>
@@ -1396,7 +1409,7 @@ describe('TerminalPane links', () => {
     expect(second.map((l) => l.text)).toEqual(['https://sparkdown.dev/a']);
     second[0]!.activate({ button: 2 }); // not a primary click
     expect(api.openExternal).not.toHaveBeenCalled();
-    second[0]!.activate({ button: 0 });
+    second[0]!.activate({ button: 0, ctrlKey: true });
     expect(api.openExternal).toHaveBeenCalledWith('https://sparkdown.dev/a');
     expect(opened).toEqual(['src/app.ts']);
   });
@@ -1405,17 +1418,37 @@ describe('TerminalPane links', () => {
     const { mgr } = makeManager();
     await mgr.addTerminal();
     const handler = terms.all[0]!.options.linkHandler as {
-      activate: (e: { button: number }, uri: string) => void;
+      activate: (e: Click, uri: string) => void;
       allowNonHttpProtocols: boolean;
     };
     expect(handler.allowNonHttpProtocols).toBe(false);
-    handler.activate({ button: 0 }, 'javascript:alert(1)');
-    handler.activate({ button: 0 }, 'file:///etc/passwd');
+    handler.activate({ button: 0, ctrlKey: true }, 'javascript:alert(1)');
+    handler.activate({ button: 0, ctrlKey: true }, 'file:///etc/passwd');
     expect(api.openExternal).not.toHaveBeenCalled();
-    handler.activate({ button: 2 }, 'https://sparkdown.dev/');
+    handler.activate({ button: 2, ctrlKey: true }, 'https://sparkdown.dev/');
+    handler.activate({ button: 0 }, 'https://sparkdown.dev/'); // plain click
     expect(api.openExternal).not.toHaveBeenCalled();
-    handler.activate({ button: 0 }, 'https://sparkdown.dev/');
+    handler.activate({ button: 0, ctrlKey: true }, 'https://sparkdown.dev/');
+    expect(api.openExternal).toHaveBeenCalledTimes(1);
     expect(api.openExternal).toHaveBeenCalledWith('https://sparkdown.dev/');
+  });
+
+  it('box QA order: left, right, middle, then Ctrl+click opens exactly once', async () => {
+    const { mgr } = makeManager();
+    await mgr.addTerminal();
+    await flush();
+    terms.all[0]!.rows_ = ['see https://example.com/comfort-qa'];
+    const [link] = await linksAt(1);
+    expect(link!.text).toBe('https://example.com/comfort-qa');
+    link!.activate({ button: 0 }); // plain left click: selection only
+    link!.activate({ button: 2 }); // right
+    link!.activate({ button: 1 }); // middle
+    link!.activate({ button: 1, ctrlKey: true }); // Ctrl+middle
+    link!.activate({ button: 0, metaKey: true }); // Super/Meta is not Ctrl off Mac
+    expect(api.openExternal).not.toHaveBeenCalled();
+    link!.activate({ button: 0, ctrlKey: true });
+    expect(api.openExternal).toHaveBeenCalledTimes(1);
+    expect(api.openExternal).toHaveBeenCalledWith('https://example.com/comfort-qa');
   });
 
   it('a disposed pane ignores late link-provider callbacks', async () => {
@@ -1532,5 +1565,109 @@ describe('TerminalManager find', () => {
     mgr.closeTerminal('term-2');
     expect(host.querySelector('.sd-find-terminal')).toBeNull();
     expect(mgr.openFind('term-2')).toBe(false);
+  });
+});
+
+describe('terminal URL click gate', () => {
+  it('Linux/Windows: only Ctrl+primary; macOS: only Cmd+primary', () => {
+    const c = (button: number, ctrlKey = false, metaKey = false) => ({ button, ctrlKey, metaKey });
+    expect(isUrlOpenClick(c(0, true), false)).toBe(true);
+    expect(isUrlOpenClick(c(0), false)).toBe(false);
+    expect(isUrlOpenClick(c(1, true), false)).toBe(false);
+    expect(isUrlOpenClick(c(2, true), false)).toBe(false);
+    expect(isUrlOpenClick(c(0, false, true), false)).toBe(false);
+    expect(isUrlOpenClick(c(0, false, true), true)).toBe(true);
+    // Ctrl+click on a Mac is the context-menu click.
+    expect(isUrlOpenClick(c(0, true), true)).toBe(false);
+    expect(isUrlOpenClick(c(0, true, true), true)).toBe(false);
+  });
+});
+
+describe('TerminalPane wheel on tmux panes', () => {
+  const wheel = (deltaY: number) =>
+    new WheelEvent('wheel', { deltaY, deltaMode: 0, cancelable: true });
+
+  async function tmuxPane() {
+    const { mgr } = makeManager({ tmux: true });
+    await mgr.addTerminal();
+    await flush();
+    const t = terms.all[0]!;
+    const session = api.terminalStart.mock.calls[0]![4]!;
+    expect(session).toMatch(/^sd-/);
+    return { mgr, t, session };
+  }
+
+  it('wheel up in tmux scrolls tmux history and never types into the shell', async () => {
+    const { t, session } = await tmuxPane();
+    t.buffer.active.type = 'alternate'; // tmux draws in the alternate screen
+    const ev = wheel(-3 * TMUX_WHEEL_ROW_PX);
+    expect(t.wheelHandler!(ev)).toBe(false); // xterm must not send Up keys
+    expect(ev.defaultPrevented).toBe(true);
+    await flush();
+    expect(api.tmuxWheel).toHaveBeenCalledWith(session, 3);
+    expect(api.terminalWrite).not.toHaveBeenCalled();
+    expect(api.tmuxSendKeys).not.toHaveBeenCalled();
+    t.wheelHandler!(wheel(2 * TMUX_WHEEL_ROW_PX));
+    await flush();
+    expect(api.tmuxWheel).toHaveBeenLastCalledWith(session, -2);
+  });
+
+  it('small trackpad deltas accumulate into whole lines', async () => {
+    const { t, session } = await tmuxPane();
+    t.buffer.active.type = 'alternate';
+    t.wheelHandler!(wheel(-TMUX_WHEEL_ROW_PX / 2));
+    await flush();
+    expect(api.tmuxWheel).not.toHaveBeenCalled();
+    t.wheelHandler!(wheel(-TMUX_WHEEL_ROW_PX / 2));
+    await flush();
+    expect(api.tmuxWheel).toHaveBeenCalledWith(session, 1);
+  });
+
+  it('typing after a wheel-up leaves copy mode first, then writes, in order', async () => {
+    const { t, session } = await tmuxPane();
+    t.buffer.active.type = 'alternate';
+    const order: string[] = [];
+    let release!: () => void;
+    api.tmuxWheel.mockImplementation(async (_s: string, n: number) => {
+      order.push(`wheel ${n}`);
+      if (n > 0) await new Promise<void>((r) => (release = r));
+    });
+    api.terminalWrite.mockImplementation(async (_id: string, d: string) => {
+      order.push(`write ${d}`);
+    });
+    t.wheelHandler!(wheel(-TMUX_WHEEL_ROW_PX));
+    await flush();
+    t.dataHandler!('l');
+    t.dataHandler!('s');
+    await flush();
+    // Keys wait for the in-flight wheel call: nothing overtakes it.
+    expect(order).toEqual(['wheel 1']);
+    release();
+    await flush();
+    expect(order).toEqual(['wheel 1', 'wheel 0', 'write l', 'write s']);
+    expect(api.tmuxWheel).toHaveBeenCalledWith(session, 0);
+    api.tmuxWheel.mockImplementation(async () => {});
+    api.terminalWrite.mockImplementation(async () => {});
+  });
+
+  it('plain shells, the normal buffer and mouse-reporting apps keep xterm defaults', async () => {
+    const { t } = await tmuxPane();
+    t.buffer.active.type = 'normal';
+    expect(t.wheelHandler!(wheel(-50))).toBe(true);
+    t.buffer.active.type = 'alternate';
+    t.modes.mouseTrackingMode = 'any';
+    expect(t.wheelHandler!(wheel(-50))).toBe(true);
+    await flush();
+    expect(api.tmuxWheel).not.toHaveBeenCalled();
+
+    terms.all = [];
+    const { mgr } = makeManager({ tmux: false });
+    await mgr.addTerminal();
+    await flush();
+    const plain = terms.all[0]!;
+    plain.buffer.active.type = 'alternate'; // e.g. less in a plain shell
+    expect(plain.wheelHandler!(wheel(-50))).toBe(true);
+    await flush();
+    expect(api.tmuxWheel).not.toHaveBeenCalled();
   });
 });

@@ -53,6 +53,11 @@ export class SettingsDialog {
     const open = this.open;
     if (!open) return;
     this.open = null;
+    // Closing (×, Escape, backdrop) must not drop a typed but uncommitted
+    // number: commit it the way blur would have.
+    for (const el of open.overlay.querySelectorAll<HTMLInputElement>('[data-commit-on-close]')) {
+      el.dispatchEvent(new Event('change'));
+    }
     document.removeEventListener('keydown', open.onKey);
     open.overlay.remove();
     open.modal.release();
@@ -470,7 +475,7 @@ function scrollbackRow(spec: { value: number; onChange: (value: number) => void 
   label.textContent = 'Scrollback lines';
   const desc = document.createElement('div');
   desc.className = 'settings-row-desc';
-  desc.textContent = `${TERMINAL_SCROLLBACK_MIN.toLocaleString()} to ${TERMINAL_SCROLLBACK_MAX.toLocaleString()} lines of history, applied live.`;
+  desc.textContent = `${TERMINAL_SCROLLBACK_MIN.toLocaleString()} to ${TERMINAL_SCROLLBACK_MAX.toLocaleString()} lines of history, applied live. tmux-backed terminals scroll tmux's own history instead.`;
   text.append(label, desc);
   const input = document.createElement('input');
   input.type = 'number';
@@ -478,14 +483,29 @@ function scrollbackRow(spec: { value: number; onChange: (value: number) => void 
   input.dataset.settingScrollback = '';
   input.min = String(TERMINAL_SCROLLBACK_MIN);
   input.max = String(TERMINAL_SCROLLBACK_MAX);
-  input.step = '100';
+  // Any whole number of lines: a coarser step made in-range values such as
+  // 350 a stepMismatch, so validity failed and the change was dropped.
+  input.step = '1';
   input.value = String(spec.value);
   const save = () => {
-    if (!input.validity.valid || !input.value) return;
-    spec.onChange(input.valueAsNumber);
-    input.value = String(clampScrollback(input.valueAsNumber));
+    // Empty or unparsable: keep the last saved value. Out of range: clamp
+    // (and show the clamped value) instead of silently ignoring the edit.
+    const typed = input.valueAsNumber;
+    if (!Number.isFinite(typed)) {
+      input.value = String(spec.value);
+      return;
+    }
+    const lines = clampScrollback(typed);
+    input.value = String(lines);
+    if (lines === spec.value) return;
+    spec.value = lines;
+    spec.onChange(lines);
   };
+  input.dataset.commitOnClose = '';
   input.addEventListener('change', save);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') save();
+  });
   row.append(text, input);
   return row;
 }

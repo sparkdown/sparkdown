@@ -793,7 +793,11 @@ export class App {
         if (!this.config.agent_context_enabled) void this.agent.clear();
         else this.agent.publishSoon();
         void this.refreshAgentTools();
-        this.debouncedSaveConfig();
+        // A committed Settings change is written now, not after the 2 s
+        // debounce: quitting (or a crash) right after closing Settings must
+        // not lose it.
+        this.debouncedSaveConfig.cancel();
+        void this.persistConfig();
       },
     };
     if (section) this.settingsDialog.showSection(host, section);

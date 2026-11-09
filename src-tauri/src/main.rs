@@ -592,6 +592,7 @@ fn main() {
             terminal::tmux_sessions,
             terminal::tmux_send_keys,
             terminal::tmux_kill_session,
+            terminal::tmux_wheel,
             watcher::watch_start,
             watcher::watch_stop,
             git::git_status,

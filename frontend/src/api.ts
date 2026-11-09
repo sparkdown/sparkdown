@@ -151,6 +151,10 @@ export const api = {
    *  it can't race tmux's startup redraw and appear duplicated. */
   tmuxSendKeys: (session: string, text: string) =>
     invoke<void>("tmux_send_keys", { session, text }),
+  /** One mouse-wheel step on a tmux pane: >0 up, <0 down (tmux history /
+   *  the screen app), 0 leaves copy mode. Never types at a shell prompt. */
+  tmuxWheel: (session: string, lines: number) =>
+    invoke<void>("tmux_wheel", { session, lines }),
   tmuxKillSession: (session: string) =>
     invoke<void>("tmux_kill_session", { session }),
   terminalWrite: (id: string, data: string) =>
