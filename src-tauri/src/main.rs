@@ -1098,9 +1098,10 @@ mod tests {
             hooks.contains("NSIS_HOOK_POSTINSTALL")
                 && hooks.contains("SdAppendUserPath")
                 && hooks.contains("un.SdRemoveUserPath")
-                && hooks.contains("${un.StrLoc}")
-                && hooks.contains("SdInstallPathShim"),
-            "PATH install/uninstall hooks (#160; uninstall needs un. + un.StrLoc)"
+                && hooks.contains("SdInstallPathShim")
+                && !hooks.lines().any(|l| l.trim_start().starts_with("${un.StrLoc}"))
+                && !hooks.contains("!define MUI_FINISHPAGE_SHOWREADME"),
+            "PATH hooks (#160): un.SdRemoveUserPath without StrFunc/SHOWREADME defines"
         );
         assert!(
             hooks.contains(r"$INSTDIR\bin")

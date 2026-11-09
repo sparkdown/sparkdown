@@ -29,9 +29,6 @@
 !include LogicLib.nsh
 !include FileFunc.nsh
 
-; StrFunc uninstall variant (installer.nsi only inits ${StrLoc}).
-${un.StrLoc}
-
 !define SD_PRODUCTNAME "SparkDown"
 !define SD_PUBLISHER "PearTree Forge LLC"
 !define SD_LEGACY_MANUFACTURER "sparkdown"
@@ -166,6 +163,10 @@ Function SdAppendUserPath
 FunctionEnd
 
 Function un.SdRemoveUserPath
+  ; No ${StrLoc}/${un.StrLoc}: Tauri inits only ${StrLoc} for the installer,
+  ; and uninstall Calls must stay in un.* without StrFunc. Remove our dir
+  ; when it is the whole Path, a ";dir" suffix, a "dir;" prefix, or a
+  ; ";dir;" middle — using only StrCpy/StrCmp/StrLen.
   ReadRegStr $SdPathNeedle HKCU "${SD_UNINSTKEY}" "SdPathDir"
   ${If} $SdPathNeedle == ""
     Return
@@ -173,30 +174,64 @@ Function un.SdRemoveUserPath
   ReadRegStr $SdOldPath HKCU "${SD_PATH_REGKEY}" "Path"
   ${If} $SdOldPath == $SdPathNeedle
     StrCpy $SdNewPath ""
-  ${Else}
-    ; Prefer removing ";dir" then "dir;" then bare "dir".
-    StrCpy $SdNewPath "$SdOldPath"
-    StrCpy $0 ";$SdPathNeedle"
-    ${un.StrLoc} $SdPathIdx "$SdNewPath" "$0" ">"
-    ${If} $SdPathIdx != ""
-      StrLen $SdPathLen "$0"
-      StrCpy $SdPathLeft "$SdNewPath" $SdPathIdx
-      IntOp $SdPathIdx $SdPathIdx + $SdPathLen
-      StrCpy $SdPathRight "$SdNewPath" "" $SdPathIdx
-      StrCpy $SdNewPath "$SdPathLeft$SdPathRight"
-    ${Else}
-      StrCpy $0 "$SdPathNeedle;"
-      ${un.StrLoc} $SdPathIdx "$SdNewPath" "$0" ">"
-      ${If} $SdPathIdx != ""
-        StrLen $SdPathLen "$0"
-        StrCpy $SdPathLeft "$SdNewPath" $SdPathIdx
-        IntOp $SdPathIdx $SdPathIdx + $SdPathLen
-        StrCpy $SdPathRight "$SdNewPath" "" $SdPathIdx
-        StrCpy $SdNewPath "$SdPathLeft$SdPathRight"
-      ${EndIf}
+    Goto sd_un_path_write
+  ${EndIf}
+
+  ; Prefix "dir;"
+  StrCpy $0 "$SdPathNeedle;"
+  StrLen $SdPathLen $0
+  StrCpy $1 $SdOldPath $SdPathLen
+  ${If} $1 == $0
+    StrCpy $SdNewPath $SdOldPath "" $SdPathLen
+    Goto sd_un_path_write
+  ${EndIf}
+
+  ; Suffix ";dir"
+  StrCpy $0 ";$SdPathNeedle"
+  StrLen $SdPathLen $0
+  StrLen $1 $SdOldPath
+  IntOp $2 $1 - $SdPathLen
+  ${If} $2 >= 0
+    StrCpy $3 $SdOldPath "" $2
+    ${If} $3 == $0
+      StrCpy $SdNewPath $SdOldPath $2
+      Goto sd_un_path_write
     ${EndIf}
   ${EndIf}
-  WriteRegExpandStr HKCU "${SD_PATH_REGKEY}" "Path" "$SdNewPath"
+
+  ; Middle ";dir;" — scan by walking $SdOldPath
+  StrCpy $0 ";$SdPathNeedle;"
+  StrLen $SdPathLen $0
+  StrCpy $SdPathIdx 0
+  StrLen $1 $SdOldPath
+  sd_un_scan:
+    IntOp $2 $1 - $SdPathIdx
+    ${If} $2 < $SdPathLen
+      ; Not found: leave Path unchanged but still clear our marker.
+      Goto sd_un_path_clear_marker
+    ${EndIf}
+    StrCpy $3 $SdOldPath $SdPathLen $SdPathIdx
+    ${If} $3 == $0
+      StrCpy $SdPathLeft $SdOldPath $SdPathIdx
+      IntOp $4 $SdPathIdx + $SdPathLen
+      ; Keep one ';' — $0 was ";dir;", so drop the leading ';' of the match
+      ; by putting ';' back between left and right only if both sides nonempty.
+      IntOp $4 $4 - 1
+      StrCpy $SdPathRight $SdOldPath "" $4
+      ; $SdPathLeft + $SdPathRight where right still starts with ';'
+      ${If} $SdPathLeft == ""
+        StrCpy $SdNewPath $SdPathRight "" 1
+      ${Else}
+        StrCpy $SdNewPath "$SdPathLeft$SdPathRight"
+      ${EndIf}
+      Goto sd_un_path_write
+    ${EndIf}
+    IntOp $SdPathIdx $SdPathIdx + 1
+    Goto sd_un_scan
+
+  sd_un_path_write:
+    WriteRegExpandStr HKCU "${SD_PATH_REGKEY}" "Path" "$SdNewPath"
+  sd_un_path_clear_marker:
   DeleteRegValue HKCU "${SD_UNINSTKEY}" "SdPathDir"
   System::Call 'user32::SendMessageTimeout(i 0xffff, i 0x1A, i 0, t "Environment", i 0, i 5000, *i .r0)'
 FunctionEnd
