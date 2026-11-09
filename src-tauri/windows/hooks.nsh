@@ -29,6 +29,9 @@
 !include LogicLib.nsh
 !include FileFunc.nsh
 
+; StrFunc uninstall variant (installer.nsi only inits ${StrLoc}).
+${un.StrLoc}
+
 !define SD_PRODUCTNAME "SparkDown"
 !define SD_PUBLISHER "PearTree Forge LLC"
 !define SD_LEGACY_MANUFACTURER "sparkdown"
@@ -174,7 +177,7 @@ Function un.SdRemoveUserPath
     ; Prefer removing ";dir" then "dir;" then bare "dir".
     StrCpy $SdNewPath "$SdOldPath"
     StrCpy $0 ";$SdPathNeedle"
-    ${StrLoc} $SdPathIdx "$SdNewPath" "$0" ">"
+    ${un.StrLoc} $SdPathIdx "$SdNewPath" "$0" ">"
     ${If} $SdPathIdx != ""
       StrLen $SdPathLen "$0"
       StrCpy $SdPathLeft "$SdNewPath" $SdPathIdx
@@ -183,7 +186,7 @@ Function un.SdRemoveUserPath
       StrCpy $SdNewPath "$SdPathLeft$SdPathRight"
     ${Else}
       StrCpy $0 "$SdPathNeedle;"
-      ${StrLoc} $SdPathIdx "$SdNewPath" "$0" ">"
+      ${un.StrLoc} $SdPathIdx "$SdNewPath" "$0" ">"
       ${If} $SdPathIdx != ""
         StrLen $SdPathLen "$0"
         StrCpy $SdPathLeft "$SdNewPath" $SdPathIdx

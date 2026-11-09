@@ -1097,9 +1097,10 @@ mod tests {
         assert!(
             hooks.contains("NSIS_HOOK_POSTINSTALL")
                 && hooks.contains("SdAppendUserPath")
-                && hooks.contains("SdRemoveUserPath")
+                && hooks.contains("un.SdRemoveUserPath")
+                && hooks.contains("${un.StrLoc}")
                 && hooks.contains("SdInstallPathShim"),
-            "PATH install/uninstall hooks (#160)"
+            "PATH install/uninstall hooks (#160; uninstall needs un. + un.StrLoc)"
         );
         assert!(
             hooks.contains(r"$INSTDIR\bin")
