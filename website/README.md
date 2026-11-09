@@ -19,9 +19,9 @@ only the canonical, Open Graph and Twitter URLs are absolute.
   unverifiable comparisons with other apps.
 - Primary CTA: the Download section, then `releases/latest` (never a
   hard-coded tag or a direct DMG link).
-- Size: about **4 MB** installed on Mac (4.2 MB `.app`), 3 MB DMG, measured
-  with `scripts/package-macos.sh` for 0.3.1. Re-measure when the bundle
-  changes.
+- Size: quote the published Apple Silicon **DMG** only when verified from the
+  current release asset (v0.4.1 is about **3.7 MB**). Do not claim an installed
+  `.app` size unless it was re-measured for that version.
 - Platforms: Apple Silicon, macOS 10.15+ (`tauri.conf.json`
   `minimumSystemVersion`); Linux x86_64 `.deb` and AppImage; Windows is a
   preview (one line in Download, pointing at `docs/windows.md`); AUR
