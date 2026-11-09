@@ -162,7 +162,7 @@ Function SdAppendUserPath
   System::Call 'user32::SendMessageTimeout(i 0xffff, i 0x1A, i 0, t "Environment", i 0, i 5000, *i .r0)'
 FunctionEnd
 
-Function SdRemoveUserPath
+Function un.SdRemoveUserPath
   ReadRegStr $SdPathNeedle HKCU "${SD_UNINSTKEY}" "SdPathDir"
   ${If} $SdPathNeedle == ""
     Return
@@ -213,5 +213,5 @@ FunctionEnd
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
-  Call SdRemoveUserPath
+  Call un.SdRemoveUserPath
 !macroend
