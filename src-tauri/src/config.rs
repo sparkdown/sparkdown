@@ -131,6 +131,13 @@ pub struct AppConfig {
     /// user-only pipe (after a restart).
     #[serde(default)]
     pub mcp_external_agents: bool,
+
+    /// Fetch the current branch's upstream quietly in the background (on
+    /// window focus, every few minutes while focused, and after a rejected
+    /// push) so the Pull behind count is current (#175). Local repos only;
+    /// never prompts for credentials. On by default (Settings → Git).
+    #[serde(default = "default_true")]
+    pub git_background_fetch: bool,
 }
 
 /// One node of a persisted terminal split layout (see
@@ -239,6 +246,7 @@ impl Default for AppConfig {
             terminal_layouts: std::collections::HashMap::new(),
             mcp_install_prompt_dismissed: vec![],
             mcp_external_agents: false,
+            git_background_fetch: true,
         }
     }
 }

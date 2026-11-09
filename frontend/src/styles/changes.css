@@ -154,7 +154,7 @@
 
 .change-row {
   display: grid;
-  grid-template-columns: 16px 12px minmax(0, 1fr) auto;
+  grid-template-columns: 16px 12px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 7px;
   height: 30px;
@@ -616,3 +616,108 @@
 .git-output-time { color: var(--text-subtle); font-variant-numeric: tabular-nums; }
 .git-output-entry[data-state='error'] .git-output-msg { color: var(--status-warning); }
 .git-output-text { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font-size: 11px; }
+
+/* --- Discard (#172) ------------------------------------------------------ */
+
+/* The row's Discard icon: shown on hover / selection, keeps its column so
+   the counts don't jump. */
+.change-discard {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-subtle);
+  cursor: pointer;
+  visibility: hidden;
+}
+.change-row:hover .change-discard,
+.change-row.current .change-discard,
+.change-discard:focus-visible {
+  visibility: visible;
+}
+.change-discard:hover {
+  background: var(--sidebar-active);
+  color: var(--fg);
+}
+.change-discard[aria-disabled='true'] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.discard-dialog {
+  max-width: 560px;
+}
+.discard-title {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+.discard-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.discard-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.discard-item .discard-detail {
+  grid-column: 2;
+  color: var(--text-subtle);
+}
+.discard-path {
+  overflow-wrap: anywhere;
+}
+.discard-action {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.discard-action-delete {
+  color: var(--danger, #d64545);
+}
+.discard-dirty {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--danger, #d64545);
+  background: var(--sidebar-hover);
+}
+.discard-dirty p {
+  margin: 0 0 6px;
+}
+.discard-dirty small {
+  display: block;
+  color: var(--text-subtle);
+}
+.discard-warning {
+  margin: 0 0 16px;
+  color: var(--text-subtle);
+}
+.discard-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.discard-buttons button {
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+.discard-buttons .danger {
+  background: var(--danger, #d64545);
+  border-color: var(--danger, #d64545);
+  color: #fff;
+}

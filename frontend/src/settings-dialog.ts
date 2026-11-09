@@ -124,6 +124,31 @@ function buildSettingsOverlay(host: SettingsHost, close: () => void): HTMLElemen
 
   dialog.appendChild(section);
 
+  // #175: Settings → Git.
+  const git = document.createElement('div');
+  git.className = 'settings-section';
+  git.dataset.section = 'git';
+  const gitHeading = document.createElement('h3');
+  gitHeading.textContent = 'Git';
+  git.appendChild(gitHeading);
+  git.appendChild(
+    toggleRow({
+      label: 'Fetch in the background',
+      desc:
+        "Quietly run git fetch for the current branch's upstream when the " +
+        'window gains focus, every 5 minutes while it is focused, and after ' +
+        'a rejected push, so the Pull count shows new commits. Fetch only: ' +
+        'nothing is merged. Never asks for credentials (a remote that needs ' +
+        'them is skipped). Off in remote (SSH) folders.',
+      checked: host.config.git_background_fetch ?? true,
+      onToggle: (value) => {
+        host.config.git_background_fetch = value;
+        host.onChange();
+      },
+    }),
+  );
+  dialog.appendChild(git);
+
   const agents = document.createElement('div');
   agents.className = 'settings-section';
   agents.dataset.section = 'agents';

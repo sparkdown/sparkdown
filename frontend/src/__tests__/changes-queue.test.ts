@@ -267,3 +267,75 @@ describe('ChangesView review queue', () => {
     expect(rowPaths(listEl)).toEqual(['Cargo.lock']);
   });
 });
+
+describe('ChangesView Discard entry points (#172)', () => {
+  function withDiscard(reason: string | null = null) {
+    gitStatus.mockResolvedValue({
+      is_repo: true,
+      top_level: '/repo',
+      branch: 'main',
+      changes: files.map(([path, status]) => ({ path, status, staged: false })),
+    });
+    gitChangeStats.mockResolvedValue([]);
+    const listEl = document.createElement('div');
+    document.body.appendChild(listEl);
+    const asked: string[][] = [];
+    const cv = new ChangesView(listEl, () => {}, () => {}, {
+      review: new ReviewState({ load: async () => ({}), save: async () => {} }, 0),
+      onDiscard: (paths) => asked.push(paths),
+      discardDisabledReason: () => reason,
+    });
+    cv.setRoot('/repo');
+    return { cv, listEl, asked };
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('the row icon asks to discard that one file and does not open it', async () => {
+    const { cv, listEl, asked } = withDiscard();
+    await cv.refresh();
+    const row = listEl.querySelector<HTMLElement>('.change-row[data-path="src/mcp.rs"]')!;
+    row.querySelector<HTMLElement>('.change-discard')!.click();
+    expect(asked).toEqual([['src/mcp.rs']]);
+  });
+
+  it('Discard All asks for every changed file; stale paths are dropped', async () => {
+    const { cv, asked } = withDiscard();
+    await cv.refresh();
+    cv.discardAll();
+    expect(asked[0].sort()).toEqual(files.map(([p]) => p).sort());
+    cv.requestDiscard(['gone.md']);
+    expect(asked).toHaveLength(1);
+  });
+
+  it('keyboard: Shift+F10 / the Menu key on the focused list asks to discard the selected file', async () => {
+    const { cv, listEl, asked } = withDiscard();
+    await cv.refresh();
+    press(listEl, 'ArrowDown');
+    const sel = listEl.querySelector<HTMLElement>('.change-row[aria-selected="true"]')?.dataset.path;
+    expect(sel).toBeTruthy();
+    press(listEl, 'F10', { shiftKey: true });
+    expect(asked).toEqual([[sel]]);
+    press(listEl, 'ContextMenu');
+    expect(asked).toHaveLength(2);
+    // Plain F10, or the key outside the list, does nothing.
+    press(listEl, 'F10');
+    press(document.body, 'ContextMenu');
+    expect(asked).toHaveLength(2);
+    // The keyboard contextmenu event that follows opens no mouse menu.
+    const ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+    listEl.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(document.querySelector('.sd-ctxmenu')).toBeNull();
+  });
+
+  it('remote: the icon carries the reason and is aria-disabled', async () => {
+    const { cv, listEl } = withDiscard('Not in remote sessions');
+    await cv.refresh();
+    const btn = listEl.querySelector<HTMLElement>('.change-discard')!;
+    expect(btn.title).toBe('Not in remote sessions');
+    expect(btn.getAttribute('aria-disabled')).toBe('true');
+  });
+});

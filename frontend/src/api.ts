@@ -202,6 +202,16 @@ export const api = {
   gitPull: (root: string) => invoke<GitActionResult>("git_pull", { root }),
   /** #122: push the current branch to its upstream; never forced. */
   gitPush: (root: string) => invoke<GitActionResult>("git_push", { root }),
+  /** #175: quiet background fetch of the upstream remote (local repos
+   *  only; never prompts). "busy": this window already has one running. */
+  gitFetch: (root: string) => invoke<"fetched" | "busy">("git_fetch", { root }),
+  /** #172: what Discard would do to each path (fresh status). */
+  gitDiscardPreview: (root: string, paths: string[]) =>
+    invoke<DiscardItem[]>("git_discard_preview", { root, paths }),
+  /** #172: discard the changes of `paths` (revert to HEAD; files with no
+   *  committed version go to the OS trash). Rejects with a GitActionError. */
+  gitDiscard: (root: string, items: DiscardRequest[]) =>
+    invoke<DiscardResult>("git_discard", { root, items }),
   gitDiffFile: (root: string, path: string, untracked: boolean) =>
     invoke<string>("git_diff_file", { root, path, untracked }),
   /** Per changed file: +adds / −dels and a fingerprint of the change
@@ -358,6 +368,8 @@ type GitErrorKind =
   | "auth"
   | "network"
   | "conflict"
+  | "merge_conflict"
+  | "rebase_conflict"
   | "local_changes"
   | "diverged"
   | "rejected"
@@ -373,6 +385,8 @@ export interface GitActionError {
   kind: GitErrorKind;
   message: string;
   detail: string;
+  /** Repo-relative files the error is about (conflicted files, #174). */
+  files?: string[];
 }
 
 export interface GitActionResult {
@@ -384,6 +398,34 @@ export interface GitActionResult {
   commits: number | null;
   /** Pull / push: the upstream, such as `origin/main`. */
   target: string | null;
+}
+
+/** One row of the Discard confirmation (git_write.rs `DiscardItem`). */
+export interface DiscardItem {
+  path: string;
+  action: "revert" | "delete";
+  detail: string;
+  /** A staged rename's source, restored together with `path`. */
+  source?: string;
+  staged: boolean;
+  partially_staged: boolean;
+  untracked: boolean;
+  /** Opaque token for exactly what was previewed (status, index, bytes on
+   *  disk). Sent back unchanged; the core refuses a row that differs. */
+  fingerprint: string;
+}
+
+/** One confirmed row sent back to git_discard (git_write.rs
+ *  `DiscardRequest`): a path whose fresh plan differs is refused. */
+export type DiscardRequest = Pick<DiscardItem, "path" | "action" | "source" | "fingerprint">;
+
+/** git_write.rs `DiscardResult`. */
+export interface DiscardResult {
+  discarded: string[];
+  /** Among `discarded`: moved to the OS trash. */
+  trashed: string[];
+  failed: { path: string; message: string }[];
+  output: string;
 }
 
 /** Mirror of `GitBranchStatus` in src-tauri/src/git.rs. */
