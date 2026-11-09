@@ -1,6 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { isUnderRoot } from "./utils";
 import type { AppConfig } from "./types/AppConfig";
+import { ptyBytes, type PtyOutput } from "./terminal-output";
 
 export type { AppConfig };
 
@@ -143,8 +144,17 @@ export const api = {
     rows: number,
     session: string | null,
     launch: string | null = null,
-  ) =>
-    invoke<string>("terminal_start", { id, cwd, cols, rows, session, launch }),
+    /** This pane's pty output, in order. It travels over a Channel owned by
+     *  this call, so no other pane or window can receive it. Ack the bytes
+     *  with `terminalAck` once xterm has parsed them (flow control). */
+    onOutput: (bytes: Uint8Array) => void = () => {},
+  ) => {
+    const output = new Channel<PtyOutput>((msg) => onOutput(ptyBytes(msg)));
+    return invoke<string>("terminal_start", { id, cwd, cols, rows, session, launch, output });
+  },
+  /** xterm has parsed `bytes` more bytes of terminal `id`'s output. */
+  terminalAck: (id: string, bytes: number) =>
+    invoke<void>("terminal_ack", { id, bytes }),
   tmuxSessions: (prefix: string) =>
     invoke<string[]>("tmux_sessions", { prefix }),
   /** Type text into a tmux session (no Enter) via tmux's own input cycle, so

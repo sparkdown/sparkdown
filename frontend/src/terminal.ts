@@ -1,5 +1,6 @@
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { loadWebglRenderer } from './terminal-output';
 import { listen, type UnlistenFn } from './window-events';
 import { ask } from '@tauri-apps/plugin-dialog';
 import { api, type RemoteSession } from './api';
@@ -133,6 +134,8 @@ export class TerminalPane {
    *  actually gave us tmux ("tmux") or fell back to a plain shell ("shell"). */
   private session: string | null = null;
   private mode = 'shell';
+  /** Active xterm renderer: WebGL when available, else the DOM renderer. */
+  private renderer: 'webgl' | 'dom' = 'dom';
 
   constructor(
     id: string,
@@ -276,10 +279,13 @@ export class TerminalPane {
     this.term.open(container);
     this.applyTheme();
 
-    // Render with xterm's built-in DOM renderer (no WebGL addon). The DOM
-    // renderer draws each glyph with the system font, which is correct for an
-    // embedded editor terminal and fast enough; dropping the addon also trims
-    // the bundle.
+    // GPU rendering when the webview has WebGL2; otherwise (or after a lost
+    // context) xterm keeps its built-in DOM renderer. A flood of output is
+    // drawn once per frame either way; WebGL makes each frame much cheaper.
+    this.renderer = loadWebglRenderer(this.term, (reason) => {
+      this.renderer = 'dom';
+      console.warn(`terminal ${this.id}: DOM renderer (${reason})`);
+    });
 
     this.registerPathLinks();
 
@@ -291,18 +297,11 @@ export class TerminalPane {
     if (this.disposed) return;
     this.fit.fit();
 
-    // Route only THIS terminal's output/exit (events carry an id). Each listen
-    // is async; if destroy() ran while it was pending, unlisten immediately —
-    // destroy already drained unlisteners, so a late push would leak.
-    const dataUn = await listen<{ id: string; chunk: string }>('terminal://data', (e) => {
-      if (e.payload.id === this.id) {
-        this.term.write(e.payload.chunk);
-        this.lastOutputAt = performance.now();
-      }
-    });
-    if (this.disposed) return void dataUn();
-    this.unlisteners.push(dataUn);
-
+    // Output arrives on this pane's own Channel (passed to terminalStart
+    // below). Exit is still an event carrying the id, so route only THIS
+    // terminal's. Each listen is async; if destroy() ran while it was
+    // pending, unlisten immediately — destroy already drained unlisteners,
+    // so a late push would leak.
     const exitUn = await listen<{ id: string }>('terminal://exit', (e) => {
       if (e.payload.id !== this.id) return;
       // No parting message: the manager closes this tab right away (a
@@ -326,6 +325,7 @@ export class TerminalPane {
         this.term.rows,
         this.session,
         launch,
+        (bytes) => this.onOutput(bytes),
       );
     } catch (err) {
       if (this.disposed) return;
@@ -346,6 +346,26 @@ export class TerminalPane {
 
     this.resizeObserver = new ResizeObserver(() => this.refitDebounced());
     this.resizeObserver.observe(container);
+  }
+
+  /**
+   * One batch of pty output (whole UTF-8 sequences, raw bytes). xterm decodes
+   * it; once xterm has parsed it, ack the byte count so the backend can send
+   * more. The backend stops sending while ~1 MiB is unacked, which pushes
+   * back on a flooding program instead of queueing its output here.
+   */
+  private onOutput(bytes: Uint8Array): void {
+    if (this.disposed) return;
+    this.lastOutputAt = performance.now();
+    const n = bytes.length;
+    this.term.write(bytes, () => {
+      if (!this.disposed) api.terminalAck(this.id, n).catch(() => {});
+    });
+  }
+
+  /** Which renderer draws this pane ('webgl' or the 'dom' fallback). */
+  get rendererKind(): 'webgl' | 'dom' {
+    return this.renderer;
   }
 
   /** Coalesce a burst of container resizes (divider drag, window resize)
