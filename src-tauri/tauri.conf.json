@@ -143,6 +143,9 @@
         "mimeType": "text/plain",
         "description": "Config / Data File"
       }
+    ],
+    "resources": [
+      "resources/bin/sparkdown"
     ]
   }
 }

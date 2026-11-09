@@ -2,6 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod askpass;
+mod cli;
+mod cli_install;
 mod commands;
 mod config;
 mod context;
@@ -106,48 +108,14 @@ fn route_and_emit(app: &tauri::AppHandle, paths: &[String], new_window: bool) {
 /// Event for paths a second `sparkdown <path>…` launch forwarded (#51).
 const OPEN_PATHS_EVENT: &str = "open-paths";
 
-/// CLI flag forcing folders into a new window (#66).
-const NEW_WINDOW_FLAG: &str = "--new-window";
-
-/// Paths a second `sparkdown …` launch passed (#51), resolved against that
-/// launch's working directory (not ours). Flags are skipped; `--version`,
-/// `--help`, `--mcp-stdio` and the askpass helper never get here (they exit
-/// in `main` before the single-instance plugin starts).
-fn forwarded_paths(argv: &[String], cwd: &str) -> Vec<String> {
-    argv.iter()
-        .skip(1)
-        .filter(|a| !a.is_empty() && !a.starts_with('-'))
-        .map(|a| {
-            let p = std::path::Path::new(a);
-            let joined = if p.is_absolute() || cwd.is_empty() {
-                p.to_path_buf()
-            } else {
-                std::path::Path::new(cwd).join(p)
-            };
-            // `sparkdown .` → `<cwd>`, not `<cwd>/.`.
-            std::path::absolute(&joined)
-                .unwrap_or(joined)
-                .to_string_lossy()
-                .trim_end_matches(['/', '\\'])
-                .to_string()
-        })
-        .map(|p| {
-            if p.is_empty() {
-                "/".to_string()
-            } else if p.ends_with(':') {
-                format!("{p}\\") // `C:` alone would mean "the cwd on C:"
-            } else {
-                p
-            }
-        })
-        .collect()
-}
-
 /// A second launch (#51): bring the window forward and open its paths here.
 fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, cwd: String) {
-    let paths = forwarded_paths(&argv, &cwd);
-    // `sparkdown --new-window <folder>` (#66).
-    let new_window = argv.iter().skip(1).any(|a| a == NEW_WINDOW_FLAG);
+    open_forwarded_argv(app, argv, cwd, cli::wants_new_window);
+}
+
+/// Shared entry for single-instance forwards and macOS `RunEvent::Opened`
+/// paths once converted to argv-equivalent absolute paths (#160 decision 4).
+fn open_forwarded_paths(app: &tauri::AppHandle, paths: Vec<String>, new_window: bool) {
     eprintln!("another launch handed over {} path(s)", paths.len());
     if paths.is_empty() {
         if let Some(window) = windows::target_window(app) {
@@ -155,13 +123,21 @@ fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, cwd: String) {
         }
         return;
     }
-    // Folders route (#62): focus the window that has it, else the focused
-    // window if empty, else a new window. Before the frontend has started,
-    // it takes these with the CLI's.
     if let Some(paths) = app.state::<PendingFiles>().offer(paths) {
         let app = app.clone();
         std::thread::spawn(move || route_and_emit(&app, &paths, new_window));
     }
+}
+
+fn open_forwarded_argv(
+    app: &tauri::AppHandle,
+    argv: Vec<String>,
+    cwd: String,
+    new_window_flag: fn(&[String]) -> bool,
+) {
+    let new_window = new_window_flag(&argv);
+    let paths = cli::forwarded_paths(&argv, &cwd);
+    open_forwarded_paths(app, paths, new_window);
 }
 
 /// Hand argv + cwd to a running SparkDown over its core socket. True when
@@ -220,6 +196,90 @@ fn dbus_address_looks_valid(v: &str) -> bool {
     .any(|t| first.starts_with(t) && first.len() > t.len())
 }
 
+/// Path of the lock file that serializes the D-Bus-fallback first instance
+/// before the MCP socket exists (#160).
+#[cfg(unix)]
+fn fallback_instance_lock_path() -> std::path::PathBuf {
+    mcp::mcp_socket_path().with_extension("instance.lock")
+}
+
+/// Exclusive non-blocking flock. `Some(file)` holds the lock for the process
+/// lifetime; `None` means another process already holds it.
+#[cfg(unix)]
+fn try_claim_fallback_lock() -> Option<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let path = fallback_instance_lock_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .ok()?;
+    let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 };
+    if ok {
+        Some(file)
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn hold_fallback_lock(file: std::fs::File) {
+    use std::sync::Mutex;
+    static HOLD: Mutex<Option<std::fs::File>> = Mutex::new(None);
+    *HOLD.lock().unwrap_or_else(|e| e.into_inner()) = Some(file);
+}
+
+/// Retry forwarding over the core socket while the first instance is still
+/// starting (socket not listening yet).
+fn forward_with_retry(budget: std::time::Duration) -> bool {
+    let start = std::time::Instant::now();
+    let mut delay = std::time::Duration::from_millis(50);
+    while start.elapsed() < budget {
+        if forward_to_running_core() {
+            return true;
+        }
+        std::thread::sleep(delay);
+        delay = (delay * 2).min(std::time::Duration::from_millis(400));
+    }
+    false
+}
+
+/// Without the single-instance plugin: forward to a running/starting app, or
+/// claim the fallback lock and become the primary (#160 D-Bus race).
+fn fallback_single_instance_or_forward() -> bool {
+    if forward_to_running_core() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        if let Some(lock) = try_claim_fallback_lock() {
+            hold_fallback_lock(lock);
+            return false; // we are primary
+        }
+        // Another process holds the lock (starting or running): wait for its
+        // socket and forward, never a second GUI.
+        if forward_with_retry(std::time::Duration::from_secs(12)) {
+            return true;
+        }
+        // Lock holder vanished without a socket: try to take over.
+        if let Some(lock) = try_claim_fallback_lock() {
+            hold_fallback_lock(lock);
+            return false;
+        }
+        // Still contested: one last forward attempt, else start (rare).
+        forward_with_retry(std::time::Duration::from_secs(2))
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 /// Holds the HTML document currently being previewed with scripts enabled.
 /// Served by the `htmlpreview://` custom protocol, which gives the document its
 /// own origin (isolated from the app) and a network-permissive CSP so inline
@@ -263,27 +323,6 @@ pub(crate) fn is_allowed_navigation(url: &tauri::Url) -> bool {
     }
 }
 
-/// What `sparkdown <first arg>` should print and exit with, for the flags that
-/// must never open a window (#33): `--version`/`-V` and `--help`/`-h`. Only
-/// the first argument counts, so a file that happens to be named `--help`
-/// later on the command line still opens.
-fn cli_info(first_arg: Option<&str>) -> Option<String> {
-    let version = env!("CARGO_PKG_VERSION");
-    match first_arg? {
-        "--version" | "-V" => Some(format!("SparkDown {version}\n")),
-        "--help" | "-h" => Some(format!(
-            "SparkDown {version}: a Markdown editor and agent cockpit.\n\n\
-             Usage:\n  \
-             sparkdown [FILE|FOLDER]...   open files or a folder in the app\n                               (in the open window, if SparkDown is running)\n  \
-             sparkdown --new-window FOLDER  open FOLDER in a new window (focuses it if already open)\n  \
-             sparkdown --mcp-stdio        run the stdio MCP bridge for agent CLIs\n  \
-             sparkdown --version, -V      print the version and exit\n  \
-             sparkdown --help, -h         print this help and exit\n"
-        )),
-        _ => None,
-    }
-}
-
 /// Release Windows builds use the GUI subsystem, which starts with no
 /// console: attach to the parent's (the terminal that ran us) so `--version`
 /// output shows there. Redirected output (a pipe or file) works without it.
@@ -312,7 +351,7 @@ fn main() {
     // `--version` / `--help`: print and exit before any window, single-instance
     // or MCP logic runs (#33).
     let first = std::env::args().nth(1);
-    if let Some(text) = cli_info(first.as_deref()) {
+    if let Some(text) = cli::cli_info(first.as_deref()) {
         #[cfg(windows)]
         attach_parent_console();
         use std::io::Write;
@@ -330,10 +369,21 @@ fn main() {
         return;
     }
 
-    // Fallback lock (decision 1): without the single-instance plugin (a
-    // malformed D-Bus address on Linux), a live core socket means SparkDown
-    // already runs: hand it our args and exit, never a second GUI process.
-    if !single_instance_supported() && forward_to_running_core() {
+    // Detach on first launch so the terminal is free (#160 decision 1).
+    // `--wait`, the Windows shim, and an already-detached child skip this.
+    let argv_all: Vec<String> = std::env::args().collect();
+    if cli::should_detach(&argv_all) {
+        match proc::spawn_detached_self(&argv_all) {
+            Ok(()) => return,
+            Err(e) => eprintln!("Warning: could not detach from terminal: {e}"),
+        }
+    }
+
+    // Fallback lock (#160): without the single-instance plugin (a malformed
+    // D-Bus address on Linux), forward to a running/starting instance, or
+    // claim the instance lock before the MCP socket exists so a second
+    // launch during startup cannot open another GUI.
+    if !single_instance_supported() && fallback_single_instance_or_forward() {
         return;
     }
 
@@ -446,6 +496,13 @@ fn main() {
 
             app.on_menu_event(move |app_handle, event| {
                 let id = event.id().0.as_str();
+                // PATH install/repair (#160): no window required.
+                if matches!(id, "cli-install" | "cli-uninstall" | "cli-repair") {
+                    let app = app_handle.clone();
+                    let id = id.to_string();
+                    std::thread::spawn(move || handle_cli_install_menu(&app, &id));
+                    return;
+                }
                 // Window-level actions are the core's (#65).
                 if id.starts_with(lifecycle::NEW_WINDOW_ID) {
                     let app = app_handle.clone();
@@ -474,7 +531,11 @@ fn main() {
                 }
             });
 
-            let cli_files: Vec<String> = std::env::args().skip(1).collect();
+            let argv: Vec<String> = std::env::args().collect();
+            let cwd = std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let cli_files = cli::forwarded_paths(&argv, &cwd);
             if !cli_files.is_empty() {
                 let _ = app.state::<PendingFiles>().offer(cli_files);
             }
@@ -794,14 +855,39 @@ fn main() {
                     let _ = window.set_focus();
                 }
 
-                // Queued for a frontend that hasn't started, else routed
-                // and sent to one window. Never both (#106).
-                if let Some(paths) = app.state::<PendingFiles>().offer(paths) {
-                    let app = app.clone();
-                    std::thread::spawn(move || route_and_emit(&app, &paths, false));
-                }
+                // Same path as single-instance (#160 decision 4 / #106).
+                open_forwarded_paths(app, paths, false);
             }
         });
+}
+
+/// SparkDown → Install/Uninstall/Repair 'sparkdown' Command (#160).
+fn handle_cli_install_menu(app: &tauri::AppHandle, id: &str) {
+    let Some(target) = cli_install::running_cli_target() else {
+        eprintln!("cli install: no target binary for this package");
+        return;
+    };
+    let dirs = cli_install::user_bin_dirs();
+    let msg = match id {
+        "cli-install" => match cli_install::install(&dirs, &target) {
+            Ok(link) => format!("Installed sparkdown → {}", link.display()),
+            Err(e) => format!("Could not install sparkdown: {e}"),
+        },
+        "cli-uninstall" => match cli_install::uninstall(&dirs, &target) {
+            Ok(()) => "Removed the sparkdown command from PATH.".into(),
+            Err(e) => format!("Could not uninstall sparkdown: {e}"),
+        },
+        "cli-repair" => match cli_install::repair(&dirs, &target) {
+            Ok(link) => format!("Repaired sparkdown → {}", link.display()),
+            Err(e) => format!("Could not repair sparkdown: {e}"),
+        },
+        _ => return,
+    };
+    eprintln!("{msg}");
+    // Best-effort UI notice when a window exists.
+    if let Some(window) = windows::target_window(app) {
+        let _ = app.emit_to(window.label(), "cli-install-status", msg);
+    }
 }
 
 /// Remember a window's outer geometry for the next launch (in memory; the
@@ -908,43 +994,30 @@ mod tests {
             !opened.contains("push_pending"),
             "Opened must not queue after the take"
         );
-        assert!(opened.contains(".offer("));
+        // Shared with single-instance (#160 decision 4).
+        assert!(
+            opened.contains("open_forwarded_paths("),
+            "Opened must use the shared open path"
+        );
     }
 
     #[test]
-    fn second_launch_paths_resolve_against_its_own_cwd() {
-        // #51: `sparkdown .` / `sparkdown notes` from another directory.
-        #[cfg(unix)]
-        {
-            let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-            assert_eq!(
-                super::forwarded_paths(&argv(&["sparkdown", "."]), "/home/u/proj"),
-                vec!["/home/u/proj"]
-            );
-            assert_eq!(
-                super::forwarded_paths(&argv(&["sparkdown", "notes", "a.md"]), "/home/u"),
-                vec!["/home/u/notes", "/home/u/a.md"]
-            );
-            assert_eq!(
-                super::forwarded_paths(&argv(&["/usr/bin/sparkdown", "/tmp/x/"]), "/home/u"),
-                vec!["/tmp/x"]
-            );
-            // Flags are not paths; a bare launch forwards nothing.
-            assert!(super::forwarded_paths(&argv(&["sparkdown", "--foo"]), "/h").is_empty());
-            assert!(super::forwarded_paths(&argv(&["sparkdown"]), "/h").is_empty());
-            assert_eq!(
-                super::forwarded_paths(&argv(&["sparkdown", "/"]), "/h"),
-                vec!["/"]
-            );
-        }
-        #[cfg(windows)]
-        {
-            let argv = vec!["sparkdown.exe".to_string(), "notes".to_string()];
-            assert_eq!(
-                super::forwarded_paths(&argv, r"C:\Users\u"),
-                vec![r"C:\Users\u\notes".to_string()]
-            );
-        }
+    fn opened_and_second_instance_share_one_open_path() {
+        // #160 decision 4: both routes call open_forwarded_paths → route_and_emit.
+        let src = include_str!("main.rs");
+        assert!(src.contains("fn open_forwarded_paths("));
+        assert!(
+            src.contains("open_forwarded_argv(app, argv, cwd, cli::wants_new_window)"),
+            "single-instance must use the shared open path"
+        );
+        assert!(
+            src.contains("open_forwarded_paths(app, paths, false)"),
+            "Opened must call open_forwarded_paths"
+        );
+        assert!(
+            src.contains("route_and_emit(&app, &paths, new_window)"),
+            "shared open must route_and_emit"
+        );
     }
 
     #[test]
@@ -958,28 +1031,6 @@ mod tests {
         assert!(!super::dbus_address_looks_valid(""));
         assert!(!super::dbus_address_looks_valid("garbage"));
         assert!(!super::dbus_address_looks_valid("unix:"));
-    }
-
-    #[test]
-    fn version_and_help_flags_print_instead_of_opening_the_app() {
-        let v = super::cli_info(Some("--version")).unwrap();
-        assert_eq!(v, format!("SparkDown {}\n", env!("CARGO_PKG_VERSION")));
-        assert_eq!(super::cli_info(Some("-V")), Some(v));
-        let help = super::cli_info(Some("--help")).unwrap();
-        assert!(
-            help.contains("--mcp-stdio") && help.contains("--version"),
-            "{help}"
-        );
-        assert_eq!(super::cli_info(Some("-h")), Some(help));
-        // Anything else (files, folders, the MCP flag, nothing) is not ours.
-        for other in [
-            None,
-            Some("notes.md"),
-            Some("--mcp-stdio"),
-            Some("-psn_0_1"),
-        ] {
-            assert_eq!(super::cli_info(other), None, "{other:?}");
-        }
     }
 
     use super::is_allowed_navigation;
@@ -1046,5 +1097,66 @@ mod tests {
         ] {
             assert!(hooks.contains(&line), "{hooks_rel} must contain `{line}`");
         }
+        assert!(
+            hooks.contains("NSIS_HOOK_POSTINSTALL")
+                && hooks.contains("SdAppendUserPath")
+                && hooks.contains("un.SdRemoveUserPath")
+                && hooks.contains("SdInstallPathShim")
+                && !hooks
+                    .lines()
+                    .any(|l| l.trim_start().starts_with("${un.StrLoc}"))
+                && !hooks.contains("!define MUI_FINISHPAGE_SHOWREADME"),
+            "PATH hooks (#160): un.SdRemoveUserPath without StrFunc/SHOWREADME defines"
+        );
+        assert!(
+            hooks.contains(r"$INSTDIR\bin")
+                && hooks.contains("sparkdown-shim.exe")
+                && hooks.contains(r"bin\sparkdown.exe"),
+            "PATH must use $INSTDIR\\bin\\sparkdown.exe (Windows case-safe, #160)"
+        );
+        assert!(
+            hooks.contains("/SDNOPATH") && hooks.contains("SdAppendUserPath"),
+            "PATH default-on in POSTINSTALL with /SDNOPATH opt-out (#160); Finish SHOWREADME is owned by Tauri desktop shortcut"
+        );
+        let package_ps1 =
+            std::fs::read_to_string(dir.join("../scripts/package-windows.ps1")).unwrap();
+        assert!(
+            package_ps1.contains("binaries/sparkdown-shim"),
+            "package-windows.ps1 must externalBin sparkdown-shim (#160)"
+        );
+        // Reject the case-colliding name (sparkdown next to SparkDown.exe).
+        let colliding = "binaries/sparkdown";
+        let safe = "binaries/sparkdown-shim";
+        assert!(
+            package_ps1.contains(safe)
+                && package_ps1
+                    .match_indices(colliding)
+                    .all(|(i, _)| package_ps1[i..].starts_with(safe)),
+            "externalBin must not use binaries/sparkdown without -shim (#160)"
+        );
+    }
+
+    #[test]
+    fn bump_cask_and_launcher_resource_for_cli_path() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let script = std::fs::read_to_string(dir.join("../scripts/bump-cask.sh")).unwrap();
+        assert!(
+            script.contains("Contents/Resources/bin/sparkdown") && script.contains("binary "),
+            "bump-cask.sh must ensure the cask binary stanza (#160)"
+        );
+        assert!(
+            dir.join("resources/bin/sparkdown").is_file(),
+            "macOS launcher must ship as Contents/Resources/bin/sparkdown"
+        );
+        let conf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("tauri.conf.json")).unwrap())
+                .unwrap();
+        let resources = conf["bundle"]["resources"].as_array().unwrap();
+        assert!(
+            resources
+                .iter()
+                .any(|r| r.as_str() == Some("resources/bin/sparkdown")),
+            "tauri.conf.json must bundle the macOS launcher"
+        );
     }
 }

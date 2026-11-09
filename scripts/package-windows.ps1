@@ -129,6 +129,7 @@ $SrcTauri = Join-Path $RepoRoot 'src-tauri'
 $SavedKey = $env:TAURI_SIGNING_PRIVATE_KEY
 $SavedKeyPassword = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 $TempConfig = $null
+$ShimConfig = $null
 $Pushed = $false
 $ExitCode = 0
 
@@ -318,6 +319,42 @@ try {
         Stop-Build "Tauri CLI not found at $tauri." 'Run the script without -SkipNpmCi so npm ci installs it.'
     }
 
+    # --- Windows console shim (#160) ----------------------------------------
+    # Build sparkdown-shim.exe and ship it via Tauri externalBin under that
+    # distinct name. NSIS then copies it to $INSTDIR\bin\sparkdown.exe and
+    # puts $INSTDIR\bin on PATH — never beside SparkDown.exe, because Windows
+    # paths are case-insensitive and SparkDown.exe / sparkdown.exe collide.
+    Write-Step 'Building Windows console shim (sparkdown-shim)'
+    Push-Location $SrcTauri
+    try {
+        & cargo build --release --bin sparkdown-shim @ExtraTauriArgs
+        # Package configuration may already contain +target; Rust 1.99 accepts
+        # that repeated flag, while omitting it breaks the MSVC GNU cross build.
+        if ($LASTEXITCODE -ne 0) {
+            Stop-Build "cargo build --bin sparkdown-shim failed (exit $LASTEXITCODE)." `
+                'The console shim is required so `sparkdown --version` prints to the terminal (#160).'
+        }
+        $triple = if ($ExtraTauriArgs -contains '--target') { $RustTarget } else { 'x86_64-pc-windows-msvc' }
+        $shimBuilt = Join-Path $SrcTauri "target\release\sparkdown-shim.exe"
+        if ($ExtraTauriArgs -contains '--target') {
+            $shimBuilt = Join-Path $SrcTauri "target\$RustTarget\release\sparkdown-shim.exe"
+        }
+        if (-not (Test-Path $shimBuilt)) {
+            Stop-Build "shim binary missing at $shimBuilt after cargo build."
+        }
+        $binDir = Join-Path $SrcTauri 'binaries'
+        New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+        $shimDest = Join-Path $binDir "sparkdown-shim-$triple.exe"
+        Copy-Item -Force $shimBuilt $shimDest
+        Write-Ok "Shim ready at $shimDest"
+    } finally {
+        Pop-Location
+    }
+    $ShimConfig = Join-Path ([IO.Path]::GetTempPath()) ("sparkdown-shim-{0}.json" -f [guid]::NewGuid())
+    $shimJson = '{"bundle":{"externalBin":["binaries/sparkdown-shim"]}}'
+    [IO.File]::WriteAllText($ShimConfig, $shimJson, [Text.Encoding]::ASCII)
+    $ExtraTauriArgs += @('--config', $ShimConfig)
+
     # --- Tauri build ---------------------------------------------------------
     $bundles = @('nsis')
     if ($Msi) { $bundles += 'msi' }
@@ -387,6 +424,7 @@ try {
 } finally {
     if ($Pushed) { Pop-Location }
     if ($TempConfig -and (Test-Path $TempConfig)) { Remove-Item $TempConfig -Force }
+    if ($ShimConfig -and (Test-Path $ShimConfig)) { Remove-Item $ShimConfig -Force }
     if ($null -ne $SavedKey) { $env:TAURI_SIGNING_PRIVATE_KEY = $SavedKey }
     if ($null -ne $SavedKeyPassword) { $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $SavedKeyPassword }
 }
