@@ -9,6 +9,7 @@ import {
   type NoiseReason,
 } from './meat';
 import { ReviewState, workspaceId } from './review-state';
+import { showContextMenu } from './context-menu';
 
 /** How a row was activated: show its diff, or open it in the editor. */
 export type OpenHow = 'diff' | 'editor';
@@ -22,6 +23,11 @@ export interface ChangesViewOptions {
   onReviewChange?(): void;
   /** Reviewed marks store (tests inject one with a fake persistence). */
   review?: ReviewState;
+  /** #172: Discard Changes for these repo-relative paths (row icon, context
+   *  menu, Discard All). The handler confirms first. */
+  onDiscard?(paths: string[]): void;
+  /** #172: why Discard is unavailable (remote session), or null. */
+  discardDisabledReason?(): string | null;
 }
 
 /** Outcome of one status + stats load. */
@@ -37,6 +43,9 @@ const STATUS_LETTER: Record<GitChange['status'], string> = {
 
 const CHECK_SVG =
   '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" aria-hidden="true"><path d="m5 12 5 5 9-10"/></svg>';
+/** Discard (undo arrow). */
+const DISCARD_SVG =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>';
 const CARET_SVG =
   '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>';
 
@@ -100,6 +109,7 @@ export class ChangesView {
     this.listEl.setAttribute('aria-label', 'Changed files');
     this.listEl.tabIndex = 0;
     this.listEl.addEventListener('click', (e) => this.onClick(e));
+    this.listEl.addEventListener('contextmenu', (e) => this.onContextMenu(e));
     this.listEl.addEventListener('keydown', (e) => {
       if (this.handleKey(e)) {
         e.preventDefault();
@@ -378,6 +388,15 @@ export class ChangesView {
    */
   handleKey(e: KeyboardEvent, opts: { enter?: boolean } = {}): boolean {
     if (e.metaKey || e.ctrlKey || e.altKey) return false;
+    // #172: the Menu key / Shift+F10 on the focused list asks to discard the
+    // selected file (the confirmation dialog is the keyboard-safe step; the
+    // mouse context menu has no keyboard navigation).
+    if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+      const inList = !!e.target && e.target instanceof Node && this.listEl.contains(e.target);
+      if (!inList || !this.opts.onDiscard || !this.current) return false;
+      this.requestDiscard([this.current]);
+      return true;
+    }
     const t = e.target as HTMLElement | null;
     if (t && (t.closest?.('input, textarea, select, [contenteditable="true"]') || t.isContentEditable))
       return false;
@@ -422,12 +441,50 @@ export class ChangesView {
     const row = target.closest<HTMLElement>('.change-row');
     const path = row?.dataset.path;
     if (!row || !path) return;
+    if (target.closest('.change-discard')) {
+      e.stopPropagation();
+      this.requestDiscard([path]);
+      return;
+    }
     if (target.closest('.change-check')) {
       this.toggleReviewed(path);
       return;
     }
     this.select(path);
     this.onOpen(path, row.dataset.status as GitChange['status'], 'diff');
+  }
+
+  /** #172: right-click a file row → Discard Changes… */
+  private onContextMenu(e: MouseEvent): void {
+    const row = (e.target as HTMLElement).closest<HTMLElement>('.change-row');
+    const path = row?.dataset.path;
+    if (this.opts.onDiscard && !row && e.target === this.listEl) {
+      // Keyboard-initiated (Menu key / Shift+F10 on the list): handleKey
+      // already asked for the selected file; don't open a mouse menu too.
+      e.preventDefault();
+      return;
+    }
+    if (!row || !path || !this.opts.onDiscard) return;
+    e.preventDefault();
+    const reason = this.opts.discardDisabledReason?.() ?? null;
+    showContextMenu(e.clientX, e.clientY, [
+      {
+        label: reason ? 'Discard Changes… (not available in remote sessions)' : 'Discard Changes…',
+        onClick: () => this.requestDiscard([path]),
+      },
+    ]);
+  }
+
+  /** Discard these files (the handler confirms first, or explains why it
+   *  can't in a remote session). */
+  requestDiscard(paths: string[]): void {
+    const live = paths.filter((p) => this.change(p));
+    if (live.length > 0) this.opts.onDiscard?.(live);
+  }
+
+  /** Discard All: every changed file (never nested repos / folders). */
+  discardAll(): void {
+    this.requestDiscard(this.lastChanges.map((c) => c.path));
   }
 
   private render(): void {
@@ -586,7 +643,20 @@ export class ChangesView {
       (dir ? `<em class="change-dir">${escapeHtml(dir)}</em>` : '') +
       `</span>` +
       `<span class="change-counts">${counts}</span>` +
+      this.renderDiscardButton(c) +
       `</div>`
+    );
+  }
+
+  /** The row's hover Discard icon (#172); disabled with the reason remotely. */
+  private renderDiscardButton(c: GitChange): string {
+    if (!this.opts.onDiscard) return '';
+    const reason = this.opts.discardDisabledReason?.() ?? null;
+    const title = reason ?? 'Discard Changes… (Shift+F10 on the selected file)';
+    return (
+      `<button type="button" class="change-discard" tabindex="-1" title="${escapeHtml(title)}" aria-label="${escapeHtml(`Discard changes in ${c.path}`)}"${reason ? ' aria-disabled="true"' : ''}>` +
+      DISCARD_SVG +
+      `</button>`
     );
   }
 

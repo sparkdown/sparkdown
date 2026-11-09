@@ -67,6 +67,7 @@ const DEFAULT_CONFIG: AppConfig = {
   terminal_layouts: {},
   mcp_install_prompt_dismissed: [],
   mcp_external_agents: false,
+  git_background_fetch: true,
 };
 
 /**
@@ -847,6 +848,7 @@ export class App {
         terminal_layouts: this.config.terminal_layouts ?? {},
         mcp_install_prompt_dismissed: this.config.mcp_install_prompt_dismissed ?? [],
         mcp_external_agents: this.config.mcp_external_agents ?? false,
+        git_background_fetch: this.config.git_background_fetch ?? true,
       };
       await api.saveConfig(config);
       this.configSaveFailures = 0;

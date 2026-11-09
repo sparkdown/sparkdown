@@ -8,6 +8,10 @@ import {
 } from '../changes-view';
 import { api, type GitBranchStatus, type GitChange } from '../api';
 import { GitActions } from '../git-actions';
+import { BackgroundFetcher } from '../git-fetch';
+import { REMOTE_DISCARD_REASON, runDiscard, type ReloadOutcome } from '../changes-discard';
+import { LOCAL_ORIGIN } from '../tabs';
+import { onWindowFocusChange } from '../window-events';
 import type { Command } from '../commands';
 import { EVENTS } from '../event-names';
 import { effectiveView } from '../view-mode';
@@ -68,6 +72,15 @@ export class DiffController {
   private changesView: ChangesView | null = null;
   /** Commit / Pull / Push above the Changes list (#122). */
   private gitActions: GitActions | null = null;
+  /** #175: quiet background fetch so the behind count is current. */
+  private fetcher: BackgroundFetcher | null = null;
+  /** Last branch status (the fetcher needs to know about an upstream). */
+  private branchStatus: GitBranchStatus | null = null;
+  /** Repo the fetcher last ran for on its own (first status of a repo). */
+  private fetchedRepo: string | null = null;
+  private windowFocused = typeof document !== 'undefined' && document.hasFocus?.() === true;
+  /** A Discard confirmation or run is in progress (#172). */
+  private discarding = false;
   private changesMode = false; // the sidebar is showing the Changes view
   // Diff pane: "reading" (meat-abridged) vs full verbatim. Reading by default,
   // matching the meat philosophy; the header control flips it (sticky across
@@ -136,9 +149,24 @@ export class DiffController {
         origin: () => this.ctx.tabs.getOrigin(),
         onPending: (pending) => this.deps.onChangeCount(pending),
         onReviewChange: () => this.syncDiffHeader(),
+        onDiscard: (paths) => void this.discard(paths),
+        discardDisabledReason: () => (this.isRemote() ? REMOTE_DISCARD_REASON : null),
       },
     );
+    $('btn-changes-discard-all')?.addEventListener('click', () => this.changesView?.discardAll());
     $('btn-changes-refresh')?.addEventListener('click', () => void this.changesView?.refresh());
+    this.fetcher = new BackgroundFetcher({
+      enabled: () => this.ctx.config.git_background_fetch ?? true,
+      repoRoot: () => this.changesView?.getRepoRoot() ?? null,
+      isRemote: () => this.isRemote(),
+      hasUpstream: () => !!this.branchStatus?.has_upstream && !this.branchStatus.detached,
+      fetch: (root) => api.gitFetch(root),
+      onFetched: () => this.refreshBranch(),
+    });
+    void onWindowFocusChange((focused) => {
+      this.windowFocused = focused;
+      this.fetcher?.setFocused(focused);
+    });
     const gitGroup = $('changes-git-actions');
     if (gitGroup) {
       this.gitActions = new GitActions(
@@ -162,6 +190,8 @@ export class DiffController {
             await this.refreshBranch();
           },
           report: this.deps.gitReporter,
+          onPushRejected: () => this.fetcher?.afterRejectedPush(),
+          lastFetched: () => this.fetcher?.lastFetchedAt() ?? null,
         },
       );
     }
@@ -453,6 +483,11 @@ export class DiffController {
    */
   private applyGitStatus(changes: GitChange[]): void {
     this.gitActions?.setChanges(changes);
+    const discardAll = document.getElementById('btn-changes-discard-all');
+    if (discardAll) {
+      discardAll.hidden = changes.length === 0;
+      discardAll.title = this.isRemote() ? REMOTE_DISCARD_REASON : 'Discard All Changes…';
+    }
     const letter: Record<GitChange['status'], string> = {
       modified: 'M',
       added: 'A',
@@ -481,9 +516,88 @@ export class DiffController {
     }
   }
 
+  private isRemote(): boolean {
+    return this.ctx.tabs.getOrigin() !== LOCAL_ORIGIN;
+  }
+
+  /** #172: confirm, discard, then sync open tabs and the Changes list. */
+  private async discard(paths: string[]): Promise<void> {
+    // One confirmation at a time (a double click or Menu key + contextmenu
+    // must not stack two dialogs).
+    if (this.discarding) return;
+    this.discarding = true;
+    try {
+      await this.runDiscardFlow(paths);
+    } finally {
+      this.discarding = false;
+    }
+  }
+
+  private async runDiscardFlow(paths: string[]): Promise<void> {
+    await runDiscard(this.changesView?.getRepoRoot() ?? null, paths, {
+      isRemote: () => this.isRemote(),
+      preview: (root, p) => api.gitDiscardPreview(root, p),
+      discard: (root, items) => api.gitDiscard(root, items),
+      tabs: () => this.ctx.tabs.tabsOfOrigin(),
+      reloadTab: (id, path, force) => this.reloadDiscardedTab(id, path, force),
+      closeTab: (id) => this.ctx.tabs.closeTab(id),
+      markConflict: (id) => this.ctx.tabs.setDiskConflict(id, true),
+      refresh: async () => {
+        await this.changesView?.refresh();
+        await this.refreshBranch();
+      },
+      report: this.deps.gitReporter,
+    });
+  }
+
+  /**
+   * Re-read a discarded file into its tab. Without `force` a tab that has
+   * unsaved text (in the model or the live editor) keeps it and is flagged
+   * as changed on disk; `force` is only passed for tabs the user chose to
+   * drop in the confirmation.
+   */
+  private async reloadDiscardedTab(id: string, path: string, force: boolean): Promise<ReloadOutcome> {
+    let disk: string;
+    try {
+      disk = await api.readFile(path);
+    } catch {
+      // Gone (or unreadable): the caller decides; a file that exists but
+      // can't be read is reported as missing too, and nothing is dropped.
+      return 'missing';
+    }
+    const tab = this.ctx.tabs.getTab(id);
+    if (!tab || tab.path !== path || tab.origin !== this.ctx.tabs.getOrigin()) return 'skipped';
+    const isActive = tab.id === this.ctx.tabs.activeTab()?.id;
+    const current = isActive ? this.ctx.editor.getContent() : tab.content;
+    if (!force && (tab.modified || current !== tab.savedContent)) {
+      this.ctx.tabs.setDiskConflict(id, true);
+      return 'conflict';
+    }
+    this.ctx.tabs.reloadFromDisk(id, disk);
+    if (isActive) {
+      this.ctx.editor.replaceContentPreservingView(disk);
+      this.ctx.statusbar.updateModified(false);
+    } else {
+      this.ctx.editor.forgetState(id);
+    }
+    this.ctx.publishContextSoon();
+    return 'reloaded';
+  }
+
   private setBranch(status: GitBranchStatus | null): void {
+    this.branchStatus = status;
     this.ctx.statusbar.setBranch(status);
     this.gitActions?.setBranch(status);
+    // #175: the first status of a repo with an upstream (folder opened or
+    // switched while focused): fetch once, like a focus would.
+    const repo = this.changesView?.getRepoRoot() ?? null;
+    if (status?.has_upstream && repo && repo !== this.fetchedRepo) {
+      this.fetchedRepo = repo;
+      if (this.windowFocused) {
+        this.fetcher?.setFocused(true); // starts the 5 min timer
+        void this.fetcher?.run();
+      }
+    }
   }
 
   /** Ask git for the branch and ahead/behind of the current repo. */
