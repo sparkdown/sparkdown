@@ -75,11 +75,24 @@ pub fn wants_wait(argv: &[String]) -> bool {
         .any(|a| a == WAIT_FLAG)
 }
 
-/// Detach on first launch unless `--wait`, already detached, or launched by
-/// the Windows shim (#160 decision 1).
+/// Detach on first launch unless `--wait`, already detached, launched by
+/// the Windows shim, built for WebDriver, or started with no terminal
+/// (#160 decision 1).
 pub fn should_detach(argv: &[String]) -> bool {
     // Debug/`cargo run`: stay attached so logs stay in the terminal.
     if cfg!(debug_assertions) {
+        return false;
+    }
+    // e2e-webdriver builds: tauri-driver tracks this process; exiting after
+    // spawn_detached_self leaves the session hung until timeout.
+    if cfg!(feature = "e2e-webdriver") {
+        return false;
+    }
+    // No TTY to free (desktop shortcut, WebDriver without the feature flag,
+    // service/CI launch). Detaching would orphan the only process the launcher
+    // is watching.
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() && !std::io::stdout().is_terminal() {
         return false;
     }
     !wants_wait(argv)

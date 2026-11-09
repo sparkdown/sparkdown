@@ -111,18 +111,15 @@ FunctionEnd
 
 ; ---------------------------------------------------------------------------
 ; #160: add sparkdown to the user PATH (on by default), remove on uninstall.
-; UI installs: Finish-page checkbox (MUI_FINISHPAGE_SHOWREADME), checked by
-; default. Silent (/S): added automatically unless /SDNOPATH is passed.
+; Tauri's finish page already owns MUI_FINISHPAGE_SHOWREADME for the desktop
+; shortcut checkbox, so we cannot reuse that slot. PATH is added in
+; NSIS_HOOK_POSTINSTALL for every install (UI and silent) unless /SDNOPATH.
 ; The console shim ships as $INSTDIR\sparkdown-shim.exe (externalBin). We copy
 ; it to $INSTDIR\bin\sparkdown.exe and put $INSTDIR\bin on PATH — not $INSTDIR
 ; itself — because Windows is case-insensitive and SparkDown.exe would collide
 ; with sparkdown.exe in the same folder.
 ; Uses ${StrLoc} (initialized by Tauri's installer.nsi before hooks).
 ; ---------------------------------------------------------------------------
-
-!define MUI_FINISHPAGE_SHOWREADME ""
-!define MUI_FINISHPAGE_SHOWREADME_TEXT "Add 'sparkdown' to the user PATH (recommended)"
-!define MUI_FINISHPAGE_SHOWREADME_FUNCTION SdFinishAddPath
 
 Var SdOldPath
 Var SdNewPath
@@ -144,11 +141,6 @@ Function SdInstallPathShim
     Return
   sd_shim_missing:
     DetailPrint "sparkdown-shim.exe missing; PATH entry skipped"
-FunctionEnd
-
-Function SdFinishAddPath
-  Call SdInstallPathShim
-  Call SdAppendUserPath
 FunctionEnd
 
 Function SdAppendUserPath
@@ -208,15 +200,15 @@ FunctionEnd
 
 !macro NSIS_HOOK_POSTINSTALL
   ; Always stage bin\sparkdown.exe when the shim is present (even if PATH is
-  ; opted out — a later Repair / Finish check can still add PATH).
+  ; opted out — a later Repair can still add PATH).
   Call SdInstallPathShim
-  ; Silent installs have no Finish page: honour default-on unless /SDNOPATH.
-  IfSilent 0 sd_path_done
-    ClearErrors
-    ${GetParameters} $0
-    ${GetOptions} $0 "/SDNOPATH" $1
-    IfErrors 0 sd_path_done
-      Call SdAppendUserPath
+  ; Default-on PATH for UI and silent installs; /SDNOPATH opts out.
+  ; (Cannot use MUI_FINISHPAGE_SHOWREADME — Tauri already uses it for desktop.)
+  ClearErrors
+  ${GetParameters} $0
+  ${GetOptions} $0 "/SDNOPATH" $1
+  IfErrors 0 sd_path_done
+    Call SdAppendUserPath
   sd_path_done:
 !macroend
 

@@ -1108,8 +1108,8 @@ mod tests {
             "PATH must use $INSTDIR\\bin\\sparkdown.exe (Windows case-safe, #160)"
         );
         assert!(
-            hooks.contains("MUI_FINISHPAGE_SHOWREADME_TEXT") && hooks.contains("/SDNOPATH"),
-            "PATH Finish checkbox + silent opt-out (#160)"
+            hooks.contains("/SDNOPATH") && hooks.contains("SdAppendUserPath"),
+            "PATH default-on in POSTINSTALL with /SDNOPATH opt-out (#160); Finish SHOWREADME is owned by Tauri desktop shortcut"
         );
         let package_ps1 =
             std::fs::read_to_string(dir.join("../scripts/package-windows.ps1")).unwrap();
