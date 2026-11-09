@@ -123,8 +123,8 @@ With tmux off (Settings → turn off tmux, then open a **new** terminal tab):
 
 ## Local automated evidence (not a substitute for the box retest)
 
-- Frontend: **866** tests / **61** files; `tsc && vite build` OK
-- Rust: app **422** passed, **0** failed, **7** ignored (incl. a live tmux wheel test on a private socket); CLI **2**; MCP **2**
+- Frontend (after merging main 96eed14): **910** tests / **63** files; `tsc && vite build` OK
+- Rust: app **462** passed, **0** failed, **7** ignored (incl. a live tmux wheel test on a private socket); CLI **2**; MCP **2**
 - `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`: pass
 - Native run of the standalone binary (fresh Xvfb, fresh XDG + tmux roots, own WebDriver port, real X pointer/wheel events via xdotool): all checks above pass, harness `/workspace/local-night/gui-test/fix184/run.py`, results `tmux-results.json` and `restart-plain-results.json` in that folder
 
