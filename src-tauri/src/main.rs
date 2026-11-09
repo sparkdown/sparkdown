@@ -1099,7 +1099,9 @@ mod tests {
                 && hooks.contains("SdAppendUserPath")
                 && hooks.contains("un.SdRemoveUserPath")
                 && hooks.contains("SdInstallPathShim")
-                && !hooks.lines().any(|l| l.trim_start().starts_with("${un.StrLoc}"))
+                && !hooks
+                    .lines()
+                    .any(|l| l.trim_start().starts_with("${un.StrLoc}"))
                 && !hooks.contains("!define MUI_FINISHPAGE_SHOWREADME"),
             "PATH hooks (#160): un.SdRemoveUserPath without StrFunc/SHOWREADME defines"
         );
