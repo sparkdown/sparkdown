@@ -1,6 +1,6 @@
 {
   "productName": "SparkDown",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "identifier": "com.sparkdown.editor",
   "build": {
     "beforeBuildCommand": "npm run build",
