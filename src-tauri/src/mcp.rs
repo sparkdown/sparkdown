@@ -2504,6 +2504,39 @@ mod tests {
         assert_ne!(token_of(&a), token_of(&b));
     }
 
+    /// #116: the Windows shim started by an agent under WSL gets a
+    /// `\\wsl.localhost\…` cwd (a Linux folder), which matches no window.
+    /// The forwarded token still routes it; without one it is refused with
+    /// the window list, never sent to a guessed window.
+    #[test]
+    fn wsl_launched_shim_routes_by_token_despite_a_wsl_cwd() {
+        let (reg, _a, b) = two_windows();
+        let cwd = r"\\wsl.localhost\Ubuntu\home\jane\proj".to_string();
+        let h = |token: Option<String>| Hello {
+            terminal: true,
+            token,
+            cwd: Some(cwd.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_route(&reg, Some(&h(Some(token_of(&b)))), false).unwrap(),
+            "w-b"
+        );
+        let e = resolve_route(&reg, Some(&h(None)), false).unwrap_err();
+        assert!(e.contains("[w-a]") && e.contains("[w-b]"), "{e}");
+    }
+
+    /// #116: the line a user runs inside WSL to register the Windows shim,
+    /// with the `/p`-translated `$SPARKDOWN_MCP_SHIM` (spaces, apostrophe).
+    #[test]
+    fn wsl_registration_line_quotes_the_translated_shim_path() {
+        let exe = "/mnt/c/Users/Jane O'Brien/AppData/Local/SparkDown/sparkdown.exe";
+        assert_eq!(
+            posix_command_line(&agent_mcp_commands("claude", exe).unwrap().0),
+            r"claude mcp add sparkdown --scope user -- '/mnt/c/Users/Jane O'\''Brien/AppData/Local/SparkDown/sparkdown.exe' --mcp-stdio"
+        );
+    }
+
     #[test]
     fn external_agents_are_off_by_default_and_must_name_a_folder() {
         let (reg, a, _b) = two_windows();

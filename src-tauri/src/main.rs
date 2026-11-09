@@ -28,6 +28,7 @@ mod watcher;
 #[cfg(all(test, windows))]
 mod win_test_agents;
 mod windows;
+mod wsl;
 
 use std::sync::{Arc, Mutex};
 use tauri::menu::CheckMenuItem;

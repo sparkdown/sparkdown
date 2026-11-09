@@ -782,6 +782,8 @@ pub fn terminal_start(
     // Agent context bridge: agents in this shell can read what the user is
     // viewing in the editor from $SPARKDOWN_CONTEXT/context.json (see
     // context.rs). Set per-workspace so multiple windows don't collide.
+    // SparkDown variables set on this terminal, for the WSL bridge below.
+    let mut sd_vars: Vec<&'static str> = Vec::new();
     if !is_remote {
         if let Some(dir) = cwd.as_deref().filter(|d| !d.is_empty()) {
             cmd.env(
@@ -790,6 +792,7 @@ pub fn terminal_start(
                     .to_string_lossy()
                     .to_string(),
             );
+            sd_vars.push("SPARKDOWN_CONTEXT");
         }
         // MCP gate: the stdio shim serves the editor tools ONLY when this is
         // set to a live socket. Exported here so agents in this terminal (and
@@ -798,11 +801,28 @@ pub fn terminal_start(
         // shells can't reach a local socket, so they keep the file bridge.
         if let Some(sock) = crate::mcp::running_socket_path() {
             cmd.env(crate::mcp::SOCKET_ENV, sock);
+            sd_vars.push(crate::mcp::SOCKET_ENV);
         }
         // Which window's folder this terminal's agents act on (#64).
         if let Some(t) = crate::windows::token_for_current_window(cwd.as_deref()) {
             cmd.env(crate::mcp::TOKEN_ENV, t);
+            sd_vars.push(crate::mcp::TOKEN_ENV);
         }
+    }
+    // WSL (#116): a `wsl` shell started in this (local Windows) terminal
+    // keeps the routing variables, and so does the Windows shim its agents
+    // start. No-op elsewhere; see wsl.rs.
+    for (k, v) in crate::wsl::terminal_env(
+        cfg!(windows),
+        is_remote,
+        cfg!(windows)
+            .then(crate::mcp::shim_program)
+            .flatten()
+            .map(|p| p.to_string_lossy().into_owned()),
+        &sd_vars,
+        std::env::var(crate::wsl::WSLENV).ok().as_deref(),
+    ) {
+        cmd.env(k, v);
     }
 
     let mut child = pane_side
