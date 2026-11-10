@@ -41,11 +41,37 @@ debug {
   disable_logs = false
 }
 C
+# Hyprland 0.57 dropped hyprlang (hyprwm/Hyprland#15539): it reads only
+# hyprland.lua and would ignore the .conf above and generate a default config
+# (#168). Write the same settings in Lua there. Older versions keep the .conf,
+# so the pinned leg stays on the config it was green with; run.py picks the
+# matching hyprctl dispatch syntax from `hyprctl version` with the same cut-off.
+hypr_ver=$(pacman -Q hyprland | awk '{print $2}'); hypr_ver=${hypr_ver%-*}
+if [ "$(vercmp "$hypr_ver" 0.57.0)" -ge 0 ]; then
+  cat > /home/e2e/.config/hypr/hyprland.lua <<'L'
+hl.monitor({ output = "", mode = "1920x1080@60", position = "0x0", scale = 1 })
+hl.config({
+  misc = {
+    disable_hyprland_logo = true,
+    disable_splash_rendering = true,
+    -- Omarchy's default: honour xdg-activation focus requests (see the .conf).
+    focus_on_activate = true,
+  },
+  debug = {
+    disable_logs = false,
+  },
+})
+L
+  echo "hyprland config: hyprland.lua (Hyprland $hypr_ver >= 0.57)" | tee -a "$OUT/versions.txt"
+else
+  echo "hyprland config: hyprland.conf (Hyprland $hypr_ver < 0.57)" | tee -a "$OUT/versions.txt"
+fi
+cp /home/e2e/.config/hypr/hyprland.* "$OUT/" 2>/dev/null
 chown -R e2e /home/e2e "$OUT"
 cp -r /w/e2e /home/e2e/e2e && chown -R e2e /home/e2e/e2e
 aq=(); [ -n "$card" ] && aq=(AQ_DRM_DEVICES="$card")
 runuser -u e2e -- env XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR LIBSEAT_BACKEND=seatd "${aq[@]}" \
-  SHELL=/bin/bash HOME=/home/e2e E2E_TMUX="${E2E_TMUX:-off}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
+  SHELL=/bin/bash HOME=/home/e2e E2E_TMUX="${E2E_TMUX:-off}" E2E_HYPR_LEG="${E2E_HYPR_LEG:-pinned}" GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-}" \
   dbus-run-session -- bash /home/e2e/e2e/linux/hyprland-inner.sh "$OUT"
 rc=$?
 cp $XDG_RUNTIME_DIR/hypr/*/hyprland.log "$OUT/hyprland.log" 2>/dev/null
