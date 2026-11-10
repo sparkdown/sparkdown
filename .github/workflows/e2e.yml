@@ -63,7 +63,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: e2e-release-gate
+          name: e2e-release-gate-attempt-${{ github.run_attempt }}
           path: release-gate-test.txt
 
   linux-build:
@@ -142,7 +142,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: e2e-macos-tmux-${{ matrix.tmux }}
+          name: e2e-macos-tmux-${{ matrix.tmux }}-attempt-${{ github.run_attempt }}
           path: e2e-out
 
   windows:
@@ -191,7 +191,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: e2e-windows
+          name: e2e-windows-attempt-${{ github.run_attempt }}
           path: e2e-out
 
   ubuntu-webdriver:
@@ -263,7 +263,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: e2e-ubuntu-tmux-${{ matrix.tmux }}
+          name: e2e-ubuntu-tmux-${{ matrix.tmux }}-attempt-${{ github.run_attempt }}
           path: e2e-out
 
   omarchy-hyprland:
@@ -299,7 +299,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: e2e-omarchy-hyprland-tmux-${{ matrix.tmux }}
+          name: e2e-omarchy-hyprland-tmux-${{ matrix.tmux }}-attempt-${{ github.run_attempt }}
           path: e2e-out
 
   summary:
@@ -311,14 +311,54 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Download all e2e artifacts (all attempts)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: e2e-*
-          path: results
+          pattern: e2e-*-attempt-*
+          path: results-all-attempts
+      - name: Select latest attempt for each job
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          
+          # Find all artifact directories and extract base name + attempt number
+          declare -A latest_attempts
+          
+          for dir in results-all-attempts/*/; do
+            if [ -d "$dir" ]; then
+              artifact_name=$(basename "$dir")
+              # Match pattern: e2e-{name}-attempt-{N}
+              if [[ "$artifact_name" =~ ^(.+)-attempt-([0-9]+)$ ]]; then
+                base_name="${BASH_REMATCH[1]}"
+                attempt="${BASH_REMATCH[2]}"
+                
+                # Track the highest attempt for each base name
+                if [ -z "${latest_attempts[$base_name]:-}" ] || [ "$attempt" -gt "${latest_attempts[$base_name]}" ]; then
+                  latest_attempts[$base_name]=$attempt
+                fi
+              fi
+            fi
+          done
+          
+          # Copy only the latest-attempt artifacts to results/
+          for base_name in "${!latest_attempts[@]}"; do
+            attempt="${latest_attempts[$base_name]}"
+            src_dir="results-all-attempts/${base_name}-attempt-${attempt}"
+            dst_dir="results/${base_name}"
+            
+            if [ -d "$src_dir" ]; then
+              echo "Selected: ${base_name}-attempt-${attempt} -> ${base_name}"
+              cp -r "$src_dir" "$dst_dir"
+            fi
+          done
+          
+          # Show what we selected
+          echo "Latest-attempt artifacts selected:"
+          ls -la results/
       - name: Aggregate
         run: python3 e2e/aggregate.py results
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: e2e-summary
+          name: e2e-summary-attempt-${{ github.run_attempt }}
           path: results/summary.md
