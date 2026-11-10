@@ -26,11 +26,13 @@ fails if any OS has a FAIL or reported nothing.
 App bugs the suite found are in [KNOWN_ISSUES.md](KNOWN_ISSUES.md). Checks
 for open ones stay PARTIAL until the app is fixed (#95 is fixed by #96).
 
-Artifacts per run: `e2e-macos`, `e2e-windows`, `e2e-ubuntu`,
-`e2e-omarchy-hyprland` (screenshots, `e2e.log`, `app.log`, `results.json`,
+Artifacts per run: `e2e-macos-tmux-{off,on}`, `e2e-windows`, `e2e-ubuntu-tmux-{off,on}`,
+`e2e-omarchy-hyprland-tmux-{off,on}` (screenshots, `e2e.log`, `app.log`, `results.json`,
 `summary.md`; Windows adds `msedgedriver.log`, Hyprland adds the compositor
 logs and package versions), `e2e-release-gate` (gate test output),
 `e2e-summary` (all-OS table) and `e2e-linux-binary` (the tested binary, 7 days).
+Each artifact name includes `-attempt-N` (where N is `${{ github.run_attempt }}`)
+so the summary job can select the latest attempt when jobs are rerun.
 
 ## The test-only `e2e-webdriver` feature
 
