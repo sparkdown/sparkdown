@@ -28,7 +28,7 @@ permissions:
 jobs:
   build:
     name: Build DMG and signed updater
-    runs-on: macos-14
+    runs-on: macos-latest
     permissions:
       contents: read
     steps:
