@@ -1,0 +1,134 @@
+name: macOS package
+
+# Produces DMG + signed updater tarball for macOS on Apple Silicon. Not part
+# of regular PR CI: a macOS release build costs many runner minutes. Run it by
+# hand (Actions -> macOS package -> Run workflow, with an optional tag) or push
+# a v* tag. The workflow_dispatch can target an already-cut tag (e.g. v0.4.2),
+# so a release can be built from the existing tag commit even when the workflow
+# file didn't exist at that SHA.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Optional tag to build (e.g. v0.4.2)'
+        required: false
+        type: string
+  push:
+    tags: ["v*"]
+
+# Default to read-only. Only the release job (below) is granted contents:write,
+# and it does nothing but download the built artifacts and attach them to the
+# Release — it never checks out the code or builds, so the write token is never
+# exposed to build tooling or npm lifecycle scripts.
+permissions:
+  contents: read
+
+# Actions are pinned to full commit SHAs with a version comment; Dependabot's
+# github-actions updater keeps them fresh. Do not switch back to mutable tags.
+jobs:
+  build:
+    name: Build DMG and signed updater
+    runs-on: macos-14
+    permissions:
+      contents: read
+    steps:
+      - name: Verify Apple Silicon runner
+        run: |
+          set -euo pipefail
+          arch=$(uname -m)
+          echo "Architecture: $arch"
+          if [ "$arch" != "arm64" ]; then
+            echo "::error::Expected arm64, got $arch"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.22.2"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          # Pinned by SHA, so the channel can't be read from the ref — name it.
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: src-tauri
+      - name: Build macOS bundles with package-macos.sh
+        # The script runs `tauri build`, then creates and signs the updater
+        # tarball. The signing key is visible only to the script, which unsets
+        # it before the build step (so npm/vite and cargo never see it) and
+        # passes it only to `tauri signer sign`. Owner setup: add the repo
+        # secrets TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD.
+        # Without them the build still succeeds but produces no signed updater
+        # artifact, and that release has no macOS auto-update entry.
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bash scripts/package-macos.sh
+      - name: Verify signed updater artifacts
+        run: |
+          set -euo pipefail
+          if [ ! -f src-tauri/target/release/bundle/macos/SparkDown.app.tar.gz ]; then
+            echo "::error::Signed updater tarball is missing (required for macOS auto-update)"
+            exit 1
+          fi
+          if [ ! -f src-tauri/target/release/bundle/macos/SparkDown.app.tar.gz.sig ]; then
+            echo "::error::Updater signature is missing (required for macOS auto-update)"
+            exit 1
+          fi
+          python3 scripts/check-updater-sig.py src-tauri/target/release/bundle/macos/SparkDown.app.tar.gz.sig
+      - name: Rename updater artifacts
+        run: |
+          set -euo pipefail
+          version=$(node -p 'require("./src-tauri/tauri.conf.json").version')
+          cd src-tauri/target/release/bundle/macos
+          mv SparkDown.app.tar.gz "SparkDown_${version}_aarch64.app.tar.gz"
+          mv SparkDown.app.tar.gz.sig "SparkDown_${version}_aarch64.app.tar.gz.sig"
+          ls -lh SparkDown_*
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sparkdown-macos
+          path: |
+            src-tauri/target/release/bundle/dmg/SparkDown_*_aarch64.dmg
+            src-tauri/target/release/bundle/macos/SparkDown_*_aarch64.app.tar.gz
+            src-tauri/target/release/bundle/macos/SparkDown_*_aarch64.app.tar.gz.sig
+          if-no-files-found: error
+
+  release:
+    name: Attach to GitHub Release (tags only)
+    needs: build
+    # Attach to an existing release on a pushed v* tag OR a manual dispatch with
+    # a tag input. Test builds (workflow_dispatch without a tag) never touch a
+    # Release. latest.json is never written here (scripts/release.sh writes it,
+    # by hand, for real releases).
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+    runs-on: ubuntu-latest
+    # The only job with write access. It does not check out the repo or run any
+    # build/npm step, so the write token never reaches third-party tooling.
+    permissions:
+      contents: write
+    steps:
+      - name: Download built bundles
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sparkdown-macos
+          path: dist
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          # Keep it a draft: without this, attaching to an existing draft release
+          # publishes it. We must not publish until latest.json is written by hand.
+          draft: true
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            dist/**/*.dmg
+            dist/**/*.app.tar.gz
+            dist/**/*.app.tar.gz.sig
