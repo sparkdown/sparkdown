@@ -5,6 +5,32 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
+## [0.4.2] — 2026-11-09
+
+Terminal, Git and command-line improvements on top of 0.4.1. Not in this
+release: the Hyprland work (#186), the WSL agent tools (#187) and the
+terminal performance work (#219); they wait for testing on real machines.
+
+### New
+
+- **Find in the terminal:** `Ctrl+Shift+F` on Windows and Linux (plain `Ctrl+F` stays with the shell), `⌘F` or Edit > Find on macOS when a terminal has focus. Each pane has its own find bar with a match count (“2 of 5”, “No results”). `Enter` / `F3` go to the next match, `Shift+Enter` to the previous one, `Esc` closes the bar and returns to the terminal. Keys typed in the bar never reach the shell. (#184)
+- **Safer terminal links:** web links open only with `Ctrl`+click (`⌘`+click on macOS), and only `http` / `https` links with a host; a plain click no longer launches the browser. File paths still open with a plain click. Links that wrap onto the next row are recognised. (#184)
+- **Terminal scrollback setting:** Settings → Scrollback lines takes any whole number from 200 to 50,000 (default 5,000; values outside the range are clamped). The change is saved right away and applies to open and new terminals. (#184)
+- **Mouse wheel in tmux terminals** scrolls tmux's history instead of sending Up/Down to the shell, which used to recall old commands. Scrolling back to the bottom, or typing, leaves the history view. Full-screen apps inside tmux still get Up/Down. (#184)
+- **`sparkdown` command on your PATH:** the Windows installer adds it (skip with `/SDNOPATH`) and the uninstaller removes it; on macOS, and for the Linux AppImage, the SparkDown menu has Install / Uninstall / Repair 'sparkdown' Command in PATH. The `.deb` and AUR packages already ship `/usr/bin/sparkdown`. Run from a terminal, `sparkdown` gives the prompt back unless you pass `--wait`, and `--` ends the options so a path starting with `-` can be opened. (#188)
+- **Pull when branches have diverged:** if you have not set `pull.rebase` or `pull.ff`, Pull merges the remote changes instead of failing; your own git settings still win. Merge and rebase conflicts are reported with the files involved and are never aborted for you. (#218)
+- **Background fetch:** while a window is focused, SparkDown quietly fetches the current branch's upstream (on focus, every 5 minutes, and after a rejected push) so the Pull count shows new commits. It only fetches, never merges, never asks for credentials, and is off in remote (SSH) folders. Turn it off in Settings → Git → Fetch in the background. (#218)
+- **Discard changes** in the Changes view: a per-file Discard button, Discard Changes… in the right-click menu, **Discard All** in the Changes header, and `Shift+F10` / the Menu key on the selected file. A confirmation lists each file and what will happen to it: edits are reverted to the last commit, and new files are moved to the system Trash (the Recycle Bin on Windows), never deleted outright. A file that changed while the confirmation was open is left alone and reported. Open tabs with unsaved edits keep them unless you tick the box to drop them. Not available in remote (SSH) folders. (#218)
+
+### Fixed
+
+- **Status bar edges:** the first and last items no longer sit against the window border (8 px inset, 12 px on macOS for the rounded corners). (#178, #179)
+
+### Security
+
+- tokio 1.51.6, for [RUSTSEC-2026-0386](https://rustsec.org/advisories/RUSTSEC-2026-0386). (#157)
+- minisign-verify 0.3.0, the library that checks update signatures, which removes some `unsafe` code. (#4) minisign 0.10.0 is used only by the tests that sign fake updates. (#5)
+
 ## [0.4.1] — 2026-11-05
 
 Fixes and small features on top of 0.4.0.
@@ -156,5 +182,6 @@ The agent cockpit release.
 - **Linux `.deb`** as the preferred install; the AppImage is still built.
 - Hardening: the watcher ignores build and dependency folders, a stricter content policy, and dependency security updates.
 
+[0.4.2]: https://github.com/sparkdown/sparkdown/compare/v0.4.1...v0.4.2
 [0.3.1]: https://github.com/sparkdown/sparkdown/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/sparkdown/sparkdown/compare/v0.2.0...v0.3.0
