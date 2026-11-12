@@ -92,7 +92,7 @@ export class BackgroundFetcher {
       try {
         try {
           const r = await this.opts.fetch(root);
-          if (r === 'busy') return false;
+          if (r === 'busy' || r === 'skipped') return false;
           this.lastFetched = this.now();
         } catch {
           return false; // quiet: auth / network failures are skipped

@@ -10,6 +10,7 @@ requests.
 ### Changed
 
 - **Background fetch is now off by default.** The quiet git fetch that keeps the Pull ↓ count current (introduced in 0.4.2) now defaults to off in Settings → Git → Fetch in the background. Existing configurations are migrated once: if you had the setting on (which was the previous default), it is turned off. Turn it back on if you prefer the automatic fetch behavior.
+- Background fetch is skipped for repositories whose own config sets custom commands.
 
 ## [0.4.2] — 2026-11-09
 

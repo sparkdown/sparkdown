@@ -12,6 +12,28 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+/// Return a value for `core.hooksPath` that prevents git from running hooks
+/// from the repository's own `.git/hooks` directory. On Unix, `/dev/null` is
+/// a special character device, so `<path>/<hook>` cannot resolve. On Windows,
+/// we point at the current executable file; git then looks for `<exe>\<hook>`,
+/// which cannot exist because the exe is a file, not a directory.
+pub(crate) fn core_hooks_path_override() -> Result<String, String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok("/dev/null".to_string())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::env::current_exe()
+            .map_err(|e| format!("failed to get current exe: {e}"))
+            .and_then(|p| {
+                p.to_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| "exe path is not valid UTF-8".to_string())
+            })
+    }
+}
 use std::sync::OnceLock;
 
 /// One changed path in the working tree, with a coarse status.
@@ -80,13 +102,14 @@ fn git_command_with(root: &Path, safe_dirs: &[String]) -> Result<Command, String
         .map_err(|e| format!("invalid root: {e}"))?;
     let mut cmd = crate::proc::command(git_bin());
     cmd.current_dir(&root_path);
-    // Drop only GIT_* vars (they can point config/hooks/pagers at attacker
-    // input); keep PATH, HOME, etc. so git and its helpers resolve normally.
+    // Drop only GIT_* vars (they can point config/hooks/pagers at repo-supplied
+    // content); keep PATH, HOME, etc. so git and its helpers resolve normally.
     for (key, _) in std::env::vars_os() {
         if key.to_str().map(|k| k.starts_with("GIT_")).unwrap_or(false) {
             cmd.env_remove(key);
         }
     }
+    let hooks_path = core_hooks_path_override()?;
     cmd.env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -95,6 +118,8 @@ fn git_command_with(root: &Path, safe_dirs: &[String]) -> Result<Command, String
         .arg("core.quotepath=false")
         .arg("-c")
         .arg("core.fsmonitor=false")
+        .arg("-c")
+        .arg(format!("core.hooksPath={}", hooks_path))
         .arg("-c")
         .arg("diff.external=")
         .arg("-c")
@@ -1070,6 +1095,18 @@ mod tests {
 
         let bad2 = git_diff_file_impl("/tmp".to_string(), "../etc/passwd".to_string(), false);
         assert!(bad2.is_err());
+    }
+
+    #[test]
+    fn core_hooks_path_override_returns_valid_path() {
+        let path = core_hooks_path_override().expect("hooks path override");
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(path, "/dev/null");
+        #[cfg(target_os = "windows")]
+        {
+            assert!(!path.is_empty());
+            assert!(path.ends_with(".exe") || path.contains("sparkdown"));
+        }
     }
 }
 

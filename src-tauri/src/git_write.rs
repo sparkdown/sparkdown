@@ -813,6 +813,59 @@ pub(crate) fn push_impl(root: &str, extra: ExtraEnv) -> ActionResult {
 /// Why the background fetch is off in a remote session.
 const FETCH_UNSUPPORTED: &str = "Background fetch is off in remote sessions.";
 
+/// Check if the repo's own config (local + worktree + included files) has
+/// any keys that can execute commands during fetch. Returns true when the
+/// fetch should be skipped.
+fn repo_config_has_exec_keys(root: &Path, extra: ExtraEnv) -> bool {
+    let mut cmd = crate::proc::command(crate::git::git_bin());
+    cmd.current_dir(root)
+        .env("PATH", crate::context::login_shell_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .arg("config")
+        .arg("--show-scope")
+        .arg("--includes")
+        .arg("--name-only")
+        .arg("--list");
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    let Ok(output) = cmd.output() else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let Some((scope, key)) = line.split_once('\t') else {
+            continue;
+        };
+        if !matches!(scope, "local" | "worktree") {
+            continue;
+        }
+        let key_lower = key.to_lowercase();
+        if key_lower.starts_with("remote.") && key_lower.contains(".uploadpack")
+            || key_lower.starts_with("remote.") && key_lower.contains(".receivepack")
+            || key_lower.starts_with("remote.") && key_lower.contains(".vcs")
+            || key_lower == "protocol.allow"
+            || key_lower.starts_with("protocol.") && key_lower.ends_with(".allow")
+            || key_lower.starts_with("url.") && key_lower.contains(".insteadof")
+            || key_lower == "core.sshcommand"
+            || key_lower == "core.gitproxy"
+            || key_lower == "core.askpass"
+            || key_lower == "core.alternaterefscommand"
+            || key_lower.starts_with("credential.") && key_lower.contains("helper")
+            || key_lower.starts_with("include.")
+            || key_lower.starts_with("uploadpack.")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// What a background fetch did (#175).
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -821,6 +874,9 @@ pub enum FetchOutcome {
     Fetched,
     /// Another fetch for this window was still running; nothing was done.
     Busy,
+    /// The fetch was skipped because the repo's config has keys that can
+    /// execute commands (e.g. uploadpack, ext:: transport, core.sshCommand).
+    Skipped,
 }
 
 /// Quietly fetch the current branch's upstream remote so the behind count
@@ -829,15 +885,39 @@ pub enum FetchOutcome {
 /// `GIT_TERMINAL_PROMPT=0`, both askpass programs are blanked (git then
 /// uses none), so a remote that needs credentials just fails and the
 /// caller stays silent. Times out after [`FETCH_TIMEOUT`].
+///
+/// Skips the fetch when the repo's own config has keys that can execute
+/// commands (uploadpack, ext:: transport, core.sshCommand, etc.) to avoid
+/// running commands from the repository's own config on a background fetch.
 pub(crate) fn fetch_impl(root: &str, extra: ExtraEnv) -> Result<FetchOutcome, GitActionError> {
     let root = check_local(root, FETCH_UNSUPPORTED)?;
+    if repo_config_has_exec_keys(&root, extra) {
+        return Ok(FetchOutcome::Skipped);
+    }
     let up = upstream(&root, extra)?;
     let mut env: Vec<(&str, &str)> = vec![("GIT_ASKPASS", ""), ("SSH_ASKPASS", "")];
     env.extend_from_slice(extra);
+    let hooks_path = crate::git::core_hooks_path_override()
+        .map_err(|e| GitActionError::new(GitErrorKind::Other, "Background fetch failed.", e))?;
+
     run_ok(
         &root,
         &env,
         &[
+            "-c",
+            "protocol.allow=never",
+            "-c",
+            "protocol.https.allow=always",
+            "-c",
+            "protocol.http.allow=always",
+            "-c",
+            "protocol.ssh.allow=always",
+            "-c",
+            "protocol.git.allow=always",
+            "-c",
+            "protocol.file.allow=always",
+            "-c",
+            &format!("core.hooksPath={}", hooks_path),
             "-c",
             "credential.interactive=false",
             "fetch",
@@ -1705,6 +1785,50 @@ mod tests {
             self.git(dir, &["add", file]);
             self.git(dir, &["commit", "-q", "-m", msg]);
         }
+    }
+
+    fn tmpdir(name: &str) -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "sparkdown_{name}_{}_{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn init_testbed() -> (PathBuf, PathBuf) {
+        let base = tmpdir("testbed");
+        let global = base.join("gitconfig");
+        fs::write(&global, "[user]\n\tname = Test\n\temail = t@test.com\n[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n").unwrap();
+        let repo = base.join("repo");
+        let _ = fs::create_dir(&repo);
+        let git = crate::git::git_bin();
+        let ok = crate::proc::command(&git)
+            .current_dir(&repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", &global)
+            .args(["init", "-q"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "git init failed at {}", repo.display());
+        (repo, global)
+    }
+
+    fn run(repo: &Path, global: &Path, args: &[&str]) {
+        let git = crate::git::git_bin();
+        let ok = crate::proc::command(&git)
+            .current_dir(repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", global)
+            .args(args)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "git {args:?} failed");
     }
 
     fn sandbox() -> Sandbox {
@@ -3087,5 +3211,103 @@ mod tests {
         for bad in ["\"--force", "\"-f\"", "\"--force-with-lease", "format!(\"+"] {
             assert!(!code.contains(bad), "push code must never force ({bad})");
         }
+    }
+
+    #[test]
+    fn background_fetch_skips_repo_with_uploadpack() {
+        let (repo, global) = init_testbed();
+        fs::write(repo.join("a.txt"), "content").unwrap();
+        run(&repo, &global, &["add", "a.txt"]);
+        run(&repo, &global, &["commit", "-m", "initial"]);
+        run(
+            &repo,
+            &global,
+            &["config", "remote.origin.uploadpack", "/tmp/marker"],
+        );
+        let result = fetch_impl(repo.to_str().unwrap(), &[]);
+        assert_eq!(result.unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn background_fetch_skips_repo_with_gitproxy() {
+        let (repo, global) = init_testbed();
+        fs::write(repo.join("a.txt"), "content").unwrap();
+        run(&repo, &global, &["add", "a.txt"]);
+        run(&repo, &global, &["commit", "-m", "initial"]);
+        run(&repo, &global, &["config", "core.gitProxy", "/tmp/marker"]);
+        let result = fetch_impl(repo.to_str().unwrap(), &[]);
+        assert_eq!(result.unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn background_fetch_skips_repo_with_alternaterefscommand() {
+        let (repo, global) = init_testbed();
+        fs::write(repo.join("a.txt"), "content").unwrap();
+        run(&repo, &global, &["add", "a.txt"]);
+        run(&repo, &global, &["commit", "-m", "initial"]);
+        run(
+            &repo,
+            &global,
+            &["config", "core.alternateRefsCommand", "/tmp/marker"],
+        );
+        let result = fetch_impl(repo.to_str().unwrap(), &[]);
+        assert_eq!(result.unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn background_fetch_skips_repo_with_askpass() {
+        let (repo, global) = init_testbed();
+        fs::write(repo.join("a.txt"), "content").unwrap();
+        run(&repo, &global, &["add", "a.txt"]);
+        run(&repo, &global, &["commit", "-m", "initial"]);
+        run(&repo, &global, &["config", "core.askPass", "/tmp/marker"]);
+        let result = fetch_impl(repo.to_str().unwrap(), &[]);
+        assert_eq!(result.unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn background_fetch_skips_repo_with_included_uploadpack() {
+        let base = tmpdir("fetch-include");
+        let global = base.join("gitconfig");
+        fs::write(&global, "[user]\n\tname = Test\n\temail = t@test.com\n").unwrap();
+        let repo = base.join("repo");
+        let inc = base.join("included.cfg");
+        fs::create_dir(&repo).unwrap();
+        let git = crate::git::git_bin();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", &global)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        fs::write(repo.join("a.txt"), "content").unwrap();
+        run(&repo, &global, &["add", "a.txt"]);
+        run(&repo, &global, &["commit", "-m", "initial"]);
+        let marker = base.join("marker");
+        fs::write(
+            &inc,
+            format!("[remote \"origin\"]\n\tuploadpack = {}\n", marker.display()),
+        )
+        .unwrap();
+        run(
+            &repo,
+            &global,
+            &["config", "include.path", inc.to_str().unwrap()],
+        );
+        let result = fetch_impl(repo.to_str().unwrap(), &[]);
+        assert_eq!(result.unwrap(), FetchOutcome::Skipped);
+        assert!(!marker.exists(), "marker file never created");
+    }
+
+    #[test]
+    fn background_fetch_runs_for_husky_style_hooks() {
+        let (repo, global) = init_testbed();
+        fs::write(repo.join("a.txt"), "content").unwrap();
+        run(&repo, &global, &["add", "a.txt"]);
+        run(&repo, &global, &["commit", "-m", "initial"]);
+        run(&repo, &global, &["config", "core.hooksPath", ".husky/_"]);
+        let result = fetch_impl(repo.to_str().unwrap(), &[]);
+        assert_eq!(result.unwrap(), FetchOutcome::Fetched, "husky repo fetches");
     }
 }
