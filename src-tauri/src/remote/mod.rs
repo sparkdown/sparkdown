@@ -600,8 +600,19 @@ pub(crate) fn remote_deletable(root: &str, path: &str) -> Result<(), String> {
 
 /// POSIX sh: remove one file (or symlink); refuse a directory (exit 3).
 pub(crate) fn remote_delete_script(path: &str) -> String {
-    let q = shell_quote(path);
-    format!("if [ -d {q} ] && [ ! -L {q} ]; then echo __SD_DIR__; exit 3; fi; rm -f -- {q}")
+    let p = Path::new(path);
+    let (d, n) = match (p.parent(), p.file_name()) {
+        (Some(parent), Some(name)) => (
+            shell_quote(parent.to_str().unwrap()),
+            shell_quote(name.to_str().unwrap()),
+        ),
+        _ => return format!("echo 'Bad path' >&2; exit 1"),
+    };
+    format!(
+        "cd -- {d} && p=$(pwd -P) && \
+         if [ -d ./{n} ] && [ ! -L ./{n} ]; then echo __SD_DIR__; exit 3; fi; \
+         rm -f -- ./{n}"
+    )
 }
 
 /// Explorer New File / New Folder: `parent` must be this window's folder or
@@ -622,13 +633,24 @@ pub(crate) fn remote_creatable(root: &str, parent: &str) -> Result<(), String> {
 /// POSIX sh: create one empty file or folder, never replacing anything
 /// (exit 3 + marker when the name is taken; `set -C` closes the race).
 pub(crate) fn remote_create_script(path: &str, is_dir: bool) -> String {
-    let q = shell_quote(path);
-    let make = if is_dir {
-        format!("mkdir -- {q}")
-    } else {
-        format!("set -C; : > {q}")
+    let p = Path::new(path);
+    let (d, n) = match (p.parent(), p.file_name()) {
+        (Some(parent), Some(name)) => (
+            shell_quote(parent.to_str().unwrap()),
+            shell_quote(name.to_str().unwrap()),
+        ),
+        _ => return format!("echo 'Bad path' >&2; exit 1"),
     };
-    format!("if [ -e {q} ] || [ -L {q} ]; then echo __SD_EXISTS__; exit 3; fi; {make}")
+    let make = if is_dir {
+        format!("mkdir -- ./{n}")
+    } else {
+        format!("touch -- ./{n}")
+    };
+    format!(
+        "cd -- {d} && p=$(pwd -P) && \
+         if [ -e ./{n} ] || [ -L ./{n} ]; then echo __SD_EXISTS__; exit 3; fi; \
+         {make}"
+    )
 }
 
 /// Explorer New File / New Folder on the remote host.
@@ -1627,17 +1649,17 @@ pub(crate) fn strip_job_noise(stderr: &str) -> String {
 pub(crate) fn remote_agent_cli_script(cmd_line: &str, bin: &str, secs: u64) -> String {
     let bin = shell_quote(bin);
     format!(
-        "cd /tmp 2>/dev/null || cd\n\
+        "cd ~/.cache/sparkdown 2>/dev/null || {{ mkdir -p ~/.cache/sparkdown && cd ~/.cache/sparkdown; }} || cd\n\
          sd_probe() {{ \"${{SHELL:-/bin/sh}}\" \"$1\" 'printf \"\\n__SD_PATH__%s\\n\" \"$PATH\"' </dev/null 2>/dev/null | sed -n 's/^__SD_PATH__//p' | tail -n 1; }}\n\
          for sd_m in -lc -lic; do\n\
          command -v {bin} >/dev/null 2>&1 && break\n\
          sd_p=$(sd_probe $sd_m); [ -n \"$sd_p\" ] && PATH=$sd_p && export PATH\n\
          done\n\
-         sd_t=\"${{TMPDIR:-/tmp}}/.sparkdown-cli-$$\"; rm -f \"$sd_t\"\n\
+         sd_t=$(mktemp -u \".sparkdown-cli-$$-XXXXXX\")\n\
          if command -v setsid >/dev/null 2>&1; then sd_g=1; setsid {cmd_line} </dev/null & else sd_g=; {cmd_line} </dev/null & fi\n\
          sd_c=$!\n\
          sd_kill() {{ if [ -n \"$sd_g\" ]; then kill -$1 -$sd_c; else pkill -$1 -P $sd_c; kill -$1 $sd_c; fi; }} 2>/dev/null\n\
-         ( sleep {secs}; : > \"$sd_t\"; sd_kill TERM; sleep 2; sd_kill KILL ) </dev/null >/dev/null 2>&1 &\n\
+         ( sleep {secs}; touch \"$sd_t\"; sd_kill TERM; sleep 2; sd_kill KILL ) </dev/null >/dev/null 2>&1 &\n\
          sd_w=$!\n\
          wait $sd_c; sd_s=$?\n\
          kill $sd_w 2>/dev/null; wait $sd_w 2>/dev/null\n\
@@ -3877,7 +3899,7 @@ pub fn git_change_stats(
 
 #[cfg(test)]
 mod delete_tests {
-    use super::{remote_deletable, remote_delete_script};
+    use super::{remote_create_script, remote_deletable, remote_delete_script};
 
     #[test]
     fn remote_delete_only_inside_the_folder() {
@@ -3911,5 +3933,47 @@ mod delete_tests {
         assert_eq!(out.status.code(), Some(3));
         assert!(d.exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scripts_operate_via_physical_parent_path() {
+        let base = std::env::temp_dir().join(format!("sd-script-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let real_dir = base.join("real");
+        std::fs::create_dir(&real_dir).unwrap();
+        let file = real_dir.join("test.txt");
+        std::fs::write(&file, "data").unwrap();
+        let linked = base.join("linked");
+        std::os::unix::fs::symlink(&real_dir, &linked).unwrap();
+        let path_through_link = linked.join("test.txt");
+        let del_script = remote_delete_script(path_through_link.to_str().unwrap());
+        let out = crate::proc::command("sh")
+            .arg("-c")
+            .arg(&del_script)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "delete resolves parent and removes file"
+        );
+        assert!(!file.exists());
+        std::fs::write(&file, "new").unwrap();
+        let marker = real_dir.join("marker.txt");
+        std::os::unix::fs::symlink(&file, &marker).unwrap();
+        let cre_through_marker = linked.join("marker.txt");
+        let cre_script = remote_create_script(cre_through_marker.to_str().unwrap(), false);
+        let out2 = crate::proc::command("sh")
+            .arg("-c")
+            .arg(&cre_script)
+            .output()
+            .unwrap();
+        assert_eq!(
+            out2.status.code(),
+            Some(3),
+            "create detects existing link without following it"
+        );
+        assert!(String::from_utf8_lossy(&out2.stdout).contains("__SD_EXISTS__"));
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }
