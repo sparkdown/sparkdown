@@ -331,6 +331,76 @@ pub fn curl_args(url: &str, out: &Path, max_time_secs: u64, max_bytes: u64) -> V
     v
 }
 
+/// A short, random component for the per-call manifest staging
+/// directory. Not a secret — the directory is also 0700 — but it keeps the
+/// path from being predictable from PID alone.
+fn manifest_nonce() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, Ordering::SeqCst);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{n}-{t:x}")
+}
+
+/// Create the new directory `dir` (its parent must exist) with mode 0700 on
+/// Unix, so other users on the host cannot read or write inside it.
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    // Not create_dir_all: the directory must be new, so an existing
+    // directory at this path is an error instead of being adopted.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        fs::DirBuilder::new().mode(0o700).create(dir)?;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir(dir)?;
+    Ok(())
+}
+
+/// Create an empty manifest file at `path`, failing if anything already
+/// exists there and (on Unix) refusing to follow symlinks. The file is only
+/// used as a destination for curl's `--output`; the handle is closed
+/// immediately so curl can reopen the regular file for writing.
+fn create_manifest_file(path: &Path) -> io::Result<()> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+        // libc::O_NOFOLLOW without pulling in the libc crate.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        const O_NOFOLLOW: i32 = 0o400_000;
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "dragonfly"
+        ))]
+        const O_NOFOLLOW: i32 = 0x0100;
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "netbsd",
+            target_os = "openbsd",
+            target_os = "dragonfly"
+        )))]
+        const O_NOFOLLOW: i32 = 0;
+        opts.custom_flags(O_NOFOLLOW);
+    }
+    let _f = opts.open(path)?;
+    Ok(())
+}
+
 fn curl_program() -> &'static str {
     if cfg!(windows) {
         "curl.exe"
@@ -718,17 +788,43 @@ pub async fn update_check(app: AppHandle) -> Result<Option<UpdateInfo>, String> 
         return Err("update checks are disabled (no updater public key)".to_owned());
     }
     blocking(move || {
-        let tmp =
-            std::env::temp_dir().join(format!("sparkdown-latest-{}.json", std::process::id()));
-        let fetched = download(
-            ENDPOINT,
-            &tmp,
-            MANIFEST_TIMEOUT_SECS,
-            MANIFEST_MAX_BYTES,
-            |_| {},
-        );
-        let json = fetched.and_then(|()| fs::read_to_string(&tmp).map_err(|e| e.to_string()));
-        let _ = fs::remove_file(&tmp);
+        // Stage the manifest in a process-private 0700 directory with a
+        // random name so another local user cannot place a symlink at a
+        // predictable path in a shared /tmp, and so a same-user process
+        // cannot find and swap the file between curl's write and the
+        // read-back here. The staging directory is created fresh for every
+        // call and removed in all exit paths.
+        let dir = std::env::temp_dir().join(format!(
+            "sparkdown-update-{}-{}",
+            std::process::id(),
+            manifest_nonce()
+        ));
+        create_private_dir(&dir).map_err(|e| format!("update temp dir: {e}"))?;
+        let tmp = dir.join("latest.json");
+        let json = (|| -> Result<String, String> {
+            // Pre-create the file ourselves with create_new + O_NOFOLLOW so
+            // we fail closed if anything (symlink, regular file) is already
+            // at that path. curl's --output then opens the existing regular
+            // file, which is fine inside our 0700 directory.
+            create_manifest_file(&tmp).map_err(|e| format!("update temp file: {e}"))?;
+            download(
+                ENDPOINT,
+                &tmp,
+                MANIFEST_TIMEOUT_SECS,
+                MANIFEST_MAX_BYTES,
+                |_| {},
+            )?;
+            fs::read_to_string(&tmp).map_err(|e| e.to_string())
+        })();
+        if let Err(e) = fs::remove_dir_all(&dir) {
+            if e.kind() != io::ErrorKind::NotFound {
+                eprintln!(
+                    "warning: could not remove update temp dir {}: {}",
+                    dir.display(),
+                    e
+                );
+            }
+        }
         let manifest = parse_manifest(&json?)?;
         let current = app.package_info().version.to_string();
         if !is_newer(&manifest.version, &current) {
@@ -1945,5 +2041,56 @@ mod tests {
         let err = download(ENDPOINT, &out, 30, MANIFEST_MAX_BYTES, |_| {}).unwrap_err();
         // The repo is private until launch, so the manifest is a 404.
         assert!(err.contains("404"), "{err}");
+    }
+
+    #[test]
+    fn manifest_dir_is_new_and_owner_only() {
+        let s = Scratch::new("manifest-dir");
+        let dir = s.0.join("run-1");
+        create_private_dir(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        // The same path cannot be taken twice: an existing directory is an
+        // error, not something to adopt.
+        assert!(create_private_dir(&dir).is_err());
+        // The parent is not created on the way.
+        assert!(create_private_dir(&s.0.join("missing").join("run-2")).is_err());
+    }
+
+    #[test]
+    fn manifest_file_needs_a_fresh_path() {
+        let s = Scratch::new("manifest-file");
+        let path = s.0.join("latest.json");
+        create_manifest_file(&path).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+        fs::write(&path, "previous").unwrap();
+        assert!(create_manifest_file(&path).is_err(), "existing file");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "previous");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_file_does_not_follow_a_symlink() {
+        let s = Scratch::new("manifest-link");
+        let target = s.0.join("target.txt");
+        fs::write(&target, "keep").unwrap();
+        let link = s.0.join("latest.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(create_manifest_file(&link).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+        // A dangling link is refused too.
+        let dangling = s.0.join("dangling.json");
+        std::os::unix::fs::symlink(s.0.join("not-there"), &dangling).unwrap();
+        assert!(create_manifest_file(&dangling).is_err());
+        assert!(!s.0.join("not-there").exists());
+    }
+
+    #[test]
+    fn manifest_nonce_differs_between_calls() {
+        assert_ne!(manifest_nonce(), manifest_nonce());
     }
 }

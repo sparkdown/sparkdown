@@ -30,6 +30,7 @@ requests.
 - MCP: sparkdown_forward is restricted to the core local socket and needs a per-launch nonce; each window's forwarded socket needs a per-window token.
 - Remote MCP on SSH hosts requires Python 3 on the remote host. Terminals opened before an app restart need to be reopened for MCP to work.
 - Files: Saving over an existing file stages the new contents in an owner-only temporary file until the data is written.
+- Updater: The update check downloads its manifest into a per-run directory that only the current user can open.
 
 ### Changed
 
