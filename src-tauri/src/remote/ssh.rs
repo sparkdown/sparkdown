@@ -730,7 +730,7 @@ pub(crate) fn encrypted_key_without_agent(host: &str) -> Option<String> {
 #[cfg(unix)]
 pub(crate) fn mux_options() -> Vec<String> {
     use std::os::unix::fs::PermissionsExt;
-    let dir = home_dir().join(".ssh").join("sparkdown");
+    let (dir, name) = control_location(&home_dir(), &crate::windows::current_label());
     if std::fs::create_dir_all(&dir).is_err() {
         return vec![];
     }
@@ -742,21 +742,35 @@ pub(crate) fn mux_options() -> Vec<String> {
         "-o".into(),
         // One control connection per window (#60 decision 6): two windows
         // on the same host must not share (or close) each other's mux.
-        format!("ControlPath={}/{}", dir.display(), control_name()),
+        format!("ControlPath={}/{}", dir.display(), name),
         "-o".into(),
         "ControlPersist=600".into(),
     ]
 }
 
-/// `%C` (ssh's hash of host/port/user), prefixed per window. The unscoped
-/// default keeps the plain `%C` used before multi-window.
+/// Hex characters of the window tag kept in a per-window control socket
+/// name. The full 128-bit tag names app sockets; here the name only has to
+/// differ between the windows of one process inside a private directory,
+/// and `%C` (40 hex characters) plus ssh's 17-byte bind suffix leave little
+/// room under the 104-byte (including NUL) macOS socket address.
 #[cfg(unix)]
-fn control_name() -> String {
-    let label = crate::windows::current_label();
+const CONTROL_TAG_LEN: usize = 7;
+
+/// The directory and file name (an ssh `%C` template) of the control socket
+/// for `label`, under `home`. The unscoped default keeps the plain `%C`
+/// used before multi-window, in `~/.ssh/sparkdown`. Other windows use a
+/// short tag in `~/.ssh/sd`, a shorter directory, so the path stays inside
+/// the socket address limit for home directories up to 30 characters.
+#[cfg(unix)]
+fn control_location(home: &Path, label: &str) -> (PathBuf, String) {
     if label == crate::windows::DEFAULT_LABEL {
-        "%C".into()
+        (home.join(".ssh").join("sparkdown"), "%C".into())
     } else {
-        format!("{}-%C", crate::windows::label_tag(&label))
+        let tag = crate::windows::label_tag(label);
+        (
+            home.join(".ssh").join("sd"),
+            format!("{}%C", &tag[..CONTROL_TAG_LEN]),
+        )
     }
 }
 
@@ -1718,6 +1732,47 @@ mod exec_tests {
         assert!(
             result.starts_with(ERR_HOSTKEY_UNKNOWN),
             "Expected [hostkey-unknown], got: {result}"
+        );
+    }
+
+    /// ssh binds the control socket under a temporary name that adds 17
+    /// bytes (`.` plus 16 random characters); the whole path must still fit
+    /// the socket address.
+    #[cfg(unix)]
+    #[test]
+    fn control_path_fits_the_socket_limit_for_a_30_char_home() {
+        const BIND_SUFFIX: usize = 17;
+        // `sun_path` holds 104 bytes on macOS including the terminating NUL.
+        const MAX_CONTROL_PATH: usize = 103;
+        let home = PathBuf::from(format!("/Users/{}", "h".repeat(23)));
+        assert_eq!(home.as_os_str().len(), 30);
+        for label in [crate::windows::DEFAULT_LABEL, "window-2", &"w".repeat(200)] {
+            let (dir, name) = control_location(&home, label);
+            // `%C` expands to a 40-character hex digest.
+            let expanded = format!("{}/{}", dir.display(), name.replace("%C", &"0".repeat(40)));
+            assert!(
+                expanded.len() + BIND_SUFFIX <= MAX_CONTROL_PATH,
+                "{} bytes: {expanded}",
+                expanded.len() + BIND_SUFFIX
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn control_path_differs_per_window_and_stays_in_a_private_dir() {
+        let home = PathBuf::from("/home/u");
+        let (d0, n0) = control_location(&home, crate::windows::DEFAULT_LABEL);
+        let (d1, n1) = control_location(&home, "window-1");
+        let (d2, n2) = control_location(&home, "window-2");
+        assert_eq!((d0, n0.as_str()), (home.join(".ssh/sparkdown"), "%C"));
+        assert_eq!(d1, home.join(".ssh/sd"));
+        assert_eq!(d1, d2);
+        assert_ne!(n1, n2);
+        assert_eq!(n1, control_location(&home, "window-1").1, "stable");
+        assert!(
+            n1.ends_with("%C") && n1.len() == CONTROL_TAG_LEN + 2,
+            "{n1}"
         );
     }
 }

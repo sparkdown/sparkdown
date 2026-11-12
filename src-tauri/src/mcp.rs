@@ -1659,27 +1659,77 @@ pub fn window_socket_token(_label: &str) -> Option<String> {
 #[cfg(unix)]
 pub fn window_socket(app: &AppHandle, label: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::net::UnixListener;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    // Per-window registry of sockets this process bound. Only paths
+    // recorded here are considered this process's own: never remove_file
+    // a path that is not in the registry and is live, so a tag collision (or
+    // a name conflict) cannot make us take another window's socket.
     let socks = window_socks();
     if let Some(w) = socks.lock().ok()?.get(label) {
         if w.path.exists() {
             return Some(w.path.clone());
         }
     }
-    let path =
+    // 128-bit keyed label_tag makes an accidental collision between two
+    // labels effectively impossible, but a stale socket from a previous
+    // launch of *this* label can still be on disk. Attempt to connect: a
+    // successful connect means some live process already owns the name, so
+    // we refuse to clobber it; a connection-refused (or ENOENT) means the
+    // file is dead and can be unlinked.
+    let base_path =
         mcp_socket_path()?.with_file_name(format!("mcp-{}.sock", crate::windows::label_tag(label)));
+    let mut path = base_path.clone();
     check_socket_path_length(&path).ok()?;
-    // Validate the parent dir with the same symlink/ownership check `start`
-    // uses before binding this per-window socket, so a squatter cannot point
-    // the base at a victim-owned dir and have us unlink `mcp-*.sock` or bind
-    // a listener there. Also surface a failed chmod instead of dropping it
-    // (`set_permissions` on `&path` must succeed or we must not advertise
-    // the socket at the default-umask mode).
     if let Some(dir) = path.parent() {
         ensure_socket_dir(dir).ok()?;
     }
-    let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path).ok()?;
+    let mut listener: Option<UnixListener> = None;
+    for attempt in 0u32..8 {
+        if path.exists() {
+            // Live? Then this is not our socket to touch.
+            match UnixStream::connect(&path) {
+                Ok(_) => {
+                    // Someone is listening. Try a fresh suffix so we never
+                    // disturb a live socket, even in the (unreachable with
+                    // a 128-bit keyed tag) event of a collision.
+                    path = base_path.with_file_name(format!(
+                        "mcp-{}-{}.sock",
+                        crate::windows::label_tag(label),
+                        attempt + 1
+                    ));
+                    if check_socket_path_length(&path).is_err() {
+                        return None;
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    // ECONNREFUSED / ENOENT: the file is a stale socket;
+                    // dropping it before bind is standard practice.
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+        match UnixListener::bind(&path) {
+            Ok(l) => {
+                listener = Some(l);
+                break;
+            }
+            Err(_) => {
+                // Lost a race or the dir is unwritable: retry with a
+                // different suffix.
+                path = base_path.with_file_name(format!(
+                    "mcp-{}-{}.sock",
+                    crate::windows::label_tag(label),
+                    attempt + 1
+                ));
+                if check_socket_path_length(&path).is_err() {
+                    return None;
+                }
+                continue;
+            }
+        }
+    }
+    let listener = listener?;
     if std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).is_err() {
         let _ = std::fs::remove_file(&path);
         return None;
@@ -1697,12 +1747,27 @@ pub fn window_socket(app: &AppHandle, label: &str) -> Option<PathBuf> {
     );
     let app = app.clone();
     let state = app.state::<Arc<McpState>>().inner().clone();
+    let socks_ref = socks;
     let label = label.to_string();
+    let bound_path = path.clone();
     let _ = std::thread::Builder::new()
         .name("sparkdown-mcp-window".into())
         .spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
+                // Verify the socket we are accepting on still belongs to
+                // this window's label. If the registry no longer maps
+                // label -> bound_path, this listener may not match the label
+                // (e.g. the file was unlinked and the entry
+                // overwritten); drop the connection instead of pinning
+                // Conn::fixed to a label we can no longer vouch for.
+                let owned = socks_ref
+                    .lock()
+                    .ok()
+                    .is_some_and(|g| g.get(&label).is_some_and(|w| w.path == bound_path));
+                if !owned {
+                    continue;
+                }
                 let (app, state, label, token) =
                     (app.clone(), state.clone(), label.clone(), token.clone());
                 std::thread::spawn(move || {
