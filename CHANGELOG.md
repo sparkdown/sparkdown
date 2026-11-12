@@ -33,6 +33,8 @@ requests.
 - Updater: The update check downloads its manifest into a per-run directory that only the current user can open.
 - Terminal: Pasting from the clipboard uses bracketed-paste markers when the shell enables them.
 - Release: The release gate fails on missing binaries and on multi-line default feature lists.
+- Release: The macOS updater tarball is signed in a separate step, under its final asset name.
+- Updater: Artifact URLs must be under the release download prefix, the signature must name the artifact being installed, and AppImage payloads must be ELF files.
 
 ### Changed
 

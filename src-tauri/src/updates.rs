@@ -34,6 +34,10 @@ pub const ENDPOINT: &str =
     "https://github.com/sparkdown/sparkdown/releases/latest/download/latest.json";
 /// Where "Download" sends users whose install can't update itself.
 pub const RELEASES_PAGE: &str = "https://github.com/sparkdown/sparkdown/releases/latest";
+/// Allowed prefix for artifact URLs taken from `latest.json`. The manifest
+/// is unsigned, so pinning its per-platform `url` to the release host/path
+/// stops a modified manifest from pointing at a different host.
+pub const RELEASE_URL_PREFIX: &str = "https://github.com/sparkdown/sparkdown/releases/download/";
 /// The literal content of updater-pubkey.txt until the owner pastes the key.
 pub const PUBKEY_PLACEHOLDER: &str = "REPLACE_WITH_UPDATER_PUBLIC_KEY";
 /// Updater public key: the content of `~/.tauri/sparkdown-updater.key.pub`
@@ -246,23 +250,69 @@ pub fn parse_pubkey(key: &str) -> Option<minisign_verify::PublicKey> {
 /// Read `version:` from a signature's trusted comment, which `tauri signer
 /// sign --app-version` writes as tab-separated `key:value` pairs.
 pub fn signed_version(trusted_comment: &str) -> Option<&str> {
+    signed_field(trusted_comment, "version:")
+}
+
+/// Read `file:` from a signature's trusted comment. `tauri signer sign`
+/// writes the signed artifact's filename there (e.g. `file:SparkDown_1.0.0
+/// _amd64.AppImage`). Binding this to the manifest entry's URL basename
+/// stops a modified (unsigned) manifest from pairing one platform's `url`
+/// with another platform's same-version signed signature.
+pub fn signed_filename(trusted_comment: &str) -> Option<&str> {
+    signed_field(trusted_comment, "file:")
+}
+
+fn signed_field<'a>(trusted_comment: &'a str, prefix: &str) -> Option<&'a str> {
     trusted_comment
         .split('\t')
-        .find_map(|kv| kv.strip_prefix("version:"))
+        .find_map(|kv| kv.strip_prefix(prefix))
         .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+/// The last `/`-separated segment of `url` (an `https://` URL), with any
+/// `?query` and `#fragment` stripped. Returns `None` when there is no
+/// non-empty final segment.
+pub fn url_basename(url: &str) -> Option<&str> {
+    let path = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    let last = path.rsplit('/').next().unwrap_or(path);
+    if last.is_empty() {
+        None
+    } else {
+        Some(last)
+    }
+}
+
+/// Refuse an artifact URL that is not under the release host/path (the
+/// manifest is unsigned, so the only invariant on `url` otherwise is the
+/// `https://` scheme). `RELEASE_URL_PREFIX` is a prefix of the exact form
+/// scripts/release.sh writes into `latest.json`.
+pub fn check_release_url(url: &str) -> Result<(), String> {
+    if url.starts_with(RELEASE_URL_PREFIX) {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing an update URL that is not on the release host: {url}"
+        ))
+    }
 }
 
 /// Verify `path` against a Tauri-format `.sig` (base64 of the minisign
 /// signature file) and require that the signature was made for
-/// `expected_version`. The trusted comment is covered by minisign's global
-/// signature, so it is only read after `finalize()` succeeds. Requiring the
-/// signed version stops a tampered manifest from pairing a new version number
-/// with an older (validly signed) release.
+/// `expected_version` AND for the artifact named `expected_file` (normally
+/// the basename of the manifest entry's URL). The trusted comment is covered
+/// by minisign's global signature, so it is only read after `finalize()`
+/// succeeds. Requiring the signed version stops a modified manifest from
+/// pairing a new version number with an older (validly signed) release;
+/// requiring the signed filename additionally stops it from pairing one
+/// platform's `url` with another platform's same-version signed artifact.
 pub fn verify_file(
     path: &Path,
     signature_b64: &str,
     pubkey: &minisign_verify::PublicKey,
     expected_version: &str,
+    expected_file: &str,
 ) -> Result<(), String> {
     let sig_text = base64_decode(signature_b64)
         .and_then(|b| String::from_utf8(b).ok())
@@ -286,14 +336,33 @@ pub fn verify_file(
     verifier
         .finalize()
         .map_err(|_| "update signature verification failed".to_owned())?;
-    let signed =
-        signed_version(sig.trusted_comment()).ok_or("update signature does not name a version")?;
+    let comment = sig.trusted_comment();
+    let signed = signed_version(comment).ok_or("update signature does not name a version")?;
     match (Version::parse(signed), Version::parse(expected_version)) {
-        (Some(s), Some(e)) if s == e => Ok(()),
-        _ => Err(format!(
-            "update was signed for version {signed}, but {expected_version} was announced"
-        )),
+        (Some(s), Some(e)) if s == e => {}
+        _ => {
+            return Err(format!(
+                "update was signed for version {signed}, but {expected_version} was announced"
+            ));
+        }
     }
+    let signed_name = signed_filename(comment).ok_or("update signature does not name a file")?;
+    if signed_name != expected_file {
+        // Older macOS releases (≤0.4.2) signed SparkDown.app.tar.gz and renamed
+        // it to SparkDown_<ver>_aarch64.app.tar.gz for distribution, so their
+        // signatures name the pre-rename form. Accept either the exact published
+        // name or the build artifact name for darwin compatibility, but only for
+        // the exact expected filename format.
+        let versioned_darwin = format!("SparkDown_{}_aarch64.app.tar.gz", expected_version);
+        let is_darwin_alias =
+            expected_file == versioned_darwin && signed_name == "SparkDown.app.tar.gz";
+        if !is_darwin_alias {
+            return Err(format!(
+                "update was signed for file {signed_name}, but {expected_file} was announced"
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- curl ----
@@ -527,6 +596,12 @@ pub fn stage_update(
     fetch: Box<Fetch<'_>>,
     mut on_progress: impl FnMut(DownloadProgress),
 ) -> Result<(PathBuf, PathBuf), String> {
+    // The manifest is unsigned: constrain the URL and derive the
+    // expected signed filename from it before touching the network.
+    check_release_url(&entry.url)?;
+    let expected_name = url_basename(&entry.url)
+        .ok_or_else(|| format!("update URL has no filename: {}", entry.url))?
+        .to_owned();
     let limit = artifact_limit(entry.size)?;
     if let Some(parent) = target.parent() {
         sweep_staging(parent);
@@ -538,7 +613,7 @@ pub fn stage_update(
         on_progress(DownloadProgress { received, total })
     })
     .and_then(|()| check_size(&file, entry.size))
-    .and_then(|()| verify_file(&file, &entry.signature, pubkey, version));
+    .and_then(|()| verify_file(&file, &entry.signature, pubkey, version, &expected_name));
     match res {
         Ok(()) => Ok((staging, file)),
         Err(e) => {
@@ -964,6 +1039,12 @@ fn install_staged(
         }
         InstallKind::AppImage => {
             use std::os::unix::fs::PermissionsExt;
+            // AppImage files are ELF binaries (type-1 and type-2 both start
+            // with the ELF magic). The signature already binds the artifact
+            // to its asset name, but this is a last-ditch shape check so a
+            // same-version signature from a different platform cannot be
+            // chmod +x'd and renamed over the installed AppImage.
+            check_elf_magic(file).map_err(|e| e.to_string())?;
             fs::set_permissions(file, fs::Permissions::from_mode(0o755))
                 .map_err(|e| e.to_string())?;
             swap_into_place(target, file).map_err(|e| e.to_string())
@@ -975,6 +1056,21 @@ fn install_staged(
 #[cfg(not(unix))]
 fn install_staged(_: InstallKind, _: &Path, _: &Path, _: &Path) -> Result<(), String> {
     Err("this install cannot update itself".to_owned())
+}
+
+/// Return `Ok` when the file at `path` starts with the ELF magic (`\x7fELF`).
+/// Used as a shape check on an AppImage payload before we chmod +x and swap
+/// it over the installed app.
+#[cfg_attr(not(unix), allow(dead_code))] // install is Unix-only
+fn check_elf_magic(path: &Path) -> io::Result<()> {
+    let mut file = fs::File::open(path)?;
+    let mut magic = [0u8; 4];
+    match file.read_exact(&mut magic) {
+        Ok(()) if &magic == b"\x7fELF" => Ok(()),
+        _ => Err(io::Error::other(
+            "the update payload is not an ELF binary (not an AppImage)",
+        )),
+    }
 }
 
 /// Start the installed version once this process has exited, then exit.
@@ -1189,8 +1285,8 @@ mod tests {
         let s = Scratch::new("sig-ok");
         let f = signed_file(&s.0, b"hello\n");
         let key = parse_pubkey(FIXTURE_PUBKEY).unwrap();
-        verify_file(&f, FIXTURE_SIG, &key, "1.2.3").unwrap();
-        verify_file(&f, FIXTURE_SIG, &key, "v1.2.3").unwrap();
+        verify_file(&f, FIXTURE_SIG, &key, "1.2.3", "f.bin").unwrap();
+        verify_file(&f, FIXTURE_SIG, &key, "v1.2.3", "f.bin").unwrap();
     }
 
     #[test]
@@ -1198,7 +1294,7 @@ mod tests {
         let s = Scratch::new("sig-bad");
         let f = signed_file(&s.0, b"hellO\n");
         let key = parse_pubkey(FIXTURE_PUBKEY).unwrap();
-        assert!(verify_file(&f, FIXTURE_SIG, &key, "1.2.3").is_err());
+        assert!(verify_file(&f, FIXTURE_SIG, &key, "1.2.3", "f.bin").is_err());
     }
 
     #[test]
@@ -1206,7 +1302,7 @@ mod tests {
         let s = Scratch::new("sig-key");
         let f = signed_file(&s.0, b"hello\n");
         let key = parse_pubkey(FIXTURE_PUBKEY).unwrap();
-        let err = verify_file(&f, FIXTURE_SIG_OTHER_KEY, &key, "1.2.3").unwrap_err();
+        let err = verify_file(&f, FIXTURE_SIG_OTHER_KEY, &key, "1.2.3", "other.bin").unwrap_err();
         assert!(err.contains("key"), "{err}");
     }
 
@@ -1216,12 +1312,12 @@ mod tests {
         let f = signed_file(&s.0, b"hello\n");
         let key = parse_pubkey(FIXTURE_PUBKEY).unwrap();
         // Downgrade attack: manifest says 9.9.9, artifact was signed as 1.2.3.
-        let err = verify_file(&f, FIXTURE_SIG, &key, "9.9.9").unwrap_err();
+        let err = verify_file(&f, FIXTURE_SIG, &key, "9.9.9", "f.bin").unwrap_err();
         assert!(err.contains("signed for version 1.2.3"), "{err}");
         // Signatures without a version are rejected outright.
-        let err = verify_file(&f, FIXTURE_SIG_NO_VERSION, &key, "1.2.3").unwrap_err();
+        let err = verify_file(&f, FIXTURE_SIG_NO_VERSION, &key, "1.2.3", "nover.bin").unwrap_err();
         assert!(err.contains("does not name a version"), "{err}");
-        assert!(verify_file(&f, "!!!", &key, "1.2.3").is_err());
+        assert!(verify_file(&f, "!!!", &key, "1.2.3", "f.bin").is_err());
     }
 
     #[test]
@@ -1231,6 +1327,152 @@ mod tests {
             Some("1.2.3")
         );
         assert_eq!(signed_version("timestamp:1\tfile:a"), None);
+    }
+
+    #[test]
+    fn signed_filename_must_match_the_manifest_entry() {
+        let s = Scratch::new("sig-file");
+        let f = signed_file(&s.0, b"hello\n");
+        let key = parse_pubkey(FIXTURE_PUBKEY).unwrap();
+        // Cross-platform swap: the signature is genuine for the same key and
+        // same version, but was made for a different asset filename.
+        let err = verify_file(
+            &f,
+            FIXTURE_SIG,
+            &key,
+            "1.2.3",
+            "SparkDown_1.2.3_amd64.AppImage",
+        )
+        .unwrap_err();
+        assert!(err.contains("signed for file f.bin"), "{err}");
+    }
+
+    #[test]
+    fn signed_filename_reads_the_trusted_comment() {
+        assert_eq!(
+            signed_filename("timestamp:1\tfile:a.tar.gz\tversion:1.2.3"),
+            Some("a.tar.gz")
+        );
+        assert_eq!(signed_filename("timestamp:1\tversion:1.2.3"), None);
+        // Empty values are not accepted as a bound filename.
+        assert_eq!(signed_filename("timestamp:1\tfile:\tversion:1.2.3"), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn darwin_alias_must_match_exact_versioned_filename() {
+        let key = TestKey::new();
+        let pk = key.pubkey();
+        let s = Scratch::new("darwin-alias-exact");
+        let f = signed_file(&s.0, b"macOS bundle");
+
+        // Signature for SparkDown.app.tar.gz (the build artifact)
+        let sig = key.sign(&f, "1.0.0", "SparkDown.app.tar.gz");
+
+        // Should fail for arbitrary _aarch64.app.tar.gz names (not the exact SparkDown_{version}_aarch64.app.tar.gz)
+        let bad = verify_file(&f, &sig, &pk, "1.0.0", "anything_aarch64.app.tar.gz");
+        assert!(bad.is_err(), "should reject arbitrary _aarch64.app.tar.gz");
+        assert!(bad.unwrap_err().contains("anything_aarch64.app.tar.gz"));
+
+        // Should fail when version doesn't match between signature and expected
+        let sig_wrong_ver = key.sign(&f, "1.0.0", "SparkDown.app.tar.gz");
+        let bad_version = verify_file(
+            &f,
+            &sig_wrong_ver,
+            &pk,
+            "9.9.9",
+            "SparkDown_9.9.9_aarch64.app.tar.gz",
+        );
+        assert!(bad_version.is_err(), "should reject when version mismatch");
+
+        // Should accept the exact versioned name with the alias
+        let ok = verify_file(&f, &sig, &pk, "1.0.0", "SparkDown_1.0.0_aarch64.app.tar.gz");
+        assert!(
+            ok.is_ok(),
+            "should accept exact versioned filename with alias"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn darwin_accepts_exact_name_or_build_artifact_alias() {
+        let key = TestKey::new();
+        let pk = key.pubkey();
+        let s = Scratch::new("darwin-alias");
+        let f = signed_file(&s.0, b"macOS bundle");
+
+        // New releases: signature names the final asset (SparkDown_1.0.0_aarch64.app.tar.gz).
+        let sig_new = key.sign(&f, "1.0.0", "SparkDown_1.0.0_aarch64.app.tar.gz");
+        verify_file(
+            &f,
+            &sig_new,
+            &pk,
+            "1.0.0",
+            "SparkDown_1.0.0_aarch64.app.tar.gz",
+        )
+        .unwrap();
+
+        // Older releases (≤0.4.2): signature names the build artifact (SparkDown.app.tar.gz)
+        // which was renamed to SparkDown_<ver>_aarch64.app.tar.gz for distribution.
+        // The client accepts both for darwin.
+        let sig_old = key.sign(&f, "0.4.2", "SparkDown.app.tar.gz");
+        verify_file(
+            &f,
+            &sig_old,
+            &pk,
+            "0.4.2",
+            "SparkDown_0.4.2_aarch64.app.tar.gz",
+        )
+        .unwrap();
+
+        // But only for darwin: other platforms must match exactly.
+        let sig_appimage = key.sign(&f, "1.0.0", "SparkDown.app.tar.gz");
+        let err = verify_file(
+            &f,
+            &sig_appimage,
+            &pk,
+            "1.0.0",
+            "SparkDown_1.0.0_amd64.AppImage",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("signed for file SparkDown.app.tar.gz"),
+            "{err}"
+        );
+        assert!(
+            err.contains("SparkDown_1.0.0_amd64.AppImage was announced"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn url_basename_extracts_the_last_path_segment() {
+        assert_eq!(
+            url_basename("https://host/releases/download/v1.0.0/SparkDown.AppImage"),
+            Some("SparkDown.AppImage")
+        );
+        assert_eq!(
+            url_basename("https://host/a/b.tar.gz?x=1#frag"),
+            Some("b.tar.gz")
+        );
+        assert_eq!(url_basename("https://host/"), None);
+        assert_eq!(url_basename("https://host"), Some("host"));
+    }
+
+    #[test]
+    fn release_url_prefix_rejects_foreign_hosts() {
+        assert!(check_release_url(
+            "https://github.com/sparkdown/sparkdown/releases/download/v1.0.0/x"
+        )
+        .is_ok());
+        for bad in [
+            "http://github.com/sparkdown/sparkdown/releases/download/v1/x",
+            "https://example.invalid/sparkdown/sparkdown/releases/download/v1/x",
+            "https://github.com/other/sparkdown/releases/download/v1/x",
+            "https://github.com.not-github.example/sparkdown/sparkdown/releases/download/v1/x",
+        ] {
+            assert!(check_release_url(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -1461,12 +1703,13 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let s = Scratch::new("install-appimage");
         let target = s.0.join("SparkDown.AppImage");
-        fs::write(&target, "old").unwrap();
+        fs::write(&target, fake_appimage_bytes("old")).unwrap();
         let staging = create_staging(&target).unwrap();
         let file = staging.join("download");
-        fs::write(&file, "new").unwrap();
+        let new_bytes = fake_appimage_bytes("new");
+        fs::write(&file, &new_bytes).unwrap();
         install_staged(InstallKind::AppImage, &target, &staging, &file).unwrap();
-        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(fs::read(&target).unwrap(), new_bytes);
         let mode = fs::metadata(&target).unwrap().permissions().mode();
         assert_eq!(mode & 0o111, 0o111);
     }
@@ -1578,10 +1821,10 @@ mod tests {
             parse_pubkey(&base64_encode(text.as_bytes())).unwrap()
         }
 
-        /// A Tauri-format signature of `path` for `version`, as `tauri signer
-        /// sign --app-version` writes it.
-        fn sign(&self, path: &Path, version: &str) -> String {
-            let comment = format!("timestamp:1790000000\tfile:download\tversion:{version}");
+        /// A Tauri-format signature of `path` for `version` with the signed
+        /// filename `file`, as `tauri signer sign --app-version` writes it.
+        fn sign(&self, path: &Path, version: &str, file: &str) -> String {
+            let comment = format!("timestamp:1790000000\tfile:{file}\tversion:{version}");
             let sig = minisign::sign(
                 Some(&self.0.pk),
                 &self.0.sk,
@@ -1595,11 +1838,15 @@ mod tests {
     }
 
     #[cfg(unix)]
-    /// The manifest entry for a local artifact (signed for `version`).
+    /// The manifest entry for a local artifact (signed for `version`). The
+    /// URL is placed under `RELEASE_URL_PREFIX` and its basename matches the
+    /// artifact file's name, so the signature's `file:` field agrees with
+    /// the URL basename the app derives from the entry.
     fn entry_for(key: &TestKey, artifact: &Path, version: &str) -> PlatformEntry {
+        let name = artifact.file_name().unwrap().to_string_lossy().into_owned();
         PlatformEntry {
-            signature: key.sign(artifact, version),
-            url: "https://example.invalid/artifact".to_owned(),
+            signature: key.sign(artifact, version, &name),
+            url: format!("{RELEASE_URL_PREFIX}v{version}/{name}"),
             size: Some(fs::metadata(artifact).unwrap().len()),
         }
     }
@@ -1830,10 +2077,12 @@ mod tests {
         let err = f.run(&entry, "2.0.0").unwrap_err();
         assert!(err.contains("key"), "{err}");
         f.assert_original_intact();
-        // Right key, but the signature is for other bytes.
+        // Right key, but the signature is for other bytes (same file name,
+        // so verification reaches the stream check and fails there).
         let other = f.tgz.with_extension("other");
         fs::write(&other, b"other bytes").unwrap();
-        entry.signature = f.key.sign(&other, "2.0.0");
+        let name = f.tgz.file_name().unwrap().to_string_lossy().into_owned();
+        entry.signature = f.key.sign(&other, "2.0.0", &name);
         let err = f.run(&entry, "2.0.0").unwrap_err();
         assert!(err.contains("verification failed"), "{err}");
         f.assert_original_intact();
@@ -1940,13 +2189,27 @@ mod tests {
         f.assert_original_intact();
     }
 
-    /// An installed 1.0.0 AppImage (a shell stub) and a signed 2.0.0 one.
+    /// A fake AppImage: four bytes of ELF magic followed by a short marker.
+    /// This passes `check_elf_magic` but is not actually executable; the
+    /// AppImage end-to-end tests therefore check the installed file's bytes
+    /// instead of running it.
+    #[cfg(unix)]
+    fn fake_appimage_bytes(tag: &str) -> Vec<u8> {
+        let mut v = b"\x7fELF".to_vec();
+        v.extend_from_slice(tag.as_bytes());
+        v.extend_from_slice(&[0u8; 60]);
+        v
+    }
+
+    /// An installed 1.0.0 AppImage (ELF-magic stub) and a signed 2.0.0 one.
     #[cfg(unix)]
     struct AppImageFixture {
         _s: Scratch,
         home: PathBuf,
         target: PathBuf,
         new: PathBuf,
+        new_bytes: Vec<u8>,
+        old_bytes: Vec<u8>,
         key: TestKey,
     }
 
@@ -1958,16 +2221,20 @@ mod tests {
             let home = s.0.join("Apps");
             fs::create_dir(&home).unwrap();
             let target = home.join("SparkDown.AppImage");
-            fs::write(&target, "#!/bin/sh\necho 1.0.0\n").unwrap();
+            let old_bytes = fake_appimage_bytes("old-1.0.0");
+            fs::write(&target, &old_bytes).unwrap();
             fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
             // Downloaded files are not executable; install sets the bits.
             let new = s.0.join("SparkDown_2.0.0_amd64.AppImage");
-            fs::write(&new, "#!/bin/sh\necho 2.0.0\n").unwrap();
+            let new_bytes = fake_appimage_bytes("new-2.0.0");
+            fs::write(&new, &new_bytes).unwrap();
             AppImageFixture {
                 _s: s,
                 home,
                 target,
                 new,
+                new_bytes,
+                old_bytes,
                 key: TestKey::new(),
             }
         }
@@ -1984,13 +2251,12 @@ mod tests {
             install_and_clean(InstallKind::AppImage, &self.target, &staging, &file)
         }
 
-        fn runs_as(&self) -> String {
-            let out = crate::proc::command(&self.target).output().unwrap();
-            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        fn installed_bytes(&self) -> Vec<u8> {
+            fs::read(&self.target).unwrap()
         }
 
         fn assert_original_intact(&self) {
-            assert_eq!(self.runs_as(), "1.0.0");
+            assert_eq!(self.installed_bytes(), self.old_bytes);
             assert_no_leftovers(&self.home, &["SparkDown.AppImage"]);
         }
     }
@@ -2001,8 +2267,40 @@ mod tests {
         let f = AppImageFixture::new("e2e-ai");
         let entry = entry_for(&f.key, &f.new, "2.0.0");
         f.run(&entry, "2.0.0").unwrap();
-        assert_eq!(f.runs_as(), "2.0.0");
+        assert_eq!(f.installed_bytes(), f.new_bytes);
         assert_no_leftovers(&f.home, &["SparkDown.AppImage"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn appimage_update_rejects_a_non_elf_payload() {
+        // Even with a genuine signature for the right name/version, a
+        // payload that is not an ELF (e.g. the macOS .app.tar.gz swapped in
+        // through a modified manifest entry) is refused before the swap.
+        let s = Scratch::new("ai-not-elf");
+        let home = s.0.join("Apps");
+        fs::create_dir(&home).unwrap();
+        let target = home.join("SparkDown.AppImage");
+        fs::write(&target, fake_appimage_bytes("old")).unwrap();
+        let bad = s.0.join("SparkDown_2.0.0_aarch64.app.tar.gz");
+        // A gzip-like header, exactly what the macOS asset looks like.
+        fs::write(&bad, b"\x1f\x8b\x08\x00gzip-ish payload").unwrap();
+        let key = TestKey::new();
+        let entry = entry_for(&key, &bad, "2.0.0");
+        let (staging, file) = stage_update(
+            &target,
+            &entry,
+            "2.0.0",
+            &key.pubkey(),
+            local_fetch(bad.clone(), None),
+            |_| {},
+        )
+        .unwrap();
+        // Signature verifies (right name, right version, right key) but the
+        // install refuses the non-ELF payload and the installed file is kept.
+        let err = install_and_clean(InstallKind::AppImage, &target, &staging, &file).unwrap_err();
+        assert!(err.contains("ELF") || err.contains("AppImage"), "{err}");
+        assert_eq!(fs::read(&target).unwrap(), fake_appimage_bytes("old"));
     }
 
     #[cfg(unix)]
