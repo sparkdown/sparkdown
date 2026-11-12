@@ -18,12 +18,12 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 pub mod hostkey;
-mod ssh;
+pub(crate) mod ssh;
 pub use ssh::display_home_path;
 use ssh::{
     classify_remote_watch_delta, close_mux, load_ssh_hosts, map_ssh_failure, mux_options,
     shell_quote, ssh_git, ssh_run, ssh_run_bytes, ssh_run_status, ssh_run_stdin,
-    validate_host_alias, validate_remote_input, validate_remote_path, watch_fingerprint_script,
+    validate_host_alias, validate_remote_input, validate_remote_path,
 };
 pub use ssh::{RemoteSession, SshHost};
 
@@ -961,25 +961,28 @@ const GIT_SECTION_SEP: &str = "__SD_SEP__";
 pub fn git_status(root: &str) -> Result<GitStatus, String> {
     let session = current_session().ok_or_else(|| "no remote session".to_string())?;
     validate_remote_path(root)?;
-    let raw = ssh_run(&session.host, &git_status_script(root))?;
+    let script = git_status_script(root)?;
+    let raw = ssh_run(&session.host, &script)?;
     Ok(parse_status_sections(&raw, root))
 }
 
-fn git_status_script(root: &str) -> String {
+fn git_status_script(root: &str) -> Result<String, String> {
     // One round trip for all the git questions (repo? top-level, the way up
     // to it, branch, porcelain status), sectioned by a sentinel line. The old
     // shape was up to four ssh calls — and the Changes badge asks on every
     // watcher tick. The `--show-cdup` section (see parse_status_sections)
     // lets the top level keep the root's spelling through symlinks.
+    let (filters, diffs) = ssh::remote_collect_driver_names(root)?;
+    let neutralizers = ssh::remote_filter_neutralizers_env(&filters, &diffs);
     let r = shell_quote(root);
-    format!(
-        "env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -C {r} rev-parse --is-inside-work-tree 2>/dev/null; echo {sep}; \
-         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -C {r} rev-parse --show-toplevel 2>/dev/null; echo {sep}; \
-         c=$(env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -C {r} rev-parse --show-cdup 2>/dev/null) && printf 'cdup=%s\\n' \"$c\" && (cd {r} && cd \"./$c\" && printf 'phys=%s\\n' \"$(pwd -P)\") 2>/dev/null; echo {sep}; \
-         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -C {r} rev-parse --abbrev-ref HEAD 2>/dev/null; echo {sep}; \
-         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -C {r} status --ignore-submodules=all --porcelain -z --untracked-files=all 2>/dev/null; true",
+    Ok(format!(
+        "env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= {neutralizers}git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c protocol.allow=never -c fetch.negotiationAlgorithm=noop -C {r} rev-parse --is-inside-work-tree 2>/dev/null; echo {sep}; \
+         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= {neutralizers}git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c protocol.allow=never -c fetch.negotiationAlgorithm=noop -C {r} rev-parse --show-toplevel 2>/dev/null; echo {sep}; \
+         c=$(env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= {neutralizers}git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c protocol.allow=never -c fetch.negotiationAlgorithm=noop -C {r} rev-parse --show-cdup 2>/dev/null) && printf 'cdup=%s\\n' \"$c\" && (cd {r} && cd \"./$c\" && printf 'phys=%s\\n' \"$(pwd -P)\") 2>/dev/null; echo {sep}; \
+         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= {neutralizers}git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c protocol.allow=never -c fetch.negotiationAlgorithm=noop -C {r} rev-parse --abbrev-ref HEAD 2>/dev/null; echo {sep}; \
+         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= {neutralizers}git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c protocol.allow=never -c fetch.negotiationAlgorithm=noop -C {r} status --ignore-submodules=all --porcelain -z --untracked-files=all 2>/dev/null; true",
         sep = GIT_SECTION_SEP
-    )
+    ))
 }
 
 /// Parse the sectioned git_status payload (see GIT_SECTION_SEP script).
@@ -1117,7 +1120,6 @@ pub fn watch_start(app: AppHandle, root: &str) -> Result<(), String> {
     let my_generation = watch_generation().load(Ordering::SeqCst);
     let host = session.host;
     let root = root.to_string();
-    let script = watch_fingerprint_script(&root);
     let label = crate::windows::current_label();
     std::thread::spawn(move || {
         let _scope = crate::windows::enter(&label);
@@ -1128,6 +1130,14 @@ pub fn watch_start(app: AppHandle, root: &str) -> Result<(), String> {
             {
                 break;
             }
+            let script = match ssh::watch_fingerprint_script(&root) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to build watch script: {}", e);
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                    continue;
+                }
+            };
             match ssh_run(&host, &script) {
                 Ok(fp) => {
                     // Structure-only deltas remount the explorer; content/git
@@ -1918,7 +1928,9 @@ Host *.example.com
 
     #[test]
     fn watch_and_git_scripts_run_on_remote() {
-        let watch = watch_fingerprint_script("/home/u/proj");
+        let _guard = TEST_LOCK.lock().unwrap();
+        let watch = ssh::watch_fingerprint_script("/home/u/proj")
+            .expect("watch_fingerprint_script should succeed");
         assert!(watch.contains("core.fsmonitor=false"));
         // -H: follow a symlinked root (e.g. /home/user) or the
         // fingerprint is permanently empty and changes never surface.
@@ -1944,6 +1956,7 @@ Host *.example.com
     #[cfg(unix)]
     #[test]
     fn watch_fingerprint_script_runs_under_local_sh() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("sd-watch-fp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
@@ -1951,7 +1964,8 @@ Host *.example.com
         std::fs::write(dir.join("a.md"), "hello").unwrap();
 
         let run = || {
-            let script = watch_fingerprint_script(dir.to_str().unwrap());
+            let script = ssh::watch_fingerprint_script(dir.to_str().unwrap())
+                .expect("watch_fingerprint_script should succeed");
             let out = crate::proc::command("sh")
                 .arg("-c")
                 .arg(&script)
@@ -2382,7 +2396,8 @@ Host *.example.com
         let dest = std::env::var("SPARKDOWN_SSH_TEST_DEST").expect("SPARKDOWN_SSH_TEST_DEST");
         let repo = std::env::var("SPARKDOWN_SSH_TEST_REPO").expect("SPARKDOWN_SSH_TEST_REPO");
         let s = connect_with(&[], &dest, &repo, ssh_run).unwrap();
-        let script = watch_fingerprint_script(&s.path);
+        let script = ssh::watch_fingerprint_script(&s.path)
+            .expect("watch_fingerprint_script should succeed");
         let before = ssh_run(&dest, &script).unwrap();
         let status0 = git_status(&s.path).unwrap();
         assert!(status0.is_repo, "not a repo");
@@ -3157,6 +3172,7 @@ Host *.example.com
     #[cfg(unix)]
     #[test]
     fn remote_git_status_script_runs_through_a_symlink() {
+        let _guard = TEST_LOCK.lock().unwrap();
         use std::fs;
         let git_ok = crate::proc::command("git")
             .arg("--version")
@@ -3185,8 +3201,9 @@ Host *.example.com
         let link = base.join("link");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let root = format!("{}/docs", link.to_string_lossy());
+        let script = git_status_script(&root).expect("git_status_script should succeed");
         let out = crate::proc::command("/bin/sh")
-            .args(["-c", &git_status_script(&root)])
+            .args(["-c", &script])
             .output()
             .unwrap();
         let _ = fs::remove_dir_all(&base);
@@ -3203,7 +3220,8 @@ Host *.example.com
 
     #[test]
     fn remote_git_status_script_asks_for_the_way_up() {
-        let script = git_status_script("/tmp/x");
+        let _guard = TEST_LOCK.lock().unwrap();
+        let script = git_status_script("/tmp/x").expect("git_status_script should succeed");
         assert_eq!(script.matches(GIT_SECTION_SEP).count(), 4, "{script}");
         assert!(script.contains("rev-parse --show-cdup"), "{script}");
         assert!(script.contains("printf 'cdup=%s\\n'"), "{script}");
@@ -3837,7 +3855,7 @@ pub fn git_change_stats(
         return Ok(Vec::new());
     }
     let (tracked, hashed, untracked) = remote_plan(&changes);
-    let script = remote_stats_script(root, tracked, &hashed, &untracked, shell_quote);
+    let script = remote_stats_script(root, tracked, &hashed, &untracked, shell_quote)?;
     let raw = ssh_run(&session.host, &script)?;
     let parsed = parse_remote_stats(&raw, hashed.len(), untracked.len());
     Ok(remote_stats_from(&changes, &hashed, &parsed))

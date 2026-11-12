@@ -20,6 +20,7 @@ requests.
 - Git diff operations now timeout after 20 seconds and reject special file types.
 - Filter and diff driver enumeration now covers included config and worktree scope.
 - Filter and diff driver config is applied via environment variables to handle names containing special characters.
+- Remote git operations over SSH apply filter and diff driver neutralization.
 - Background fetch is skipped for repositories whose config sets commands.
 
 ### Changed

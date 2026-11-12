@@ -1,6 +1,7 @@
 //! SSH config parse + BatchMode `ssh` helpers for remote sessions v1 (#36).
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1147,11 +1148,126 @@ pub(crate) fn ssh_run_bytes(
     Ok(result.stdout)
 }
 
+/// Build shell environment variable assignments for filter/diff driver neutralization.
+/// Returns a string like "GIT_CONFIG_COUNT=N GIT_CONFIG_KEY_0=... GIT_CONFIG_VALUE_0=... "
+pub(crate) fn remote_filter_neutralizers_env(
+    filters: &BTreeSet<String>,
+    diffs: &BTreeSet<String>,
+) -> String {
+    let mut pairs = Vec::new();
+    for f in filters {
+        pairs.push((format!("filter.{f}.clean"), String::new()));
+        pairs.push((format!("filter.{f}.smudge"), String::new()));
+        pairs.push((format!("filter.{f}.process"), String::new()));
+        pairs.push((format!("filter.{f}.required"), "false".to_string()));
+    }
+    for d in diffs {
+        pairs.push((format!("diff.{d}.command"), String::new()));
+        pairs.push((format!("diff.{d}.textconv"), String::new()));
+    }
+    if pairs.is_empty() {
+        return String::new();
+    }
+    let mut result = format!("GIT_CONFIG_COUNT={} ", pairs.len());
+    for (i, (key, value)) in pairs.iter().enumerate() {
+        result.push_str(&format!("GIT_CONFIG_KEY_{}={} ", i, shell_quote(key)));
+        result.push_str(&format!("GIT_CONFIG_VALUE_{}={} ", i, shell_quote(value)));
+    }
+    result
+}
+
+/// Collect filter and diff driver names from local and worktree git config over SSH.
+/// Uses the same enumeration logic as local_exec_neutralisers in git.rs.
+pub(crate) fn remote_collect_driver_names(
+    root: &str,
+) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
+    let Some(session) = super::current_session() else {
+        return Ok((BTreeSet::new(), BTreeSet::new()));
+    };
+    validate_remote_path(root)?;
+    collect_driver_names_with(root, |cmd| ssh_exec(&session.host, cmd, None))
+}
+
+/// True when a `git config <scope>` failure only means that scope does not
+/// exist here: a folder that is not a repository, or a linked worktree whose
+/// repository has no `extensions.worktreeConfig`. Any other failure is a real
+/// error and must not be treated as "no drivers".
+fn config_scope_absent(result: &SshResult) -> bool {
+    if result.status == 1 && result.stdout.is_empty() {
+        return true;
+    }
+    result.stderr.contains("not a git repository")
+        || result
+            .stderr
+            .contains("can only be used inside a git repository")
+        || (result.status == 128
+            && result
+                .stderr
+                .contains("cannot be used with multiple working trees")
+            && result.stderr.contains("worktreeConfig"))
+}
+
+/// Enumeration behind [`remote_collect_driver_names`], with the command runner
+/// injected so it can be exercised against a local shell. Each scope is
+/// handled on its own: a scope that is absent contributes nothing, but names
+/// found in the other scope are kept.
+fn collect_driver_names_with(
+    root: &str,
+    exec: impl Fn(&str) -> Result<SshResult, String>,
+) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
+    let mut filters = BTreeSet::new();
+    let mut diffs = BTreeSet::new();
+
+    for scope in ["--local", "--worktree"] {
+        let cmd = format!(
+            "LC_ALL=C LANG=C git -C {} config {} --includes --name-only --get-regexp '^(filter|diff)\\.'",
+            shell_quote(root),
+            scope
+        );
+        let result = exec(&cmd)?;
+        if result.status != 0 {
+            if config_scope_absent(&result) {
+                continue;
+            }
+            return Err(format!(
+                "{} config enumeration failed: {}",
+                scope,
+                result.failure_text()
+            ));
+        }
+
+        for line in result.stdout_lossy().lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("filter.") {
+                if let Some((name, sub)) = rest.rsplit_once('.') {
+                    if !name.is_empty()
+                        && matches!(sub, "clean" | "smudge" | "process" | "required")
+                    {
+                        filters.insert(name.to_string());
+                    }
+                }
+            } else if let Some(rest) = line.strip_prefix("diff.") {
+                if let Some((name, sub)) = rest.rsplit_once('.') {
+                    if !name.is_empty() && matches!(sub, "command" | "textconv") {
+                        diffs.insert(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((filters, diffs))
+}
+
 /// `git -C <root> <args…>` over SSH. Diffs may exit 1 when there are changes;
 /// we still return stdout in that case (same as a working `git diff`).
 pub(crate) fn ssh_git(root: &str, args: &[&str]) -> Result<String, String> {
     let session = super::current_session().ok_or_else(|| "no remote session".to_string())?;
     validate_remote_path(root)?;
+
+    let (filters, diffs) = remote_collect_driver_names(root)?;
+    let neutralizers = remote_filter_neutralizers_env(&filters, &diffs);
+
     let prefix = if args.contains(&"--no-index") {
         let requested = args.last().copied().unwrap_or("");
         // POSIX resolution of the repo root and the requested file's directory
@@ -1170,7 +1286,7 @@ pub(crate) fn ssh_git(root: &str, args: &[&str]) -> Result<String, String> {
     } else {
         String::new()
     };
-    let mut remote = format!("{prefix}env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c core.pager=cat -C {} ", shell_quote(root));
+    let mut remote = format!("{prefix}env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= {neutralizers}git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c core.pager=cat -c protocol.allow=never -c fetch.negotiationAlgorithm=noop -C {} ", shell_quote(root));
     for a in args {
         remote.push_str(&shell_quote(a));
         remote.push(' ');
@@ -1205,15 +1321,17 @@ pub(crate) fn ssh_git(root: &str, args: &[&str]) -> Result<String, String> {
 /// change ever reached the explorer or Changes (#28). The exact mtime
 /// format is irrelevant — the content section is only ever compared for
 /// equality between two polls of the *same* host, never parsed.
-pub fn watch_fingerprint_script(root: &str) -> String {
+pub fn watch_fingerprint_script(root: &str) -> Result<String, String> {
+    let (filters, diffs) = remote_collect_driver_names(root)?;
+    let neutralizers = remote_filter_neutralizers_env(&filters, &diffs);
     let root = shell_quote(root);
-    format!(
+    Ok(format!(
         "printf '%s\\n' '__SD_STRUCT__'; \
          find -H {root} \\( -name .git -o -name node_modules -o -name target -o -name dist \\) -prune \
          -o \\( -type d -exec printf 'd %s\\n' {{}} + -o -type f -exec printf 'f %s\\n' {{}} + \\) 2>/dev/null | LC_ALL=C sort; \
          printf '%s\\n' '__SD_CONTENT__'; \
-         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-           git -c core.fsmonitor=false -c diff.external= -C {root} status --ignore-submodules=all --porcelain -z --untracked-files=all 2>/dev/null; \
+         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= {neutralizers}\
+           git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c protocol.allow=never -c fetch.negotiationAlgorithm=noop -C {root} status --ignore-submodules=all --porcelain -z --untracked-files=all 2>/dev/null; \
          if stat -c %Y / >/dev/null 2>&1; then \
            find -H {root} \\( -name .git -o -name node_modules -o -name target -o -name dist \\) -prune \
            -o -type f -exec stat -c '%Y %s %n' {{}} + 2>/dev/null; \
@@ -1222,7 +1340,7 @@ pub fn watch_fingerprint_script(root: &str) -> String {
            -o -type f -exec stat -f '%m %z %N' {{}} + 2>/dev/null; \
          fi | LC_ALL=C sort",
         root = root
-    )
+    ))
 }
 
 pub fn split_watch_fingerprint(fp: &str) -> (&str, &str) {
@@ -1310,5 +1428,153 @@ mod exec_tests {
         let out = run_with_deadline(cmd, Some(&payload), Duration::from_secs(30)).unwrap();
         assert_eq!(out.status.code(), Some(3));
         assert!(out.stdin_err.is_some());
+    }
+
+    // --- driver enumeration, run against a local shell instead of ssh ---
+
+    #[cfg(unix)]
+    fn local_exec(cmd: &str) -> Result<SshResult, String> {
+        let out = crate::proc::command("sh")
+            .arg("-c")
+            .arg(cmd)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .map_err(|e| e.to_string())?;
+        Ok(SshResult {
+            status: out.status.code().unwrap_or(-1),
+            stdout: out.stdout,
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
+    #[cfg(unix)]
+    fn git_in(dir: &Path, args: &[&str]) {
+        let out = crate::proc::command("git")
+            .current_dir(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    fn scratch_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sd_drivers_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d.canonicalize().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn driver_names_empty_for_a_folder_that_is_not_a_repo() {
+        let dir = scratch_dir("nonrepo");
+        let (filters, diffs) = collect_driver_names_with(dir.to_str().unwrap(), local_exec)
+            .expect("a folder that is not a repository has no drivers, not an error");
+        assert!(filters.is_empty() && diffs.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn driver_names_empty_for_a_folder_whose_gitfile_points_nowhere() {
+        let dir = scratch_dir("gitfile");
+        std::fs::write(dir.join(".git"), "gitdir: /nonexistent/sd-drivers\n").unwrap();
+        let (filters, diffs) = collect_driver_names_with(dir.to_str().unwrap(), local_exec)
+            .expect("a dangling gitfile is a folder that is not a repository");
+        assert!(filters.is_empty() && diffs.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn driver_names_found_in_a_plain_repo() {
+        let dir = scratch_dir("plain");
+        git_in(&dir, &["init", "-q"]);
+        git_in(&dir, &["config", "filter.demo.clean", "cat"]);
+        git_in(&dir, &["config", "diff.viewer.textconv", "cat"]);
+        let (filters, diffs) =
+            collect_driver_names_with(dir.to_str().unwrap(), local_exec).unwrap();
+        assert_eq!(filters.into_iter().collect::<Vec<_>>(), ["demo"]);
+        assert_eq!(diffs.into_iter().collect::<Vec<_>>(), ["viewer"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn driver_names_failure_other_than_a_missing_scope_is_an_error() {
+        let dir = scratch_dir("broken");
+        git_in(&dir, &["init", "-q"]);
+        // An unreadable config makes git exit 128 with a message that is
+        // neither "not a repository" nor the worktree-config one.
+        std::fs::write(dir.join(".git/config"), "[core\n").unwrap();
+        let err = collect_driver_names_with(dir.to_str().unwrap(), local_exec)
+            .expect_err("a real failure must not read as 'no drivers'");
+        assert!(err.contains("config enumeration failed"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn driver_names_survive_a_linked_worktree_without_worktree_config() {
+        let base = scratch_dir("linked");
+        let main = base.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        git_in(&main, &["init", "-q"]);
+        git_in(&main, &["config", "filter.demo.clean", "touch MARKER; cat"]);
+        std::fs::write(main.join(".gitattributes"), "*.txt filter=demo\n").unwrap();
+        std::fs::write(main.join("a.txt"), "hello\n").unwrap();
+        git_in(&main, &["add", ".gitattributes", "a.txt"]);
+        git_in(&main, &["commit", "-q", "-m", "init"]);
+        let wt = base.join("wt");
+        git_in(&main, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        let wt_str = wt.to_str().unwrap();
+
+        // Precondition: in this worktree --worktree exits 128 while --local
+        // lists the driver, which is the case under test.
+        let probe_worktree = local_exec(&format!(
+            "git -C {} config --worktree --get-regexp '^filter\\.'",
+            shell_quote(wt_str)
+        ))
+        .unwrap();
+        assert_eq!(probe_worktree.status, 128, "{}", probe_worktree.stderr);
+        let probe_local = local_exec(&format!(
+            "git -C {} config --local --get-regexp '^filter\\.'",
+            shell_quote(wt_str)
+        ))
+        .unwrap();
+        assert_eq!(probe_local.status, 0);
+
+        let (filters, diffs) = collect_driver_names_with(wt_str, local_exec)
+            .expect("worktree scope being absent is not an error");
+        assert_eq!(
+            filters.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["demo"]
+        );
+
+        // The overrides built from those names really stop the driver.
+        let env = remote_filter_neutralizers_env(&filters, &diffs);
+        assert!(env.contains("filter.demo.clean"), "{env}");
+        let run = |prefix: &str| {
+            let _ = std::fs::remove_file(wt.join("MARKER"));
+            let out = local_exec(&format!(
+                "cd {} && {prefix}git hash-object --path=a.txt a.txt",
+                shell_quote(wt_str)
+            ))
+            .unwrap();
+            assert_eq!(out.status, 0, "{}", out.stderr);
+            wt.join("MARKER").exists()
+        };
+        assert!(run(""), "control: the driver runs without the overrides");
+        assert!(!run(&env), "the driver must not run with the overrides");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
