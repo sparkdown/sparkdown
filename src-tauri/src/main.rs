@@ -982,13 +982,13 @@ fn release_window(app: &tauri::AppHandle, label: &str) {
 mod tests {
     use super::PendingFiles;
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     struct EnvGuard {
         home: Option<std::ffi::OsString>,
         xdg: Option<std::ffi::OsString>,
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     impl EnvGuard {
         fn new() -> Self {
             Self {
@@ -998,7 +998,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             if let Some(ref h) = self.home {
