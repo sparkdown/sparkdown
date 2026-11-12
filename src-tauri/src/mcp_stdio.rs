@@ -141,7 +141,7 @@ fn say_hello<S: std::io::Read + std::io::Write>(sock: &mut S, hello: &serde_json
 /// endpoint. The app refuses it unless the user opted in.
 #[cfg(unix)]
 fn connect_external() -> Option<std::os::unix::net::UnixStream> {
-    std::os::unix::net::UnixStream::connect(crate::mcp::mcp_socket_path()).ok()
+    crate::mcp::mcp_socket_path().and_then(|p| std::os::unix::net::UnixStream::connect(p).ok())
 }
 
 #[cfg(windows)]

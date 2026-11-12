@@ -9,6 +9,10 @@ requests.
 - Terminal: Quote the agent server path in the Claude launch line.
 - Files: Check that the opened file is a regular file and cap the read.
 
+### Changed
+
+- **MCP socket folder location** (Unix): on Linux without `XDG_RUNTIME_DIR` set, the socket moves from `/tmp/sparkdown/mcp.sock` to `~/.cache/sparkdown/mcp.sock`. The folder is created with mode 0700 and verified to be owned by your user and not a symlink before binding or connecting. macOS is unchanged (still the per-user `$TMPDIR/sparkdown`), and Linux with `XDG_RUNTIME_DIR` set is unchanged. Terminal sessions started before the upgrade will need to be restarted to reconnect to the new socket location.
+
 ## [0.4.2] — 2026-11-09
 
 Terminal, Git and command-line improvements on top of 0.4.1. Not in this

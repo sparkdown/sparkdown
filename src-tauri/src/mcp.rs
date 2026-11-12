@@ -25,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1302,16 +1304,85 @@ pub(crate) fn stale_command(
     (!same).then_some(StaleCommand::Other)
 }
 
-/// Stable per-user socket path: `<runtime dir>/sparkdown/mcp.sock`. macOS
-/// `$TMPDIR` is already per-user; Linux prefers `$XDG_RUNTIME_DIR`. The
-/// parent dir is created 0700. Stable (not per-pid) so tmux sessions that
-/// outlive an app restart keep a working `$SPARKDOWN_MCP`.
+/// Stable per-user socket path: `<runtime dir>/sparkdown/mcp.sock`. The
+/// parent dir is created 0700 and verified owned by the current euid before
+/// the socket is bound (see `start`). Stable (not per-pid) so tmux sessions
+/// that outlive an app restart keep a working `$SPARKDOWN_MCP`.
+///
+/// Base selection must be strictly per-user, because `<base>/sparkdown` and
+/// `mcp.sock` carry the only access control the MCP channel has. In order:
+///   1. `$XDG_RUNTIME_DIR` when set to a non-empty value (Linux, per-user,
+///      0700).
+///   2. On macOS, `std::env::temp_dir()` — `$TMPDIR` resolves to the
+///      per-user `/var/folders/<...>/T` dir (0700).
+///   3. Otherwise an app-private dir under `$HOME` (`$HOME/.cache/sparkdown/mcp.sock`).
+///
+/// Returns `None` when no per-user base is available (both XDG_RUNTIME_DIR
+/// and HOME are unset or empty on Linux).
 #[cfg(unix)]
-pub fn mcp_socket_path() -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("sparkdown").join("mcp.sock")
+pub fn mcp_socket_path() -> Option<PathBuf> {
+    runtime_base().map(|b| b.join("sparkdown").join("mcp.sock"))
+}
+
+/// Pick the per-user runtime base used by `mcp_socket_path`. See its doc
+/// comment for the ordering. Empty env vars are rejected, matching
+/// `context.rs::context_root`.
+#[cfg(unix)]
+fn runtime_base() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(v));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // `$TMPDIR` on macOS is a per-user 0700 dir; keep the previous
+        // behaviour there.
+        return Some(std::env::temp_dir());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::env::var_os("HOME")
+            .filter(|v| !v.is_empty())
+            .map(|h| PathBuf::from(h).join(".cache"))
+    }
+}
+
+/// Create the socket directory under the runtime base. The base itself
+/// (XDG_RUNTIME_DIR or ~/.cache) is assumed to exist or be creatable;
+/// we create and harden only the sparkdown subdirectory.
+#[cfg(unix)]
+pub(crate) fn ensure_socket_dir(dir: &Path) -> std::io::Result<()> {
+    // Extract base and leaf. For ~/.cache/sparkdown/mcp.sock parent,
+    // base is ~/.cache and leaf is sparkdown.
+    let leaf = dir.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "socket dir has no name")
+    })?;
+    let base = dir.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "socket dir has no parent")
+    })?;
+    // Create base recursively if needed (e.g. ~/.cache on fresh machine).
+    std::fs::create_dir_all(base)?;
+    // Create and harden the leaf (sparkdown) with ownership check.
+    let leaf_path = base.join(leaf);
+    crate::context::ensure_owned_dir(&leaf_path)?;
+    Ok(())
+}
+
+/// Check that a Unix socket path fits in the platform's sockaddr_un limit.
+/// macOS allows 104 bytes, Linux 108.
+#[cfg(unix)]
+fn check_socket_path_length(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    const LIMIT: usize = 104;
+    #[cfg(not(target_os = "macos"))]
+    const LIMIT: usize = 108;
+    let len = path.as_os_str().len();
+    if len >= LIMIT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("socket path too long ({len} bytes, limit {LIMIT})"),
+        ));
+    }
+    Ok(())
 }
 
 /// Windows: a per-launch named pipe with an unguessable name. Pipes live in
@@ -1397,12 +1468,24 @@ pub fn shutdown() {
 pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
-    let path = mcp_socket_path();
+    let Some(path) = mcp_socket_path() else {
+        eprintln!(
+            "SparkDown MCP socket: no per-user base available (XDG_RUNTIME_DIR and HOME unset)"
+        );
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no per-user base directory available",
+        ));
+    };
+    check_socket_path_length(&path)?;
     let dir = path.parent().expect("socket path has a parent");
-    std::fs::create_dir_all(dir)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    // Create base recursively (e.g. ~/.cache) and harden only the leaf
+    // (sparkdown) with ownership check, so root-owned /home is fine.
+    ensure_socket_dir(dir)?;
     if path.exists() {
         // Live socket → another instance owns it. Dead file (crash) → reclaim.
+        // Validate the folder before connecting, same as when binding.
+        ensure_socket_dir(dir)?;
         if UnixStream::connect(&path).is_ok() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AddrInUse,
@@ -1412,7 +1495,13 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
         let _ = std::fs::remove_file(&path);
     }
     let listener = UnixListener::bind(&path)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    if std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).is_err() {
+        let _ = std::fs::remove_file(&path);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "failed to set socket permissions",
+        ));
+    }
     let _ = SOCKET.set(path.clone());
     eprintln!("SparkDown MCP socket: {}", path.display());
     std::thread::Builder::new()
@@ -1445,10 +1534,23 @@ pub fn window_socket(app: &AppHandle, label: &str) -> Option<PathBuf> {
         }
     }
     let path =
-        mcp_socket_path().with_file_name(format!("mcp-{}.sock", crate::windows::label_tag(label)));
+        mcp_socket_path()?.with_file_name(format!("mcp-{}.sock", crate::windows::label_tag(label)));
+    check_socket_path_length(&path).ok()?;
+    // Validate the parent dir with the same symlink/ownership check `start`
+    // uses before binding this per-window socket, so a squatter cannot point
+    // the base at a victim-owned dir and have us unlink `mcp-*.sock` or bind
+    // a listener there. Also surface a failed chmod instead of dropping it
+    // (`set_permissions` on `&path` must succeed or we must not advertise
+    // the socket at the default-umask mode).
+    if let Some(dir) = path.parent() {
+        ensure_socket_dir(dir).ok()?;
+    }
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).ok()?;
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    if std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).is_err() {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
     socks.lock().ok()?.insert(label.to_string(), path.clone());
     let app = app.clone();
     let state = app.state::<Arc<McpState>>().inner().clone();
@@ -3029,7 +3131,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn socket_path_is_under_a_sparkdown_dir() {
-        let p = mcp_socket_path();
+        let p = mcp_socket_path().unwrap();
         assert!(p.ends_with("sparkdown/mcp.sock"), "{}", p.display());
     }
     /// The POSIX form (local Unix and every remote host) is the same command
@@ -3905,5 +4007,242 @@ mod tests {
         let p = mcp_socket_path();
         assert!(p.to_string_lossy().starts_with(r"\\.\pipe\sparkdown-"));
         assert_eq!(p, mcp_socket_path(), "stable within one launch");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn socket_dir_creates_base_and_hardens_leaf() {
+        let tmp = std::env::temp_dir().join(format!("sd-sockdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let base = tmp.join("base");
+        let leaf = base.join("sparkdown");
+        let sock = leaf.join("mcp.sock");
+        ensure_socket_dir(sock.parent().unwrap()).unwrap();
+        assert!(leaf.is_dir());
+        let meta = std::fs::metadata(&leaf).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn socket_dir_works_with_missing_base() {
+        let tmp = std::env::temp_dir().join(format!("sd-nobase-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let base = tmp.join("not-yet");
+        let leaf = base.join("sparkdown");
+        ensure_socket_dir(&leaf).unwrap();
+        assert!(leaf.is_dir());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn socket_dir_accepts_root_owned_parent() {
+        use std::os::unix::fs::MetadataExt;
+        let parent = std::path::PathBuf::from("/tmp");
+        let parent_meta = std::fs::metadata(&parent).unwrap();
+        let my_uid = unsafe { libc::geteuid() };
+
+        if parent_meta.uid() == my_uid {
+            eprintln!("skip: /tmp is user-owned, cannot test root-owned parent");
+            return;
+        }
+
+        let leaf = parent.join(format!("sd-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&leaf);
+
+        assert!(
+            ensure_socket_dir(&leaf).is_ok(),
+            "accept root-owned parent when leaf is ours"
+        );
+        assert!(leaf.is_dir());
+        let leaf_meta = std::fs::metadata(&leaf).unwrap();
+        assert_eq!(leaf_meta.uid(), my_uid);
+        assert_eq!(leaf_meta.mode() & 0o777, 0o700);
+        let _ = std::fs::remove_dir_all(&leaf);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn socket_dir_refuses_symlink() {
+        let tmp = std::env::temp_dir().join(format!("sd-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let target = tmp.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = tmp.join("sparkdown");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(ensure_socket_dir(&link).is_err(), "refuses symlinked leaf");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn socket_dir_refuses_non_user_leaf() {
+        use std::os::unix::fs::MetadataExt;
+        let my_uid = unsafe { libc::geteuid() };
+
+        if my_uid == 0 {
+            let tmp = std::env::temp_dir().join(format!("sd-notours-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir(&tmp).unwrap();
+            let other_uid = 65534; // nobody
+            unsafe {
+                libc::chown(
+                    std::ffi::CString::new(tmp.to_str().unwrap())
+                        .unwrap()
+                        .as_ptr(),
+                    other_uid,
+                    0,
+                );
+            }
+            let meta = std::fs::metadata(&tmp).unwrap();
+            if meta.uid() == other_uid {
+                assert!(
+                    ensure_socket_dir(&tmp).is_err(),
+                    "refuses leaf owned by another user (root test with chown)"
+                );
+            } else {
+                eprintln!("skip: chown failed");
+            }
+            let _ = std::fs::remove_dir_all(&tmp);
+        } else {
+            let non_user_dir = std::path::PathBuf::from("/tmp");
+            let meta = std::fs::metadata(&non_user_dir).unwrap();
+            if meta.uid() != my_uid {
+                assert!(
+                    ensure_socket_dir(&non_user_dir).is_err(),
+                    "refuses leaf owned by another user (non-root test on /tmp)"
+                );
+            } else {
+                eprintln!("skip: /tmp is user-owned, cannot test non-user directory");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn socket_path_length_is_checked() {
+        let short = PathBuf::from("/tmp/a.sock");
+        assert!(check_socket_path_length(&short).is_ok());
+        let long = PathBuf::from(format!("/tmp/{}.sock", "x".repeat(200)));
+        assert!(check_socket_path_length(&long).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn socket_works_on_fresh_home() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let _guard = EnvGuard::new();
+        let tmp = std::env::temp_dir().join(format!("sd-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir(&tmp).unwrap();
+        std::env::set_var("HOME", &tmp);
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        let path = mcp_socket_path().unwrap();
+        assert_eq!(path, tmp.join(".cache").join("sparkdown").join("mcp.sock"));
+        if let Some(dir) = path.parent() {
+            ensure_socket_dir(dir).unwrap();
+        }
+        let _ = std::fs::remove_file(&path);
+        let _listener = UnixListener::bind(&path).unwrap();
+        assert!(UnixStream::connect(&path).is_ok());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn xdg_runtime_dir_wins() {
+        use std::os::unix::net::UnixStream;
+        let _guard = EnvGuard::new();
+        let tmp = std::env::temp_dir().join(format!("sd-xdg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir(&tmp).unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", &tmp);
+        let path = mcp_socket_path().unwrap();
+        assert_eq!(path, tmp.join("sparkdown").join("mcp.sock"));
+        if let Some(dir) = path.parent() {
+            ensure_socket_dir(dir).unwrap();
+        }
+        let _ = std::fs::remove_file(&path);
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert!(UnixStream::connect(&path).is_ok());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn fallback_lock_succeeds_on_fresh_home() {
+        let _guard = EnvGuard::new();
+        let tmp = std::env::temp_dir().join(format!("sd-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir(&tmp).unwrap();
+        std::env::set_var("HOME", &tmp);
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        let start = std::time::Instant::now();
+        let lock_path = tmp.join(".cache").join("sparkdown").join("instance.lock");
+        if let Some(dir) = lock_path.parent() {
+            ensure_socket_dir(dir).unwrap();
+        }
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 };
+        let elapsed = start.elapsed();
+        assert!(ok, "lock acquired");
+        assert!(elapsed.as_secs() < 1, "lock acquired quickly");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    struct EnvGuard {
+        home: Option<std::ffi::OsString>,
+        xdg: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(unix)]
+    impl EnvGuard {
+        fn new() -> Self {
+            Self {
+                home: std::env::var_os("HOME"),
+                xdg: std::env::var_os("XDG_RUNTIME_DIR"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(ref h) = self.home {
+                std::env::set_var("HOME", h);
+            } else {
+                std::env::remove_var("HOME");
+            }
+            if let Some(ref x) = self.xdg {
+                std::env::set_var("XDG_RUNTIME_DIR", x);
+            } else {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn socket_returns_none_when_no_base_available() {
+        let _guard = EnvGuard::new();
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        std::env::remove_var("HOME");
+        assert!(mcp_socket_path().is_none());
     }
 }

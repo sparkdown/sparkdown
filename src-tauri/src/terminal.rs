@@ -720,10 +720,9 @@ pub fn terminal_start(
                 // session already has its env then).
                 if let Some(dir) = cwd.as_deref().filter(|d| !d.is_empty()) {
                     c.arg("-e");
-                    c.arg(format!(
-                        "SPARKDOWN_CONTEXT={}",
-                        crate::context::context_dir_for(dir).to_string_lossy()
-                    ));
+                    if let Some(ctx) = crate::context::context_dir_for(dir) {
+                        c.arg(format!("SPARKDOWN_CONTEXT={}", ctx.to_string_lossy()));
+                    }
                 }
                 if let Some(sock) = crate::mcp::running_socket_path() {
                     c.arg("-e");
@@ -784,12 +783,9 @@ pub fn terminal_start(
     // context.rs). Set per-workspace so multiple windows don't collide.
     if !is_remote {
         if let Some(dir) = cwd.as_deref().filter(|d| !d.is_empty()) {
-            cmd.env(
-                "SPARKDOWN_CONTEXT",
-                crate::context::context_dir_for(dir)
-                    .to_string_lossy()
-                    .to_string(),
-            );
+            if let Some(ctx) = crate::context::context_dir_for(dir) {
+                cmd.env("SPARKDOWN_CONTEXT", ctx.to_string_lossy().to_string());
+            }
         }
         // MCP gate: the stdio shim serves the editor tools ONLY when this is
         // set to a live socket. Exported here so agents in this terminal (and

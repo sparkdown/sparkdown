@@ -63,20 +63,32 @@ pub fn workspace_key(root: &str) -> String {
 }
 
 /// Base holding every per-workspace context dir: `<runtime>/sparkdown`. Mirrors
-/// `mcp::mcp_socket_path`: `$XDG_RUNTIME_DIR` (per-user, 0700) on Linux, else
-/// the per-user temp dir (`$TMPDIR` on macOS).
-fn context_root() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("sparkdown")
+/// `mcp::mcp_socket_path`: `$XDG_RUNTIME_DIR` (per-user, 0700) on Linux when
+/// set, `$TMPDIR` on macOS, or `~/.cache` on Linux. Windows uses temp_dir().
+fn context_root() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(v).join("sparkdown"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return Some(std::env::temp_dir().join("sparkdown"));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::env::var_os("HOME")
+            .filter(|v| !v.is_empty())
+            .map(|h| PathBuf::from(h).join(".cache").join("sparkdown"))
+    }
+    #[cfg(not(unix))]
+    {
+        Some(std::env::temp_dir().join("sparkdown"))
+    }
 }
 
 /// Context dir for a workspace root: stable across runs, safe for concurrent
 /// workspaces.
-pub fn context_dir_for(root: &str) -> PathBuf {
-    context_root().join(workspace_key(root))
+pub fn context_dir_for(root: &str) -> Option<PathBuf> {
+    context_root().map(|r| r.join(workspace_key(root)))
 }
 
 /// File-name-safe version of a tab title ("Untitled" → "Untitled.md").
@@ -146,7 +158,9 @@ fn agent_context_update_impl(
         return crate::remote::agent_context_update(&root, &context_json, CONTEXT_README, &bufs);
     }
 
-    let dir = context_dir_for(&root);
+    let Some(dir) = context_dir_for(&root) else {
+        return Err("no per-user context directory available".into());
+    };
     let buf_dir = dir.join("buffers");
     // Create the tree owner-only AND verify each level is a real directory we
     // own — never follow a symlink or reuse another user's dir. On a shared
@@ -197,7 +211,9 @@ fn agent_context_clear_impl(root: String) -> Result<(), String> {
     if crate::remote::is_active() {
         return crate::remote::agent_context_clear(&root);
     }
-    let dir = context_dir_for(&root);
+    let Some(dir) = context_dir_for(&root) else {
+        return Ok(()); // Nothing to clear if no context dir is available.
+    };
     match std::fs::remove_dir_all(&dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -247,8 +263,12 @@ fn secure_context_tree(buf_dir: &Path) -> std::io::Result<()> {
 /// directory (not a symlink), owned by the current effective uid, with no
 /// group/other permission bits. Anything else means another user may control
 /// it, so we refuse rather than write through it.
+///
+/// Crate-visible so `mcp.rs` (socket parent dir) and `main.rs`
+/// (fallback instance lock dir) can reuse the exact same hardening
+/// instead of a path-based `chmod` that follows symlinks.
 #[cfg(unix)]
-fn ensure_owned_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn ensure_owned_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     match std::fs::DirBuilder::new().mode(0o700).create(dir) {
         Ok(()) => {}
@@ -524,7 +544,7 @@ mod tests {
     #[test]
     fn clear_removes_the_context_dir_and_tolerates_absence() {
         let root = format!("/tmp/sd-test-{}", std::process::id());
-        let dir = context_dir_for(&root);
+        let dir = context_dir_for(&root).unwrap();
         std::fs::create_dir_all(dir.join("buffers")).unwrap();
         std::fs::write(dir.join("buffers").join("x.md"), "secret").unwrap();
         agent_context_clear_impl(root.clone()).unwrap();
@@ -534,9 +554,9 @@ mod tests {
 
     #[test]
     fn context_dir_is_stable_and_distinct() {
-        let a1 = context_dir_for("/Users/x/proj-a");
-        let a2 = context_dir_for("/Users/x/proj-a");
-        let b = context_dir_for("/Users/x/proj-b");
+        let a1 = context_dir_for("/Users/x/proj-a").unwrap();
+        let a2 = context_dir_for("/Users/x/proj-a").unwrap();
+        let b = context_dir_for("/Users/x/proj-b").unwrap();
         assert_eq!(a1, a2);
         assert_ne!(a1, b);
     }

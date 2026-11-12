@@ -145,7 +145,15 @@ fn open_forwarded_argv(
 #[cfg(unix)]
 fn forward_to_running_core() -> bool {
     use std::io::{Read, Write};
-    let Ok(mut s) = std::os::unix::net::UnixStream::connect(mcp::mcp_socket_path()) else {
+    let Some(path) = mcp::mcp_socket_path() else {
+        return false;
+    };
+    if let Some(dir) = path.parent() {
+        if mcp::ensure_socket_dir(dir).is_err() {
+            return false;
+        }
+    }
+    let Ok(mut s) = std::os::unix::net::UnixStream::connect(&path) else {
         return false;
     };
     let cwd = std::env::current_dir()
@@ -199,31 +207,53 @@ fn dbus_address_looks_valid(v: &str) -> bool {
 /// Path of the lock file that serializes the D-Bus-fallback first instance
 /// before the MCP socket exists (#160).
 #[cfg(unix)]
-fn fallback_instance_lock_path() -> std::path::PathBuf {
-    mcp::mcp_socket_path().with_extension("instance.lock")
+fn fallback_instance_lock_path() -> Option<std::path::PathBuf> {
+    mcp::mcp_socket_path().map(|p| p.with_extension("instance.lock"))
 }
 
-/// Exclusive non-blocking flock. `Some(file)` holds the lock for the process
-/// lifetime; `None` means another process already holds it.
+/// Result of trying to claim the fallback instance lock.
 #[cfg(unix)]
-fn try_claim_fallback_lock() -> Option<std::fs::File> {
+enum LockResult {
+    Claimed(std::fs::File),
+    Held,
+    Failed,
+}
+
+/// Exclusive non-blocking flock. Returns the lock holder when successful,
+/// `Held` when another process holds it, or `Failed` when the folder check fails.
+#[cfg(unix)]
+fn try_claim_fallback_lock() -> LockResult {
     use std::os::unix::io::AsRawFd;
-    let path = fallback_instance_lock_path();
+    let Some(path) = fallback_instance_lock_path() else {
+        return LockResult::Failed;
+    };
+    // Create the base recursively and harden the leaf with the same ownership
+    // check used by `mcp::start`, so a fresh HOME with no ~/.cache works.
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        if mcp::ensure_socket_dir(dir).is_err() {
+            return LockResult::Failed;
+        }
     }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&path)
-        .ok()?;
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+        {
+            Ok(f) => f,
+            Err(_) => return LockResult::Failed,
+        }
+    };
     let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 };
     if ok {
-        Some(file)
+        LockResult::Claimed(file)
     } else {
-        None
+        LockResult::Held
     }
 }
 
@@ -257,9 +287,19 @@ fn fallback_single_instance_or_forward() -> bool {
     }
     #[cfg(unix)]
     {
-        if let Some(lock) = try_claim_fallback_lock() {
-            hold_fallback_lock(lock);
-            return false; // we are primary
+        match try_claim_fallback_lock() {
+            LockResult::Claimed(lock) => {
+                hold_fallback_lock(lock);
+                return false; // we are primary
+            }
+            LockResult::Failed => {
+                // Folder check failed (no per-user base, or not owned by us):
+                // skip the socket entirely, start normally.
+                return false;
+            }
+            LockResult::Held => {
+                // Another process holds the lock: fall through to wait.
+            }
         }
         // Another process holds the lock (starting or running): wait for its
         // socket and forward, never a second GUI.
@@ -267,7 +307,7 @@ fn fallback_single_instance_or_forward() -> bool {
             return true;
         }
         // Lock holder vanished without a socket: try to take over.
-        if let Some(lock) = try_claim_fallback_lock() {
+        if let LockResult::Claimed(lock) = try_claim_fallback_lock() {
             hold_fallback_lock(lock);
             return false;
         }
@@ -941,6 +981,67 @@ fn release_window(app: &tauri::AppHandle, label: &str) {
 #[cfg(test)]
 mod tests {
     use super::PendingFiles;
+
+    #[cfg(unix)]
+    struct EnvGuard {
+        home: Option<std::ffi::OsString>,
+        xdg: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(unix)]
+    impl EnvGuard {
+        fn new() -> Self {
+            Self {
+                home: std::env::var_os("HOME"),
+                xdg: std::env::var_os("XDG_RUNTIME_DIR"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(ref h) = self.home {
+                std::env::set_var("HOME", h);
+            } else {
+                std::env::remove_var("HOME");
+            }
+            if let Some(ref x) = self.xdg {
+                std::env::set_var("XDG_RUNTIME_DIR", x);
+            } else {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn lock_wait_skipped_on_folder_check_failure() {
+        use super::{fallback_instance_lock_path, try_claim_fallback_lock, LockResult};
+
+        let _guard = EnvGuard::new();
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        std::env::remove_var("HOME");
+
+        let start = std::time::Instant::now();
+        let result = try_claim_fallback_lock();
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, LockResult::Failed),
+            "lock returns Failed when no per-user base is available"
+        );
+        assert!(
+            elapsed.as_secs() < 1,
+            "lock check completes quickly without waiting ({}s)",
+            elapsed.as_secs()
+        );
+        assert!(
+            fallback_instance_lock_path().is_none(),
+            "lock path is None when no per-user base is available"
+        );
+    }
 
     fn v(xs: &[&str]) -> Vec<String> {
         xs.iter().map(|s| s.to_string()).collect()
