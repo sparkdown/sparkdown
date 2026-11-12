@@ -303,6 +303,35 @@ describe('markdown sanitizer', () => {
       expect(norm(container.innerHTML)).toBe(norm(String(expected)));
     });
 
+    it('falls back to single-lex when defs prefix and segments exceed budget', async () => {
+      // When reference-link definitions are large and there are many
+      // headings, the fallback keeps lexer input linear in |content|
+      // instead of quadratic in segments × defsPrefix. Build a document
+      // that exceeds the PREFIX_BUDGET_BYTES cap (4 MiB).
+      // With 5000 defs (~88 KB) and 50 headings, segments × |defsPrefix| = ~4.4 MB
+      const largeDefs = Array.from({ length: 5000 }, (_, i) => `[ref${i}]: /url${i}`).join('\n');
+      const manyHeadings = Array.from({ length: 50 }, (_, i) => `# Heading ${i}\n\npara\n\n`).join('');
+      const md = largeDefs + '\n\n' + manyHeadings;
+
+      const { pane, container } = makeLivePane();
+      // Spy on marked.lexer to verify fallback uses single whole-document lex
+      let lexCalls = 0;
+      const originalLex = marked.lexer;
+      marked.lexer = ((src: string) => {
+        lexCalls++;
+        return originalLex(src);
+      }) as typeof marked.lexer;
+
+      await pane.renderImmediateForExport(md);
+
+      // Restore original
+      marked.lexer = originalLex;
+
+      // Fallback should call lexer once (whole document), not once per segment
+      expect(lexCalls).toBe(1);
+      expect(container.querySelectorAll('h1').length).toBe(50);
+    });
+
     it('fence tracking ignores shorter fences and info-string pseudo-fences inside blocks', async () => {
       // Test 1: four-backtick block containing a shorter fence, a heading, and raw markup
       const md1 = [

@@ -15,6 +15,7 @@ requests.
 - Diff: Show Unicode bidirectional and invisible control characters.
 - Preview: Optimize preview search match filtering.
 - Search: Bound fuzzy-path matching steps.
+- Markdown: Cache reference-link definition parsing.
 
 ### Changed
 

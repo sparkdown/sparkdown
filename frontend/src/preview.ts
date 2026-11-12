@@ -508,21 +508,77 @@ export class PreviewPane {
     const tokens: ReturnType<typeof marked.lexer> =
       [] as unknown as ReturnType<typeof marked.lexer>;
     const links: Record<string, unknown> = {};
-    // Count tokens the defs-prefix itself produces so they can be dropped
-    // from each segment's stream (defs render nothing, but duplicating them
-    // per segment would bloat the token list).
-    const prefixTokenCount = defsPrefix ? marked.lexer(defsPrefix).length : 0;
-    for (const seg of segments) {
-      // Prepend doc-wide reference definitions: marked resolves [use][ref]
-      // during lexing, so each segment must see all definitions.
-      const segTokens = marked.lexer(defsPrefix + seg);
-      for (let i = prefixTokenCount; i < segTokens.length; i++) {
-        tokens.push(segTokens[i]);
+    // When a document has many reference-link definitions and many top-level
+    // headings, the segments × |defsPrefix| product can grow large: a ~440 KB
+    // file can feed the lexer ~7 GB of input and freeze the webview main thread.
+    // Bound the total extra bytes the prefix contributes (segments × |defsPrefix|)
+    // in addition to standalone caps on each dimension; when any cap is exceeded,
+    // fall back to a single whole-document lex whose cost is bounded by |content|.
+    const DEFS_PREFIX_MAX = 64 * 1024;
+    const SEGMENT_COUNT_MAX = 2000;
+    const PREFIX_BUDGET_BYTES = 4 * 1024 * 1024;
+    const useSegmented =
+      defsPrefix.length <= DEFS_PREFIX_MAX &&
+      segments.length <= SEGMENT_COUNT_MAX &&
+      segments.length * defsPrefix.length <= PREFIX_BUDGET_BYTES;
+    if (!useSegmented) {
+      // Fallback: a single whole-document lex is slower per byte for large
+      // docs but it is linear in |content| rather than quadratic in
+      // segments × defsPrefix, so large documents take longer but bounded time.
+      const whole = marked.lexer(content);
+      for (const t of whole) tokens.push(t);
+      Object.assign(links, whole.links ?? {});
+      tokens.links = links as ReturnType<typeof marked.lexer>['links'];
+      endLexOnly();
+    } else {
+      // Lex defsPrefix once up-front: its token count lets us skip the defs'
+      // own tokens when they are re-emitted inside a segment lex, and its
+      // resolved `links` map seeds cross-segment [use][ref] resolution. This
+      // replaces the previous per-segment re-lex of defsPrefix.
+      let prefixTokenCount = 0;
+      if (defsPrefix) {
+        const prefixTokens = marked.lexer(defsPrefix);
+        prefixTokenCount = prefixTokens.length;
+        Object.assign(links, prefixTokens.links);
       }
-      Object.assign(links, segTokens.links);
+      // Heuristic: only segments that actually use a reference-style link
+      // (`[text][ref]` or `[text][]`) need defsPrefix prepended so marked
+      // can resolve the ref during lexing. Fenced-code regions are skipped
+      // so a `][` inside ``` doesn't force a re-lex, and definition lines
+      // themselves aren't counted as usages. Segments without any reflink
+      // usage are lexed bare, so total input is O(|content|) in the common
+      // case even when defsPrefix is non-trivial.
+      const usesReflink = (seg: string): boolean => {
+        const lines = seg.split('\n');
+        let fence: string | null = null;
+        for (const line of lines) {
+          const fm = line.match(/^ {0,3}(`{3,}|~{3,})/);
+          if (fm) {
+            const ch = fm[1][0];
+            fence = fence === null ? ch : ch === fence ? null : fence;
+            continue;
+          }
+          if (fence !== null) continue;
+          // Reference-link definition lines are not usages.
+          if (/^ {0,3}\[[^\]]+\]:\s+\S/.test(line)) continue;
+          if (/\]\s*\[/.test(line)) return true;
+        }
+        return false;
+      };
+      for (const seg of segments) {
+        const needsPrefix = defsPrefix.length > 0 && usesReflink(seg);
+        const segTokens = needsPrefix
+          ? marked.lexer(defsPrefix + seg)
+          : marked.lexer(seg);
+        const skip = needsPrefix ? prefixTokenCount : 0;
+        for (let i = skip; i < segTokens.length; i++) {
+          tokens.push(segTokens[i]);
+        }
+        Object.assign(links, segTokens.links);
+      }
+      tokens.links = links as ReturnType<typeof marked.lexer>['links'];
+      endLexOnly();
     }
-    tokens.links = links as ReturnType<typeof marked.lexer>['links'];
-    endLexOnly();
     const endLex = span('parse-chunks');
 
     // Group top-level tokens into chunks. Chunk granularity balances two
