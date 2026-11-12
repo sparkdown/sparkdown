@@ -89,19 +89,31 @@ function align(q: string, target: string, lower: string, from: number, out: numb
   let i = start;
   for (qi = 0; qi < m; qi++) {
     const c = q.charCodeAt(qi);
-    while (lower.charCodeAt(i) !== c) i++;
+    // Defensive bound: if the forward/backward passes above succeeded,
+    // `c` must still be reachable at or after `i`; the guard turns any
+    // future alignment bug into NO_MATCH instead of a hang
+    // (charCodeAt past the end returns NaN, which is never equal to c).
+    while (i < n && lower.charCodeAt(i) !== c) i++;
+    if (i >= n) return NO_MATCH;
     let pos = i;
     if (prevPos !== pos - 1 && boundaryBonus(target, pos) === 0) {
       // Look for the same char on a boundary before the next query char's
-      // first position at or after it — keeps the match valid.
+      // first position at or after it — keeps the match valid. When the
+      // next query char equals the current one (e.g. "ll"), skip the
+      // lookahead entirely: otherwise it would consume the very position
+      // the next iteration needs, leaving nothing to align against.
       const next = qi + 1 < m ? q.charCodeAt(qi + 1) : -1;
-      for (let j = pos + 1; j <= end; j++) {
-        const cj = lower.charCodeAt(j);
-        if (cj === c && boundaryBonus(target, j) > 0) {
-          pos = j;
-          break;
+      if (next !== c) {
+        for (let j = pos + 1; j <= end; j++) {
+          const cj = lower.charCodeAt(j);
+          // Test `next` before `c`: the position needed by the following
+          // query character must never be stolen by this lookahead.
+          if (cj === next) break;
+          if (cj === c && boundaryBonus(target, j) > 0) {
+            pos = j;
+            break;
+          }
         }
-        if (cj === next) break;
       }
     }
     const bonus = boundaryBonus(target, pos);

@@ -67,6 +67,53 @@ describe('fuzzy scoring', () => {
     const titles = new FuzzyIndex(['Terminal: Split right', 'Terminal: Split down'], (s) => s, false);
     expect(titles.search('split', 10).map((r) => r.item)).toEqual(['Terminal: Split right', 'Terminal: Split down']);
   });
+
+  it('terminates on queries with repeated characters (regression: unbounded align loop)', () => {
+    // Previously, align()'s boundary lookahead could steal the position
+    // required by the next (identical) query char, and the following
+    // `while (lower.charCodeAt(i) !== c) i++;` had no upper bound, so
+    // `charCodeAt` past the end returned NaN and spun forever.
+    // These cases must all return promptly — either a valid match or no
+    // match — without hanging.
+    const cases: Array<[string, string]> = [
+      ['ll', 'tool.list'],
+      ['llo', 'install.log'],
+      ['ll', 'docs/release-log.md'],
+      ['ll', 'model-list.md'],
+      ['ll', 'notes/final-list.md'],
+      ['ll', 'final.list'],
+      ['__', 'x__'],
+      ['tt', 'frontend/src/api.ts'],
+      ['ss', 'src/css/styles.css'],
+      ['oo', 'docs/room.ool'],
+    ];
+    for (const [q, t] of cases) {
+      // The call must return (not hang); any value is acceptable.
+      const r = score(q, t);
+      // If a result is returned, the matched characters must equal the query.
+      if (r) {
+        expect(r.positions.map((p) => t.toLowerCase()[p]).join('')).toBe(q.toLowerCase());
+      }
+    }
+    // Index-level smoke test over doubled-character queries on a mix of
+    // names with doubled characters: just needs to return.
+    const idx = new FuzzyIndex(
+      [
+        'tool.list',
+        'install.log',
+        'docs/release-log.md',
+        'model-list.md',
+        'frontend/src/api.ts',
+        'src/css/styles.css',
+        'x__',
+        'README.md',
+      ],
+      (s) => s,
+    );
+    for (const q of ['ll', '__', 'tt', 'ss', 'oo', 'settings']) {
+      expect(() => idx.search(q, 50)).not.toThrow();
+    }
+  });
 });
 
 describe('fuzzy performance', () => {

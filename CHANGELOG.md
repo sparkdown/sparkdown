@@ -14,6 +14,7 @@ requests.
 - Markdown: Include reference-link definitions in chunk cache key.
 - Diff: Show Unicode bidirectional and invisible control characters.
 - Preview: Optimize preview search match filtering.
+- Search: Bound fuzzy-path matching steps.
 
 ### Changed
 
