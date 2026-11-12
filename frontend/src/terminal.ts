@@ -723,7 +723,9 @@ export function agentLaunchCommand(bin: string, ctx: LaunchContext): string {
     switch (bin) {
       case 'claude':
         // --mcp-config ADDS servers (no --strict-mcp-config, which replaces).
-        return `claude --mcp-config '{"mcpServers":{"sparkdown":{"command":${prog},"args":${args}}}}'${extra}`;
+        // shq() around the JSON prevents an apostrophe in the command path from
+        // breaking out of the shell word when eval parses the launch line.
+        return `claude --mcp-config ${shq(JSON.stringify({ mcpServers: { sparkdown: { command: ctx.shim.program, args: ctx.shim.args } } }))}${extra}`;
       case 'codex':
         // Three -c overrides; the rest of ~/.codex/config.toml is untouched.
         // env_vars forwards $SPARKDOWN_MCP by name: without it Codex starts

@@ -5,6 +5,9 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
+## Unreleased (0.4.3)
+- Terminal: Quote the agent server path in the Claude launch line.
+
 ## [0.4.2] — 2026-11-09
 
 Terminal, Git and command-line improvements on top of 0.4.1. Not in this
