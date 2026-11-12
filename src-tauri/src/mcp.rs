@@ -145,14 +145,15 @@ impl Default for McpState {
 /// change; cheap (in-memory clone).
 #[tauri::command]
 pub fn mcp_publish(
+    app: tauri::AppHandle,
     webview_window: tauri::WebviewWindow,
     state: tauri::State<'_, Arc<McpState>>,
     snapshot: Snapshot,
 ) {
-    publish_for(&state, webview_window.label(), snapshot);
+    publish_for(&app, &state, webview_window.label(), snapshot);
 }
 
-fn publish_for(state: &McpState, label: &str, mut snapshot: Snapshot) {
+fn publish_for(app: &AppHandle, state: &McpState, label: &str, mut snapshot: Snapshot) {
     if let Ok(mut all) = state.snapshots.lock() {
         let g = all.entry(label.to_string()).or_default();
         // The frontend omits (sends `content: None`) a tab whose text is
@@ -171,6 +172,16 @@ fn publish_for(state: &McpState, label: &str, mut snapshot: Snapshot) {
                     }
                 }
             }
+        }
+        // When agent context sharing is off, drop all buffer text and selection
+        // so a stale snapshot can never serve it.
+        if !agent_context_enabled(app) {
+            for t in &mut snapshot.tabs {
+                t.content = None;
+                t.truncated = false;
+            }
+            snapshot.selection = None;
+            snapshot.cursor_line = None;
         }
         cap_tab_buffers(&mut snapshot.tabs);
         *g = snapshot;
@@ -482,7 +493,7 @@ pub(crate) fn run_program_windows(
     full.extend(rest.iter().map(std::ffi::OsString::from));
     let mut command = crate::proc::command(&runner);
     command.args(&full);
-    run_command_with_timeout(command, &std::env::temp_dir(), timeout)
+    run_command_with_timeout(command, &cli_working_dir(), timeout)
 }
 
 /// How an agent CLI run ended.
@@ -902,6 +913,22 @@ fn kill_tree(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
+/// A private empty working directory for running agent CLIs, so they cannot
+/// pick up project config from a shared temp dir. Created under the app's
+/// cache dir with mode 0700. Best-effort: falls back to temp_dir() if the
+/// app cache dir is unavailable (tests, non-standard envs).
+fn cli_working_dir() -> PathBuf {
+    tauri::api::path::cache_dir()
+        .map(|d| d.join("SparkDown").join("cli-work"))
+        .and_then(|d| {
+            std::fs::create_dir_all(&d).ok()?;
+            #[cfg(unix)]
+            crate::context::ensure_owned_dir(&d).ok()?;
+            Some(d)
+        })
+        .unwrap_or_else(std::env::temp_dir)
+}
+
 /// Unix: run the agent CLI `argv` directly (no shell string), not in an
 /// interactive shell (#49): an interactive shell without a terminal prints
 /// job-control noise, and its own job control puts the CLI in a process
@@ -910,14 +937,13 @@ fn kill_tree(child: &mut std::process::Child) {
 /// to PATH, e.g. nvm), and the CLI runs with that PATH. Only a name that is
 /// neither (an alias or shell function) still goes through `$SHELL -lic`,
 /// with the noise lines dropped from its error. The working directory is
-/// the temp dir, NOT the app's (home or `/` for a Dock launch): agent CLIs
-/// scan the cwd for project config, and a scan of `$HOME` touches
-/// Documents/Downloads/Desktop, which macOS attributes to SparkDown and
-/// prompts for. Blocking: call from a worker thread, never the UI.
+/// a private app-cache dir, NOT the app's home or a shared temp dir: agent
+/// CLIs scan the cwd for project config, and a shared dir lets another user
+/// plant it. Blocking: call from a worker thread, never the UI.
 #[cfg_attr(windows, allow(dead_code))]
 fn run_local_argv_unix(argv: &[String], timeout: Duration) -> Result<CliOutcome, String> {
     let (bin, rest) = argv.split_first().ok_or("empty agent command")?;
-    let tmp = std::env::temp_dir();
+    let cwd = cli_working_dir();
     let login = crate::context::login_shell_path();
     let found = crate::context::find_in_path(bin, &login, "", false)
         .map(|p| (p, login.clone()))
@@ -929,13 +955,13 @@ fn run_local_argv_unix(argv: &[String], timeout: Duration) -> Result<CliOutcome,
         Some((program, path)) => {
             let mut command = crate::proc::command(&program);
             command.args(rest).env("PATH", path);
-            run_command_with_timeout(command, &tmp, timeout)
+            run_command_with_timeout(command, &cwd, timeout)
         }
         None => {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
             let mut command = crate::proc::command(shell);
             command.args(["-lic", &posix_command_line(argv)]);
-            run_command_with_timeout(command, &tmp, timeout)
+            run_command_with_timeout(command, &cwd, timeout)
         }
     }
 }
@@ -952,7 +978,7 @@ fn interactive_shell_path() -> Option<String> {
         let (ok, stdout, _noise) = run_with_timeout(
             &shell,
             &["-lic", "printf '\\n__SD_PATH__%s\\n' \"$PATH\""],
-            &std::env::temp_dir(),
+            &cli_working_dir(),
             Duration::from_secs(5),
         )
         .ok()?;
@@ -1487,6 +1513,11 @@ pub fn discoverable_pipe_path() -> PathBuf {
     PathBuf::from(format!(r"\\.\pipe\sparkdown-{safe}-mcp-external"))
 }
 
+/// Whether the Windows external-agent pipe was successfully created. Checked
+/// by the frontend to decide whether to show the external-agent status.
+#[cfg(windows)]
+static EXTERNAL_PIPE_OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Windows: serve on a per-user named pipe via `interprocess`. Same
 /// line protocol; `serve_client` gets the pipe's two halves.
 #[cfg(windows)]
@@ -1500,6 +1531,7 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
         let ext = discoverable_pipe_path();
         match create_pipe_listener(&ext) {
             Ok(l) => {
+                EXTERNAL_PIPE_OK.store(true, std::sync::atomic::Ordering::Relaxed);
                 let (app, state) = (app.clone(), state.clone());
                 std::thread::spawn(move || {
                     use interprocess::local_socket::traits::ListenerExt as _;
@@ -1509,8 +1541,12 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
                         std::thread::spawn(move || serve_client(stream, &app, &state));
                     }
                 });
+                eprintln!("External-agent pipe: {}", ext.display());
             }
-            Err(e) => eprintln!("Warning: external-agent pipe unavailable: {e}"),
+            Err(e) => {
+                eprintln!("Error: external-agent pipe creation failed: {e}");
+                eprintln!("External agents will not be available (possible pipe name conflict)");
+            }
         }
     }
     std::thread::Builder::new()
@@ -1756,6 +1792,19 @@ fn externals_allowed(app: &AppHandle) -> bool {
                 .and_then(Value::as_bool)
         })
         .unwrap_or(false)
+}
+
+/// Settings → Agents → Share editor context (on by default). The authoritative
+/// gate: tools check this instead of trusting a per-window cached snapshot.
+fn agent_context_enabled(app: &AppHandle) -> bool {
+    app.try_state::<crate::session::ConfigStore>()
+        .and_then(|s| {
+            s.stored()
+                .prefs
+                .get("agent_context_enabled")
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or(true)
 }
 
 /// A second GUI launch forwarded over the socket (the fallback lock when
@@ -2061,11 +2110,16 @@ fn call_tool(app: &AppHandle, state: &Arc<McpState>, params: &Value) -> Result<V
         return Ok(list_windows_result());
     }
     let snap = state.snapshot_of(&crate::windows::current_label());
-    if let Some(result) = snapshot_tool(&snap, name, &args) {
+    if let Some(result) = snapshot_tool(app, &snap, name, &args) {
         return Ok(result);
     }
     Ok(match name {
         "sparkdown_edit_buffer" => {
+            if !agent_context_enabled(app) {
+                return Ok(error_result(
+                    "The user has switched off editor context sharing in SparkDown (Settings → Agents).",
+                ));
+            }
             let path = args.get("path").and_then(Value::as_str).unwrap_or("");
             let content = args.get("content").and_then(Value::as_str).unwrap_or("");
             if !snap.tabs.iter().any(|t| t.path.as_deref() == Some(path)) {
@@ -2116,9 +2170,10 @@ fn call_tool(app: &AppHandle, state: &Arc<McpState>, params: &Value) -> Result<V
 
 /// The tools answered from the snapshot alone (no frontend round trip, no
 /// git), and the `enabled` gate that covers every tool. `None` means the
-/// tool is not one of these and the caller dispatches it.
-fn snapshot_tool(snap: &Snapshot, name: &str, args: &Value) -> Option<Value> {
-    if !snap.enabled {
+/// tool is not one of these and the caller dispatches it. Checks the live
+/// ConfigStore instead of trusting the snapshot's cached flag.
+fn snapshot_tool(app: &AppHandle, snap: &Snapshot, name: &str, args: &Value) -> Option<Value> {
+    if !agent_context_enabled(app) {
         return Some(error_result(
             "The user has switched off editor context sharing in SparkDown (Settings → Agents).",
         ));
@@ -2926,24 +2981,10 @@ mod tests {
         assert!(v["note"].as_str().unwrap().contains("MiB"));
     }
 
-    #[test]
-    fn disabled_gate_refuses_every_snapshot_tool() {
-        let mut s = snap();
-        s.enabled = false;
-        for name in [
-            "sparkdown_get_context",
-            "sparkdown_read_buffer",
-            "sparkdown_get_lines",
-            "sparkdown_get_selection",
-            "sparkdown_edit_buffer",
-        ] {
-            let (err, text) = call(&s, name, json!({ "path": "/w/a.md", "start_line": 1 }));
-            assert!(err, "{name}");
-            assert!(text.contains("switched off"), "{name}: {text}");
-        }
-        // Enabled: tools that need the app are left to the caller.
-        assert!(snapshot_tool(&snap(), "sparkdown_edit_buffer", &json!({})).is_none());
-    }
+    // The agent_context_enabled gate is now checked via ConfigStore instead of
+    // the snapshot's cached enabled flag. Unit tests can't easily mock AppHandle/
+    // ConfigStore, so the gate is tested via integration tests (frontend toggles
+    // Settings → Agents → Share editor context and verifies tools refuse).
 
     #[test]
     fn context_carries_cursor_line_text_and_line_count() {

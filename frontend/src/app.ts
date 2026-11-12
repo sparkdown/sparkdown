@@ -134,6 +134,23 @@ export class App {
       else this.forwardedPaths.push(...paths);
     }).catch(() => null);
     if (unlistenOpenPaths) this.unlisteners.push(unlistenOpenPaths);
+    // Prefs changed in another window: reload config and re-apply it.
+    const unlistenPrefsChanged = await listen('prefs-changed', async () => {
+      try {
+        this.config = await api.loadConfig();
+        this.cockpit.applySettings();
+        if (!this.config.agent_context_enabled) {
+          await this.agent.publish();
+          void this.agent.clear();
+        } else {
+          this.agent.publishSoon();
+        }
+        void this.refreshAgentTools();
+      } catch {
+        // Config reload failed; keep the old one.
+      }
+    }).catch(() => null);
+    if (unlistenPrefsChanged) this.unlisteners.push(unlistenPrefsChanged);
     const pendingFilesPromise = api.getPendingFiles().catch(() => [] as string[]);
     try {
       this.config = await api.loadConfig();
@@ -788,11 +805,15 @@ export class App {
   private openSettings(section?: 'agents'): void {
     const host = {
       config: this.config,
-      onChange: () => {
+      onChange: async () => {
         this.cockpit.applySettings();
-        // Bridge switched off → remove what it already wrote, now.
-        if (!this.config.agent_context_enabled) void this.agent.clear();
-        else this.agent.publishSoon();
+        // Bridge switched off → publish with enabled:false, then clear.
+        if (!this.config.agent_context_enabled) {
+          await this.agent.publish();
+          void this.agent.clear();
+        } else {
+          this.agent.publishSoon();
+        }
         void this.refreshAgentTools();
         // A committed Settings change is written now, not after the 2 s
         // debounce: quitting (or a crash) right after closing Settings must

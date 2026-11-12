@@ -451,9 +451,12 @@ impl ConfigStore {
         cfg
     }
 
-    /// A window saved: merge and write.
+    /// A window saved: merge and write. Emits `prefs-changed` to every other
+    /// window so they can refresh their cached config (agent context enabled,
+    /// agent args, use_tmux, etc.).
     pub fn save_from(
         &self,
+        app: &tauri::AppHandle,
         label: &str,
         cfg: &AppConfig,
         folder: Option<(FolderId, Option<String>)>,
@@ -464,7 +467,19 @@ impl ConfigStore {
             g.stored.apply_save(label, base.as_ref(), cfg, folder);
             g.given.insert(label.to_string(), prefs_of(cfg));
         }
-        self.write()
+        self.write()?;
+        // Notify all windows to reload their config so preference changes
+        // (especially agent_context_enabled) apply everywhere immediately.
+        let windows: Vec<String> = windows::registry()
+            .summaries()
+            .into_iter()
+            .filter(|w| w.label != label)
+            .map(|w| w.label)
+            .collect();
+        for w in windows {
+            let _ = app.emit_to(&w, "prefs-changed", ());
+        }
+        Ok(())
     }
 
     /// Record a window's geometry and focus order (written with the next
