@@ -21,6 +21,7 @@ use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use tauri::Emitter;
 
 /// The on-disk format version this build writes.
 pub const VERSION: u32 = 2;
@@ -451,20 +452,41 @@ impl ConfigStore {
         cfg
     }
 
-    /// A window saved: merge and write.
+    /// A window saved: merge and write. Emits `prefs-changed` to every other
+    /// window when preferences actually changed, so they refresh their cached config.
     pub fn save_from(
         &self,
+        app: Option<&tauri::AppHandle>,
         label: &str,
         cfg: &AppConfig,
         folder: Option<(FolderId, Option<String>)>,
     ) -> Result<(), String> {
+        let old_prefs;
+        let prefs_changed;
         {
             let mut g = self.lock();
+            old_prefs = g.stored.prefs.clone();
             let base = g.given.get(label).cloned();
             g.stored.apply_save(label, base.as_ref(), cfg, folder);
             g.given.insert(label.to_string(), prefs_of(cfg));
+            prefs_changed = g.stored.prefs != old_prefs;
         }
-        self.write()
+        self.write()?;
+        // Notify all other windows to reload config only if preferences changed.
+        if prefs_changed {
+            if let Some(app) = app {
+                let windows: Vec<String> = windows::registry()
+                    .summaries()
+                    .into_iter()
+                    .filter(|w| w.label != label)
+                    .map(|w| w.label)
+                    .collect();
+                for w in windows {
+                    let _ = app.emit_to(&w, "prefs-changed", ());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Record a window's geometry and focus order (written with the next
@@ -742,7 +764,7 @@ mod tests {
         // Reopen (dock) can't bring the closed folder back either.
         assert!(!store.has_closed());
         // Its next save (empty window) restores as an empty window, not A.
-        store.save_from(&a, &cfg, None).unwrap();
+        store.save_from(None, &a, &cfg, None).unwrap();
         let on_disk = Stored::parse(&std::fs::read_to_string(&path).unwrap(), None);
         assert!(plan_restore(&on_disk)
             .iter()
@@ -888,7 +910,7 @@ mod tests {
                             last_open_files: vec![format!("/f/{i}/{n}.md")],
                             ..base.clone()
                         };
-                        store.save_from(&label, &cfg, None).unwrap();
+                        store.save_from(None, &label, &cfg, None).unwrap();
                     }
                 })
             })

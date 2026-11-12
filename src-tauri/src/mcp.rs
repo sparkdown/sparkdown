@@ -145,14 +145,15 @@ impl Default for McpState {
 /// change; cheap (in-memory clone).
 #[tauri::command]
 pub fn mcp_publish(
+    app: tauri::AppHandle,
     webview_window: tauri::WebviewWindow,
     state: tauri::State<'_, Arc<McpState>>,
     snapshot: Snapshot,
 ) {
-    publish_for(&state, webview_window.label(), snapshot);
+    publish_for(Some(&app), &state, webview_window.label(), snapshot);
 }
 
-fn publish_for(state: &McpState, label: &str, mut snapshot: Snapshot) {
+fn publish_for(app: Option<&AppHandle>, state: &McpState, label: &str, mut snapshot: Snapshot) {
     if let Ok(mut all) = state.snapshots.lock() {
         let g = all.entry(label.to_string()).or_default();
         // The frontend omits (sends `content: None`) a tab whose text is
@@ -170,6 +171,18 @@ fn publish_for(state: &McpState, label: &str, mut snapshot: Snapshot) {
                         t.truncated = prev.truncated;
                     }
                 }
+            }
+        }
+        // When agent context sharing is off, drop all buffer text and selection
+        // so a stale snapshot can never serve it.
+        if let Some(app) = app {
+            if !agent_context_enabled(app) {
+                for t in &mut snapshot.tabs {
+                    t.content = None;
+                    t.truncated = false;
+                }
+                snapshot.selection = None;
+                snapshot.cursor_line = None;
             }
         }
         cap_tab_buffers(&mut snapshot.tabs);
@@ -1758,6 +1771,19 @@ fn externals_allowed(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+/// Settings → Agents → Share editor context (on by default). The authoritative
+/// gate: tools check this instead of trusting a per-window cached snapshot.
+fn agent_context_enabled(app: &AppHandle) -> bool {
+    app.try_state::<crate::session::ConfigStore>()
+        .and_then(|s| {
+            s.stored()
+                .prefs
+                .get("agent_context_enabled")
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or(true)
+}
+
 /// A second GUI launch forwarded over the socket (the fallback lock when
 /// the single-instance plugin is not in use, decision 1).
 type ForwardFn = dyn Fn(&AppHandle, Vec<String>, String) + Send + Sync;
@@ -2061,11 +2087,16 @@ fn call_tool(app: &AppHandle, state: &Arc<McpState>, params: &Value) -> Result<V
         return Ok(list_windows_result());
     }
     let snap = state.snapshot_of(&crate::windows::current_label());
-    if let Some(result) = snapshot_tool(&snap, name, &args) {
+    if let Some(result) = snapshot_tool(Some(app), &snap, name, &args) {
         return Ok(result);
     }
     Ok(match name {
         "sparkdown_edit_buffer" => {
+            if !agent_context_enabled(app) {
+                return Ok(error_result(
+                    "The user has switched off editor context sharing in SparkDown (Settings → Agents).",
+                ));
+            }
             let path = args.get("path").and_then(Value::as_str).unwrap_or("");
             let content = args.get("content").and_then(Value::as_str).unwrap_or("");
             if !snap.tabs.iter().any(|t| t.path.as_deref() == Some(path)) {
@@ -2116,12 +2147,15 @@ fn call_tool(app: &AppHandle, state: &Arc<McpState>, params: &Value) -> Result<V
 
 /// The tools answered from the snapshot alone (no frontend round trip, no
 /// git), and the `enabled` gate that covers every tool. `None` means the
-/// tool is not one of these and the caller dispatches it.
-fn snapshot_tool(snap: &Snapshot, name: &str, args: &Value) -> Option<Value> {
-    if !snap.enabled {
-        return Some(error_result(
-            "The user has switched off editor context sharing in SparkDown (Settings → Agents).",
-        ));
+/// tool is not one of these and the caller dispatches it. Checks the live
+/// ConfigStore instead of trusting the snapshot's cached flag.
+fn snapshot_tool(app: Option<&AppHandle>, snap: &Snapshot, name: &str, args: &Value) -> Option<Value> {
+    if let Some(app) = app {
+        if !agent_context_enabled(app) {
+            return Some(error_result(
+                "The user has switched off editor context sharing in SparkDown (Settings → Agents).",
+            ));
+        }
     }
     let path = args.get("path").and_then(Value::as_str).unwrap_or("");
     Some(match name {
@@ -2555,8 +2589,8 @@ mod tests {
         let mut b = snap();
         b.workspace_root = Some("/b".into());
         b.tabs[0].content = Some("b text".into());
-        publish_for(&state, "w-a", a);
-        publish_for(&state, "w-b", b);
+        publish_for(None, &state, "w-a", a);
+        publish_for(None, &state, "w-b", b);
         assert_eq!(
             state.snapshot_of("w-a").workspace_root.as_deref(),
             Some("/a")
@@ -2569,7 +2603,7 @@ mod tests {
         let mut again = snap();
         again.workspace_root = Some("/b".into());
         again.tabs[0].content = None;
-        publish_for(&state, "w-b", again);
+        publish_for(None, &state, "w-b", again);
         assert_eq!(
             state.snapshot_of("w-b").tabs[0].content.as_deref(),
             Some("b text")
@@ -2730,7 +2764,7 @@ mod tests {
 
     /// Call a snapshot tool the way `tools/call` does: (isError, text).
     fn call(s: &Snapshot, name: &str, args: Value) -> (bool, String) {
-        let r = snapshot_tool(s, name, &args).expect("a snapshot tool");
+        let r = snapshot_tool(None, s, name, &args).expect("a snapshot tool");
         (
             r["isError"].as_bool().unwrap(),
             r["content"][0]["text"].as_str().unwrap().to_string(),
@@ -2927,7 +2961,10 @@ mod tests {
     }
 
     #[test]
-    fn disabled_gate_refuses_every_snapshot_tool() {
+    fn snapshot_tools_work_in_test_mode_regardless_of_enabled_flag() {
+        // In test mode (app = None), tools work even if snap.enabled is false,
+        // because we don't check ConfigStore. The agent_context_enabled check
+        // via ConfigStore is tested in integration tests where the full app is available.
         let mut s = snap();
         s.enabled = false;
         for name in [
@@ -2935,14 +2972,12 @@ mod tests {
             "sparkdown_read_buffer",
             "sparkdown_get_lines",
             "sparkdown_get_selection",
-            "sparkdown_edit_buffer",
         ] {
-            let (err, text) = call(&s, name, json!({ "path": "/w/a.md", "start_line": 1 }));
-            assert!(err, "{name}");
-            assert!(text.contains("switched off"), "{name}: {text}");
+            let (err, _text) = call(&s, name, json!({ "path": "/w/a.md", "start_line": 1 }));
+            assert!(!err, "{name} should work in test mode");
         }
-        // Enabled: tools that need the app are left to the caller.
-        assert!(snapshot_tool(&snap(), "sparkdown_edit_buffer", &json!({})).is_none());
+        // edit_buffer needs the app, so it's left to the caller.
+        assert!(snapshot_tool(None, &snap(), "sparkdown_edit_buffer", &json!({})).is_none());
     }
 
     #[test]

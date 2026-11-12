@@ -814,6 +814,7 @@ pub fn load_config(
 /// session goes to its own section.
 #[tauri::command]
 pub fn save_config(
+    app: tauri::AppHandle,
     webview_window: tauri::WebviewWindow,
     store: State<'_, crate::session::ConfigStore>,
     config: AppConfig,
@@ -823,7 +824,7 @@ pub fn save_config(
         .get(label)
         .and_then(|w| w.folder.clone().map(|f| (f, w.display.clone())));
     store
-        .save_from(label, &config, folder)
+        .save_from(Some(&app), label, &config, folder)
         .map_err(AppError::Config)
 }
 
