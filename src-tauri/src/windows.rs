@@ -220,7 +220,7 @@ fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
 }
 
 /// 256 bits of OS-seeded randomness as hex.
-fn random_hex() -> String {
+pub(crate) fn random_hex() -> String {
     use std::hash::{BuildHasher, Hasher};
     let mut out = String::new();
     for i in 0..4u64 {

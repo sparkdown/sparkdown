@@ -156,11 +156,17 @@ fn forward_to_running_core() -> bool {
     let Ok(mut s) = std::os::unix::net::UnixStream::connect(&path) else {
         return false;
     };
+    // The running instance refuses forwards that lack its per-launch nonce;
+    // we read it from the file it placed next to the socket. The read
+    // succeeds only for the owning user.
+    let Some(nonce) = mcp::read_forward_nonce() else {
+        return false;
+    };
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
     let argv: Vec<String> = std::env::args().collect();
-    let msg = serde_json::json!({ "sparkdown_forward": { "argv": argv, "cwd": cwd } });
+    let msg = mcp::forward_message(&argv, &cwd, &nonce);
     if writeln!(s, "{msg}").is_err() {
         return false;
     }

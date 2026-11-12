@@ -27,6 +27,8 @@ requests.
 - Remote: Agent CLI watchdog creates timeout marker directory with exclusive permissions.
 - SSH: Host-key trust flow checks all known_hosts files before scanning.
 - SSH: Passphrase broker uses per-connection nonces and verifies peer credentials.
+- MCP: sparkdown_forward is restricted to the core local socket and needs a per-launch nonce; each window's forwarded socket needs a per-window token.
+- Remote MCP on SSH hosts requires Python 3 on the remote host. Terminals opened before an app restart need to be reopened for MCP to work.
 
 ### Changed
 

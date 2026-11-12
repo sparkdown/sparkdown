@@ -1249,6 +1249,10 @@ pub async fn mcp_agent_installed(webview_window: tauri::WebviewWindow, bin: Stri
 pub const SOCKET_ENV: &str = "SPARKDOWN_MCP";
 /// The routing token of a terminal's folder (#64, decision 3).
 pub const TOKEN_ENV: &str = "SPARKDOWN_MCP_TOKEN";
+/// Per-connection secret required by the per-window socket's sparkdown_hello.
+/// Generated fresh when the socket is created, exported into SparkDown
+/// terminals only, and read by the remote shim.
+pub const WINDOW_TOKEN_ENV: &str = "SPARKDOWN_MCP_WINDOW_TOKEN";
 /// The folder an external agent names (or `--folder <path>`).
 pub const FOLDER_ENV: &str = "SPARKDOWN_FOLDER";
 
@@ -1423,7 +1427,6 @@ pub fn mcp_socket_path() -> PathBuf {
 /// seeded from the platform RNG (it backs HashMap's hash-flooding defence), so
 /// hashing a fixed input under two fresh instances yields an unguessable token
 /// for the pipe name.
-#[cfg(windows)]
 pub(crate) fn random_token() -> String {
     use std::hash::{BuildHasher, Hasher};
     let mut token = String::with_capacity(32);
@@ -1433,6 +1436,76 @@ pub(crate) fn random_token() -> String {
         token.push_str(&format!("{:016x}", h.finish()));
     }
     token
+}
+
+/// Per-launch secret for the sparkdown_forward second-launch protocol.
+///
+/// The forward branch runs before the sparkdown_hello handshake and before
+/// routing, so without this gate any client that can connect to the socket
+/// could make the GUI open files and bind windows to folders. The nonce is
+/// generated fresh at server start, stored next to the socket (so only
+/// the owning user can read it), and the second-launch forwarder reads it
+/// and attaches it to its message. A client that lacks file-system access
+/// to the nonce file is refused.
+#[cfg(unix)]
+static FORWARD_NONCE: OnceLock<String> = OnceLock::new();
+
+/// Path of the per-launch forward nonce file (next to the MCP socket on Unix).
+#[cfg(unix)]
+pub fn forward_nonce_path() -> PathBuf {
+    mcp_socket_path()
+        .unwrap_or_else(|| PathBuf::from("/tmp/sparkdown-mcp.nonce"))
+        .with_file_name("mcp.nonce")
+}
+
+/// Create or refresh the per-launch forward nonce file. Called by start once
+/// the socket directory exists. On failure the cached nonce is still set, so
+/// the forward branch keeps rejecting any client that cannot read the file.
+#[cfg(unix)]
+fn init_forward_nonce() {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let nonce = FORWARD_NONCE.get_or_init(random_token).clone();
+    let path = forward_nonce_path();
+    // Replace in place so we never widen permissions on an existing file.
+    let _ = std::fs::remove_file(&path);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+    {
+        let _ = f.write_all(nonce.as_bytes());
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
+/// Read the per-launch forward nonce for a second-launch client to attach
+/// to its sparkdown_forward message. Returns None when the running instance
+/// has not written one yet (socket not up).
+#[cfg(unix)]
+pub fn read_forward_nonce() -> Option<String> {
+    let bytes = std::fs::read(forward_nonce_path()).ok()?;
+    // Trim any whitespace.
+    let s = String::from_utf8(bytes).ok()?.trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// The first line a second launch sends to the running instance.
+#[cfg(unix)]
+pub fn forward_message(argv: &[String], cwd: &str, nonce: &str) -> Value {
+    json!({ "sparkdown_forward": { "argv": argv, "cwd": cwd, "nonce": nonce } })
+}
+
+/// Constant-time comparison of the client-supplied forward nonce against
+/// the running instance's cached value.
+#[cfg(unix)]
+fn forward_nonce_matches(supplied: &str) -> bool {
+    let Some(expected) = FORWARD_NONCE.get() else {
+        return false;
+    };
+    constant_time_eq(expected.as_bytes(), supplied.as_bytes())
 }
 
 static SOCKET: OnceLock<PathBuf> = OnceLock::new();
@@ -1453,6 +1526,7 @@ pub fn shutdown() {
     #[cfg(unix)]
     if let Some(p) = SOCKET.get() {
         let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_file(forward_nonce_path());
     }
     // Claude Code's Windows session config (never written elsewhere).
     if cfg!(windows) {
@@ -1503,6 +1577,10 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
         ));
     }
     let _ = SOCKET.set(path.clone());
+    // Per-launch nonce for the sparkdown_forward branch: a file next to the
+    // socket that only the owning user can read, which the second-launch
+    // sender attaches to its forward message.
+    init_forward_nonce();
     eprintln!("SparkDown MCP socket: {}", path.display());
     std::thread::Builder::new()
         .name("sparkdown-mcp".into())
@@ -1513,10 +1591,64 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
                 let state = state.clone();
                 // One thread per client (one shim per agent process); a slow
                 // round trip in one never blocks another.
-                std::thread::spawn(move || serve_client(stream, &app, &state));
+                std::thread::spawn(move || serve_client(stream, &app, &state, true));
             }
         })?;
     Ok(path)
+}
+
+/// Per-window socket state: path + per-session random token the client must
+/// present in sparkdown_hello before any dispatch. One entry per window
+/// label; the token is exported into the window's SparkDown terminals only.
+#[cfg(unix)]
+#[derive(Clone)]
+pub(crate) struct WindowSock {
+    pub(crate) path: PathBuf,
+    pub(crate) token: String,
+}
+
+#[cfg(unix)]
+fn window_socks() -> &'static Mutex<HashMap<String, WindowSock>> {
+    static SOCKS: OnceLock<Mutex<HashMap<String, WindowSock>>> = OnceLock::new();
+    SOCKS.get_or_init(Default::default)
+}
+
+/// The per-connection secret agents in label's terminals must send in
+/// sparkdown_hello.token to use the window's forwarded MCP socket, if one
+/// has been created. Exposed so remote can plumb it into the terminal env.
+#[cfg(unix)]
+pub fn window_socket_token(label: &str) -> Option<String> {
+    window_socks()
+        .lock()
+        .ok()?
+        .get(label)
+        .map(|w| w.token.clone())
+}
+
+/// Tests: set or clear the window token `window_socket_token` reports.
+#[cfg(all(test, unix))]
+pub(crate) fn set_window_token_for_test(label: &str, token: Option<&str>) {
+    let mut socks = window_socks().lock().unwrap();
+    match token {
+        Some(t) => {
+            socks.insert(
+                label.to_string(),
+                WindowSock {
+                    path: PathBuf::from("/nonexistent"),
+                    token: t.to_string(),
+                },
+            );
+        }
+        None => {
+            socks.remove(label);
+        }
+    }
+}
+
+/// Non-Unix: there is no per-window socket, so there is no token.
+#[cfg(not(unix))]
+pub fn window_socket_token(_label: &str) -> Option<String> {
+    None
 }
 
 /// The local end of one window's remote MCP forward (#64): a socket of its
@@ -1526,11 +1658,10 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
 pub fn window_socket(app: &AppHandle, label: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
-    static SOCKS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
-    let socks = SOCKS.get_or_init(Default::default);
-    if let Some(p) = socks.lock().ok()?.get(label) {
-        if p.exists() {
-            return Some(p.clone());
+    let socks = window_socks();
+    if let Some(w) = socks.lock().ok()?.get(label) {
+        if w.path.exists() {
+            return Some(w.path.clone());
         }
     }
     let path =
@@ -1551,7 +1682,17 @@ pub fn window_socket(app: &AppHandle, label: &str) -> Option<PathBuf> {
         let _ = std::fs::remove_file(&path);
         return None;
     }
-    socks.lock().ok()?.insert(label.to_string(), path.clone());
+    // Fresh per-connect secret: a direct connection to the forwarded socket
+    // that does not know this token can neither read/edit buffers nor send
+    // sparkdown_forward.
+    let token = crate::windows::random_hex();
+    socks.lock().ok()?.insert(
+        label.to_string(),
+        WindowSock {
+            path: path.clone(),
+            token: token.clone(),
+        },
+    );
     let app = app.clone();
     let state = app.state::<Arc<McpState>>().inner().clone();
     let label = label.to_string();
@@ -1560,15 +1701,13 @@ pub fn window_socket(app: &AppHandle, label: &str) -> Option<PathBuf> {
         .spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let (app, state, label) = (app.clone(), state.clone(), label.clone());
+                let (app, state, label, token) =
+                    (app.clone(), state.clone(), label.clone(), token.clone());
                 std::thread::spawn(move || {
                     let Ok(read_half) = stream.try_clone() else {
                         return;
                     };
-                    let mut conn = Conn {
-                        fixed: Some(label),
-                        ..Default::default()
-                    };
+                    let mut conn = Conn::for_window(label, token);
                     serve_lines(read_half, stream, |msg| conn.handle(&app, &state, msg));
                 });
             }
@@ -1608,7 +1747,9 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
                     for stream in l.incoming() {
                         let Ok(stream) = stream else { continue };
                         let (app, state) = (app.clone(), state.clone());
-                        std::thread::spawn(move || serve_client(stream, &app, &state));
+                        // External agents: never permitted to drive the
+                        // local-launch forward branch.
+                        std::thread::spawn(move || serve_client(stream, &app, &state, false));
                     }
                 });
             }
@@ -1622,7 +1763,7 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
                 let Ok(stream) = stream else { continue };
                 let app = app.clone();
                 let state = state.clone();
-                std::thread::spawn(move || serve_client(stream, &app, &state));
+                std::thread::spawn(move || serve_client(stream, &app, &state, true));
             }
         })?;
     Ok(path)
@@ -1730,21 +1871,36 @@ fn serve_client(
     stream: interprocess::local_socket::Stream,
     app: &AppHandle,
     state: &Arc<McpState>,
+    allow_forward: bool,
 ) {
     use interprocess::local_socket::traits::Stream as _;
     let (read_half, write_half) = stream.split();
-    let mut conn = Conn::default();
+    let mut conn = Conn {
+        allow_forward,
+        ..Default::default()
+    };
     serve_lines(read_half, write_half, |msg| conn.handle(app, state, msg));
 }
 
 /// One client: newline-delimited JSON-RPC in, one line per response out.
-/// Notifications get no reply. Runs until the client hangs up.
+/// Notifications get no reply. Runs until the client hangs up. `allow_forward`
+/// is true only for the process-wide core socket (the local second-launch
+/// channel); every other transport (per-window remote forward, Windows
+/// discoverable external pipe) must pass false.
 #[cfg(unix)]
-fn serve_client(stream: std::os::unix::net::UnixStream, app: &AppHandle, state: &Arc<McpState>) {
+fn serve_client(
+    stream: std::os::unix::net::UnixStream,
+    app: &AppHandle,
+    state: &Arc<McpState>,
+    allow_forward: bool,
+) {
     let Ok(read_half) = stream.try_clone() else {
         return;
     };
-    let mut conn = Conn::default();
+    let mut conn = Conn {
+        allow_forward,
+        ..Default::default()
+    };
     serve_lines(read_half, stream, |msg| conn.handle(app, state, msg));
 }
 
@@ -1775,7 +1931,22 @@ pub(crate) struct Conn {
     hello: Option<Hello>,
     /// A per-window socket (remote forward): always this window.
     pub(crate) fixed: Option<String>,
+    /// Per-connection secret the client must present in sparkdown_hello
+    /// before anything on this socket dispatches. Set when the socket is
+    /// reachable from a channel where filesystem permissions are insufficient
+    /// (the per-window remote-forwarded one).
+    pub(crate) required_token: Option<String>,
+    /// True once a hello carried the matching required_token.
+    pub(crate) token_ok: bool,
     started: bool,
+    /// Honour `sparkdown_forward` on this connection. True only for the
+    /// process-wide core socket/pipe created by `mcp::start` (the local
+    /// second-launch channel). False on the per-window remote-forward
+    /// socket (reverse-forwarded to the SSH remote host) and on the
+    /// Windows discoverable external-agent pipe: either of those would
+    /// otherwise let a remote or external peer drive the local UI into
+    /// opening arbitrary paths.
+    pub(crate) allow_forward: bool,
 }
 
 /// Where a connection's tool calls go, given the open windows.
@@ -1869,6 +2040,160 @@ pub fn set_forward_handler(f: Box<ForwardFn>) {
     let _ = ON_FORWARD.set(f);
 }
 
+/// Constant-time byte compare (short-circuit only on length). Used so a
+/// peer cannot time-oracle the per-window token.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut d: u8 = 0;
+    for i in 0..a.len() {
+        d |= a[i] ^ b[i];
+    }
+    d == 0
+}
+
+/// Check if a window token matches the required token.
+fn window_token_valid(presented: &str, required: &str) -> bool {
+    constant_time_eq(presented.as_bytes(), required.as_bytes())
+}
+
+/// True while this connection still owes the window token.
+fn needs_window_token(required_token: Option<&str>, token_ok: bool) -> bool {
+    required_token.is_some() && !token_ok
+}
+
+/// Check if forward requests are allowed on this transport.
+fn forward_allowed(allow_forward: bool, fixed: Option<&str>, required_token: Option<&str>) -> bool {
+    allow_forward && fixed.is_none() && required_token.is_none()
+}
+
+/// A connection without a valid token: initialize, ping,
+/// and notifications still answer so the stdio shim doesn't look hung, but
+/// any real work is a hard error.
+fn dispatch_rejected(msg: &Value, err: &str) -> Option<Value> {
+    let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+    let id = msg.get("id").cloned();
+    // Notifications never get a reply.
+    let id = id?;
+    match method {
+        "initialize" => Some(rpc_result(
+            id,
+            initialize_result(msg.get("params").unwrap_or(&Value::Null)),
+        )),
+        "ping" => Some(rpc_result(id, json!({}))),
+        "tools/list" => Some(rpc_result(id, json!({ "tools": [] }))),
+        "resources/list" => Some(rpc_result(id, json!({ "resources": [] }))),
+        "prompts/list" => Some(rpc_result(id, json!({ "prompts": [] }))),
+        _ => Some(rpc_result(
+            id,
+            json!({ "content": [{ "type": "text", "text": err }], "isError": true }),
+        )),
+    }
+}
+
+/// What `Conn::handle` does with a message before it routes it. Decided
+/// without an `AppHandle` so tests can drive it directly.
+#[derive(Debug, PartialEq)]
+enum Early {
+    /// Answer now (`None`: a notification, no reply).
+    Reply(Option<Value>),
+    /// Hand argv/cwd to the second-launch handler, then acknowledge.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Forward { argv: Vec<String>, cwd: String },
+    /// Nothing to decide here: route the message as usual.
+    Continue,
+}
+
+impl Conn {
+    /// A connection on one window's forwarded socket: always that window, and
+    /// nothing dispatches until a `sparkdown_hello` carries `token`.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn for_window(label: String, token: String) -> Conn {
+        Conn {
+            fixed: Some(label),
+            required_token: Some(token),
+            ..Default::default()
+        }
+    }
+
+    /// Window-token hello, `sparkdown_forward` gates and the token gate.
+    fn early(&mut self, msg: &Value, first: bool) -> Early {
+        if first {
+            if let Some(h) = msg.get("sparkdown_hello") {
+                let Some(required) = self.required_token.as_deref() else {
+                    return Early::Continue;
+                };
+                let hello: Hello = serde_json::from_value(h.clone()).unwrap_or_default();
+                let presented = hello.token.as_deref().unwrap_or("");
+                let ok = window_token_valid(presented, required);
+                self.token_ok = ok;
+                self.hello = Some(hello);
+                return Early::Reply(Some(if ok {
+                    json!({ "sparkdown_ack": { "ok": true } })
+                } else {
+                    json!({
+                        "sparkdown_ack": { "ok": false, "error": "missing or wrong SparkDown MCP window token" }
+                    })
+                }));
+            }
+            if let Some(f) = msg.get("sparkdown_forward") {
+                if !forward_allowed(
+                    self.allow_forward,
+                    self.fixed.as_deref(),
+                    self.required_token.as_deref(),
+                ) {
+                    return Early::Reply(Some(json!({ "sparkdown_ack": {
+                        "ok": false,
+                        "error": "sparkdown_forward is not allowed on this transport"
+                    } })));
+                }
+                #[cfg(unix)]
+                {
+                    let nonce = f.get("nonce").and_then(Value::as_str).unwrap_or("");
+                    if !forward_nonce_matches(nonce) {
+                        return Early::Reply(Some(json!({
+                            "sparkdown_ack": {
+                                "ok": false,
+                                "error": "sparkdown_forward: missing or invalid nonce"
+                            }
+                        })));
+                    }
+                    let argv: Vec<String> = f
+                        .get("argv")
+                        .and_then(|a| serde_json::from_value(a.clone()).ok())
+                        .unwrap_or_default();
+                    let cwd = f
+                        .get("cwd")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    return Early::Forward { argv, cwd };
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = f;
+                    return Early::Reply(Some(json!({
+                        "sparkdown_ack": {
+                            "ok": false,
+                            "error": "sparkdown_forward is not supported on this platform"
+                        }
+                    })));
+                }
+            }
+        }
+        // A per-window connection that never produced a valid hello gets an
+        // error for everything except the protocol basics.
+        if needs_window_token(self.required_token.as_deref(), self.token_ok) {
+            return Early::Reply(dispatch_rejected(
+                msg,
+                "SparkDown MCP: missing or wrong window token in sparkdown_hello",
+            ));
+        }
+        Early::Continue
+    }
+}
+
 impl Conn {
     pub(crate) fn handle(
         &mut self,
@@ -1878,6 +2203,16 @@ impl Conn {
     ) -> Option<Value> {
         let first = !self.started;
         self.started = true;
+        match self.early(msg, first) {
+            Early::Reply(r) => return r,
+            Early::Forward { argv, cwd } => {
+                if let Some(h) = ON_FORWARD.get() {
+                    h(app, argv, cwd);
+                }
+                return Some(json!({ "sparkdown_ack": { "ok": true } }));
+            }
+            Early::Continue => {}
+        }
         if first {
             if let Some(h) = msg.get("sparkdown_hello") {
                 let hello: Hello = serde_json::from_value(h.clone()).unwrap_or_default();
@@ -1894,21 +2229,6 @@ impl Conn {
                     (true, Err(e)) => json!({ "sparkdown_ack": { "ok": false, "error": e } }),
                     _ => json!({ "sparkdown_ack": { "ok": true } }),
                 });
-            }
-            if let Some(f) = msg.get("sparkdown_forward") {
-                let argv: Vec<String> = f
-                    .get("argv")
-                    .and_then(|a| serde_json::from_value(a.clone()).ok())
-                    .unwrap_or_default();
-                let cwd = f
-                    .get("cwd")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                if let Some(h) = ON_FORWARD.get() {
-                    h(app, argv, cwd);
-                }
-                return Some(json!({ "sparkdown_ack": { "ok": true } }));
             }
         }
         let route = match &self.fixed {
@@ -4248,5 +4568,293 @@ mod tests {
         std::env::remove_var("XDG_RUNTIME_DIR");
         std::env::remove_var("HOME");
         assert!(mcp_socket_path().is_none());
+    }
+
+    /// Runs `f` with XDG_RUNTIME_DIR pointing at a fresh temp dir, so nothing
+    /// touches the real runtime dir of whoever runs the tests.
+    #[cfg(unix)]
+    fn with_temp_runtime_dir(f: impl FnOnce(&Path)) {
+        let _guard = EnvGuard::new();
+        let dir = std::env::temp_dir().join(format!("sd-nonce-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sparkdown")).unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", &dir);
+        f(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn forward_nonce_file_sits_next_to_the_socket_and_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        with_temp_runtime_dir(|dir| {
+            let s = mcp_socket_path().unwrap();
+            let n = forward_nonce_path();
+            assert_eq!(n.parent(), s.parent());
+            assert!(n.starts_with(dir));
+            assert_eq!(n.file_name().and_then(|f| f.to_str()), Some("mcp.nonce"));
+            init_forward_nonce();
+            let mode = std::fs::metadata(&n).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+            let on_disk = read_forward_nonce().expect("nonce file");
+            assert!(forward_nonce_matches(&on_disk));
+            assert!(!forward_nonce_matches("wrong"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forward_nonce_matches_rejects_without_server_init() {
+        // Comparison without a cached nonce (fresh test process) always fails.
+        assert!(!forward_nonce_matches("anything"));
+        assert!(!forward_nonce_matches(""));
+    }
+
+    #[test]
+    fn constant_time_eq_checks_length_and_content() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+        assert!(!constant_time_eq(b"hello", b"world"));
+        assert!(!constant_time_eq(b"hello", b"hell"));
+        assert!(!constant_time_eq(b"hello", b"helloo"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn window_token_requires_exact_match() {
+        let required = "secret123";
+
+        assert!(window_token_valid("secret123", required));
+        assert!(!window_token_valid("wrong", required));
+        assert!(!window_token_valid("", required));
+        assert!(!window_token_valid("secret12", required));
+        assert!(!window_token_valid("secret1234", required));
+    }
+
+    #[test]
+    fn dispatch_requires_window_token() {
+        assert!(needs_window_token(Some("token"), false));
+        assert!(!needs_window_token(Some("token"), true));
+        assert!(!needs_window_token(None, false));
+        assert!(!needs_window_token(None, true));
+    }
+
+    #[test]
+    fn dispatch_rejected_method_handling() {
+        let init = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        });
+        let result = dispatch_rejected(&init, "test error");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.get("result").is_some());
+
+        let tools_list = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list"
+        });
+        let result = dispatch_rejected(&tools_list, "test error");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        let tools = r.get("result").and_then(|r| r.get("tools"));
+        assert_eq!(tools, Some(&json!([])));
+
+        let tool_call = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "something"}
+        });
+        let result = dispatch_rejected(&tool_call, "test error");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        let content = r.get("result").and_then(|r| r.get("content"));
+        assert!(content.is_some());
+        let is_error = r.get("result").and_then(|r| r.get("isError"));
+        assert_eq!(is_error, Some(&json!(true)));
+
+        // Notifications get no reply.
+        let notif = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/progress"
+        });
+        let result = dispatch_rejected(&notif, "test error");
+        assert!(result.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forward_requires_core_socket() {
+        assert!(!forward_allowed(true, None, Some("token")));
+        assert!(!forward_allowed(true, Some("window"), None));
+        assert!(!forward_allowed(false, None, None));
+        assert!(forward_allowed(true, None, None));
+    }
+
+    // ---- Conn::early: the decisions Conn::handle takes before routing ----
+
+    fn window_conn(token: &str) -> Conn {
+        Conn::for_window("w".into(), token.into())
+    }
+
+    fn hello_msg(token: Option<&str>) -> Value {
+        match token {
+            Some(t) => json!({ "sparkdown_hello": { "token": t, "terminal": true } }),
+            None => json!({ "sparkdown_hello": { "terminal": true } }),
+        }
+    }
+
+    fn tools_call() -> Value {
+        json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "x" } })
+    }
+
+    fn ack_ok(e: &Early) -> Option<bool> {
+        match e {
+            Early::Reply(Some(v)) => v["sparkdown_ack"]["ok"].as_bool(),
+            _ => None,
+        }
+    }
+
+    fn is_error_reply(e: &Early) -> bool {
+        matches!(e, Early::Reply(Some(v)) if v["result"]["isError"] == json!(true))
+    }
+
+    #[test]
+    fn window_conn_without_hello_never_reaches_routing() {
+        let mut c = window_conn("tok");
+        assert!(is_error_reply(&c.early(&tools_call(), true)));
+        assert!(is_error_reply(&c.early(&tools_call(), false)));
+    }
+
+    #[test]
+    fn window_conn_refuses_wrong_and_missing_token() {
+        for presented in [Some("nope"), Some(""), Some("to"), Some("tokk"), None] {
+            let mut c = window_conn("tok");
+            let e = c.early(&hello_msg(presented), true);
+            assert_eq!(ack_ok(&e), Some(false), "{presented:?}: {e:?}");
+            assert!(
+                is_error_reply(&c.early(&tools_call(), false)),
+                "{presented:?} must stay locked"
+            );
+        }
+    }
+
+    #[test]
+    fn window_conn_right_token_unlocks_routing() {
+        let mut c = window_conn("tok");
+        let e = c.early(&hello_msg(Some("tok")), true);
+        assert_eq!(ack_ok(&e), Some(true), "{e:?}");
+        assert_eq!(c.early(&tools_call(), false), Early::Continue);
+    }
+
+    #[test]
+    fn a_later_hello_does_not_unlock_a_window_conn() {
+        let mut c = window_conn("tok");
+        assert!(is_error_reply(&c.early(&tools_call(), true)));
+        // A hello is only honoured as the first message; later it is dropped.
+        assert_eq!(c.early(&hello_msg(Some("tok")), false), Early::Reply(None));
+        assert!(is_error_reply(&c.early(&tools_call(), false)));
+    }
+
+    #[test]
+    fn conn_without_required_token_routes_as_before() {
+        let mut c = Conn::default();
+        assert_eq!(c.early(&hello_msg(None), true), Early::Continue);
+        assert_eq!(c.early(&tools_call(), false), Early::Continue);
+    }
+
+    #[cfg(unix)]
+    fn forward_msg(nonce: Option<&str>) -> Value {
+        let mut f = json!({ "argv": ["sparkdown", "/tmp/x.md"], "cwd": "/tmp" });
+        if let Some(n) = nonce {
+            f["nonce"] = json!(n);
+        }
+        json!({ "sparkdown_forward": f })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_second_launch_message_is_accepted_by_the_core_socket() {
+        let nonce = FORWARD_NONCE.get_or_init(random_token).clone();
+        let argv = vec!["sparkdown".to_string(), "notes.md".to_string()];
+        let msg = forward_message(&argv, "/work", &nonce);
+        let mut core = Conn {
+            allow_forward: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            core.early(&msg, true),
+            Early::Forward {
+                argv,
+                cwd: "/work".into()
+            }
+        );
+        // The same message without the nonce is refused.
+        let bare = forward_message(&["sparkdown".to_string()], "/work", "");
+        let mut core = Conn {
+            allow_forward: true,
+            ..Default::default()
+        };
+        assert_eq!(ack_ok(&core.early(&bare, true)), Some(false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forward_is_refused_on_every_transport_but_the_core_socket() {
+        let nonce = FORWARD_NONCE.get_or_init(random_token).clone();
+        let msg = forward_msg(Some(&nonce));
+        let window = Conn {
+            allow_forward: true,
+            fixed: Some("w".into()),
+            ..Default::default()
+        };
+        let token = Conn {
+            allow_forward: true,
+            required_token: Some("t".into()),
+            ..Default::default()
+        };
+        let external = Conn::default();
+        for (name, mut c) in [("window", window), ("token", token), ("external", external)] {
+            let e = c.early(&msg, true);
+            assert_eq!(ack_ok(&e), Some(false), "{name}: {e:?}");
+            assert!(format!("{e:?}").contains("not allowed"), "{name}: {e:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forward_on_the_core_socket_needs_the_launch_nonce() {
+        let nonce = FORWARD_NONCE.get_or_init(random_token).clone();
+        let core = || Conn {
+            allow_forward: true,
+            ..Default::default()
+        };
+        for bad in [
+            None,
+            Some(""),
+            Some("wrong"),
+            Some(&nonce[..nonce.len() - 1]),
+        ] {
+            let e = core().early(&forward_msg(bad), true);
+            assert_eq!(ack_ok(&e), Some(false), "{bad:?}: {e:?}");
+            assert!(format!("{e:?}").contains("nonce"), "{bad:?}: {e:?}");
+        }
+        let e = core().early(&forward_msg(Some(&nonce)), true);
+        assert_eq!(
+            e,
+            Early::Forward {
+                argv: vec!["sparkdown".into(), "/tmp/x.md".into()],
+                cwd: "/tmp".into()
+            }
+        );
+        // Only the first message of a connection can forward.
+        assert_eq!(
+            core().early(&forward_msg(Some(&nonce)), false),
+            Early::Continue
+        );
     }
 }

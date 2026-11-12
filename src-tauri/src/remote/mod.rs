@@ -1379,6 +1379,15 @@ pub fn terminal_command(
         }
         if let Some(sock) = remote_mcp_socket() {
             f.push_str(&format!("export SPARKDOWN_MCP={}; ", shell_quote(&sock)));
+            // Per-session secret for the window socket's sparkdown_hello.
+            // Exported alongside SPARKDOWN_MCP so the shim can send it.
+            if let Some(wtok) = crate::mcp::window_socket_token(&crate::windows::current_label()) {
+                f.push_str(&format!(
+                    "export {}={}; ",
+                    crate::mcp::WINDOW_TOKEN_ENV,
+                    shell_quote(&wtok)
+                ));
+            }
         }
         if let Some(t) = crate::windows::token_for_current_window(None) {
             f.push_str(&format!(
@@ -1456,7 +1465,20 @@ pub fn terminal_command(
     // app only where this names a live socket — here the reverse-forwarded
     // one. Unset when the forward is down, so they fall back to the bridge.
     let remote = match remote_mcp_socket() {
-        Some(sock) => format!("export SPARKDOWN_MCP={}; {remote}", shell_quote(&sock)),
+        Some(sock) => {
+            // Also export the per-session window token (used by the shim to
+            // send to the forwarded socket) in the non-tmux fallback
+            // shell.
+            let mut head = format!("export SPARKDOWN_MCP={}; ", shell_quote(&sock));
+            if let Some(wtok) = crate::mcp::window_socket_token(&crate::windows::current_label()) {
+                head.push_str(&format!(
+                    "export {}={}; ",
+                    crate::mcp::WINDOW_TOKEN_ENV,
+                    shell_quote(&wtok)
+                ));
+            }
+            format!("{head}{remote}")
+        }
         None => remote,
     };
     cmd.arg(remote);
@@ -3664,7 +3686,14 @@ Host *.example.com
         let s = REMOTE_SHIM_SCRIPT;
         assert!(s.starts_with("#!/bin/sh\n"));
         assert!(s.contains("SPARKDOWN_MCP"), "gate on the env var");
-        assert!(s.contains("UNIX-CONNECT"), "socat bridge");
+        assert!(
+            s.contains("SPARKDOWN_MCP_WINDOW_TOKEN"),
+            "per-connection token must be required by the shim"
+        );
+        assert!(
+            s.contains("sparkdown_hello"),
+            "shim must send sparkdown_hello before relaying"
+        );
         assert!(s.contains("AF_UNIX"), "python bridge");
         assert!(
             s.contains("\"tools\": []"),
@@ -3702,6 +3731,183 @@ Host *.example.com
         remote_mcp_slot().set(None);
         disconnect_now();
     }
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(hostkey_cache)]
+    fn remote_terminal_pins_host_key_algorithms_and_exports_the_window_token() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let hosts = parse_ssh_config("Host dev\n  HostName dev.example\n");
+        disconnect_now();
+        connect_with(&hosts, "dev", "~/proj", |_h, _c| {
+            Ok("/local/home/u/proj\n/local/home/u\n".into())
+        })
+        .unwrap();
+        let label = crate::windows::current_label();
+        remote_mcp_slot().set(Some("/local/home/u/.cache/sparkdown/mcp.sock".into()));
+        crate::mcp::set_window_token_for_test(&label, Some("wtok-1"));
+        // tmux path and plain login-shell path
+        for session in [Some("sd-x-zsh"), None] {
+            // Re-seed each time: a finished host-key trust in another test
+            // clears the shared cache.
+            hostkey::seed_stored_key_types("dev", &["ssh-rsa", "ssh-ed25519"]);
+            let (cmd, _) = terminal_command(Some("/proj"), session, None).unwrap();
+            let argv = format!("{:?}", cmd.get_argv());
+            assert!(
+                argv.contains("HostKeyAlgorithms=rsa-sha2-512,rsa-sha2-256,ssh-rsa,ssh-ed25519"),
+                "{session:?}: {argv}"
+            );
+            // Exported for the plain login shell, and (tmux) inside the pane.
+            assert!(
+                argv.contains("export SPARKDOWN_MCP_WINDOW_TOKEN='wtok-1'"),
+                "{session:?}: {argv}"
+            );
+            if session.is_some() {
+                assert!(
+                    argv.contains(r"export SPARKDOWN_MCP_WINDOW_TOKEN='\\''wtok-1'\\''"),
+                    "pane command lacks the token: {argv}"
+                );
+            }
+        }
+        // No stored keys and no window token: neither is added.
+        hostkey::seed_stored_key_types("dev", &[]);
+        crate::mcp::set_window_token_for_test(&label, None);
+        let (cmd, _) = terminal_command(Some("/proj"), None, None).unwrap();
+        let argv = format!("{:?}", cmd.get_argv());
+        assert!(!argv.contains("HostKeyAlgorithms"), "{argv}");
+        assert!(!argv.contains("SPARKDOWN_MCP_WINDOW_TOKEN"), "{argv}");
+        hostkey::invalidate_stored_key_types_cache();
+        remote_mcp_slot().set(None);
+        disconnect_now();
+    }
+
+    /// Runs the shim against a stand-in window socket that behaves like the
+    /// app: the first line must be a `sparkdown_hello` with the exact token,
+    /// anything else (or a wrong token) is refused.
+    #[cfg(unix)]
+    fn run_shim_against_stand_in(
+        token_env: Option<&str>,
+        server_token: &str,
+    ) -> (bool, String, String) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::os::unix::net::UnixListener;
+        let dir =
+            std::env::temp_dir().join(format!("sd-shim-{}-{}", std::process::id(), server_token));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("w.sock");
+        let shim = dir.join("shim.sh");
+        std::fs::write(&shim, REMOTE_SHIM_SCRIPT).unwrap();
+        let listener = UnixListener::bind(&sock).unwrap();
+        let want = server_token.to_string();
+        let server = std::thread::spawn(move || {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+            let mut w = stream.try_clone().unwrap();
+            let mut lines = BufReader::new(stream).lines();
+            let first = lines.next().and_then(|l| l.ok()).unwrap_or_default();
+            let hello: serde_json::Value = serde_json::from_str(&first).unwrap_or_default();
+            let ok = hello["sparkdown_hello"]["token"].as_str() == Some(want.as_str());
+            let _ = writeln!(
+                w,
+                "{}",
+                serde_json::json!({ "sparkdown_ack": { "ok": ok } })
+            );
+            if !ok {
+                return;
+            }
+            for line in lines.map_while(Result::ok) {
+                let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                let Some(id) = msg.get("id") else { continue };
+                let reply = serde_json::json!({ "jsonrpc": "2.0", "id": id,
+                    "result": { "tools": [{ "name": "stand_in_marker" }] } });
+                let _ = writeln!(w, "{reply}");
+            }
+        });
+        let mut cmd = crate::proc::command("sh");
+        cmd.arg(&shim)
+            .env_remove("SPARKDOWN_MCP_WINDOW_TOKEN")
+            .env("SPARKDOWN_MCP", &sock)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Some(t) = token_env {
+            cmd.env("SPARKDOWN_MCP_WINDOW_TOKEN", t);
+        }
+        let mut child = cmd.spawn().unwrap();
+        {
+            let mut stdin = child.stdin.take().unwrap();
+            let _ = stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
+        }
+        let mut out = String::new();
+        let mut err = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut out)
+            .unwrap();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut err)
+            .unwrap();
+        let status = child.wait().unwrap();
+        // Unblock a stand-in that was never connected to (offline shim).
+        let _ = std::os::unix::net::UnixStream::connect(&sock);
+        let _ = server.join();
+        let _ = std::fs::remove_dir_all(&dir);
+        (status.success(), out, err)
+    }
+
+    #[cfg(unix)]
+    fn have_python3() -> bool {
+        crate::proc::command("python3")
+            .arg("-c")
+            .arg("pass")
+            .output()
+            .is_ok()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shim_sends_its_window_token_in_the_first_line_and_relays() {
+        if !have_python3() {
+            return;
+        }
+        let (ok, out, err) = run_shim_against_stand_in(Some("tok-a"), "tok-a");
+        assert!(ok, "shim failed: {err}");
+        assert!(out.contains("stand_in_marker"), "{out}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shim_stops_when_the_window_refuses_its_token() {
+        if !have_python3() {
+            return;
+        }
+        let (ok, out, err) = run_shim_against_stand_in(Some("tok-b"), "something-else");
+        assert!(!ok);
+        assert!(!out.contains("stand_in_marker"), "{out}");
+        assert!(err.contains("refused"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shim_without_a_window_token_stays_offline() {
+        if !have_python3() {
+            return;
+        }
+        let (ok, out, _err) = run_shim_against_stand_in(None, "tok-c");
+        assert!(ok);
+        assert!(out.contains("\"tools\": []"), "{out}");
+        assert!(!out.contains("stand_in_marker"), "{out}");
+    }
+
     /// Live end-to-end check of phase 4 against a real host. Ignored by
     /// default; run with:
     ///   SPARKDOWN_LIVE_HOST=myhost cargo test --release -- --ignored live_remote
@@ -3732,6 +3938,14 @@ Host *.example.com
                 let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
                     continue;
                 };
+                // The shim sends sparkdown_hello as the first line, with its
+                // per-connection token; the stand-in acks any token so the rest
+                // of the handshake is exercised.
+                if msg.get("sparkdown_hello").is_some() {
+                    let ack = serde_json::json!({ "sparkdown_ack": { "ok": true } });
+                    let _ = writeln!(w, "{ack}");
+                    continue;
+                }
                 let Some(id) = msg.get("id") else { continue };
                 let result = if msg["method"] == "tools/list" {
                     serde_json::json!({ "tools": [{ "name": "sparkdown_live_marker" }] })
@@ -3761,7 +3975,7 @@ Host *.example.com
             "\n",
         );
         let cmd = format!(
-            "test -S {s} && test -x {sh} && SPARKDOWN_MCP={s} {sh}",
+            "test -S {s} && test -x {sh} && SPARKDOWN_MCP={s} SPARKDOWN_MCP_WINDOW_TOKEN=live-test-token {sh}",
             s = shell_quote(&sock),
             sh = shell_quote(&shim)
         );

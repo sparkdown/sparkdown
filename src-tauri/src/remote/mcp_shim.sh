@@ -11,14 +11,38 @@
 # here is silent outside SparkDown. Arguments are ignored (SparkDown's local
 # shim takes --mcp-stdio; agent configs pass it along).
 #
-# Bridges, in order: socat, python3, nc -U. Offline mode needs python3.
+# A per-session secret ($SPARKDOWN_MCP_WINDOW_TOKEN), exported only in
+# SparkDown terminals, accompanies each connection to the window's socket.
+# The bridge sends a sparkdown_hello with that token as the first line and
+# swallows the server's one-line ack; a direct connection that skips this is
+# refused.
+#
+# Bridge: python3 (needed for the handshake). Offline mode also needs python3.
 
 sock="${SPARKDOWN_MCP:-}"
+tok="${SPARKDOWN_MCP_WINDOW_TOKEN:-}"
 
 py_bridge=$(cat <<'PY'
-import os, socket, sys, threading
+import json, os, socket, sys, threading
+sock_path, token = sys.argv[1], sys.argv[2]
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect(sys.argv[1])
+s.connect(sock_path)
+sf = s.makefile("rwb", buffering=0)
+# Send the token before relaying anything in either direction: a per-window
+# socket drops every message until it sees a sparkdown_hello with the
+# matching token.
+hello = {"sparkdown_hello": {"token": token, "terminal": True}}
+sf.write((json.dumps(hello) + "\n").encode("utf-8"))
+sf.flush()
+ack_line = sf.readline()
+try:
+    ack = json.loads(ack_line.decode("utf-8", "replace"))
+    ok = bool(ack.get("sparkdown_ack", {}).get("ok"))
+except Exception:
+    ok = False
+if not ok:
+    sys.stderr.write("sparkdown mcp-shim: SparkDown refused this connection (bad or missing window token)\n")
+    sys.exit(1)
 def to_sock():
     # stdin -> socket. On EOF half-close, so the server still answers what
     # it has read, then closes; the main loop below drains that and exits.
@@ -27,7 +51,8 @@ def to_sock():
             b = os.read(0, 65536)
             if not b:
                 break
-            s.sendall(b)
+            sf.write(b)
+            sf.flush()
     except Exception:
         pass
     try:
@@ -37,7 +62,7 @@ def to_sock():
 threading.Thread(target=to_sock, daemon=True).start()
 try:
     while True:
-        b = s.recv(65536)
+        b = sf.read(65536)
         if not b:
             break
         os.write(1, b)
@@ -88,21 +113,16 @@ for line in sys.stdin:
 PY
 )
 
-if [ -n "$sock" ] && [ -S "$sock" ]; then
-  if command -v socat >/dev/null 2>&1; then
-    exec socat - "UNIX-CONNECT:$sock"
-  fi
+if [ -n "$sock" ] && [ -S "$sock" ] && [ -n "$tok" ]; then
   if command -v python3 >/dev/null 2>&1; then
-    exec python3 -c "$py_bridge" "$sock"
+    exec python3 -c "$py_bridge" "$sock" "$tok"
   fi
-  if command -v nc >/dev/null 2>&1; then
-    exec nc -U "$sock"
-  fi
-  echo "sparkdown mcp-shim: need socat, python3, or nc -U to reach $sock" >&2
+  echo "sparkdown mcp-shim: need python3 to reach $sock" >&2
   exit 1
 fi
 
-# Offline: no SparkDown socket in this shell. Advertise zero tools.
+# Offline: no SparkDown socket in this shell, or no window token. Advertise
+# zero tools so an agent config pointed at this file is silent.
 if command -v python3 >/dev/null 2>&1; then
   exec python3 -c "$py_offline"
 fi
