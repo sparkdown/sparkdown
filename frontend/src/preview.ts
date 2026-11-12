@@ -534,10 +534,23 @@ export class PreviewPane {
     const CHUNK_TOKENS = 32;
     const nextCache = new Map<string, string>();
     const blocks: string[] = [];
+    // The rendered HTML of a chunk also depends on the document-wide
+    // reference-link definition map (`[tag]: url` lines that marked keeps
+    // in `tokens.links` without emitting a token, so they never appear in
+    // any chunk's `raw`). Mix a stable fingerprint of that map into every
+    // cache key so a different document with byte-identical body text but
+    // different `[ref]: url` targets cannot reuse the previous document's
+    // rendered href. The fingerprint is computed once per render.
+    const linksFingerprint = JSON.stringify(
+      Object.keys(links)
+        .sort()
+        .map((k) => [k, links[k]]),
+    );
     for (let i = 0; i < tokens.length; i += CHUNK_TOKENS) {
       const slice = tokens.slice(i, i + CHUNK_TOKENS);
       const raw = slice.map((t) => t.raw).join('');
-      let html: string | undefined = this.chunkCache.get(raw) ?? nextCache.get(raw);
+      const key = linksFingerprint + '\u0000' + raw;
+      let html: string | undefined = this.chunkCache.get(key) ?? nextCache.get(key);
       if (html === undefined) {
         const chunk = slice as unknown as Parameters<typeof marked.parser>[0] & {
           links: typeof links;
@@ -545,7 +558,7 @@ export class PreviewPane {
         chunk.links = links;
         html = marked.parser(chunk) ?? '';
       }
-      nextCache.set(raw, html);
+      nextCache.set(key, html);
       blocks.push(html);
     }
     // Entries not reused this render are dropped — cache size tracks the

@@ -251,6 +251,29 @@ describe('markdown sanitizer', () => {
       expect(container.innerHTML).toContain('href="https://example.com"');
     });
 
+    it('does not reuse chunk cache when reference-link definitions differ', async () => {
+      const { pane, container } = makeLivePane();
+      
+      // Two documents with identical body text but different reference definitions
+      // elsewhere. The definition lives in a different heading segment, so it's not
+      // part of the first chunk's raw tokens. Without the linksFingerprint in the
+      // cache key, the second document would reuse the first's cached href.
+      // Use 40+ paragraph tokens between the def and link to ensure they're in different chunks
+      const filler = Array(45).fill(0).map((_, i) => `Para ${i}.`).join('\n\n');
+      const doc1 = `[ref]: /first\n\n# Section\n\n${filler}\n\n[Link][ref]`;
+      await pane.renderImmediateForExport(doc1);
+      const html1 = container.innerHTML;
+      expect(html1).toContain('href="/first"');
+      expect(html1).not.toContain('/second');
+      
+      // Second document: same filler, different definition
+      const doc2 = `[ref]: /second\n\n# Section\n\n${filler}\n\n[Link][ref]`;
+      await pane.renderImmediateForExport(doc2);
+      const html2 = container.innerHTML;
+      expect(html2).toContain('href="/second"');
+      expect(html2).not.toContain('/first');
+    });
+
     it('segmented lexing matches whole-document parsing exactly', async () => {
       // Exercises the heading-segmented lexer against marked's own
       // whole-document output on a doc with fences containing #-lines,
