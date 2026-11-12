@@ -13,6 +13,7 @@ requests.
 - Preview: Restrict preview images to the workspace folder.
 - Markdown: Include reference-link definitions in chunk cache key.
 - Diff: Show Unicode bidirectional and invisible control characters.
+- Preview: Optimize preview search match filtering.
 
 ### Changed
 
