@@ -1,5 +1,13 @@
 // @vitest-environment jsdom
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+const mockSetHtmlPreview = vi.fn(async (_html: string) => undefined);
+vi.mock('../api', () => ({
+  api: {
+    setHtmlPreview: (html: string) => mockSetHtmlPreview(html),
+  },
+}));
+
 import { marked } from 'marked';
 import { PreviewPane, sanitizeMarkdownHtml } from '../preview';
 import { EventBus } from '../events';
@@ -292,5 +300,106 @@ describe('markdown sanitizer', () => {
       expect(after).not.toBeNull();
       expect(after).not.toBe(first);
     }, 15_000);
+  });
+
+  describe('HTML scripts policy', () => {
+    it('only re-renders when key matches', () => {
+      const pane = new PreviewPane(new EventBus());
+      const container = document.createElement('div');
+      pane.init(container);
+
+      let renderCount = 0;
+      const originalRender = pane['renderImmediate'].bind(pane);
+      pane['renderImmediate'] = async function (content: string) {
+        renderCount++;
+        return originalRender(content);
+      };
+
+      pane.setRenderMode('test.html');
+      pane.setPathResolver(() => '/tmp/docs/test.html');
+      pane.setOriginResolver(() => null);
+      pane['framedMode'] = true;
+      pane['allowScripts'] = false;
+      pane['lastRendered'] = '<html><body>A</body></html>';
+      pane['lastRenderedKey'] = '\0/tmp/docs/test.html';
+
+      pane['allowScripts'] = false;
+      pane.setAllowScripts(true, '\0/tmp/other/file.html');
+      expect(renderCount).toBe(0);
+      expect(pane['lastRendered']).toBe('<html><body>A</body></html>');
+
+      pane['allowScripts'] = false;
+      pane['lastRendered'] = '<html><body>A</body></html>';
+      pane.setAllowScripts(true, '\0/tmp/docs/test.html');
+      expect(renderCount).toBe(1);
+    });
+
+    it('clears lastRenderedKey when render mode switches', () => {
+      const pane = new PreviewPane(new EventBus());
+      const container = document.createElement('div');
+      pane.init(container);
+
+      pane.setRenderMode('test.html');
+      pane['lastRendered'] = '<html><body>content</body></html>';
+      pane['lastRenderedKey'] = '\0/tmp/test.html';
+      expect(pane['lastRenderedKey']).toBe('\0/tmp/test.html');
+
+      pane.setRenderMode('test.md');
+      expect(pane['lastRendered']).toBeNull();
+      expect(pane['lastRenderedKey']).toBeNull();
+    });
+
+    it('drops render result if document switched during async rewrite', async () => {
+      const pane = new PreviewPane(new EventBus());
+      const container = document.createElement('div');
+      pane.init(container);
+      pane.setRenderMode('test.html');
+      pane.setPathResolver(() => '/tmp/doc-a.html');
+      pane.setOriginResolver(() => null);
+
+      let resolveRewrite: ((html: string) => void) | null = null;
+      const rewritePromise = new Promise<string>((resolve) => {
+        resolveRewrite = resolve;
+      });
+      pane['rewriteHtmlAssets'] = vi.fn(() => rewritePromise);
+
+      const renderPromise = pane['renderHtmlPreview']('<html><body>Doc A</body></html>');
+
+      pane.setPathResolver(() => '/tmp/doc-b.html');
+
+      resolveRewrite!('<html><body>Doc A rewritten</body></html>');
+      await renderPromise;
+
+      expect(pane['lastRenderedKey']).toBeNull();
+      expect(container.querySelector('iframe')).toBeNull();
+    });
+
+    it('revoking scripts during async rewrite falls back to srcdoc frame', async () => {
+      const pane = new PreviewPane(new EventBus());
+      const container = document.createElement('div');
+      pane.init(container);
+      pane.setRenderMode('test.html');
+      pane.setPathResolver(() => '/tmp/doc.html');
+      pane.setOriginResolver(() => null);
+      pane.setAllowScripts(true, '\0/tmp/doc.html');
+
+      let resolveRewrite: ((html: string) => void) | null = null;
+      const rewritePromise = new Promise<string>((resolve) => {
+        resolveRewrite = resolve;
+      });
+      pane['rewriteHtmlAssets'] = vi.fn(() => rewritePromise);
+
+      const renderPromise = pane['renderHtmlPreview']('<html><body>content</body></html>');
+
+      pane.setAllowScripts(false, '\0/tmp/doc.html');
+
+      resolveRewrite!('<html><body>rewritten</body></html>');
+      await renderPromise;
+
+      const frame = container.querySelector('iframe');
+      expect(frame).not.toBeNull();
+      expect(frame!.dataset.mode).toBe('srcdoc');
+      expect(frame!.hasAttribute('src')).toBe(false);
+    });
   });
 });

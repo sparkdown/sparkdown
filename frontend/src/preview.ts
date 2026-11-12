@@ -227,6 +227,7 @@ export class PreviewPane {
   private visible = true;
   private currentBaseDir: string | null = null;
   private lastRendered: string | null = null;
+  private lastRenderedKey: string | null = null;
   private framedMode = false;
   private svgMode = false;
   private allowScripts = false;
@@ -238,6 +239,8 @@ export class PreviewPane {
   private originResolver: () => string | null = () => null;
   /** Origin the current DOM was rendered for. */
   private renderedOrigin: string | null = null;
+  /** Resolver for the path of the document being previewed. */
+  private pathResolver: () => string | null = () => null;
   private scrollState = createScrollState();
   private renderDebounced = debounce((c: string) => { void this.renderImmediate(c); }, TIMING.PREVIEW_RENDER_MS);
   // Invoked on interaction inside the (same-origin) preview iframe — its events
@@ -347,6 +350,7 @@ export class PreviewPane {
   }
 
   render(markdownContent: string): void {
+    this.renderDebounced.cancel();
     this.renderDebounced(markdownContent);
   }
 
@@ -373,6 +377,7 @@ export class PreviewPane {
       this.framedMode = framed;
       this.svgMode = svg;
       this.lastRendered = null;
+      this.lastRenderedKey = null;
       // Framed mode replaces the container's children with an iframe, so the
       // incremental block cache no longer describes the DOM.
       this.prevBlocks = [];
@@ -383,12 +388,16 @@ export class PreviewPane {
   /**
    * Enable/disable script execution in the HTML-preview iframe. Off by default;
    * scripts only run for HTML files when the user opts in via the View menu.
-   * Re-renders so the change takes effect on the current document immediately.
+   * Re-renders so the change takes effect on the current document immediately,
+   * but only if the key matches the document that was last rendered.
+   *
+   * @param allow - Whether to allow scripts
+   * @param key - Document key (origin\0path) to match against lastRenderedKey
    */
-  setAllowScripts(allow: boolean): void {
+  setAllowScripts(allow: boolean, key: string | null = null): void {
     if (allow === this.allowScripts) return;
     this.allowScripts = allow;
-    if (this.framedMode && this.lastRendered !== null) {
+    if (this.framedMode && this.lastRendered !== null && key === this.lastRenderedKey) {
       const content = this.lastRendered;
       this.lastRendered = null;
       void this.renderImmediate(content);
@@ -606,14 +615,19 @@ export class PreviewPane {
     // SVG is wrapped in a host document that centres it; HTML is framed as-is
     // (with relative asset references rewritten through the asset protocol).
     const seq = ++this.htmlAssetSeq;
+    const scriptsDecision = this.allowScripts;
+    const docKey = this.currentDocKey();
     const resolved = this.svgMode
       ? this.wrapSvgDocument(content)
       : await this.rewriteHtmlAssets(content);
     // Remote images are fetched over SSH; a newer render may have finished
-    // while this one waited. Only the latest may reach the frame.
-    if (seq !== this.htmlAssetSeq) return;
+    // while this one waited. Only the latest may reach the frame. Also drop
+    // this render if the document changed (tab switch).
+    if (seq !== this.htmlAssetSeq || docKey !== this.currentDocKey()) return;
 
-    if (this.allowScripts) {
+    this.lastRenderedKey = docKey;
+
+    if (scriptsDecision && this.allowScripts) {
       await this.renderHtmlWithScripts(resolved);
       return;
     }
@@ -770,6 +784,19 @@ export class PreviewPane {
    *  active tab's origin): null = local, otherwise the SSH host alias. */
   setOriginResolver(resolver: () => string | null): void {
     this.originResolver = resolver;
+  }
+
+  /** Tell the pane how to resolve the path of the document being previewed. */
+  setPathResolver(resolver: () => string | null): void {
+    this.pathResolver = resolver;
+  }
+
+  /** Document key for the current preview: origin\0path, or null. */
+  private currentDocKey(): string | null {
+    const path = this.pathResolver();
+    if (!path) return null;
+    const origin = this.originResolver();
+    return `${origin ?? ''}\0${path}`;
   }
 
   /** Settles once every pending image URL has been applied (tests). */

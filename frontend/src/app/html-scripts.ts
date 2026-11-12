@@ -123,7 +123,8 @@ export class HtmlScriptsController {
    */
   applyPolicy(syncMenu = true): void {
     const allowed = this.allowedForActive();
-    this.getPreview()?.setAllowScripts(allowed);
+    const key = this.activeFramedKey();
+    this.getPreview()?.setAllowScripts(allowed, key);
     this.updateButton();
     if (syncMenu && allowed !== this.lastHtmlJsMenuChecked) {
       this.lastHtmlJsMenuChecked = allowed;
