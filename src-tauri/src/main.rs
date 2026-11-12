@@ -207,16 +207,21 @@ fn fallback_instance_lock_path() -> std::path::PathBuf {
 /// lifetime; `None` means another process already holds it.
 #[cfg(unix)]
 fn try_claim_fallback_lock() -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
     let path = fallback_instance_lock_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    if path.parent().is_some() {
+        if let Some(base) = mcp::socket_base_dir() {
+            let _ = mcp::ensure_socket_dir(&base, &path);
+        }
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(&path)
         .ok()?;
     let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 };

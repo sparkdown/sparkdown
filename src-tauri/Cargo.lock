@@ -3746,6 +3746,7 @@ version = "0.4.2"
 dependencies = [
  "arboard",
  "base64 0.23.1",
+ "dirs",
  "interprocess",
  "libc",
  "minisign",

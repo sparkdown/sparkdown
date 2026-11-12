@@ -247,8 +247,11 @@ fn secure_context_tree(buf_dir: &Path) -> std::io::Result<()> {
 /// directory (not a symlink), owned by the current effective uid, with no
 /// group/other permission bits. Anything else means another user may control
 /// it, so we refuse rather than write through it.
+///
+/// Crate-visible so `mcp.rs` (socket parent dir) and `main.rs`
+/// (fallback instance lock dir) can reuse the exact same hardening.
 #[cfg(unix)]
-fn ensure_owned_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn ensure_owned_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     match std::fs::DirBuilder::new().mode(0o700).create(dir) {
         Ok(()) => {}
