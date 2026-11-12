@@ -24,12 +24,28 @@ for f in "${release_files[@]}"; do
     fail=1
   fi
 done
-# The feature must stay off by default.
-if sed -n '/^\[features\]/,/^\[/p' src-tauri/Cargo.toml | grep -E '^default *=.*e2e-webdriver'; then
-  echo "::error file=src-tauri/Cargo.toml::e2e-webdriver is in the default features"
-  fail=1
+# The feature must stay off by default. Use cargo metadata instead of grep
+# so multi-line default arrays are handled correctly.
+if command -v jq >/dev/null; then
+  default_features=$(cd src-tauri && cargo metadata --no-deps --format-version 1 | \
+    jq -r '(.packages[] | select(.name=="sparkdown") | .features.default // []) | .[]')
+  if echo "$default_features" | grep -qF 'e2e-webdriver'; then
+    echo "::error file=src-tauri/Cargo.toml::e2e-webdriver is in the default features"
+    fail=1
+  fi
+else
+  # Fallback for environments without jq: use the old grep method (works for single-line only).
+  if sed -n '/^\[features\]/,/^\[/p' src-tauri/Cargo.toml | grep -E '^default *=.*e2e-webdriver'; then
+    echo "::error file=src-tauri/Cargo.toml::e2e-webdriver is in the default features"
+    fail=1
+  fi
 fi
 for bin in "$@"; do
+  if [ ! -f "$bin" ]; then
+    echo "::error::$bin does not exist or is not a file"
+    fail=1
+    continue
+  fi
   if grep -a -q 'SPARKDOWN_E2E_WEBVIEW2_ARGS' "$bin"; then
     echo "::error::$bin contains the e2e-webdriver code path (SPARKDOWN_E2E_WEBVIEW2_ARGS)"
     fail=1

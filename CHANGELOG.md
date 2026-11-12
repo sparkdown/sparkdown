@@ -32,6 +32,7 @@ requests.
 - Files: Saving over an existing file stages the new contents in an owner-only temporary file until the data is written.
 - Updater: The update check downloads its manifest into a per-run directory that only the current user can open.
 - Terminal: Pasting from the clipboard uses bracketed-paste markers when the shell enables them.
+- Release: The release gate fails on missing binaries and on multi-line default feature lists.
 
 ### Changed
 
