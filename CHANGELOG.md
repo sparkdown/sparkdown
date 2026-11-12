@@ -18,6 +18,7 @@ requests.
 - Markdown: Cache reference-link definition parsing.
 - Read-only git operations no longer trigger hooks from the repository.
 - Git diff operations now timeout after 20 seconds and reject special file types.
+- Filter and diff driver enumeration now covers included config and worktree scope.
 
 ### Changed
 

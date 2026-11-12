@@ -148,52 +148,76 @@ fn read_safe_directories(probe: impl Fn(&[&str]) -> Option<String>) -> Vec<Strin
 }
 
 /// `-c key=value` overrides that disable every repo-local `filter.<x>` and
-/// `diff.<x>` driver, so opening an untrusted repo and viewing its changes
-/// never runs an attacker-supplied clean/smudge/process filter or diff
-/// textconv/command hook (these fire implicitly on `git status`/`git diff`
-/// through `.gitattributes`). We enumerate the local keys first (a read that
-/// executes nothing), then blank the code-executing sub-keys and force
-/// `filter.<x>.required=false` so a still-referenced-but-disabled filter can't
-/// make the command fail. Enumeration failure returns no overrides.
-fn local_exec_neutralisers(root: &Path) -> Vec<String> {
-    let mut cmd = match git_command(root) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    cmd.args([
-        "config",
-        "--local",
-        "--name-only",
-        "--get-regexp",
-        r"^(filter|diff)\.",
-    ]);
-    let output = match cmd.output() {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    // `--get-regexp` exits non-zero when there are no matching keys.
-    if !output.status.success() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut filters: BTreeSet<&str> = BTreeSet::new();
-    let mut diffs: BTreeSet<&str> = BTreeSet::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("filter.") {
-            if let Some((name, sub)) = rest.rsplit_once('.') {
-                if !name.is_empty() && matches!(sub, "clean" | "smudge" | "process" | "required") {
-                    filters.insert(name);
-                }
+/// `diff.<x>` driver (covering local, worktree, and included config), so
+/// viewing changes never runs a repo-supplied clean/smudge/process filter or
+/// diff textconv/command hook (these fire implicitly on `git status`/`git diff`
+/// through `.gitattributes`). We enumerate keys with --includes (to follow
+/// include.path/includeIf) from both --local and --worktree scopes, then blank
+/// the code-executing sub-keys and force `filter.<x>.required=false` so a
+/// still-referenced-but-disabled filter can't make the command fail.
+/// Enumeration failure is an error (fail-closed).
+fn local_exec_neutralisers(root: &Path) -> Result<Vec<String>, String> {
+    fn collect_names(
+        root: &Path,
+        scope: &str,
+    ) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
+        let mut cmd = git_command(root)?;
+        cmd.env("LC_ALL", "C").env("LANG", "C").args([
+            "config",
+            scope,
+            "--includes",
+            "--name-only",
+            "--get-regexp",
+            r"^(filter|diff)\.",
+        ]);
+        let output = cmd
+            .output()
+            .map_err(|e| format!("failed to enumerate {scope} config: {e}"))?;
+        if !output.status.success() {
+            let code = output.status.code();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if code == Some(1) && output.stdout.is_empty() {
+                return Ok((BTreeSet::new(), BTreeSet::new()));
             }
-        } else if let Some(rest) = line.strip_prefix("diff.") {
-            if let Some((name, sub)) = rest.rsplit_once('.') {
-                if !name.is_empty() && matches!(sub, "command" | "textconv") {
-                    diffs.insert(name);
+            if stderr.contains("not a git repository")
+                || stderr.contains("can only be used inside a git repository")
+                || (code == Some(128)
+                    && stderr.contains("cannot be used with multiple working trees")
+                    && stderr.contains("worktreeConfig"))
+            {
+                return Ok((BTreeSet::new(), BTreeSet::new()));
+            }
+            return Err(format!("{scope} config enumeration failed: exit {code:?}"));
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut filters = BTreeSet::new();
+        let mut diffs = BTreeSet::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("filter.") {
+                if let Some((name, sub)) = rest.rsplit_once('.') {
+                    if !name.is_empty()
+                        && matches!(sub, "clean" | "smudge" | "process" | "required")
+                    {
+                        filters.insert(name.to_string());
+                    }
+                }
+            } else if let Some(rest) = line.strip_prefix("diff.") {
+                if let Some((name, sub)) = rest.rsplit_once('.') {
+                    if !name.is_empty() && matches!(sub, "command" | "textconv") {
+                        diffs.insert(name.to_string());
+                    }
                 }
             }
         }
+        Ok((filters, diffs))
     }
+
+    let (mut filters, mut diffs) = collect_names(root, "--local")?;
+    let (wf, wd) = collect_names(root, "--worktree")?;
+    filters.extend(wf);
+    diffs.extend(wd);
+
     let mut args = Vec::new();
     for f in filters {
         args.push("-c".to_string());
@@ -211,7 +235,7 @@ fn local_exec_neutralisers(root: &Path) -> Vec<String> {
         args.push("-c".to_string());
         args.push(format!("diff.{d}.textconv="));
     }
-    args
+    Ok(args)
 }
 
 /// Deadline for every read-only git invocation.
@@ -224,8 +248,8 @@ const READ_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20)
 /// forever.
 fn run_git_raw(root: &Path, args: &[&str]) -> Result<Output, String> {
     let mut cmd = git_command(root)?;
-    let neutralisers = local_exec_neutralisers(root);
-    cmd.args(&neutralisers);
+    let neutralisers = local_exec_neutralisers(root)?;
+    cmd.args(neutralisers);
     cmd.args(args);
     let cwd = cmd
         .get_current_dir()
