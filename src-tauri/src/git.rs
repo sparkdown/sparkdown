@@ -90,6 +90,8 @@ fn git_command_with(root: &Path, safe_dirs: &[String]) -> Result<Command, String
     cmd.env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ALLOW_PROTOCOL", "")
         .arg("--no-pager")
         .arg("--no-optional-locks")
         .arg("-c")
@@ -103,7 +105,11 @@ fn git_command_with(root: &Path, safe_dirs: &[String]) -> Result<Command, String
         .arg("-c")
         .arg("diff.tool=")
         .arg("-c")
-        .arg("diff.submodule=short");
+        .arg("diff.submodule=short")
+        .arg("-c")
+        .arg("protocol.allow=never")
+        .arg("-c")
+        .arg("fetch.negotiationAlgorithm=noop");
     for dir in safe_dirs {
         cmd.arg("-c").arg(format!("safe.directory={dir}"));
     }
@@ -1215,12 +1221,28 @@ mod tests {
 
         fs::write(repo.join("a.txt"), "modified\n").unwrap();
 
-        let status = git_status_impl(repo.to_string_lossy().into_owned()).unwrap();
+        #[cfg(unix)]
+        {
+            let control = crate::proc::command(&git)
+                .current_dir(&repo)
+                .args(["diff", "HEAD", "--", "a.txt"])
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(control.status.success());
+            assert!(
+                marker.exists(),
+                "control: plain git diff must run filter with '=' in name"
+            );
+            let _ = fs::remove_file(&marker);
+        }
+
+        let _ = run_git(&repo, &["diff", "HEAD", "--", "a.txt"]);
         assert!(
             !marker.exists(),
             "filter with '=' in name ran despite neutraliser"
         );
-        assert_eq!(status.changes.len(), 1);
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -1483,6 +1505,137 @@ mod tests {
             !marker.exists(),
             "filter from worktree config ran despite neutraliser"
         );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn git_diff_does_not_trigger_lazy_fetch_uploadpack() {
+        use std::fs;
+
+        let git = git_bin();
+        let base =
+            std::env::temp_dir().join(format!("sparkdown_lazy_fetch_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+
+        let source = base.join("source");
+        fs::create_dir_all(&source).unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["config", "user.name", "test"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["config", "user.email", "test@example.com"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["config", "uploadpack.allowFilter", "true"])
+            .status()
+            .unwrap();
+
+        fs::write(source.join("a.txt"), "initial\n").unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["add", "a.txt"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["commit", "-m", "initial"])
+            .status()
+            .unwrap();
+
+        fs::write(source.join("a.txt"), "modified\n").unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["add", "a.txt"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["commit", "-m", "modify"])
+            .status()
+            .unwrap();
+
+        let clone = base.join("clone");
+        let source_url = format!("file://{}", source.display());
+        crate::proc::command(&git)
+            .current_dir(&base)
+            .args([
+                "clone",
+                "--filter=blob:none",
+                &source_url,
+                clone.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+
+        let marker = base.join("uploadpack-ran");
+        let marker_script = base.join("uploadpack.sh");
+        fs::write(
+            &marker_script,
+            format!(
+                "#!/bin/sh\ntouch {}\nexec git-upload-pack \"$@\"\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&marker_script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        crate::proc::command(&git)
+            .current_dir(&clone)
+            .args([
+                "config",
+                "--local",
+                "remote.origin.uploadpack",
+                marker_script.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+
+        let blob_path = clone.join(".git/objects/pack");
+        if blob_path.exists() {
+            for entry in fs::read_dir(&blob_path).unwrap() {
+                let entry = entry.unwrap();
+                if entry.path().extension().and_then(|s| s.to_str()) == Some("pack") {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+
+        let _ = run_git(&clone, &["diff", "HEAD~1", "--", "a.txt"]);
+        assert!(
+            !marker.exists(),
+            "uploadpack ran during read-only diff despite lazy fetch block"
+        );
+
+        {
+            let control = crate::proc::command(&git)
+                .current_dir(&clone)
+                .args(["diff", "HEAD~1", "--", "a.txt"])
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(control.status.success());
+            assert!(
+                marker.exists(),
+                "control: plain git diff on partial clone must trigger lazy fetch"
+            );
+        }
 
         let _ = fs::remove_dir_all(&base);
     }

@@ -21,6 +21,7 @@ requests.
 - Filter and diff driver enumeration now covers included config and worktree scope.
 - Filter and diff driver config is applied via environment variables to handle names containing special characters.
 - Remote git operations over SSH apply filter and diff driver neutralization.
+- Read-only git operations block partial clone lazy fetches and protocol execution.
 - Background fetch is skipped for repositories whose config sets commands.
 
 ### Changed
