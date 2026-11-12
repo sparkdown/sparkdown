@@ -214,16 +214,51 @@ fn local_exec_neutralisers(root: &Path) -> Vec<String> {
     args
 }
 
-/// Run a hardened git command and return its full `Output` (never fails on a
+/// Deadline for every read-only git invocation.
+const READ_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Run a read-only git command and return its full `Output` (never fails on a
 /// non-zero exit — the caller decides). This is the single builder used by
-/// every git invocation, so all of them get the same env + config + driver
-/// hardening.
+/// every git invocation, so all of them get the same environment, config, and
+/// driver overrides, plus a timeout to prevent repository content from blocking
+/// forever.
 fn run_git_raw(root: &Path, args: &[&str]) -> Result<Output, String> {
     let mut cmd = git_command(root)?;
     let neutralisers = local_exec_neutralisers(root);
     cmd.args(&neutralisers);
     cmd.args(args);
-    cmd.output().map_err(|e| format!("failed to run git: {e}"))
+    let cwd = cmd
+        .get_current_dir()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| root.to_path_buf());
+    let outcome = crate::mcp::run_command_with_timeout(cmd, &cwd, READ_GIT_TIMEOUT)?;
+    match outcome {
+        crate::mcp::CliOutcome::Exited {
+            code,
+            stdout,
+            stderr,
+        } => {
+            #[cfg(unix)]
+            let status = {
+                use std::os::unix::process::ExitStatusExt;
+                match code {
+                    Some(c) => std::process::ExitStatus::from_raw((c & 0xff) << 8),
+                    None => std::process::ExitStatus::from_raw(0x09),
+                }
+            };
+            #[cfg(not(unix))]
+            let status = {
+                use std::os::windows::process::ExitStatusExt;
+                std::process::ExitStatus::from_raw(code.map(|c| c as u32).unwrap_or(1))
+            };
+            Ok(Output {
+                status,
+                stdout: stdout.into_bytes(),
+                stderr: stderr.into_bytes(),
+            })
+        }
+        _ => Err("git command failed".to_string()),
+    }
 }
 
 pub(crate) fn run_git(root: &Path, args: &[&str]) -> Result<String, String> {
@@ -907,7 +942,7 @@ mod tests {
         fs::write(dir.join(".gitattributes"), "data.txt filter=evil\n").unwrap();
         fs::write(dir.join("data.txt"), "changed contents\n").unwrap();
 
-        // Control: an unhardened `git diff` honours the local filter and
+        // Control: plain `git diff` honours the local filter and
         // creates the marker (it must clean the working file to diff it) —
         // proving the attack is real and the test below isn't vacuous.
         let _ = fs::remove_file(&marker);
@@ -1221,6 +1256,27 @@ pub(crate) fn git_diff_file_impl(
     let rel_path = path.as_str();
 
     if untracked {
+        // For untracked files, check the file type before diffing. A FIFO would
+        // block git diff --no-index forever waiting for a writer. Symlinks to
+        // FIFOs are also rejected.
+        let full_path = root_path.join(rel_path);
+        match std::fs::symlink_metadata(&full_path) {
+            Ok(meta) => {
+                let ft = meta.file_type();
+                if !ft.is_file() && !ft.is_symlink() {
+                    return Err(format!("cannot diff special file: {}", path));
+                }
+                if ft.is_symlink() {
+                    if let Ok(target_meta) = std::fs::metadata(&full_path) {
+                        if !target_meta.is_file() {
+                            return Err(format!("cannot diff symlink to non-file: {}", path));
+                        }
+                    }
+                }
+            }
+            Err(e) => return Err(format!("failed to stat file: {e}")),
+        }
+
         // Show the whole new file as additions. `--no-index` exits 0 (no diff)
         // or 1 (diff found); anything else is a real error. One hardened call.
         let output = run_git_raw(

@@ -17,6 +17,7 @@ requests.
 - Search: Bound fuzzy-path matching steps.
 - Markdown: Cache reference-link definition parsing.
 - Read-only git operations no longer trigger hooks from the repository.
+- Git diff operations now timeout after 20 seconds and reject special file types.
 
 ### Changed
 
