@@ -71,7 +71,7 @@ fn context_root() -> Option<PathBuf> {
     }
     #[cfg(target_os = "macos")]
     {
-        return Some(std::env::temp_dir().join("sparkdown"));
+        Some(std::env::temp_dir().join("sparkdown"))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {

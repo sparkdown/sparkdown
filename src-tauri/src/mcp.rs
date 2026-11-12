@@ -1336,7 +1336,7 @@ fn runtime_base() -> Option<PathBuf> {
     {
         // `$TMPDIR` on macOS is a per-user 0700 dir; keep the previous
         // behaviour there.
-        return Some(std::env::temp_dir());
+        Some(std::env::temp_dir())
     }
     #[cfg(not(target_os = "macos"))]
     {
