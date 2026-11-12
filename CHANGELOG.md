@@ -26,6 +26,7 @@ requests.
 - Remote: Delete and create operations verify paths resolve inside the window's folder on the host.
 - Remote: Agent CLI watchdog creates timeout marker directory with exclusive permissions.
 - SSH: Host-key trust flow checks all known_hosts files before scanning.
+- SSH: Passphrase broker uses per-connection nonces and verifies peer credentials.
 
 ### Changed
 
