@@ -1424,7 +1424,7 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
                 let state = state.clone();
                 // One thread per client (one shim per agent process); a slow
                 // round trip in one never blocks another.
-                std::thread::spawn(move || serve_client(stream, &app, &state));
+                std::thread::spawn(move || serve_client(stream, &app, &state, true));
             }
         })?;
     Ok(path)
@@ -1506,7 +1506,7 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
                     for stream in l.incoming() {
                         let Ok(stream) = stream else { continue };
                         let (app, state) = (app.clone(), state.clone());
-                        std::thread::spawn(move || serve_client(stream, &app, &state));
+                        std::thread::spawn(move || serve_client(stream, &app, &state, false));
                     }
                 });
             }
@@ -1520,7 +1520,7 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
                 let Ok(stream) = stream else { continue };
                 let app = app.clone();
                 let state = state.clone();
-                std::thread::spawn(move || serve_client(stream, &app, &state));
+                std::thread::spawn(move || serve_client(stream, &app, &state, true));
             }
         })?;
     Ok(path)
@@ -1628,21 +1628,82 @@ fn serve_client(
     stream: interprocess::local_socket::Stream,
     app: &AppHandle,
     state: &Arc<McpState>,
+    accepts_forward: bool,
 ) {
     use interprocess::local_socket::traits::Stream as _;
     let (read_half, write_half) = stream.split();
-    let mut conn = Conn::default();
+    let mut conn = Conn {
+        accepts_forward,
+        ..Default::default()
+    };
     serve_lines(read_half, write_half, |msg| conn.handle(app, state, msg));
 }
 
 /// One client: newline-delimited JSON-RPC in, one line per response out.
 /// Notifications get no reply. Runs until the client hangs up.
 #[cfg(unix)]
-fn serve_client(stream: std::os::unix::net::UnixStream, app: &AppHandle, state: &Arc<McpState>) {
+fn serve_client(
+    stream: std::os::unix::net::UnixStream,
+    app: &AppHandle,
+    state: &Arc<McpState>,
+    accepts_forward: bool,
+) {
     let Ok(read_half) = stream.try_clone() else {
         return;
     };
-    let mut conn = Conn::default();
+    let mut accepts_forward = accepts_forward;
+    if accepts_forward {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            let mut ucred = libc::ucred {
+                pid: 0,
+                uid: 0,
+                gid: 0,
+            };
+            let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+            if unsafe {
+                libc::getsockopt(
+                    stream.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_PEERCRED,
+                    &mut ucred as *mut _ as *mut libc::c_void,
+                    &mut len,
+                )
+            } != 0
+            {
+                accepts_forward = false;
+            } else {
+                let peer_uid = ucred.uid;
+                let our_uid = unsafe { libc::geteuid() };
+                if peer_uid != our_uid {
+                    accepts_forward = false;
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::io::AsRawFd;
+            let mut peer_uid = 0u32;
+            let mut peer_gid = 0u32;
+            if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut peer_uid, &mut peer_gid) } != 0 {
+                accepts_forward = false;
+            } else {
+                let our_uid = unsafe { libc::geteuid() };
+                if peer_uid != our_uid {
+                    accepts_forward = false;
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            accepts_forward = false;
+        }
+    }
+    let mut conn = Conn {
+        accepts_forward,
+        ..Default::default()
+    };
     serve_lines(read_half, stream, |msg| conn.handle(app, state, msg));
 }
 
@@ -1674,6 +1735,9 @@ pub(crate) struct Conn {
     /// A per-window socket (remote forward): always this window.
     pub(crate) fixed: Option<String>,
     started: bool,
+    /// Whether this connection may honour the `sparkdown_forward` launch
+    /// hand-off message. True only for the main per-user socket.
+    accepts_forward: bool,
 }
 
 /// Where a connection's tool calls go, given the open windows.
@@ -1794,6 +1858,14 @@ impl Conn {
                 });
             }
             if let Some(f) = msg.get("sparkdown_forward") {
+                if !self.accepts_forward {
+                    return Some(json!({
+                        "sparkdown_ack": {
+                            "ok": false,
+                            "error": "launch hand-off is only available on the main local socket"
+                        }
+                    }));
+                }
                 let argv: Vec<String> = f
                     .get("argv")
                     .and_then(|a| serde_json::from_value(a.clone()).ok())
@@ -3905,5 +3977,26 @@ mod tests {
         let p = mcp_socket_path();
         assert!(p.to_string_lossy().starts_with(r"\\.\pipe\sparkdown-"));
         assert_eq!(p, mcp_socket_path(), "stable within one launch");
+    }
+
+    #[test]
+    fn forward_refused_on_window_socket() {
+        let conn = Conn {
+            fixed: Some("w-remote".into()),
+            accepts_forward: false,
+            ..Default::default()
+        };
+        assert!(!conn.accepts_forward);
+        assert_eq!(conn.fixed, Some("w-remote".into()));
+    }
+
+    #[test]
+    fn forward_accepted_on_main_socket() {
+        let conn = Conn {
+            accepts_forward: true,
+            ..Default::default()
+        };
+        assert!(conn.accepts_forward);
+        assert_eq!(conn.fixed, None);
     }
 }

@@ -77,6 +77,7 @@ tauri-build = { version = "2", features = [] }
 # Tests only: sign fake update artifacts with a throwaway key made in-test.
 minisign = "0.10"
 ts-rs = "12"
+tauri = { version = "2", features = ["test"] }
 
 [features]
 # Test-only (E2E on Windows): let WebDriver attach to WebView2 by passing
