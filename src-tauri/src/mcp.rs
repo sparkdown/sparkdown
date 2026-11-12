@@ -492,7 +492,11 @@ pub(crate) fn run_program_windows(
     full.extend(rest.iter().map(std::ffi::OsString::from));
     let mut command = crate::proc::command(&runner);
     command.args(&full);
-    run_command_with_timeout(command, &std::env::temp_dir(), timeout)
+    // Private per-call cwd (dropped at the end of this call): agent CLIs
+    // scan `cwd` for project config, so using the shared temp dir would
+    // let another local account place config they would load.
+    let _guard = private_cwd_or_temp().map_err(|e| format!("private cwd: {e}"))?;
+    run_command_with_timeout(command, _guard.path(), timeout)
 }
 
 /// How an agent CLI run ended.
@@ -805,6 +809,187 @@ const CLI_TIMEOUT: Duration = Duration::from_secs(20);
 /// The remove step that a Repair runs before `mcp add`: best effort.
 const REPAIR_REMOVE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// A fresh, per-call, owner-only (0700) working directory for a child
+/// process we spawn. Dropped: the directory is removed. Agent CLIs scan
+/// `cwd` for project config, so using `std::env::temp_dir()` on a
+/// shared Linux box (world-writable `/tmp` when `TMPDIR` is unset) would
+/// let another local account place `./.mcp.json`, `./.gemini/settings.json`,
+/// `./.claude/settings.json` for the agent to load. The isolated dir
+/// avoids that: it is created mode 0700, owned by us, with a name no
+/// other process knows.
+pub(crate) struct PrivateCwd {
+    path: PathBuf,
+}
+
+impl PrivateCwd {
+    /// A fresh directory under `<root>/sparkdown`.
+    fn new_in(root: &std::path::Path) -> std::io::Result<Self> {
+        let base = private_cwd_base_in(root)?;
+        Ok(Self {
+            path: private_cwd_fresh_in(&base)?,
+        })
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for PrivateCwd {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Root under which the per-call working directories live: on Unix,
+/// `$XDG_RUNTIME_DIR` (the same per-user root as the MCP socket) when it is
+/// set to an absolute path, else the temp dir.
+fn private_cwd_root() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// `<root>/sparkdown`, created (or verified) as a real directory we own
+/// with mode 0700. Shared across calls, so it may already exist.
+fn private_cwd_base_in(root: &std::path::Path) -> std::io::Result<PathBuf> {
+    let base = root.join("sparkdown");
+    ensure_private_dir(&base)?;
+    Ok(base)
+}
+
+/// Create a fresh, uniquely named 0700 directory under `base` and return
+/// its path. The caller owns it (and removes it via [`PrivateCwd`]).
+fn private_cwd_fresh_in(base: &std::path::Path) -> std::io::Result<PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    // The pid + a monotonic counter + nanos keeps the name unique per
+    // process and across threads; the parent dir is already 0700, so
+    // no other account can see this name.
+    for _ in 0..32 {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let path = base.join(format!("cli-{}-{}-{}", std::process::id(), n, nanos));
+        match create_private_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other(
+        "could not create a private working directory",
+    ))
+}
+
+/// Create `dir` with mode 0700 (Unix) / default ACL (Windows). Fails if the
+/// name already exists.
+#[cfg(unix)]
+fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(dir)
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    // Per-user `%LOCALAPPDATA%\\Temp` already has a per-user ACL that the new
+    // directory inherits; nothing else to do.
+    std::fs::create_dir(dir)
+}
+
+/// Ensure the base dir exists, is a real directory (not a symlink) we own,
+/// and has mode 0700 on Unix. Shared across calls, so it may already exist.
+#[cfg(unix)]
+fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    // symlink_metadata: never follow a placed symlink.
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.file_type().is_dir() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a directory",
+            dir.display()
+        )));
+    }
+    // The current effective uid: `geteuid(2)` takes no arguments and cannot
+    // fail (same pattern as context::current_euid).
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: geteuid() has no arguments, no error path, no side effects.
+    let euid = unsafe { geteuid() };
+    if meta.uid() != euid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} is not owned by the current user", dir.display()),
+        ));
+    }
+    if meta.mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
+/// A private per-call working directory. Tries `<root>/sparkdown/…` first;
+/// if that base cannot be used (read-only runtime dir, a name taken by another
+/// account, exhausted inodes), falls back to a randomly named 0700 directory
+/// directly under the temp dir. Never returns a shared directory: when both
+/// fail the caller gets an error and must not spawn.
+pub(crate) fn private_cwd_or_temp() -> std::io::Result<PrivateCwd> {
+    private_cwd_in(&private_cwd_root(), &std::env::temp_dir())
+}
+
+/// [`private_cwd_or_temp`] with both locations passed in.
+fn private_cwd_in(
+    root: &std::path::Path,
+    fallback_dir: &std::path::Path,
+) -> std::io::Result<PrivateCwd> {
+    PrivateCwd::new_in(root).or_else(|_| private_cwd_fallback_in(fallback_dir))
+}
+
+/// `<dir>/sparkdown-<128-bit random>`, created 0700 with create-new
+/// semantics (an existing name is never reused) and checked to be ours.
+fn private_cwd_fallback_in(dir: &std::path::Path) -> std::io::Result<PrivateCwd> {
+    for _ in 0..10 {
+        let path = dir.join(format!("sparkdown-{}", random_token()));
+        match create_private_dir(&path) {
+            Ok(()) => {
+                let cwd = PrivateCwd { path };
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    let meta = std::fs::symlink_metadata(cwd.path())?;
+                    if meta.uid() != crate::context::current_euid() {
+                        // Dropping `cwd` removes the directory.
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "fallback private directory is not owned by the current user",
+                        ));
+                    }
+                }
+                return Ok(cwd);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other(
+        "could not create a private working directory after 10 attempts",
+    ))
+}
+
 /// Run `program args…` with a deadline: stdin closed, stdout/stderr drained
 /// on helper threads (so a chatty child never blocks on a full pipe), and the
 /// child killed if it outlives `timeout`. Returns (success, stdout, stderr).
@@ -919,15 +1104,31 @@ fn kill_tree(child: &mut std::process::Child) {
 /// shell's PATH, then on the interactive shell's PATH (an rc file can add
 /// to PATH, e.g. nvm), and the CLI runs with that PATH. Only a name that is
 /// neither (an alias or shell function) still goes through `$SHELL -lic`,
-/// with the noise lines dropped from its error. The working directory is
-/// the temp dir, NOT the app's (home or `/` for a Dock launch): agent CLIs
-/// scan the cwd for project config, and a scan of `$HOME` touches
-/// Documents/Downloads/Desktop, which macOS attributes to SparkDown and
-/// prompts for. Blocking: call from a worker thread, never the UI.
+/// with the noise lines dropped from its error. The working directory is a
+/// per-user, app-private 0700 dir (see [`private_cwd_or_temp`]), NOT the shared temp
+/// dir and NOT the app's (home or `/` for a Dock launch): agent CLIs scan
+/// the cwd for project config, so using a shared `/tmp` would let
+/// another local user place `.mcp.json` / `.claude/` / `.gemini/` /
+/// `AGENTS.md` that the CLI loads while running as the target, and
+/// using `$HOME` would make them scan Documents/Downloads/Desktop
+/// which macOS attributes to SparkDown and prompts for. Blocking: call from
+/// a worker thread, never the UI.
 #[cfg_attr(windows, allow(dead_code))]
 fn run_local_argv_unix(argv: &[String], timeout: Duration) -> Result<CliOutcome, String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    run_local_argv_unix_with(&shell, argv, timeout)
+}
+
+/// [`run_local_argv_unix`] with the login shell passed in (used for a name
+/// that is not an executable on either PATH, e.g. an alias).
+#[cfg_attr(windows, allow(dead_code))]
+fn run_local_argv_unix_with(
+    shell: &str,
+    argv: &[String],
+    timeout: Duration,
+) -> Result<CliOutcome, String> {
     let (bin, rest) = argv.split_first().ok_or("empty agent command")?;
-    let tmp = std::env::temp_dir();
+    let _guard = private_cwd_or_temp().map_err(|e| format!("private cwd: {e}"))?;
     let login = crate::context::login_shell_path();
     let found = crate::context::find_in_path(bin, &login, "", false)
         .map(|p| (p, login.clone()))
@@ -939,13 +1140,12 @@ fn run_local_argv_unix(argv: &[String], timeout: Duration) -> Result<CliOutcome,
         Some((program, path)) => {
             let mut command = crate::proc::command(&program);
             command.args(rest).env("PATH", path);
-            run_command_with_timeout(command, &tmp, timeout)
+            run_command_with_timeout(command, _guard.path(), timeout)
         }
         None => {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
             let mut command = crate::proc::command(shell);
             command.args(["-lic", &posix_command_line(argv)]);
-            run_command_with_timeout(command, &tmp, timeout)
+            run_command_with_timeout(command, _guard.path(), timeout)
         }
     }
 }
@@ -959,19 +1159,28 @@ fn interactive_shell_path() -> Option<String> {
     static PATH: OnceLock<Option<String>> = OnceLock::new();
     PATH.get_or_init(|| {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        let (ok, stdout, _noise) = run_with_timeout(
-            &shell,
-            &["-lic", "printf '\\n__SD_PATH__%s\\n' \"$PATH\""],
-            &std::env::temp_dir(),
-            Duration::from_secs(5),
-        )
-        .ok()?;
-        if !ok {
-            return None;
-        }
-        marked_path(&stdout)
+        probe_interactive_path(&shell)
     })
     .clone()
+}
+
+/// One `shell -lic` run that prints PATH after a marker line, in a private
+/// per-call working directory (see [`PrivateCwd`]). None when the directory
+/// cannot be made or the shell fails.
+#[cfg_attr(windows, allow(dead_code))]
+fn probe_interactive_path(shell: &str) -> Option<String> {
+    let cwd = private_cwd_or_temp().ok()?;
+    let (ok, stdout, _noise) = run_with_timeout(
+        shell,
+        &["-lic", "printf '\\n__SD_PATH__%s\\n' \"$PATH\""],
+        cwd.path(),
+        Duration::from_secs(5),
+    )
+    .ok()?;
+    if !ok {
+        return None;
+    }
+    marked_path(&stdout)
 }
 
 /// The PATH after the last `__SD_PATH__` marker line of a probe's output.
@@ -1432,9 +1641,8 @@ pub fn mcp_socket_path() -> PathBuf {
 }
 
 /// 128 bits of OS-seeded randomness as hex, no extra crate. `RandomState` is
-/// seeded from the platform RNG (it backs HashMap's hash-flooding defence), so
-/// hashing a fixed input under two fresh instances yields an unguessable token
-/// for the pipe name.
+/// seeded from the platform RNG (it backs HashMap's collision resistance), so
+/// hashing a fixed input under two fresh instances yields a random token.
 pub(crate) fn random_token() -> String {
     use std::hash::{BuildHasher, Hasher};
     let mut token = String::with_capacity(32);
@@ -4458,6 +4666,196 @@ mod tests {
         );
         assert!(r.unwrap_err().contains("did not finish"));
     }
+    /// `PrivateCwd` creates a 0700 directory owned by the current user and
+    /// removes it on drop. This is what defeats the placed-config scenario on
+    /// `/tmp` for `run_local_argv_unix` / `run_program_windows`.
+    #[cfg(unix)]
+    #[test]
+    fn private_cwd_returns_sparkdown_directory() {
+        let guard = private_cwd_or_temp().expect("private cwd creation");
+        let path_str = guard.path().to_string_lossy();
+        assert!(
+            path_str.contains("sparkdown"),
+            "private_cwd should return a sparkdown-prefixed directory, got: {path_str}"
+        );
+        // Should not be the bare temp root
+        assert_ne!(
+            guard.path(),
+            std::env::temp_dir(),
+            "should not return bare temp_dir()"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn private_cwd_is_owner_only_and_cleaned_up() {
+        use std::os::unix::fs::MetadataExt;
+        let guard = private_cwd_or_temp().expect("private cwd creation");
+        let path = guard.path().to_path_buf();
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert!(meta.file_type().is_dir());
+        assert_eq!(meta.mode() & 0o777, 0o700, "private cwd must be 0700");
+        // Owned by us: ensure_private_dir rejects anything else.
+        extern "C" {
+            fn geteuid() -> u32;
+        }
+        // SAFETY: geteuid() has no arguments and cannot fail.
+        let euid = unsafe { geteuid() };
+        assert_eq!(meta.uid(), euid);
+        drop(guard);
+        assert!(
+            !path.exists(),
+            "private cwd must be removed on drop: {}",
+            path.display()
+        );
+    }
+
+    /// `run_local_argv_unix` runs the CLI in a private per-call directory.
+    #[test]
+    #[cfg(unix)]
+    fn run_local_argv_unix_uses_private_cwd() {
+        let outcome = run_local_argv_unix(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                cwd_probe::REPORT_SCRIPT.to_string(),
+            ],
+            std::time::Duration::from_secs(10),
+        )
+        .expect("run /bin/sh");
+        let CliOutcome::Exited {
+            code: Some(0),
+            stdout,
+            ..
+        } = outcome
+        else {
+            panic!("the probe did not exit 0: {outcome:?}");
+        };
+        cwd_probe::assert_report(&stdout);
+    }
+
+    /// A name that is on neither PATH (an alias or function) goes through the
+    /// login shell, which also starts in a private per-call directory.
+    #[test]
+    #[cfg(unix)]
+    fn run_local_argv_unix_shell_fallback_uses_private_cwd() {
+        let shell = cwd_probe::FakeShell::new("argv-fallback");
+        let outcome = run_local_argv_unix_with(
+            shell.path(),
+            &["sd-no-such-agent-binary".to_string()],
+            std::time::Duration::from_secs(10),
+        )
+        .expect("run the fake shell");
+        assert!(
+            matches!(outcome, CliOutcome::Exited { code: Some(0), .. }),
+            "{outcome:?}"
+        );
+        shell.assert_ran_in_private_cwd();
+    }
+
+    /// The interactive-shell PATH probe runs in a private per-call directory.
+    #[test]
+    #[cfg(unix)]
+    fn interactive_shell_path_probe_uses_private_cwd() {
+        let shell = cwd_probe::FakeShell::new("interactive");
+        let path = probe_interactive_path(shell.path()).expect("probe output");
+        assert!(!path.is_empty());
+        shell.assert_ran_in_private_cwd();
+    }
+
+    /// The private-cwd directory is created under the base, is a fresh name
+    /// per call and is removed with its guard.
+    #[test]
+    #[cfg(unix)]
+    fn private_cwd_in_uses_the_runtime_root_when_it_works() {
+        let root = cwd_probe::scratch_dir("root-ok");
+        let a = private_cwd_in(&root, &root.join("unused")).unwrap();
+        let b = private_cwd_in(&root, &root.join("unused")).unwrap();
+        assert_ne!(a.path(), b.path());
+        assert_eq!(a.path().parent().unwrap(), root.join("sparkdown"));
+        cwd_probe::assert_private_dir(a.path());
+        let a_path = a.path().to_path_buf();
+        drop(a);
+        assert!(!a_path.exists());
+        assert!(b.path().exists());
+        drop(b);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// When the primary base cannot be used, the fallback is a randomly
+    /// named 0700 directory owned by us directly under the fallback dir,
+    /// never reused between calls, and removed when dropped.
+    #[test]
+    #[cfg(unix)]
+    fn private_cwd_fallback_is_random_owner_only_and_removed() {
+        let scratch = cwd_probe::scratch_dir("fallback");
+        // A regular file where the base directory would go: mkdir under it
+        // fails, so the primary location is unusable.
+        let bad_root = scratch.join("not-a-dir");
+        std::fs::write(&bad_root, b"x").unwrap();
+        let fallback_dir = scratch.join("tmp");
+        std::fs::create_dir(&fallback_dir).unwrap();
+
+        let a = private_cwd_in(&bad_root, &fallback_dir).unwrap();
+        let b = private_cwd_in(&bad_root, &fallback_dir).unwrap();
+        assert_ne!(a.path(), b.path(), "names are never reused");
+        for g in [&a, &b] {
+            assert_eq!(g.path().parent().unwrap(), fallback_dir);
+            let name = g.path().file_name().unwrap().to_string_lossy().into_owned();
+            let token = name.strip_prefix("sparkdown-").expect("sparkdown- prefix");
+            assert_eq!(token.len(), 32, "128-bit hex token: {name}");
+            assert!(token.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
+            cwd_probe::assert_private_dir(g.path());
+        }
+        let a_path = a.path().to_path_buf();
+        drop(a);
+        assert!(!a_path.exists(), "removed on drop");
+        assert!(b.path().exists(), "the other guard is unaffected");
+        drop(b);
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// When neither the primary base nor the fallback dir can be used the
+    /// result is an error: no shared directory is ever handed out.
+    #[test]
+    #[cfg(unix)]
+    fn private_cwd_errors_when_both_bases_fail() {
+        let scratch = cwd_probe::scratch_dir("both-fail");
+        let bad_root = scratch.join("not-a-dir");
+        std::fs::write(&bad_root, b"x").unwrap();
+        // Fallback dir that does not exist, and one that is a file.
+        assert!(private_cwd_in(&bad_root, &scratch.join("missing")).is_err());
+        assert!(private_cwd_in(&bad_root, &bad_root).is_err());
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// `run_program_windows` runs the CLI in a private per-call directory.
+    #[test]
+    #[cfg(windows)]
+    fn run_program_windows_uses_private_cwd() {
+        let outcome = run_program_windows(
+            &PathBuf::from("cmd.exe"),
+            &["/c".to_string(), "cd".to_string()],
+            std::time::Duration::from_secs(10),
+        )
+        .expect("run cmd.exe");
+        let CliOutcome::Exited {
+            code: Some(0),
+            stdout,
+            ..
+        } = outcome
+        else {
+            panic!("cmd.exe did not exit 0: {outcome:?}");
+        };
+        let cwd = PathBuf::from(stdout.trim());
+        assert!(
+            cwd.to_string_lossy().contains("sparkdown"),
+            "expected a sparkdown directory, got {}",
+            cwd.display()
+        );
+        assert_ne!(cwd, std::env::temp_dir(), "must not be the shared temp dir");
+    }
+
     /// The review tools against this very repository (CI checkouts have .git).
     #[test]
     fn review_tools_read_this_repo() {
@@ -5134,5 +5532,113 @@ mod tests {
         assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(p, discoverable_pipe_path());
         assert_eq!(discoverable_endpoint_secret().len(), 32);
+    }
+}
+
+/// Test support: a stand-in login shell that records the directory it ran
+/// in, so tests can check where each probe spawns its child.
+#[cfg(all(test, unix))]
+pub(crate) mod cwd_probe {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Shell snippet: print the working directory, then its mode and owner uid.
+    pub(crate) const REPORT_SCRIPT: &str = "pwd -P; set -- $(ls -ldn .); echo \"$1 $3\"";
+
+    pub(crate) fn scratch_dir(tag: &str) -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "sd-cwd-{tag}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// `path` is a real directory, mode 0700, owned by the current user.
+    pub(crate) fn assert_private_dir(path: &Path) {
+        let meta = std::fs::symlink_metadata(path).unwrap();
+        assert!(meta.file_type().is_dir(), "{}", path.display());
+        assert_eq!(meta.mode() & 0o777, 0o700, "{}", path.display());
+        assert_eq!(
+            meta.uid(),
+            crate::context::current_euid(),
+            "{}",
+            path.display()
+        );
+    }
+
+    /// Check a [`REPORT_SCRIPT`] report: the child ran in a private,
+    /// owner-only directory (not the shared temp dir) that is gone now.
+    pub(crate) fn assert_report(report: &str) {
+        let mut lines = report.lines().filter(|l| !l.trim().is_empty());
+        let cwd = PathBuf::from(lines.next().expect("cwd line").trim());
+        let mode_uid = lines.next().expect("mode line");
+        let mut fields = mode_uid.split_whitespace();
+        let mode = fields.next().unwrap();
+        let uid: u32 = fields.next().unwrap().parse().unwrap();
+        let temp = std::env::temp_dir();
+        assert_ne!(cwd, temp, "ran in the shared temp dir");
+        assert_ne!(Some(cwd.as_path()), temp.canonicalize().ok().as_deref());
+        assert!(
+            cwd.to_string_lossy().contains("sparkdown"),
+            "not a sparkdown directory: {}",
+            cwd.display()
+        );
+        assert!(
+            mode.starts_with("drwx------"),
+            "mode {mode} in {}",
+            cwd.display()
+        );
+        assert_eq!(uid, crate::context::current_euid());
+        assert!(
+            !cwd.exists(),
+            "not removed after the call: {}",
+            cwd.display()
+        );
+    }
+
+    /// An executable script that ignores its arguments, writes
+    /// [`REPORT_SCRIPT`]'s report to `<script>.cwd` and prints a PATH marker
+    /// line. Removed on drop.
+    pub(crate) struct FakeShell {
+        dir: PathBuf,
+        script: PathBuf,
+    }
+
+    impl FakeShell {
+        pub(crate) fn new(tag: &str) -> Self {
+            let dir = scratch_dir(tag);
+            let script = dir.join("shell");
+            std::fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\n{{ {REPORT_SCRIPT}; }} > \"$0.cwd\"\n\
+                     printf '\\n__SD_PATH__%s\\n' \"$(pwd -P)\"\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            Self { dir, script }
+        }
+
+        pub(crate) fn path(&self) -> &str {
+            self.script.to_str().unwrap()
+        }
+
+        /// The shell ran, in a private directory that is gone now.
+        pub(crate) fn assert_ran_in_private_cwd(&self) {
+            let report = std::fs::read_to_string(format!("{}.cwd", self.path()))
+                .expect("the fake shell did not run");
+            assert_report(&report);
+        }
+    }
+
+    impl Drop for FakeShell {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }

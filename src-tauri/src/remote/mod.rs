@@ -1779,7 +1779,17 @@ pub(crate) fn strip_job_noise(stderr: &str) -> String {
 pub(crate) fn remote_agent_cli_script(cmd_line: &str, bin: &str, secs: u64) -> String {
     let bin = shell_quote(bin);
     format!(
-        "cd /tmp 2>/dev/null || cd\n\
+        // Private per-run cwd. Agent CLIs scan `cwd` for project config, so
+        // a `cd /tmp` on a shared remote lets any other local account on
+        // that host place `.mcp.json` etc. for this CLI to load.
+        // `mktemp -d` creates a unique mode-0700 directory under TMPDIR
+        // (POSIX; present on every remote host we support); the trailing
+        // template keeps GNU and BSD mktemp happy. We fall back to the
+        // login dir only if the private dir cannot be created at all.
+        "sd_cwd=$(mktemp -d \"${{TMPDIR:-/tmp}}/sparkdown-cli-XXXXXXXX\" 2>/dev/null)\n\
+         if [ -n \"$sd_cwd\" ]; then cd \"$sd_cwd\" || cd; else cd; fi\n\
+         sd_rm_cwd() {{ [ -n \"$sd_cwd\" ] && rm -rf \"$sd_cwd\" 2>/dev/null; }}\n\
+         trap sd_rm_cwd EXIT INT TERM HUP\n\
          sd_probe() {{ \"${{SHELL:-/bin/sh}}\" \"$1\" 'printf \"\\n__SD_PATH__%s\\n\" \"$PATH\"' </dev/null 2>/dev/null | sed -n 's/^__SD_PATH__//p' | tail -n 1; }}\n\
          for sd_m in -lc -lic; do\n\
          command -v {bin} >/dev/null 2>&1 && break\n\

@@ -38,6 +38,7 @@ requests.
 - Windows: The external-agent pipe has a random name and a per-launch handshake, and the shim checks the pipe's server process before connecting.
 - Windows: The per-window label tag is a 128-bit keyed hash, and a socket in use by another process is never replaced.
 - Agents: Changes to the editor-context and background-fetch preferences take effect in every window immediately.
+- Agents: CLI checks and agent detection run in a per-call working directory, and executable lookup ignores relative PATH entries.
 
 ### Changed
 

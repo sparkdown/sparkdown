@@ -313,7 +313,7 @@ pub(crate) fn ensure_owned_dir(dir: &Path) -> std::io::Result<()> {
 /// The current effective uid, for the ownership check above. No `libc`
 /// dependency: `geteuid(2)` takes no arguments and cannot fail.
 #[cfg(unix)]
-fn current_euid() -> u32 {
+pub(crate) fn current_euid() -> u32 {
     extern "C" {
         fn geteuid() -> u32;
     }
@@ -350,22 +350,37 @@ pub fn login_shell_path() -> String {
         static PATH: OnceLock<String> = OnceLock::new();
         PATH.get_or_init(|| {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-            // Timeout-guarded: a profile that never returns must not wedge
-            // this OnceLock forever (it would block every future PATH lookup).
-            crate::mcp::run_with_timeout(
-                &shell,
-                &["-lc", "printf %s \"$PATH\""],
-                &std::env::temp_dir(),
-                SHELL_PROBE_TIMEOUT,
-            )
-            .ok()
-            .filter(|(ok, _, _)| *ok)
-            .map(|(_, stdout, _)| stdout.trim().to_string())
-            .filter(|p| !p.is_empty())
-            .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+            probe_login_path(&shell)
         })
         .clone()
     }
+}
+
+/// Run `shell -lc 'printf %s "$PATH"'` and return the PATH it prints,
+/// or the process PATH if the shell fails, times out or prints nothing.
+///
+/// Timeout-guarded: a profile that never returns must not wedge the
+/// `OnceLock` in [`login_shell_path`] forever (it would block every future
+/// PATH lookup). The shell runs in a private per-call working directory
+/// (see `mcp::PrivateCwd`), never the shared temp dir; if that directory
+/// cannot be made the probe is skipped.
+#[cfg(not(windows))]
+fn probe_login_path(shell: &str) -> String {
+    let process_path = || std::env::var("PATH").unwrap_or_default();
+    let Ok(cwd) = crate::mcp::private_cwd_or_temp() else {
+        return process_path();
+    };
+    crate::mcp::run_with_timeout(
+        shell,
+        &["-lc", "printf %s \"$PATH\""],
+        cwd.path(),
+        SHELL_PROBE_TIMEOUT,
+    )
+    .ok()
+    .filter(|(ok, _, _)| *ok)
+    .map(|(_, stdout, _)| stdout.trim().to_string())
+    .filter(|p| !p.is_empty())
+    .unwrap_or_else(process_path)
 }
 
 fn on_path(bin: &str) -> bool {
@@ -382,14 +397,32 @@ pub fn find_on_path(bin: &str) -> Option<PathBuf> {
 
 /// [`find_on_path`] with every input explicit, so the Windows rules can be
 /// tested on any OS.
+///
+/// Empty PATH elements (e.g. `PATH="/usr/bin:"`) are skipped, and only
+/// absolute candidates are returned. `std::env::split_paths` yields the
+/// empty string for an empty element, which `Path::join` leaves as the bare
+/// name (`claude`) — handing that relative name to `proc::command` would
+/// let the spawned child resolve it against its own cwd (the agent cwd),
+/// so a placed `./claude` in a relative directory could win.
 pub(crate) fn find_in_path(bin: &str, path: &str, pathext: &str, windows: bool) -> Option<PathBuf> {
     let names = path_candidates(bin, pathext, windows);
-    std::env::split_paths(path).find_map(|dir| {
-        names.iter().find_map(|name| {
-            let candidate = dir.join(name);
-            is_runnable_file(&candidate, windows).then_some(candidate)
+    std::env::split_paths(path)
+        // Reject empty elements and any relative directory: a resolved
+        // program handed to the child must be absolute, so the child's cwd
+        // cannot steer the binary lookup.
+        .filter(|dir| !dir.as_os_str().is_empty() && dir.is_absolute())
+        .find_map(|dir| {
+            names.iter().find_map(|name| {
+                let candidate = dir.join(name);
+                // Belt and braces: the join of an absolute dir with a bare
+                // name is itself absolute, but assert it so a future change
+                // can't regress silently.
+                if !candidate.is_absolute() {
+                    return None;
+                }
+                is_runnable_file(&candidate, windows).then_some(candidate)
+            })
         })
-    })
 }
 
 /// `%PATHEXT%` when the variable is unset.
@@ -456,12 +489,23 @@ fn shell_can_run(bin: &str) -> bool {
         return false;
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    // Timeout-guarded like login_shell_path: an interactive profile that
-    // blocks (network prompt, `read`, …) must not hang agent detection.
+    shell_can_run_with(&shell, bin)
+}
+
+/// `shell -lic 'command -v bin'`, true when it exits 0.
+///
+/// Timeout-guarded like [`login_shell_path`]: an interactive profile that
+/// blocks (network prompt, `read`, …) must not hang agent detection. Runs in
+/// a private per-call working directory (see `mcp::PrivateCwd`); false if
+/// that cannot be made.
+fn shell_can_run_with(shell: &str, bin: &str) -> bool {
+    let Ok(cwd) = crate::mcp::private_cwd_or_temp() else {
+        return false;
+    };
     crate::mcp::run_with_timeout(
-        &shell,
+        shell,
         &["-lic", &format!("command -v {bin} >/dev/null 2>&1")],
-        &std::env::temp_dir(),
+        cwd.path(),
         SHELL_PROBE_TIMEOUT,
     )
     .map(|(ok, _, _)| ok)
@@ -668,5 +712,75 @@ mod tests {
         assert_eq!(found("adir"), None, "a directory is not a program");
         assert_eq!(found("missing"), None);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `find_in_path` must reject empty and relative PATH elements, so the
+    /// spawned child cannot resolve `argv[0]` against its own cwd when we
+    /// hand it a bare name from an empty PATH entry or a relative directory.
+    #[test]
+    #[serial_test::serial]
+    #[cfg(unix)]
+    fn find_in_path_rejects_relative_entries() {
+        use std::fs::File;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_base =
+            std::env::temp_dir().join(format!("sd-find-in-path-test-{}", std::process::id()));
+        std::fs::create_dir_all(&temp_base).unwrap();
+
+        let relative_dir = temp_base.join("relative");
+        std::fs::create_dir(&relative_dir).unwrap();
+
+        let fake_claude = relative_dir.join("claude");
+        File::create(&fake_claude).unwrap();
+        std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Restores the working directory even if an assertion fails.
+        struct RestoreCwd(PathBuf);
+        impl Drop for RestoreCwd {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+        let _restore = RestoreCwd(std::env::current_dir().unwrap());
+        std::env::set_current_dir(&temp_base).unwrap();
+
+        // With the real file present, a relative PATH entry would find it
+        // but find_in_path must reject it
+        let result = find_in_path("claude", "./relative:/usr/bin", "", false);
+        assert!(
+            result.is_none(),
+            "find_in_path should reject relative PATH entries even when the file exists"
+        );
+
+        // Empty PATH entry should also be rejected
+        assert_eq!(find_in_path("claude", ":/usr/bin", "", false), None);
+        assert_eq!(find_in_path("claude", "", "", false), None);
+
+        let _ = std::fs::remove_dir_all(&temp_base);
+    }
+
+    /// The login-shell PATH probe spawns the shell in a private per-call
+    /// directory, not the shared temp dir.
+    #[test]
+    #[cfg(unix)]
+    fn login_path_probe_uses_private_cwd() {
+        let shell = crate::mcp::cwd_probe::FakeShell::new("login");
+        let path = probe_login_path(shell.path());
+        assert!(
+            path.contains("__SD_PATH__"),
+            "the probe output was used, not the process PATH: {path}"
+        );
+        shell.assert_ran_in_private_cwd();
+    }
+
+    /// The `command -v` probe spawns the shell in a private per-call
+    /// directory, not the shared temp dir.
+    #[test]
+    #[cfg(unix)]
+    fn shell_can_run_probe_uses_private_cwd() {
+        let shell = crate::mcp::cwd_probe::FakeShell::new("canrun");
+        assert!(shell_can_run_with(shell.path(), "claude"));
+        shell.assert_ran_in_private_cwd();
     }
 }
