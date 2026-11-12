@@ -719,10 +719,7 @@ pub async fn update_check(app: AppHandle) -> Result<Option<UpdateInfo>, String> 
     }
     blocking(move || {
         // Download the manifest into a private app cache dir instead of shared /tmp.
-        let cache_dir = app
-            .path()
-            .app_cache_dir()
-            .map_err(|e| e.to_string())?;
+        let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
         let manifest_dir = cache_dir.join("update-staging");
         fs::create_dir_all(&manifest_dir).map_err(|e| e.to_string())?;
         let tmp = manifest_dir.join(format!("sparkdown-latest-{}.json", std::process::id()));

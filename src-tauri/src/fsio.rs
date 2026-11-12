@@ -7,10 +7,10 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 

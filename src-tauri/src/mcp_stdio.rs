@@ -149,7 +149,13 @@ fn connect_external() -> Option<interprocess::local_socket::Stream> {
     use interprocess::local_socket::{prelude::*, GenericFilePath, Stream};
     let path = crate::mcp::discoverable_pipe_path();
     let name = path.as_os_str().to_fs_name::<GenericFilePath>().ok()?;
-    Stream::connect(name).ok()
+    let stream = Stream::connect(name).ok()?;
+    // Verify that the pipe server's SID matches ours: if the name was
+    // squatted by another user, refuse the connection.
+    if !verify_pipe_server_sid(&stream) {
+        return None;
+    }
+    Some(stream)
 }
 
 /// Connect to `$SPARKDOWN_MCP` if it is a working SparkDown socket.
@@ -166,6 +172,105 @@ fn connect_socket() -> Option<interprocess::local_socket::Stream> {
     let path = std::env::var_os(crate::mcp::SOCKET_ENV)?;
     let name = path.to_fs_name::<GenericFilePath>().ok()?;
     Stream::connect(name).ok()
+}
+
+/// Windows: check that the named pipe server's user SID matches ours. Returns
+/// false if the SID check fails or the pipe was squatted by another user.
+#[cfg(windows)]
+fn verify_pipe_server_sid(stream: &interprocess::local_socket::Stream) -> bool {
+    use std::mem::MaybeUninit;
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE},
+        Security::{EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER},
+        System::{
+            Pipes::GetNamedPipeServerProcessId,
+            Threading::{
+                GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        },
+    };
+
+    // Extract the raw handle from the interprocess Stream. The Stream is an
+    // enum with NamedPipe and LocalSocket variants; we need the NamedPipe.
+    let handle: HANDLE = match stream {
+        interprocess::local_socket::Stream::NamedPipe(np) => {
+            use std::os::windows::io::AsRawHandle;
+            np.as_raw_handle() as HANDLE
+        }
+        _ => return false,
+    };
+
+    unsafe {
+        // Get the server's process ID.
+        let mut server_pid: u32 = 0;
+        if GetNamedPipeServerProcessId(handle, &mut server_pid) == 0 {
+            return false;
+        }
+
+        // Open the server process with limited query rights.
+        let server_process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, server_pid);
+        if server_process.is_null() {
+            return false;
+        }
+
+        // Get the server process's token.
+        let mut server_token: HANDLE = std::ptr::null_mut();
+        let token_ok = OpenProcessToken(server_process, TOKEN_QUERY, &mut server_token);
+        CloseHandle(server_process);
+        if token_ok == 0 || server_token.is_null() {
+            return false;
+        }
+
+        // Read the server's TOKEN_USER into an aligned buffer.
+        let mut buf = vec![0u8; 256];
+        let mut len: u32 = 0;
+        let info_ok = GetTokenInformation(
+            server_token,
+            TokenUser,
+            buf.as_mut_ptr() as *mut _,
+            buf.len() as u32,
+            &mut len,
+        );
+        CloseHandle(server_token);
+        if info_ok == 0 {
+            return false;
+        }
+
+        let server_token_user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let server_sid = server_token_user.User.Sid;
+
+        // Get our own SID the same way.
+        let our_process = GetCurrentProcess();
+        let mut our_token: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(our_process, TOKEN_QUERY, &mut our_token) == 0 || our_token.is_null() {
+            return false;
+        }
+
+        let mut our_buf = vec![0u8; 256];
+        let mut our_len: u32 = 0;
+        let our_info_ok = GetTokenInformation(
+            our_token,
+            TokenUser,
+            our_buf.as_mut_ptr() as *mut _,
+            our_buf.len() as u32,
+            &mut our_len,
+        );
+        CloseHandle(our_token);
+        if our_info_ok == 0 {
+            return false;
+        }
+
+        let our_token_user = &*(our_buf.as_ptr() as *const TOKEN_USER);
+        let our_sid = our_token_user.User.Sid;
+
+        // Compare the two SIDs.
+        if EqualSid(server_sid, our_sid) == 0 {
+            eprintln!("sparkdown: named pipe server is running under a different user");
+            return false;
+        }
+
+        true
+    }
 }
 
 #[cfg(unix)]

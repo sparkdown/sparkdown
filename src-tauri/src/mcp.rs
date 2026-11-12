@@ -26,6 +26,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -821,12 +822,7 @@ const REPAIR_REMOVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// For tests (app = None), falls back to temp_dir.
 fn cli_working_dir(app: Option<&AppHandle>) -> PathBuf {
     let dir = app
-        .and_then(|a| {
-            a.path()
-                .app_cache_dir()
-                .map(|d| d.join("agent-cli"))
-                .ok()
-        })
+        .and_then(|a| a.path().app_cache_dir().map(|d| d.join("agent-cli")).ok())
         .unwrap_or_else(|| std::env::temp_dir().join("sparkdown-agent-cli"));
     // Best effort: create the dir; if it fails, fall back to the path anyway.
     let _ = std::fs::create_dir_all(&dir);
@@ -1409,6 +1405,11 @@ pub(crate) fn random_token() -> String {
 
 static SOCKET: OnceLock<PathBuf> = OnceLock::new();
 
+/// Windows: whether the external agent pipe was created successfully. When
+/// false, external agents are unavailable even if the user enabled them.
+#[cfg(windows)]
+static EXTERNAL_PIPE_OK: AtomicBool = AtomicBool::new(false);
+
 fn is_running() -> bool {
     SOCKET.get().is_some()
 }
@@ -1543,6 +1544,7 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
         let ext = discoverable_pipe_path();
         match create_pipe_listener(&ext) {
             Ok(l) => {
+                EXTERNAL_PIPE_OK.store(true, Ordering::Relaxed);
                 let (app, state) = (app.clone(), state.clone());
                 std::thread::spawn(move || {
                     use interprocess::local_socket::traits::ListenerExt as _;
@@ -1553,7 +1555,10 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
                     }
                 });
             }
-            Err(e) => eprintln!("Warning: external-agent pipe unavailable: {e}"),
+            Err(e) => {
+                EXTERNAL_PIPE_OK.store(false, Ordering::Relaxed);
+                eprintln!("Warning: external-agent pipe unavailable: {e}");
+            }
         }
     }
     std::thread::Builder::new()
@@ -2179,7 +2184,12 @@ fn call_tool(app: &AppHandle, state: &Arc<McpState>, params: &Value) -> Result<V
 /// git), and the `enabled` gate that covers every tool. `None` means the
 /// tool is not one of these and the caller dispatches it. Checks the live
 /// ConfigStore instead of trusting the snapshot's cached flag.
-fn snapshot_tool(app: Option<&AppHandle>, snap: &Snapshot, name: &str, args: &Value) -> Option<Value> {
+fn snapshot_tool(
+    app: Option<&AppHandle>,
+    snap: &Snapshot,
+    name: &str,
+    args: &Value,
+) -> Option<Value> {
     if let Some(app) = app {
         if !agent_context_enabled(app) {
             return Some(error_result(
