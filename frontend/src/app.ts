@@ -67,7 +67,7 @@ const DEFAULT_CONFIG: AppConfig = {
   terminal_layouts: {},
   mcp_install_prompt_dismissed: [],
   mcp_external_agents: false,
-  git_background_fetch: true,
+  git_background_fetch: false,
 };
 
 /**

@@ -178,7 +178,7 @@ describe('SettingsDialog', () => {
     dialog.close();
   });
 
-  it('Settings → Git → "Fetch in the background" is on by default and writes the config (#175)', () => {
+  it('Settings → Git → "Fetch in the background" is off by default and writes the config (#175)', () => {
     const dialog = new SettingsDialog();
     dialog.toggle(host());
     const section = document.querySelector<HTMLElement>('[data-section="git"]')!;
@@ -187,10 +187,10 @@ describe('SettingsDialog', () => {
       r.textContent!.includes('Fetch in the background'),
     )!;
     const sw = row.querySelector<HTMLInputElement>('.settings-switch')!;
-    expect(sw.checked).toBe(true); // missing in the config = default on
-    sw.checked = false;
+    expect(sw.checked).toBe(false); // missing in the config = default off
+    sw.checked = true;
     sw.dispatchEvent(new Event('change'));
-    expect(config.git_background_fetch).toBe(false);
+    expect(config.git_background_fetch).toBe(true);
     expect(changes).toBe(1);
     dialog.close();
   });

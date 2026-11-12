@@ -420,10 +420,41 @@ impl ConfigStore {
                 awaiting_max: HashMap::new(),
             }),
         };
-        if text.is_some_and(|t| !t.contains("\"version\"")) {
+        let mut needs_write = text.is_some_and(|t| !t.contains("\"version\""));
+        needs_write |= store.migrate_git_bg_fetch_default();
+        if needs_write {
             let _ = store.write();
         }
         store
+    }
+
+    /// One-time migration: reset `git_background_fetch` from the old default
+    /// (true) to the new one (false), once per config file. The migration
+    /// flag lives only in the backend prefs map and is never sent to windows.
+    fn migrate_git_bg_fetch_default(&self) -> bool {
+        const FLAG: &str = "git_bg_fetch_reset_043";
+        let mut g = self.lock();
+        if g.stored
+            .prefs
+            .get(FLAG)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let current = g
+            .stored
+            .prefs
+            .get("git_background_fetch")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if current {
+            g.stored
+                .prefs
+                .insert("git_background_fetch".into(), Value::Bool(false));
+        }
+        g.stored.prefs.insert(FLAG.into(), Value::Bool(true));
+        true
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -1033,5 +1064,70 @@ mod tests {
         );
         // No monitors reported: left as saved.
         assert_eq!(clamp_geometry(g(5, 5, 10, 10), &[]), g(5, 5, 10, 10));
+    }
+
+    #[test]
+    fn git_background_fetch_migration_resets_true_to_false_once() {
+        let d = tmpdir("git-bg-fetch-mig");
+        let p = d.join("config.json");
+        std::fs::write(
+            &p,
+            r#"{"version":2,"git_background_fetch":true,"windows":{}}"#,
+        )
+        .unwrap();
+        let store = ConfigStore::open(p.clone());
+        let cfg = store.load_for("main");
+        assert!(!cfg.git_background_fetch, "true was reset to false");
+        drop(store);
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            text.contains(r#""git_background_fetch""#) && text.contains("false"),
+            "config written with false"
+        );
+        assert!(
+            text.contains(r#""git_bg_fetch_reset_043""#) && text.contains("true"),
+            "migration flag written"
+        );
+    }
+
+    #[test]
+    fn git_background_fetch_migration_respects_explicit_changes_after() {
+        let d = tmpdir("git-bg-fetch-mig-explicit");
+        let p = d.join("config.json");
+        std::fs::write(
+            &p,
+            r#"{"version":2,"git_background_fetch":true,"git_bg_fetch_reset_043":true,"windows":{}}"#,
+        )
+        .unwrap();
+        let store = ConfigStore::open(p);
+        let cfg = store.load_for("main");
+        assert!(
+            cfg.git_background_fetch,
+            "explicit true after migration is kept"
+        );
+    }
+
+    #[test]
+    fn git_background_fetch_opt_in_survives_save_and_restart() {
+        let d = tmpdir("git-bg-fetch-optin");
+        let p = d.join("config.json");
+        std::fs::write(&p, r#"{"version":2,"windows":{}}"#).unwrap();
+        let store = ConfigStore::open(p.clone());
+        let mut cfg = store.load_for("main");
+        assert!(!cfg.git_background_fetch, "starts off");
+        cfg.git_background_fetch = true;
+        store.save_from("main", &cfg, None).unwrap();
+        drop(store);
+        let store2 = ConfigStore::open(p.clone());
+        let cfg2 = store2.load_for("main");
+        assert!(cfg2.git_background_fetch, "opt-in survives restart");
+        drop(store2);
+        let text = std::fs::read_to_string(&p).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            parsed["git_background_fetch"],
+            serde_json::Value::Bool(true),
+            "true is in the file"
+        );
     }
 }

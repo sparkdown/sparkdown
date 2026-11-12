@@ -156,7 +156,7 @@ export class DiffController {
     $('btn-changes-discard-all')?.addEventListener('click', () => this.changesView?.discardAll());
     $('btn-changes-refresh')?.addEventListener('click', () => void this.changesView?.refresh());
     this.fetcher = new BackgroundFetcher({
-      enabled: () => this.ctx.config.git_background_fetch ?? true,
+      enabled: () => this.ctx.config.git_background_fetch ?? false,
       repoRoot: () => this.changesView?.getRepoRoot() ?? null,
       isRemote: () => this.isRemote(),
       hasUpstream: () => !!this.branchStatus?.has_upstream && !this.branchStatus.detached,

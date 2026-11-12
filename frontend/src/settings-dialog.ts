@@ -161,7 +161,7 @@ function buildSettingsOverlay(host: SettingsHost, close: () => void): HTMLElemen
         'a rejected push, so the Pull count shows new commits. Fetch only: ' +
         'nothing is merged. Never asks for credentials (a remote that needs ' +
         'them is skipped). Off in remote (SSH) folders.',
-      checked: host.config.git_background_fetch ?? true,
+      checked: host.config.git_background_fetch ?? false,
       onToggle: (value) => {
         host.config.git_background_fetch = value;
         host.onChange();

@@ -141,8 +141,8 @@ pub struct AppConfig {
     /// Fetch the current branch's upstream quietly in the background (on
     /// window focus, every few minutes while focused, and after a rejected
     /// push) so the Pull behind count is current (#175). Local repos only;
-    /// never prompts for credentials. On by default (Settings → Git).
-    #[serde(default = "default_true")]
+    /// never prompts for credentials. Off by default (Settings → Git).
+    #[serde(default)]
     pub git_background_fetch: bool,
 }
 
@@ -257,7 +257,7 @@ impl Default for AppConfig {
             terminal_layouts: std::collections::HashMap::new(),
             mcp_install_prompt_dismissed: vec![],
             mcp_external_agents: false,
-            git_background_fetch: true,
+            git_background_fetch: false,
         }
     }
 }
@@ -392,5 +392,23 @@ mod tests {
 
         // Diff is not a default view.
         assert!(serde_json::from_str::<AppConfig>(r#"{"default_view_mode": "diff"}"#).is_err());
+    }
+
+    #[test]
+    fn git_background_fetch_defaults_to_false() {
+        let cfg = AppConfig::default();
+        assert!(!cfg.git_background_fetch);
+        let old: AppConfig = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+        assert!(!old.git_background_fetch);
+    }
+
+    #[test]
+    fn git_background_fetch_explicit_value_preserved() {
+        let with_true: AppConfig =
+            serde_json::from_str(r#"{"git_background_fetch": true}"#).unwrap();
+        assert!(with_true.git_background_fetch);
+        let with_false: AppConfig =
+            serde_json::from_str(r#"{"git_background_fetch": false}"#).unwrap();
+        assert!(!with_false.git_background_fetch);
     }
 }

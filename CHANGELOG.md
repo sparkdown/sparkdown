@@ -5,6 +5,12 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
+## [Unreleased]
+
+### Changed
+
+- **Background fetch is now off by default.** The quiet git fetch that keeps the Pull ↓ count current (introduced in 0.4.2) now defaults to off in Settings → Git → Fetch in the background. Existing configurations are migrated once: if you had the setting on (which was the previous default), it is turned off. Turn it back on if you prefer the automatic fetch behavior.
+
 ## [0.4.2] — 2026-11-09
 
 Terminal, Git and command-line improvements on top of 0.4.1. Not in this

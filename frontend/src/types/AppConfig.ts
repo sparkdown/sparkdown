@@ -3,86 +3,86 @@ import type { DefaultViewMode } from "./DefaultViewMode";
 import type { TerminalLayout } from "./TerminalLayout";
 import type { ThemeMode } from "./ThemeMode";
 
-export type AppConfig = { theme: ThemeMode,
+export type AppConfig = { theme: ThemeMode, 
 /**
  * This window's saved open files (window section, see session.rs).
  */
-last_open_files: Array<string>,
+last_open_files: Array<string>, 
 /**
  * The local folder this window reopens at launch (window section,
  * read-only for the frontend; see session.rs).
  */
-window_folder?: string | null,
+window_folder?: string | null, 
 /**
  * Recently opened folder roots (most-recent first), for the welcome
  * screen's quick-reopen. Capped by the frontend.
  */
-recent_folders: Array<string>,
+recent_folders: Array<string>, 
 /**
  * Whether the terminal drawer was open, and its height, so the cockpit
  * layout is restored across sessions.
  */
-terminal_visible: boolean, terminal_height: number,
+terminal_visible: boolean, terminal_height: number, 
 /**
  * When true, hide the editor/preview card and let the terminal panel
  * fill the center column (sidebar stays): the Terminals Only layout.
  */
-terminals_only: boolean, sidebar_width: number, sidebar_visible: boolean,
+terminals_only: boolean, sidebar_width: number, sidebar_visible: boolean, 
 /**
  * The sidebar view picked in the activity bar: "files", "changes" or
  * "search". A plain string on disk so an unknown value (a newer or older
  * build) falls back to Files in the frontend instead of failing the
  * whole config load.
  */
-sidebar_view: 'files' | 'changes' | 'search',
+sidebar_view: 'files' | 'changes' | 'search', 
 /**
  * Legacy mirror of `default_view_mode` (true unless it is Edit), kept
  * so an older build reading this file still shows the preview.
  */
-preview_visible: boolean,
+preview_visible: boolean, 
 /**
  * View a newly opened tab starts in: the last Edit / Split / Preview the
  * user picked in the title bar's view control (Diff is never a default).
  * `None` in configs written before the view control: derive it from
  * `preview_visible` (false → Edit, else Split).
  */
-default_view_mode: DefaultViewMode | null, word_wrap: boolean, show_hidden_files: boolean, enable_diagrams: boolean,
+default_view_mode: DefaultViewMode | null, word_wrap: boolean, show_hidden_files: boolean, enable_diagrams: boolean, 
 /**
  * Back embedded terminals with tmux so they survive app restarts (and
  * reattach on relaunch). On by default; when off, terminals are plain
  * login shells that die with the app. Ignored if tmux isn't installed.
  */
-use_tmux: boolean,
+use_tmux: boolean, 
 /**
  * Lines each embedded terminal keeps above the viewport. The frontend
  * clamps it to 200..=50000 (frontend/src/terminal-scrollback.ts) so a
  * hand-edited value can neither disable history nor exhaust memory.
  */
-terminal_scrollback: number,
+terminal_scrollback: number, 
 /**
  * Agent context bridge: mirror what the user is viewing (and the live
  * text of unsaved buffers) into a per-workspace temp dir that agents in
  * the embedded terminal read via $SPARKDOWN_CONTEXT. On by default; off
  * means the bridge never writes to disk.
  */
-agent_context_enabled: boolean,
+agent_context_enabled: boolean, 
 /**
  * Extra command-line arguments appended to each agent's launch command,
  * keyed by the agent's `bin` (e.g. "claude" → "--model opus"). Configured
  * in Settings → Agents so the chip can be tuned per agent. Empty by
  * default; unknown keys are ignored.
  */
-agent_args: { [key in string]: string },
+agent_args: { [key in string]: string }, 
 /**
  * Check GitHub Releases for a new version at startup (at most once per
  * 24 h). On by default; "Check for Updates..." works either way.
  */
-check_updates_automatically: boolean,
+check_updates_automatically: boolean, 
 /**
  * When the last automatic update check ran, in ms since the Unix epoch
  * (0 = never). Drives the 24 h throttle in frontend/src/updater.ts.
  */
-last_update_check_ms: number,
+last_update_check_ms: number, 
 /**
  * Terminal split layout per workspace, keyed by the workspace's tmux
  * session prefix (`sd-<hash>-`): a binary tree of rows/columns whose
@@ -91,24 +91,24 @@ last_update_check_ms: number,
  * malformed value is read as empty (older configs had no layout: their
  * surviving sessions are laid out as one row).
  */
-terminal_layouts: { [key in string]: TerminalLayout },
+terminal_layouts: { [key in string]: TerminalLayout }, 
 /**
  * Agents (by `bin`) for which the user chose "Don't ask again" in the
  * MCP install prompt shown at agent launch. Settings → Agents clears it
  * ("Ask again when launching"). Empty by default.
  */
-mcp_install_prompt_dismissed: Array<string>,
+mcp_install_prompt_dismissed: Array<string>, 
 /**
  * Serve agents started outside SparkDown's terminals (#64, decision
  * 2). Off by default; such an agent must name a folder unless exactly
  * one window is open. On Windows this also opens a discoverable,
  * user-only pipe (after a restart).
  */
-mcp_external_agents: boolean,
+mcp_external_agents: boolean, 
 /**
  * Fetch the current branch's upstream quietly in the background (on
  * window focus, every few minutes while focused, and after a rejected
  * push) so the Pull behind count is current (#175). Local repos only;
- * never prompts for credentials. On by default (Settings → Git).
+ * never prompts for credentials. Off by default (Settings → Git).
  */
 git_background_fetch: boolean, };
