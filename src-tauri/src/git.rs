@@ -91,10 +91,13 @@ fn git_command_with(root: &Path, safe_dirs: &[String]) -> Result<Command, String
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .arg("--no-pager")
+        .arg("--no-optional-locks")
         .arg("-c")
         .arg("core.quotepath=false")
         .arg("-c")
         .arg("core.fsmonitor=false")
+        .arg("-c")
+        .arg("core.hooksPath=/dev/null")
         .arg("-c")
         .arg("diff.external=")
         .arg("-c")
@@ -1070,6 +1073,96 @@ mod tests {
 
         let bad2 = git_diff_file_impl("/tmp".to_string(), "../etc/passwd".to_string(), false);
         assert!(bad2.is_err());
+    }
+
+    #[test]
+    fn git_status_does_not_run_post_index_change_hook() {
+        use std::fs;
+
+        let git = git_bin();
+        let base = std::env::temp_dir().join(format!("sparkdown_hook_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["config", "user.name", "test"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["config", "user.email", "test@example.com"])
+            .status()
+            .unwrap();
+
+        let hooks = repo.join(".git/hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("post-index-change");
+        let marker = base.join("marker");
+        fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        fs::write(repo.join("a.txt"), "initial\n").unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["add", "a.txt"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["commit", "-m", "initial"])
+            .status()
+            .unwrap();
+
+        let _ = fs::remove_file(&marker);
+        fs::write(repo.join("a.txt"), "modified\n").unwrap();
+
+        // Test the fix path first: git_status_impl should NOT run hooks.
+        let status = git_status_impl(repo.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(status.changes.len(), 1);
+        assert!(
+            !marker.exists(),
+            "git_status_impl must not fire post-index-change hook"
+        );
+
+        // Check that index.lock was not created (no optional locks taken).
+        let index_lock = repo.join(".git").join("index.lock");
+        assert!(
+            !index_lock.exists(),
+            "index.lock must not be created with --no-optional-locks"
+        );
+
+        // Control: plain git status without our vars DOES fire the hook.
+        #[cfg(unix)]
+        {
+            let control = crate::proc::command(&git)
+                .current_dir(&repo)
+                .args(["status", "--porcelain"])
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(control.status.success());
+            assert!(
+                marker.exists(),
+                "control: plain git status must fire post-index-change"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&base);
     }
 }
 

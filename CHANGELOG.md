@@ -16,6 +16,7 @@ requests.
 - Preview: Optimize preview search match filtering.
 - Search: Bound fuzzy-path matching steps.
 - Markdown: Cache reference-link definition parsing.
+- Read-only git operations no longer trigger hooks from the repository.
 
 ### Changed
 

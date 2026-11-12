@@ -1170,7 +1170,7 @@ pub(crate) fn ssh_git(root: &str, args: &[&str]) -> Result<String, String> {
     } else {
         String::new()
     };
-    let mut remote = format!("{prefix}env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -c core.fsmonitor=false -c diff.external= -c core.pager=cat -C {} ", shell_quote(root));
+    let mut remote = format!("{prefix}env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c core.pager=cat -C {} ", shell_quote(root));
     for a in args {
         remote.push_str(&shell_quote(a));
         remote.push(' ');

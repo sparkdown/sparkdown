@@ -973,11 +973,11 @@ fn git_status_script(root: &str) -> String {
     // lets the top level keep the root's spelling through symlinks.
     let r = shell_quote(root);
     format!(
-        "env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c core.fsmonitor=false -c diff.external= -C {r} rev-parse --is-inside-work-tree 2>/dev/null; echo {sep}; \
-         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c core.fsmonitor=false -c diff.external= -C {r} rev-parse --show-toplevel 2>/dev/null; echo {sep}; \
-         c=$(env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c core.fsmonitor=false -c diff.external= -C {r} rev-parse --show-cdup 2>/dev/null) && printf 'cdup=%s\\n' \"$c\" && (cd {r} && cd \"./$c\" && printf 'phys=%s\\n' \"$(pwd -P)\") 2>/dev/null; echo {sep}; \
-         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c core.fsmonitor=false -c diff.external= -C {r} rev-parse --abbrev-ref HEAD 2>/dev/null; echo {sep}; \
-         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c core.fsmonitor=false -c diff.external= -C {r} status --ignore-submodules=all --porcelain -z --untracked-files=all 2>/dev/null; true",
+        "env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -C {r} rev-parse --is-inside-work-tree 2>/dev/null; echo {sep}; \
+         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -C {r} rev-parse --show-toplevel 2>/dev/null; echo {sep}; \
+         c=$(env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -C {r} rev-parse --show-cdup 2>/dev/null) && printf 'cdup=%s\\n' \"$c\" && (cd {r} && cd \"./$c\" && printf 'phys=%s\\n' \"$(pwd -P)\") 2>/dev/null; echo {sep}; \
+         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -C {r} rev-parse --abbrev-ref HEAD 2>/dev/null; echo {sep}; \
+         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -C {r} status --ignore-submodules=all --porcelain -z --untracked-files=all 2>/dev/null; true",
         sep = GIT_SECTION_SEP
     )
 }
