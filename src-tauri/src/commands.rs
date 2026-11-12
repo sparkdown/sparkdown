@@ -4,6 +4,7 @@ use crate::PendingFiles;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -212,8 +213,44 @@ fn read_local_file(path: &str) -> Result<(String, PathBuf), AppError> {
         });
     }
 
-    let contents = fs::read_to_string(&safe_path)?;
-    Ok((contents, safe_path))
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&safe_path)?;
+        let fd_metadata = file.metadata()?;
+        if !fd_metadata.is_file() {
+            return Err(AppError::InvalidPath(format!("Not a regular file: {path}")));
+        }
+        let mut contents = String::new();
+        let read = file.take(MAX_FILE_SIZE + 1).read_to_string(&mut contents)? as u64;
+        if read > MAX_FILE_SIZE {
+            return Err(AppError::FileTooLarge {
+                size_mb: read / 1024 / 1024,
+                max_mb: MAX_FILE_SIZE / 1024 / 1024,
+            });
+        }
+        Ok((contents, safe_path))
+    }
+
+    #[cfg(not(unix))]
+    {
+        if !metadata.is_file() {
+            return Err(AppError::InvalidPath(format!("Not a regular file: {path}")));
+        }
+        let file = fs::File::open(&safe_path)?;
+        let mut contents = String::new();
+        let read = file.take(MAX_FILE_SIZE + 1).read_to_string(&mut contents)? as u64;
+        if read > MAX_FILE_SIZE {
+            return Err(AppError::FileTooLarge {
+                size_mb: read / 1024 / 1024,
+                max_mb: MAX_FILE_SIZE / 1024 / 1024,
+            });
+        }
+        Ok((contents, safe_path))
+    }
 }
 
 /// Append one frontend crash-log entry to `<app log dir>/crash-YYYY-MM-DD.log`.
@@ -1501,5 +1538,37 @@ mod create_entry_tests {
             file_uri("/home/u/a b/ü#.md"),
             "file:///home/u/a%20b/%C3%BC%23.md"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_file_refuses_device_files() {
+        let link = std::env::temp_dir().join(format!("sparkdown_test_dev_{}", std::process::id()));
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink("/dev/zero", &link).unwrap();
+        let result = read_local_file(link.to_str().unwrap());
+        let _ = fs::remove_file(&link);
+        let err = result.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(err.contains("Not a regular file"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_file_refuses_fifos() {
+        use std::os::unix::fs::DirBuilderExt;
+        let dir = std::env::temp_dir().join(format!("sparkdown_test_fifo_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let fifo = dir.join("pipe.md");
+        let fifo_path = fifo.to_str().unwrap();
+        let mkfifo_result = crate::proc::command("mkfifo").arg(fifo_path).status();
+        if mkfifo_result.is_err() || !mkfifo_result.unwrap().success() {
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+        let result = read_local_file(fifo_path);
+        let _ = fs::remove_dir_all(&dir);
+        let err = result.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(err.contains("Not a regular file"), "{err}");
     }
 }
