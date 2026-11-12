@@ -1280,6 +1280,36 @@ pub fn watch_start(app: AppHandle, root: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Map stored key types from known_hosts to SSH algorithm names.
+/// OpenSSH 8.8+ does not offer ssh-rsa signatures, so an ssh-rsa entry
+/// must map to rsa-sha2-512,rsa-sha2-256,ssh-rsa for compatibility.
+pub(crate) fn map_stored_types_to_algorithms(stored: &[String]) -> Vec<String> {
+    let mut algorithms = Vec::new();
+    for t in stored {
+        match t.as_str() {
+            "ssh-rsa" => {
+                // OpenSSH 8.8+ servers don't offer SHA-1 ssh-rsa signatures.
+                // Map to SHA-2 variants first, then ssh-rsa as fallback.
+                if !algorithms.contains(&"rsa-sha2-512".to_string()) {
+                    algorithms.push("rsa-sha2-512".into());
+                }
+                if !algorithms.contains(&"rsa-sha2-256".to_string()) {
+                    algorithms.push("rsa-sha2-256".into());
+                }
+                if !algorithms.contains(&"ssh-rsa".to_string()) {
+                    algorithms.push("ssh-rsa".into());
+                }
+            }
+            other => {
+                if !algorithms.contains(&other.to_string()) {
+                    algorithms.push(other.to_string());
+                }
+            }
+        }
+    }
+    algorithms
+}
+
 /// When a remote session is active, the embedded PTY runs `ssh -tt host`
 /// (reattach tmux on the remote if a session name is provided).
 pub fn terminal_command(
@@ -1313,6 +1343,14 @@ pub fn terminal_command(
         "-o",
         "PubkeyAuthentication=yes",
     ]);
+    // When a host has stored keys, pin HostKeyAlgorithms to those stored
+    // types to restrict negotiation to pinned algorithms.
+    let stored_algos = hostkey::stored_key_types_for(&sess.host);
+    if !stored_algos.is_empty() {
+        let algorithms = map_stored_types_to_algorithms(&stored_algos);
+        cmd.arg("-o");
+        cmd.arg(format!("HostKeyAlgorithms={}", algorithms.join(",")));
+    }
     for a in ssh::destination_args(&sess.host).ok()? {
         cmd.arg(a);
     }
@@ -2266,11 +2304,25 @@ Host *.example.com
         use ssh::{ERR_HOSTKEY_CHANGED, ERR_HOSTKEY_UNKNOWN};
         let unknown = map_ssh_failure("me@h:2222", "Host key verification failed.\r\n");
         assert!(unknown.starts_with(ERR_HOSTKEY_UNKNOWN), "{unknown}");
+        // OpenSSH's "No <TYPE> host key is known for <host> ... strict
+        // checking." maps to [hostkey-unknown] so the user sees the accept
+        // dialog on first connect. scan() then checks for existing entries and
+        // refuses if another key type is already pinned.
         let strict = map_ssh_failure(
             "h",
             "No ED25519 host key is known for h and you have requested strict checking.\nHost key verification failed.",
         );
         assert!(strict.starts_with(ERR_HOSTKEY_UNKNOWN), "{strict}");
+        // An administrator-revoked host key is also a hard stop: never offer
+        // to append it.
+        let revoked = map_ssh_failure(
+            "h",
+            "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\
+             @       WARNING: REVOKED HOST KEY DETECTED!               @\n\
+             The ED25519 host key for h is marked as revoked.\n\
+             Host key verification failed.",
+        );
+        assert!(revoked.starts_with(ERR_HOSTKEY_CHANGED), "{revoked}");
         // The real changed-key banner also says "Password authentication is
         // disabled": it must not read as a password error, and must never be
         // the accept-able unknown case.
@@ -4225,5 +4277,40 @@ mod delete_tests {
         assert_eq!(out.status.code(), Some(2), "{out:?}");
         assert!(!base.join("outside").join("made").exists());
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn map_stored_types_to_algorithms_handles_ssh_rsa() {
+        // ssh-rsa must map to SHA-2 variants for OpenSSH 8.8+ compatibility.
+        let result = super::map_stored_types_to_algorithms(&["ssh-rsa".into()]);
+        assert_eq!(result, vec!["rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"]);
+    }
+
+    #[test]
+    fn map_stored_types_to_algorithms_preserves_other_types() {
+        let result = super::map_stored_types_to_algorithms(&[
+            "ssh-ed25519".into(),
+            "ecdsa-sha2-nistp256".into(),
+        ]);
+        assert_eq!(result, vec!["ssh-ed25519", "ecdsa-sha2-nistp256"]);
+    }
+
+    #[test]
+    fn map_stored_types_to_algorithms_handles_mixed_types() {
+        let result = super::map_stored_types_to_algorithms(&[
+            "ssh-ed25519".into(),
+            "ssh-rsa".into(),
+            "ecdsa-sha2-nistp521".into(),
+        ]);
+        assert_eq!(
+            result,
+            vec![
+                "ssh-ed25519",
+                "rsa-sha2-512",
+                "rsa-sha2-256",
+                "ssh-rsa",
+                "ecdsa-sha2-nistp521"
+            ]
+        );
     }
 }

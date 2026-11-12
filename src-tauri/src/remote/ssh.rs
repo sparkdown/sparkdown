@@ -466,6 +466,24 @@ pub fn map_ssh_failure(host: &str, stderr: &str) -> String {
     let s = stderr.to_ascii_lowercase();
     // Before the password check: this warning itself mentions "Password
     // authentication is disabled to avoid man-in-the-middle attacks".
+    //
+    // A key the admin has marked `@revoked` (or that `RevokedHostKeys` lists)
+    // is a hard stop too: ssh refuses and SparkDown must NOT offer to append.
+    let revoked = s.contains("revoked host key detected")
+        || s.contains("is marked as revoked")
+        || s.contains("host key revoked");
+    if revoked {
+        let target = changed_key_entry(host, stderr, || {
+            super::hostkey::resolve(host)
+                .ok()
+                .map(|r| (r.host_key_alias.unwrap_or(r.hostname), r.port))
+        });
+        return format!(
+            "{ERR_HOSTKEY_CHANGED}WARNING: the host key for '{host}' is REVOKED. The administrator has marked this key as no longer trusted. \
+             SparkDown will not connect and will not accept the server's key. Check with the server's administrator; \
+             only if the change is expected, remove the old key with `ssh-keygen -R {target}` and connect again."
+        );
+    }
     if s.contains("remote host identification has changed") {
         let target = changed_key_entry(host, stderr, || {
             super::hostkey::resolve(host)
@@ -479,6 +497,8 @@ pub fn map_ssh_failure(host: &str, stderr: &str) -> String {
              only if the change is expected, remove the old key with `ssh-keygen -R {target}` and connect again."
         );
     }
+    // OpenSSH's "strict checking" banner covers a first connect and a host
+    // that is stored under another key type; scan() tells the two apart.
     if s.contains("host key verification failed")
         || (s.contains("host key is known for") && s.contains("strict checking"))
     {
@@ -1576,5 +1596,21 @@ mod exec_tests {
         assert!(run(""), "control: the driver runs without the overrides");
         assert!(!run(&env), "the driver must not run with the overrides");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn map_ssh_failure_strict_checking_is_hostkey_unknown() {
+        // OpenSSH prints "No <TYPE> host key is known for <host> and you have
+        // requested strict checking." for a first connect under
+        // StrictHostKeyChecking=yes. That must map to [hostkey-unknown] so
+        // scan() can offer to accept the key; only when scan() finds an
+        // existing entry is it a changed-key hard stop.
+        let banner =
+            "No ED25519 host key is known for example.com and you have requested strict checking.";
+        let result = map_ssh_failure("example.com", banner);
+        assert!(
+            result.starts_with(ERR_HOSTKEY_UNKNOWN),
+            "Expected [hostkey-unknown], got: {result}"
+        );
     }
 }

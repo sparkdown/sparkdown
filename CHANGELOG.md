@@ -25,6 +25,7 @@ requests.
 - Background fetch is skipped for repositories whose config sets commands.
 - Remote: Delete and create operations verify paths resolve inside the window's folder on the host.
 - Remote: Agent CLI watchdog creates timeout marker directory with exclusive permissions.
+- SSH: Host-key trust flow checks all known_hosts files before scanning.
 
 ### Changed
 

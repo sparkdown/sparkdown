@@ -575,7 +575,17 @@ export class RemoteSessions {
       try {
         scan = await api.remoteHostkeyScan(alias);
       } catch (e) {
-        showError(`Could not check the host key of '${alias}': ${parseRemoteError(errorText(e)).text}`);
+        const parsed = parseRemoteError(errorText(e));
+        // The backend now re-checks known_hosts before offering a scan: if
+        // the host is already pinned (any key type, including `@revoked`),
+        // it returns `[hostkey-changed]` so we show the hard-stop message
+        // and never render the "first connection" accept dialog. Preserve
+        // that code; wrap only generic failures.
+        if (parsed.code === 'hostkey-changed') {
+          showError(parsed.text, { link: parsed.link, danger: true });
+        } else {
+          showError(`Could not check the host key of '${alias}': ${parsed.text}`, { link: parsed.link });
+        }
         return reset();
       }
       const trusted = await confirmHostKey(dialog, scan);
@@ -592,6 +602,9 @@ export class RemoteSessions {
       } catch (e) {
         if (e instanceof OriginSwitchCancelled) return reset();
         const again = parseRemoteError(errorText(e));
+        // `remoteHostkeyTrust` re-verifies absence of a pinned entry before
+        // appending. If one appeared between scan and trust it fails with
+        // `[hostkey-changed]`; render that as the hard-stop too.
         showError(again.text, { link: again.link, danger: again.code === 'hostkey-changed' });
         reset();
       }
