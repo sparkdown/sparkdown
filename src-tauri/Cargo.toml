@@ -63,6 +63,8 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
   # Toolhelp32 snapshot: does a terminal's shell have child processes (#43).
   "Win32_System_Diagnostics_ToolHelp",
+  # Named pipe server process ID and SID checking (external agent verification).
+  "Win32_System_Pipes",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

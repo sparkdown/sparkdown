@@ -149,7 +149,82 @@ fn connect_external() -> Option<interprocess::local_socket::Stream> {
     use interprocess::local_socket::{prelude::*, GenericFilePath, Stream};
     let path = crate::mcp::discoverable_pipe_path();
     let name = path.as_os_str().to_fs_name::<GenericFilePath>().ok()?;
-    Stream::connect(name).ok()
+    let stream = Stream::connect(name).ok()?;
+    // Verify the server's SID matches ours before sending anything. A squatted
+    // pipe with the predictable name would otherwise receive our hello.
+    if !verify_pipe_server_sid(&stream) {
+        eprintln!("sparkdown: external pipe server SID does not match (possible attack)");
+        return None;
+    }
+    Some(stream)
+}
+
+/// Windows: verify that the pipe server runs as the same user (SID). True when
+/// the server's SID matches the current process's SID, false otherwise.
+#[cfg(windows)]
+fn verify_pipe_server_sid(stream: &interprocess::local_socket::Stream) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::Authorization::EqualSid;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_INFORMATION,
+    };
+
+    unsafe {
+        let handle = stream.as_raw_handle() as HANDLE;
+        let mut server_pid: u32 = 0;
+        if GetNamedPipeServerProcessId(handle, &mut server_pid) == 0 {
+            return false;
+        }
+        let server_process = OpenProcess(PROCESS_QUERY_INFORMATION, 0, server_pid);
+        if server_process == 0 {
+            return false;
+        }
+        let mut server_token: HANDLE = 0;
+        if OpenProcessToken(server_process, TOKEN_QUERY, &mut server_token) == 0 {
+            CloseHandle(server_process);
+            return false;
+        }
+        let mut own_token: HANDLE = 0;
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut own_token) == 0 {
+            CloseHandle(server_token);
+            CloseHandle(server_process);
+            return false;
+        }
+        let get_sid = |token: HANDLE| -> Option<Vec<u8>> {
+            let mut len = 0u32;
+            let _ = GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut len);
+            if len == 0 {
+                return None;
+            }
+            let mut buf = vec![0u8; len as usize];
+            if GetTokenInformation(token, TokenUser, buf.as_mut_ptr() as *mut _, len, &mut len) == 0
+            {
+                return None;
+            }
+            Some(buf)
+        };
+        let server_sid_buf = get_sid(server_token);
+        let own_sid_buf = get_sid(own_token);
+        CloseHandle(own_token);
+        CloseHandle(server_token);
+        CloseHandle(server_process);
+        match (server_sid_buf, own_sid_buf) {
+            (Some(s), Some(o)) => {
+                let server_sid = (*(s.as_ptr() as *const TOKEN_USER)).User.Sid;
+                let own_sid = (*(o.as_ptr() as *const TOKEN_USER)).User.Sid;
+                EqualSid(server_sid, own_sid) != 0
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn verify_pipe_server_sid(_stream: &interprocess::local_socket::Stream) -> bool {
+    true
 }
 
 /// Connect to `$SPARKDOWN_MCP` if it is a working SparkDown socket.
