@@ -146,6 +146,15 @@ describe('agentLaunchCommand', () => {
       `claude --mcp-config '{"mcpServers":{"sparkdown":{"command":"${SHIM.program}","args":["--mcp-stdio"]}}}'`,
     );
   });
+
+  it('quotes the MCP shim path in the Claude launch line', () => {
+    const odd = { program: "/Users/o'neil/SparkDown", args: ['--mcp-stdio'] };
+    const cmd = agentLaunchCommand('claude', { shim: odd, installed: false });
+    expect(cmd).toContain("'\\''");
+    expect(cmd).toBe(
+      `claude --mcp-config '{"mcpServers":{"sparkdown":{"command":"/Users/o'\\''neil/SparkDown","args":["--mcp-stdio"]}}}'`,
+    );
+  });
 });
 
 describe('clipboardAction', () => {
