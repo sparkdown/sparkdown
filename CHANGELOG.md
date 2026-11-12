@@ -24,6 +24,7 @@ requests.
 - Read-only git operations block partial clone lazy fetches and protocol execution.
 - Background fetch is skipped for repositories whose config sets commands.
 - Remote: Delete and create operations verify paths resolve inside the window's folder on the host.
+- Remote: Agent CLI watchdog creates timeout marker directory with exclusive permissions.
 
 ### Changed
 

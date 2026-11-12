@@ -1725,15 +1725,23 @@ pub(crate) fn remote_agent_cli_script(cmd_line: &str, bin: &str, secs: u64) -> S
          command -v {bin} >/dev/null 2>&1 && break\n\
          sd_p=$(sd_probe $sd_m); [ -n \"$sd_p\" ] && PATH=$sd_p && export PATH\n\
          done\n\
-         sd_t=\"${{TMPDIR:-/tmp}}/.sparkdown-cli-$$\"; rm -f \"$sd_t\"\n\
+         sd_d=\"${{TMPDIR:-/tmp}}/.sparkdown-cli-$$.d\"\n\
+         sd_n=0\n\
+         while ! (umask 077; mkdir -- \"$sd_d\") 2>/dev/null; do\n\
+         sd_n=$((sd_n + 1))\n\
+         if [ \"$sd_n\" -ge 32 ]; then echo {CLI_TIMEOUT_MARK} >&2; exit 124; fi\n\
+         sd_d=\"${{TMPDIR:-/tmp}}/.sparkdown-cli-$$.$sd_n.d\"\n\
+         done\n\
+         sd_t=\"$sd_d/t\"\n\
          if command -v setsid >/dev/null 2>&1; then sd_g=1; setsid {cmd_line} </dev/null & else sd_g=; {cmd_line} </dev/null & fi\n\
          sd_c=$!\n\
          sd_kill() {{ if [ -n \"$sd_g\" ]; then kill -$1 -$sd_c; else pkill -$1 -P $sd_c; kill -$1 $sd_c; fi; }} 2>/dev/null\n\
-         ( sleep {secs}; : > \"$sd_t\"; sd_kill TERM; sleep 2; sd_kill KILL ) </dev/null >/dev/null 2>&1 &\n\
+         ( sleep {secs}; (set -C; umask 077; : > \"$sd_t\") 2>/dev/null; sd_kill TERM; sleep 2; sd_kill KILL ) </dev/null >/dev/null 2>&1 &\n\
          sd_w=$!\n\
          wait $sd_c; sd_s=$?\n\
          kill $sd_w 2>/dev/null; wait $sd_w 2>/dev/null\n\
-         if [ -e \"$sd_t\" ]; then rm -f \"$sd_t\"; echo {CLI_TIMEOUT_MARK} >&2; exit 124; fi\n\
+         if [ -e \"$sd_t\" ]; then rm -f -- \"$sd_t\"; rmdir -- \"$sd_d\" 2>/dev/null; echo {CLI_TIMEOUT_MARK} >&2; exit 124; fi\n\
+         rmdir -- \"$sd_d\" 2>/dev/null\n\
          exit $sd_s"
     )
 }
@@ -1884,6 +1892,103 @@ mod tests {
     use super::*;
 
     use super::TEST_SESSION_LOCK as TEST_LOCK;
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_cli_script_creates_exclusive_temp_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        // Verify the watchdog marker directory is created with mode 0700 by
+        // running the script and polling for the directory to appear.
+        let test_tmp = std::env::temp_dir().join(format!("sd-test-{}", std::process::id()));
+        std::fs::create_dir_all(&test_tmp).unwrap();
+        // Use a script that stays alive briefly so the directory persists.
+        let script = remote_agent_cli_script("sleep 0.5", "sleep", 2);
+        let script_path = test_tmp.join("agent-cli.sh");
+        std::fs::write(&script_path, &script).unwrap();
+        // Run in background so we can poll for the directory.
+        let mut child = crate::proc::command("sh")
+            .arg(&script_path)
+            .env("TMPDIR", &test_tmp)
+            .spawn()
+            .expect("script should start");
+        // Poll for the marker directory to appear.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let marker_dir = loop {
+            if let Ok(entries) = std::fs::read_dir(&test_tmp) {
+                if let Some(dir) = entries.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .starts_with(".sparkdown-cli-")
+                }) {
+                    break dir;
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("marker dir did not appear within timeout");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let mode = std::fs::metadata(&marker_dir)
+            .expect("marker dir should exist")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "marker dir mode should be 0700");
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&test_tmp);
+    }
+
+    /// The marker write must refuse an existing path instead of truncating
+    /// it. A `mkdir` stand-in leaves a link named `t` inside the new
+    /// directory; the watchdog fires, and the file the link names must keep
+    /// its contents.
+    #[cfg(unix)]
+    #[test]
+    fn agent_cli_marker_write_does_not_follow_an_existing_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("sd-marker-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin = root.join("bin");
+        let tmpdir = root.join("tmp");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&tmpdir).unwrap();
+        let target = root.join("target.txt");
+        std::fs::write(&target, "keep me\n").unwrap();
+        let wrapper = bin.join("mkdir");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\n/bin/mkdir \"$@\" || exit $?\nfor a; do d=$a; done\nln -s {} \"$d/t\"\n",
+                target.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script_path = root.join("agent-cli.sh");
+        std::fs::write(&script_path, remote_agent_cli_script("sleep 4", "sleep", 1)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out = crate::proc::command("sh")
+            .arg(&script_path)
+            .env("TMPDIR", &tmpdir)
+            .env("PATH", path)
+            .output()
+            .expect("script runs");
+        assert_eq!(out.status.code(), Some(124), "{out:?}");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "keep me\n",
+            "the file behind the link must not be truncated"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     const SAMPLE: &str = r#"
 # comment
