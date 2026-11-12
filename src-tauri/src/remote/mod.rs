@@ -598,10 +598,61 @@ pub(crate) fn remote_deletable(root: &str, path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// POSIX sh snippet that confines `check_path` to `root` on the host.
+///
+/// Mirrors the pattern used by `ssh_git` at `src-tauri/src/remote/ssh.rs:1160`:
+/// `CDPATH= cd -- <root> && pwd -P` canonicalizes the root through any
+/// symlinks, then the target's dirname is resolved the same way. The two
+/// physical paths are compared with `case`.
+///
+/// Additionally: every component of `check_path` strictly below `root` is
+/// tested with `[ -L ]` (on its raw, non-resolved spelling) so a symlinked
+/// directory *inside* the opened folder cannot carry the operation outside
+/// it. `check_path` may equal `root` (used by `New File`/`New Folder` on
+/// the window's root); the walk is a no-op in that case.
+///
+/// Markers printed on stderr/stdout and dedicated exit codes let the
+/// caller distinguish refusal reasons from genuine `rm`/`mkdir` errors:
+///   __SD_OUT__  (exit 2) — path escapes the window's folder.
+///   __SD_LINK__ (exit 4) — a component below the root is a symlink.
+fn remote_confine_prelude(root: &str, check_path: &str) -> String {
+    let r = shell_quote(root);
+    let p = shell_quote(check_path);
+    format!(
+        "root={r}; path={p}; \
+         root_phys=$(CDPATH= cd -- \"$root\" && pwd -P) || {{ echo __SD_OUT__; exit 2; }}; \
+         if [ \"$path\" = \"$root\" ]; then rel=''; \
+         else case \"$path\" in \"$root\"/*) rel=${{path#\"$root\"/}} ;; *) echo __SD_OUT__; exit 2 ;; esac; fi; \
+         rest=$rel; cur=$root; \
+         while [ -n \"$rest\" ]; do \
+         case \"$rest\" in */*) comp=${{rest%%/*}}; rest=${{rest#*/}} ;; *) comp=$rest; rest='' ;; esac; \
+         [ -z \"$comp\" ] && continue; \
+         cur=\"$cur/$comp\"; \
+         if [ -L \"$cur\" ]; then echo __SD_LINK__; exit 4; fi; \
+         done; \
+         tgt_dir=$(CDPATH= cd -- \"$(dirname -- \"$path\")\" && pwd -P) || {{ echo __SD_OUT__; exit 2; }}; \
+         target_phys=\"$tgt_dir/$(basename -- \"$path\")\"; \
+         if [ -z \"$rel\" ]; then \
+           : ; \
+         else \
+           case \"$target_phys\" in \"$root_phys\"/*) ;; *) echo __SD_OUT__; exit 2 ;; esac; \
+         fi;"
+    )
+}
+
 /// POSIX sh: remove one file (or symlink); refuse a directory (exit 3).
-pub(crate) fn remote_delete_script(path: &str) -> String {
+///
+/// Also refuses to run if `path` is not strictly inside `root` once the
+/// host has resolved both ends through symlinks (exit 2 / `__SD_OUT__`),
+/// or if any component of `path` below `root` is itself a symlink
+/// (exit 4 / `__SD_LINK__`). The Rust-side `remote_deletable` is kept as
+/// a cheap pre-filter; this is the enforcing check.
+pub(crate) fn remote_delete_script(root: &str, path: &str) -> String {
+    let prelude = remote_confine_prelude(root, path);
     let q = shell_quote(path);
-    format!("if [ -d {q} ] && [ ! -L {q} ]; then echo __SD_DIR__; exit 3; fi; rm -f -- {q}")
+    format!(
+        "{prelude} if [ -d {q} ] && [ ! -L {q} ]; then echo __SD_DIR__; exit 3; fi; rm -f -- {q}"
+    )
 }
 
 /// Explorer New File / New Folder: `parent` must be this window's folder or
@@ -621,14 +672,25 @@ pub(crate) fn remote_creatable(root: &str, parent: &str) -> Result<(), String> {
 
 /// POSIX sh: create one empty file or folder, never replacing anything
 /// (exit 3 + marker when the name is taken; `set -C` closes the race).
-pub(crate) fn remote_create_script(path: &str, is_dir: bool) -> String {
-    let q = shell_quote(path);
+///
+/// Also refuses the operation when `parent` escapes `root` after the host
+/// resolves it (exit 2 / `__SD_OUT__`) or when any component of `parent`
+/// below `root` is a symlink (exit 4 / `__SD_LINK__`). The Rust-side
+/// `remote_creatable` is kept as a cheap pre-filter.
+pub(crate) fn remote_create_script(root: &str, parent: &str, name: &str, is_dir: bool) -> String {
+    let prelude = remote_confine_prelude(root, parent);
+    // Build the target path from the host-resolved `parent` plus `name`,
+    // but perform the create at the originally-requested spelling so an
+    // operation under a non-symlinked parent still works even if the root
+    // itself is reached via a symlinked prefix.
+    let path = format!("{}/{}", parent.trim_end_matches('/'), name);
+    let q = shell_quote(&path);
     let make = if is_dir {
         format!("mkdir -- {q}")
     } else {
         format!("set -C; : > {q}")
     };
-    format!("if [ -e {q} ] || [ -L {q} ]; then echo __SD_EXISTS__; exit 3; fi; {make}")
+    format!("{prelude} if [ -e {q} ] || [ -L {q} ]; then echo __SD_EXISTS__; exit 3; fi; {make}")
 }
 
 /// Explorer New File / New Folder on the remote host.
@@ -637,10 +699,19 @@ pub fn create_entry(parent: &str, name: &str, is_dir: bool) -> Result<String, Ap
     crate::commands::valid_entry_name(name).map_err(AppError::InvalidPath)?;
     remote_creatable(&session.path, parent).map_err(AppError::InvalidPath)?;
     let path = format!("{}/{}", parent.trim_end_matches('/'), name);
-    let (code, out, err) = ssh_run_status(&session.host, &remote_create_script(&path, is_dir))
-        .map_err(AppError::Other)?;
+    let (code, out, err) = ssh_run_status(
+        &session.host,
+        &remote_create_script(&session.path, parent, name, is_dir),
+    )
+    .map_err(AppError::Other)?;
     match code {
         0 => Ok(path),
+        2 if out.contains("__SD_OUT__") || out.contains("__SD_LINK__") => Err(
+            AppError::InvalidPath(format!("{parent} is not inside this window's folder")),
+        ),
+        4 if out.contains("__SD_LINK__") => Err(AppError::InvalidPath(format!(
+            "{parent} is not inside this window's folder"
+        ))),
         3 if out.contains("__SD_EXISTS__") => {
             Err(AppError::Other(format!("“{name}” already exists")))
         }
@@ -674,7 +745,12 @@ mod create_tests {
         let run = |p: &std::path::Path, d: bool| {
             crate::proc::command("sh")
                 .arg("-c")
-                .arg(remote_create_script(p.to_str().unwrap(), d))
+                .arg(remote_create_script(
+                    dir.to_str().unwrap(),
+                    p.parent().unwrap().to_str().unwrap(),
+                    p.file_name().unwrap().to_str().unwrap(),
+                    d,
+                ))
                 .output()
                 .unwrap()
         };
@@ -691,6 +767,37 @@ mod create_tests {
         assert_eq!(run(&d, true).status.code(), Some(3));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_create_script_refuses_symlinked_parent_escape() {
+        // A symlinked parent *inside* the opened folder must not
+        // let `mkdir`/`: >` land outside it.
+        use std::os::unix::fs::symlink;
+        let base =
+            std::env::temp_dir().join(format!("sd_remote_create_link_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        let parent = root.join("escape");
+        let out = crate::proc::command("sh")
+            .arg("-c")
+            .arg(remote_create_script(
+                root.to_str().unwrap(),
+                parent.to_str().unwrap(),
+                "other.txt",
+                false,
+            ))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(4));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("__SD_LINK__"));
+        assert!(!outside.join("other.txt").exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 }
 
 /// #121: delete a remote file for good (SSH has no trash).
@@ -698,9 +805,16 @@ pub fn delete_file(path: &str) -> Result<(), AppError> {
     let session = current_session().ok_or_else(|| AppError::Other("no remote session".into()))?;
     remote_deletable(&session.path, path).map_err(AppError::InvalidPath)?;
     let (code, out, err) =
-        ssh_run_status(&session.host, &remote_delete_script(path)).map_err(AppError::Other)?;
+        ssh_run_status(&session.host, &remote_delete_script(&session.path, path))
+            .map_err(AppError::Other)?;
     match code {
         0 => Ok(()),
+        2 if out.contains("__SD_OUT__") || out.contains("__SD_LINK__") => Err(
+            AppError::InvalidPath(format!("{path} is not inside this window's folder")),
+        ),
+        4 if out.contains("__SD_LINK__") => Err(AppError::InvalidPath(format!(
+            "{path} is not inside this window's folder"
+        ))),
         3 if out.contains("__SD_DIR__") => Err(AppError::InvalidPath(
             "Deleting folders on a remote host isn't supported".into(),
         )),
@@ -3885,7 +3999,10 @@ mod delete_tests {
         let run = |p: &std::path::Path| {
             crate::proc::command("sh")
                 .arg("-c")
-                .arg(remote_delete_script(p.to_str().unwrap()))
+                .arg(remote_delete_script(
+                    dir.to_str().unwrap(),
+                    p.to_str().unwrap(),
+                ))
                 .output()
                 .unwrap()
         };
@@ -3897,5 +4014,111 @@ mod delete_tests {
         assert_eq!(out.status.code(), Some(3));
         assert!(d.exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remote_delete_script_refuses_symlinked_parent_escape() {
+        // The host must refuse to `rm` a file reached through a
+        // symlinked directory *inside* the opened folder.
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("sd-rdel-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret");
+        std::fs::write(&secret, "keep").unwrap();
+        // A symlink inside the workspace that points outside it.
+        symlink(&outside, root.join("escape")).unwrap();
+        let target = root.join("escape").join("secret");
+        let out = crate::proc::command("sh")
+            .arg("-c")
+            .arg(remote_delete_script(
+                root.to_str().unwrap(),
+                target.to_str().unwrap(),
+            ))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(4));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("__SD_LINK__"));
+        // The file outside the workspace survives.
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "keep");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remote_delete_script_refuses_paths_outside_root() {
+        let base = std::env::temp_dir().join(format!("sd-rdel-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("s");
+        std::fs::write(&secret, "keep").unwrap();
+        let out = crate::proc::command("sh")
+            .arg("-c")
+            .arg(remote_delete_script(
+                root.to_str().unwrap(),
+                secret.to_str().unwrap(),
+            ))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("__SD_OUT__"));
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "keep");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A path that stays under the folder by spelling but climbs out through
+    /// `..` is refused by the host-side check even if the cheap pre-filter is
+    /// skipped.
+    #[test]
+    #[cfg(unix)]
+    fn remote_delete_script_refuses_parent_segments_that_leave_the_root() {
+        let base = std::env::temp_dir().join(format!("sd-rdel-dots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        let secret = base.join("outside").join("s");
+        std::fs::write(&secret, "keep").unwrap();
+        let spelled = format!("{}/sub/../../outside/s", root.display());
+        let out = crate::proc::command("sh")
+            .arg("-c")
+            .arg(remote_delete_script(root.to_str().unwrap(), &spelled))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("__SD_OUT__"));
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "keep");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remote_create_script_refuses_parent_segments_that_leave_the_root() {
+        let base = std::env::temp_dir().join(format!("sd-rcre-dots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        let spelled = format!("{}/sub/../../outside", root.display());
+        let out = crate::proc::command("sh")
+            .arg("-c")
+            .arg(super::remote_create_script(
+                root.to_str().unwrap(),
+                &spelled,
+                "made",
+                false,
+            ))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert!(!base.join("outside").join("made").exists());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

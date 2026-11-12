@@ -23,6 +23,7 @@ requests.
 - Remote git operations over SSH apply filter and diff driver neutralization.
 - Read-only git operations block partial clone lazy fetches and protocol execution.
 - Background fetch is skipped for repositories whose config sets commands.
+- Remote: Delete and create operations verify paths resolve inside the window's folder on the host.
 
 ### Changed
 
