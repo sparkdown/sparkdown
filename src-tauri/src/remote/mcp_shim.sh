@@ -16,9 +16,19 @@
 sock="${SPARKDOWN_MCP:-}"
 
 py_bridge=$(cat <<'PY'
-import os, socket, sys, threading
+import os, socket, sys, threading, json
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.connect(sys.argv[1])
+# Send hello with key if SPARKDOWN_MCP_KEY_FILE is set.
+key_file = os.environ.get("SPARKDOWN_MCP_KEY_FILE")
+if key_file and os.path.isfile(key_file):
+    try:
+        with open(key_file, "r") as f:
+            key = f.read().strip()
+        hello = json.dumps({"sparkdown_hello": {"key": key, "terminal": True}}) + "\n"
+        s.sendall(hello.encode())
+    except Exception:
+        pass
 def to_sock():
     # stdin -> socket. On EOF half-close, so the server still answers what
     # it has read, then closes; the main loop below drains that and exits.

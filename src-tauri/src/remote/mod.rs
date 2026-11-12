@@ -1217,6 +1217,22 @@ pub fn terminal_command(
         }
         if let Some(sock) = remote_mcp_socket() {
             f.push_str(&format!("export SPARKDOWN_MCP={}; ", shell_quote(&sock)));
+            #[cfg(unix)]
+            {
+                let label = crate::windows::current_label();
+                if let Some(key) = crate::mcp::window_socket_key(&label) {
+                    let key_file = format!("${{HOME:-~}}/.cache/sparkdown/.mcp-key-{}", label);
+                    f.push_str(&format!(
+                        "mkdir -p \"${{HOME:-~}}/.cache/sparkdown\" 2>/dev/null; echo {} > {}; ",
+                        shell_quote(&key),
+                        shell_quote(&key_file)
+                    ));
+                    f.push_str(&format!(
+                        "export SPARKDOWN_MCP_KEY_FILE={}; ",
+                        shell_quote(&key_file)
+                    ));
+                }
+            }
         }
         if let Some(t) = crate::windows::token_for_current_window(None) {
             f.push_str(&format!(
@@ -1294,7 +1310,23 @@ pub fn terminal_command(
     // app only where this names a live socket — here the reverse-forwarded
     // one. Unset when the forward is down, so they fall back to the bridge.
     let remote = match remote_mcp_socket() {
-        Some(sock) => format!("export SPARKDOWN_MCP={}; {remote}", shell_quote(&sock)),
+        Some(sock) => {
+            let mut exports = format!("export SPARKDOWN_MCP={}", shell_quote(&sock));
+            #[cfg(unix)]
+            {
+                let label = crate::windows::current_label();
+                if let Some(key) = crate::mcp::window_socket_key(&label) {
+                    let key_file = format!("$HOME/.cache/sparkdown/.mcp-key-{}", label);
+                    exports.push_str(&format!(
+                        "; mkdir -p \"$HOME/.cache/sparkdown\" 2>/dev/null; echo {} > {}; export SPARKDOWN_MCP_KEY_FILE={}",
+                        shell_quote(&key),
+                        shell_quote(&key_file),
+                        shell_quote(&key_file)
+                    ));
+                }
+            }
+            format!("{}; {remote}", exports)
+        }
         None => remote,
     };
     cmd.arg(remote);

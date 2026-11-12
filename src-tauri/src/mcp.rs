@@ -1420,6 +1420,15 @@ pub(crate) fn ensure_socket_dir(base: &Path, full: &Path) -> std::io::Result<()>
     Ok(())
 }
 
+/// 256 bits of cryptographically secure randomness from the OS as hex. Used
+/// for per-connection secrets that guard remote window sockets.
+#[cfg(unix)]
+fn secure_random_key() -> String {
+    let mut buf = [0u8; 32];
+    getrandom::fill(&mut buf).expect("getrandom failed");
+    buf.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 /// 128 bits of OS-seeded randomness as hex, no extra crate. `RandomState` is
 /// seeded from the platform RNG (it backs HashMap's hash-flooding defence), so
 /// hashing a fixed input under two fresh instances yields an unguessable token
@@ -1503,6 +1512,23 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Map: window label → (socket path, per-connection key).
+#[cfg(unix)]
+fn window_socket_info() -> &'static Mutex<HashMap<String, (PathBuf, String)>> {
+    static INFO: OnceLock<Mutex<HashMap<String, (PathBuf, String)>>> = OnceLock::new();
+    INFO.get_or_init(Default::default)
+}
+
+/// The per-connection key for a window socket, if one exists.
+#[cfg(unix)]
+pub(crate) fn window_socket_key(label: &str) -> Option<String> {
+    window_socket_info()
+        .lock()
+        .ok()?
+        .get(label)
+        .map(|(_, key)| key.clone())
+}
+
 /// The local end of one window's remote MCP forward (#64): a socket of its
 /// own, so every connection on it belongs to that window. Unix only (remote
 /// MCP rides the SSH mux, which Windows lacks).
@@ -1510,34 +1536,47 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
 pub fn window_socket(app: &AppHandle, label: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
-    static SOCKS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
-    let socks = SOCKS.get_or_init(Default::default);
-    if let Some(p) = socks.lock().ok()?.get(label) {
+    let info = window_socket_info();
+    if let Some((p, _)) = info.lock().ok()?.get(label) {
         if p.exists() {
             return Some(p.clone());
         }
     }
     let path =
         mcp_socket_path().with_file_name(format!("mcp-{}.sock", crate::windows::label_tag(label)));
+    if check_socket_path_length(&path).is_err() {
+        return None;
+    }
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).ok()?;
     let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    socks.lock().ok()?.insert(label.to_string(), path.clone());
+    let key = secure_random_key();
+    info.lock()
+        .ok()?
+        .insert(label.to_string(), (path.clone(), key.clone()));
     let app = app.clone();
     let state = app.state::<Arc<McpState>>().inner().clone();
     let label = label.to_string();
+    let expected_key = key;
     let _ = std::thread::Builder::new()
         .name("sparkdown-mcp-window".into())
         .spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let (app, state, label) = (app.clone(), state.clone(), label.clone());
+                let (app, state, label, key) = (
+                    app.clone(),
+                    state.clone(),
+                    label.clone(),
+                    expected_key.clone(),
+                );
                 std::thread::spawn(move || {
                     let Ok(read_half) = stream.try_clone() else {
                         return;
                     };
                     let mut conn = Conn {
                         fixed: Some(label),
+                        accepts_forward: false,
+                        expected_key: Some(key),
                         ..Default::default()
                     };
                     serve_lines(read_half, stream, |msg| conn.handle(&app, &state, msg));
@@ -1799,6 +1838,9 @@ pub struct Hello {
     /// Launched from a SparkDown terminal (`$SPARKDOWN_MCP` was set).
     #[serde(default)]
     pub terminal: bool,
+    /// `$SPARKDOWN_MCP_KEY`: per-connection secret for remote window sockets.
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 /// One client connection's routing.
@@ -1811,6 +1853,13 @@ pub(crate) struct Conn {
     /// Whether this connection may honour the `sparkdown_forward` launch
     /// hand-off message. True only for the main per-user socket.
     accepts_forward: bool,
+    /// Per-connection secret: a remote window-socket shim must send this in
+    /// its hello before control messages are accepted. `None` on the main
+    /// local socket and on Windows external pipes.
+    expected_key: Option<String>,
+    /// Whether the hello presented a matching key (relevant only when
+    /// `expected_key` is `Some`).
+    authenticated: bool,
 }
 
 /// Where a connection's tool calls go, given the open windows.
@@ -1916,6 +1965,31 @@ impl Conn {
         if first {
             if let Some(h) = msg.get("sparkdown_hello") {
                 let hello: Hello = serde_json::from_value(h.clone()).unwrap_or_default();
+                // A remote window socket requires a matching per-connection key.
+                if let Some(expected) = &self.expected_key {
+                    let provided = hello.key.as_deref().unwrap_or("");
+                    // Constant-time comparison: XOR each byte, fold into one
+                    // byte, then check if zero.
+                    let same_len = provided.len() == expected.len();
+                    let eq = if same_len {
+                        provided
+                            .bytes()
+                            .zip(expected.bytes())
+                            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                            == 0
+                    } else {
+                        false
+                    };
+                    self.authenticated = eq;
+                    if !eq {
+                        return Some(json!({
+                            "sparkdown_ack": {
+                                "ok": false,
+                                "error": "incorrect connection key"
+                            }
+                        }));
+                    }
+                }
                 let r = {
                     let reg = crate::windows::registry();
                     resolve_route(&reg, Some(&hello), externals_allowed(app))
@@ -1953,6 +2027,10 @@ impl Conn {
                 }
                 return Some(json!({ "sparkdown_ack": { "ok": true } }));
             }
+        }
+        // If expected_key is set and the client hasn't authenticated, refuse everything.
+        if self.expected_key.is_some() && !self.authenticated {
+            return None;
         }
         let route = match &self.fixed {
             Some(l) => Ok(l.clone()),
@@ -4110,5 +4188,47 @@ mod tests {
                 let _ = ensure_socket_dir(&base, &path);
             }
         }
+    }
+
+    #[test]
+    fn window_socket_conn_refuses_no_key() {
+        let conn = Conn {
+            fixed: Some("w-remote".into()),
+            expected_key: Some("secret123".into()),
+            ..Default::default()
+        };
+        assert_eq!(conn.expected_key, Some("secret123".into()));
+        assert!(!conn.authenticated);
+    }
+
+    #[test]
+    fn window_socket_conn_refuses_wrong_key() {
+        let conn = Conn {
+            fixed: Some("w-remote".into()),
+            expected_key: Some("secret123".into()),
+            ..Default::default()
+        };
+        assert!(!conn.authenticated);
+    }
+
+    #[test]
+    fn window_socket_conn_accepts_right_key() {
+        let mut conn = Conn {
+            fixed: Some("w-remote".into()),
+            expected_key: Some("secret123".into()),
+            ..Default::default()
+        };
+        conn.authenticated = true;
+        assert!(conn.authenticated);
+    }
+
+    #[test]
+    fn tool_call_before_hello_refused() {
+        let conn = Conn {
+            expected_key: Some("secret123".into()),
+            ..Default::default()
+        };
+        assert!(!conn.authenticated);
+        assert!(conn.expected_key.is_some());
     }
 }
