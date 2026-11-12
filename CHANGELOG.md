@@ -35,6 +35,7 @@ requests.
 - Release: The release gate fails on missing binaries and on multi-line default feature lists.
 - Release: The macOS updater tarball is signed in a separate step, under its final asset name.
 - Updater: Artifact URLs must be under the release download prefix, the signature must name the artifact being installed, and AppImage payloads must be ELF files.
+- Windows: The external-agent pipe has a random name and a per-launch handshake, and the shim checks the pipe's server process before connecting.
 
 ### Changed
 

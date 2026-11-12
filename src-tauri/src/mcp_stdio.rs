@@ -15,6 +15,13 @@
 //!
 //! Runs before Tauri: no window, no webview, just line I/O. Exits when the
 //! agent closes stdin.
+//!
+//! Windows external-agent authentication: the discoverable pipe name is
+//! random per launch and published — together with a per-launch secret —
+//! in a user-only file ([`crate::mcp::discoverable_endpoint_path`]). The
+//! shim verifies the pipe server's user SID
+//! (`GetNamedPipeServerProcessId`) before writing anything, and the ack
+//! must echo the same secret back (two-sided handshake).
 
 use serde_json::{json, Value};
 
@@ -29,13 +36,20 @@ pub fn run() {
     // terminal), or — for an external agent — the app's discoverable one.
     // The hello tells the app which window this agent belongs to (#64).
     let terminal = std::env::var_os(crate::mcp::SOCKET_ENV).is_some();
-    let sock = if terminal {
-        connect_socket()
+    let (sock, expected_secret): (Option<_>, Option<String>) = if terminal {
+        (connect_socket(), None)
     } else {
-        connect_external()
+        match connect_external() {
+            Some((s, secret)) => (Some(s), secret),
+            None => (None, None),
+        }
     };
     if let Some(mut sock) = sock {
-        if say_hello(&mut sock, &hello(terminal)) {
+        if say_hello(
+            &mut sock,
+            &hello(terminal, expected_secret.as_deref()),
+            expected_secret.as_deref(),
+        ) {
             bridge(sock);
             return;
         }
@@ -83,8 +97,11 @@ fn exit_when_orphaned() {
 #[cfg(not(unix))]
 fn exit_when_orphaned() {}
 
-/// What this shim tells the app about itself.
-fn hello(terminal: bool) -> serde_json::Value {
+/// What this shim tells the app about itself. On Windows external agents
+/// also quote the per-launch handshake secret they read from the user-only
+/// endpoint file (see module docs); terminal agents and non-Windows paths
+/// pass `secret = None`.
+fn hello(terminal: bool, secret: Option<&str>) -> serde_json::Value {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let args: Vec<String> = std::env::args().collect();
     let folder = args
@@ -97,12 +114,19 @@ fn hello(terminal: bool) -> serde_json::Value {
         "token": if terminal { env(crate::mcp::TOKEN_ENV) } else { None },
         "cwd": std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string()),
         "folder": folder,
+        "secret": secret,
     }})
 }
 
 /// Send the hello and read the app's one-line answer. False (go offline)
-/// when the app refuses this agent or does not answer.
-fn say_hello<S: std::io::Read + std::io::Write>(sock: &mut S, hello: &serde_json::Value) -> bool {
+/// when the app refuses this agent or does not answer. When
+/// `expected_secret` is `Some`, also require the app's ack to echo that
+/// secret back — the shim side of the two-sided external-agent handshake.
+fn say_hello<S: std::io::Read + std::io::Write>(
+    sock: &mut S,
+    hello: &serde_json::Value,
+    expected_secret: Option<&str>,
+) -> bool {
     if writeln!(sock, "{hello}")
         .and_then(|_| sock.flush())
         .is_err()
@@ -133,23 +157,99 @@ fn say_hello<S: std::io::Read + std::io::Write>(sock: &mut S, hello: &serde_json
         {
             eprintln!("sparkdown: {e}");
         }
+        return false;
     }
-    ok
+    if let Some(want) = expected_secret {
+        let got = v
+            .pointer("/sparkdown_ack/secret")
+            .and_then(serde_json::Value::as_str);
+        if !ack_secret_matches(got, want) {
+            // WrongProcess (or a server that does not know about the
+            // secret): refuse to bridge.
+            eprintln!("sparkdown: external-agent handshake failed; refusing to bridge");
+            return false;
+        }
+    }
+    true
+}
+
+/// Constant-time comparison for the server's ack secret.
+fn ack_secret_matches(got: Option<&str>, want: &str) -> bool {
+    let Some(got) = got else { return false };
+    if got.len() != want.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in got.as_bytes().iter().zip(want.as_bytes().iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
 }
 
 /// External agent (not in a SparkDown terminal): the app's discoverable
-/// endpoint. The app refuses it unless the user opted in.
+/// endpoint. Returns the open stream and the ack-side secret to require.
+/// `None` means no secret applies (Unix: filesystem permissions gate it).
 #[cfg(unix)]
-fn connect_external() -> Option<std::os::unix::net::UnixStream> {
-    crate::mcp::mcp_socket_path().and_then(|p| std::os::unix::net::UnixStream::connect(p).ok())
+fn connect_external() -> Option<(std::os::unix::net::UnixStream, Option<String>)> {
+    let s = crate::mcp::mcp_socket_path()
+        .and_then(|p| std::os::unix::net::UnixStream::connect(p).ok())?;
+    Some((s, None))
 }
 
+/// Windows: read the per-launch pipe name + handshake secret from the
+/// user-only endpoint file, connect, verify the server end belongs to the
+/// current user before writing anything, then return the ack secret to
+/// require. Any failure falls through to offline, zero-tools mode.
 #[cfg(windows)]
-fn connect_external() -> Option<interprocess::local_socket::Stream> {
+fn connect_external() -> Option<(interprocess::local_socket::Stream, Option<String>)> {
     use interprocess::local_socket::{prelude::*, GenericFilePath, Stream};
-    let path = crate::mcp::discoverable_pipe_path();
+    use std::os::windows::io::AsRawHandle;
+
+    let raw = std::fs::read_to_string(crate::mcp::discoverable_endpoint_path()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let pipe = v.get("pipe").and_then(serde_json::Value::as_str)?;
+    let secret = v
+        .get("secret")
+        .and_then(serde_json::Value::as_str)?
+        .to_string();
+    // Refuse anything that is not a Windows pipe path.
+    if !pipe.starts_with(r"\\.\pipe\") {
+        return None;
+    }
+    let path = std::path::PathBuf::from(pipe);
     let name = path.as_os_str().to_fs_name::<GenericFilePath>().ok()?;
-    Stream::connect(name).ok()
+    let sock = Stream::connect(name).ok()?;
+
+    // Verify the pipe server's user SID matches ours before writing.
+    // `Stream` has a single variant on Windows.
+    let Stream::NamedPipe(pipe) = &sock;
+    let handle = {
+        use std::os::windows::io::AsHandle;
+        pipe.as_handle().as_raw_handle()
+    };
+    let server_pid = server_pid_for(handle)?;
+    let server_sid = crate::mcp::process_user_sid(server_pid).ok()?;
+    let my_sid = crate::mcp::current_user_sid().ok()?;
+    if server_sid != my_sid {
+        eprintln!("sparkdown: external-agent pipe not owned by current user; refusing");
+        return None;
+    }
+    Some((sock, Some(secret)))
+}
+
+/// `GetNamedPipeServerProcessId` wrapper. `None` if the handle is not a
+/// client end of a named pipe or the call fails.
+#[cfg(windows)]
+fn server_pid_for(handle: std::os::windows::io::RawHandle) -> Option<u32> {
+    use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+    let mut pid: u32 = 0;
+    // SAFETY: borrowed HANDLE for the duration of the call; `pid` is a
+    // valid out-pointer.
+    let ok = unsafe { GetNamedPipeServerProcessId(handle as _, &mut pid) };
+    if ok == 0 || pid == 0 {
+        return None;
+    }
+    Some(pid)
 }
 
 /// Connect to `$SPARKDOWN_MCP` if it is a working SparkDown socket.

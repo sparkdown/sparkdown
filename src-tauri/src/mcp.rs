@@ -1531,6 +1531,8 @@ pub fn shutdown() {
     // Claude Code's Windows session config (never written elsewhere).
     if cfg!(windows) {
         let _ = std::fs::remove_file(claude_session_config_path());
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(discoverable_endpoint_path());
     }
 }
 
@@ -1715,17 +1717,51 @@ pub fn window_socket(app: &AppHandle, label: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-/// Windows: a stable, discoverable pipe for external agents, created only
-/// when Settings → Agents → External agents is on (decision 2). Same
-/// user-only DACL and first-instance guard as the secret pipe.
+/// Windows: a per-launch named pipe with a random name for external agents,
+/// created only when Settings → Agents → External agents is on. Same
+/// three-layer checks as the primary pipe: random per-launch suffix,
+/// `FILE_FLAG_FIRST_PIPE_INSTANCE`, and the user+SYSTEM DACL
+/// (`pipe_sddl`). The random name is published in
+/// [`discoverable_endpoint_path`] (a per-user file), so only the current
+/// user can learn it; the USERNAME is kept as a human-readable prefix but
+/// is never relied on alone.
 #[cfg(windows)]
 pub fn discoverable_pipe_path() -> PathBuf {
-    let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".into());
-    let safe: String = user
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect();
-    PathBuf::from(format!(r"\\.\pipe\sparkdown-{safe}-mcp-external"))
+    static PIPE: OnceLock<PathBuf> = OnceLock::new();
+    PIPE.get_or_init(|| {
+        let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".into());
+        let user_part: String = user
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .collect();
+        PathBuf::from(format!(
+            r"\\.\pipe\sparkdown-{user_part}-{}-mcp-external",
+            random_token()
+        ))
+    })
+    .clone()
+}
+
+/// Per-launch external-agent handshake secret (128 bits of OS randomness).
+/// Published in the user-only endpoint file so a name conflict cannot create it.
+#[cfg(windows)]
+pub(crate) fn discoverable_endpoint_secret() -> &'static str {
+    static SECRET: OnceLock<String> = OnceLock::new();
+    SECRET.get_or_init(random_token).as_str()
+}
+
+/// Per-user file that publishes the external pipe name and handshake
+/// secret. In `%LOCALAPPDATA%\Temp` (same per-user ACL as
+/// [`claude_session_config_path`]), removed in [`shutdown`].
+#[cfg(windows)]
+pub(crate) fn discoverable_endpoint_path() -> PathBuf {
+    std::env::temp_dir().join("sparkdown-mcp-external.json")
+}
+
+/// Serialise the published external endpoint: the pipe path and secret.
+#[cfg(windows)]
+pub(crate) fn discoverable_endpoint_json(pipe: &std::path::Path, secret: &str) -> String {
+    json!({ "pipe": pipe.to_string_lossy(), "secret": secret }).to_string()
 }
 
 /// Windows: serve on a per-user named pipe via `interprocess`. Same
@@ -1741,6 +1777,15 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
         let ext = discoverable_pipe_path();
         match create_pipe_listener(&ext) {
             Ok(l) => {
+                // Publish the pipe name (with random suffix) and secret for the
+                // shim. The user-only temp-dir ACL keeps a foreign account
+                // from reading either.
+                let endpoint = discoverable_endpoint_path();
+                let secret = discoverable_endpoint_secret();
+                if let Err(e) = std::fs::write(&endpoint, discoverable_endpoint_json(&ext, secret))
+                {
+                    eprintln!("Warning: external-agent endpoint not published: {e}");
+                }
                 let (app, state) = (app.clone(), state.clone());
                 std::thread::spawn(move || {
                     use interprocess::local_socket::traits::ListenerExt as _;
@@ -1753,7 +1798,13 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
                     }
                 });
             }
-            Err(e) => eprintln!("Warning: external-agent pipe unavailable: {e}"),
+            Err(e) => {
+                // Another process already owns the pipe name.
+                eprintln!("Warning: external-agent pipe unavailable: {e}");
+                // Drop any stale endpoint file: it would point at a pipe
+                // we do not own.
+                let _ = std::fs::remove_file(discoverable_endpoint_path());
+            }
         }
     }
     std::thread::Builder::new()
@@ -1777,10 +1828,28 @@ fn pipe_sddl(user_sid: &str) -> String {
     format!("D:P(A;;GA;;;{user_sid})(A;;GA;;;SY)")
 }
 
+/// Constant-time secret comparison for the external-agent handshake. An
+/// absent or mismatching length is a mismatch; equal-length inputs are
+/// compared with a bitwise accumulator so a mismatch does not short-circuit.
+#[cfg(any(windows, test))]
+pub(crate) fn secret_matches(got: Option<&str>, want: &str) -> bool {
+    let Some(got) = got else { return false };
+    if got.len() != want.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in got.as_bytes().iter().zip(want.as_bytes().iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 /// The current process user's SID as a string (`S-1-5-21-...`), read from
-/// the process token (`TokenUser`), not from the environment.
+/// the process token (`TokenUser`), not from the environment. Visible to
+/// the shim module as well so it can verify the external-agent pipe's
+/// server end.
 #[cfg(windows)]
-fn current_user_sid() -> std::io::Result<String> {
+pub(crate) fn current_user_sid() -> std::io::Result<String> {
     use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
     use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
@@ -1829,6 +1898,68 @@ fn current_user_sid() -> std::io::Result<String> {
     }
     // SAFETY: on success `wide` is a NUL-terminated UTF-16 string that we
     // own and free with LocalFree.
+    let s = unsafe {
+        let n = (0..).take_while(|&i| *wide.add(i) != 0).count();
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(wide, n));
+        LocalFree(wide.cast());
+        s
+    };
+    Ok(s)
+}
+
+/// SID (as a string) of the user that owns the process with pid `pid`.
+/// Used by the external-agent shim to verify the pipe server end.
+#[cfg(windows)]
+pub(crate) fn process_user_sid(pid: u32) -> std::io::Result<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    struct Owned(HANDLE);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            // SAFETY: closed exactly once; handle from a checked Open*.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    // SAFETY: args by value; NULL on failure.
+    let proc_handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if proc_handle.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let proc_h = Owned(proc_handle);
+    let mut raw: HANDLE = std::ptr::null_mut();
+    // SAFETY: valid process handle; valid out-pointer.
+    if unsafe { OpenProcessToken(proc_h.0, TOKEN_QUERY, &mut raw) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let token = Owned(raw);
+
+    let mut len = 0u32;
+    // SAFETY: size query.
+    unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+    if len == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+    // SAFETY: buffer has `len` writable bytes.
+    let ok =
+        unsafe { GetTokenInformation(token.0, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: TOKEN_USER's SID pointer points inside the same buffer.
+    let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let mut wide: *mut u16 = std::ptr::null_mut();
+    // SAFETY: valid SID; valid out-pointer.
+    if unsafe { ConvertSidToStringSidW(sid, &mut wide) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: on success `wide` is a NUL-terminated UTF-16 string we own.
     let s = unsafe {
         let n = (0..).take_while(|&i| *wide.add(i) != 0).count();
         let s = String::from_utf16_lossy(std::slice::from_raw_parts(wide, n));
@@ -1923,6 +2054,13 @@ pub struct Hello {
     /// Launched from a SparkDown terminal (`$SPARKDOWN_MCP` was set).
     #[serde(default)]
     pub terminal: bool,
+    /// Windows external-agent handshake: the per-launch secret the shim
+    /// read from the user-only endpoint file. The server refuses an
+    /// external connection without a matching secret, and the shim refuses
+    /// to bridge unless the server echoes the same value in its ack —
+    /// two-sided authentication over a pipe with a random name.
+    #[serde(default)]
+    pub secret: Option<String>,
 }
 
 /// One client connection's routing.
@@ -2038,6 +2176,36 @@ static ON_FORWARD: OnceLock<Box<ForwardFn>> = OnceLock::new();
 
 pub fn set_forward_handler(f: Box<ForwardFn>) {
     let _ = ON_FORWARD.set(f);
+}
+
+/// Windows external-agent gate: non-terminal connections must quote the
+/// per-launch secret from the user-only endpoint file. Nothing to refuse
+/// on non-Windows targets.
+#[cfg(windows)]
+fn external_hello_bad_secret(hello: &Hello) -> bool {
+    !hello.terminal && !secret_matches(hello.secret.as_deref(), discoverable_endpoint_secret())
+}
+#[cfg(not(windows))]
+fn external_hello_bad_secret(_hello: &Hello) -> bool {
+    false
+}
+
+/// Ack after a successful hello. Windows external agents receive the
+/// per-launch secret so the shim can verify the server (two-sided).
+#[cfg(windows)]
+fn external_ack_ok(is_external: bool) -> Value {
+    if is_external {
+        json!({ "sparkdown_ack": {
+            "ok": true,
+            "secret": discoverable_endpoint_secret(),
+        } })
+    } else {
+        json!({ "sparkdown_ack": { "ok": true } })
+    }
+}
+#[cfg(not(windows))]
+fn external_ack_ok(_is_external: bool) -> Value {
+    json!({ "sparkdown_ack": { "ok": true } })
 }
 
 /// Constant-time byte compare (short-circuit only on length). Used so a
@@ -2220,14 +2388,23 @@ impl Conn {
                     let reg = crate::windows::registry();
                     resolve_route(&reg, Some(&hello), externals_allowed(app))
                 };
-                // Refuse an external agent outright when they are off; any
-                // other routing problem is reported per tool call (a window
-                // may open later).
                 let refused = !hello.terminal && !externals_allowed(app);
+                let is_external = !hello.terminal;
+                // Windows external agents must quote the per-launch secret
+                // from the user-only endpoint file (a name conflict cannot read
+                // it). Terminal agents reach the primary pipe (with random suffix)
+                // via `$SPARKDOWN_MCP`, so no secret is required there.
+                let bad_secret = external_hello_bad_secret(&hello);
                 self.hello = Some(hello);
-                return Some(match (refused, r) {
-                    (true, Err(e)) => json!({ "sparkdown_ack": { "ok": false, "error": e } }),
-                    _ => json!({ "sparkdown_ack": { "ok": true } }),
+                return Some(match (refused, bad_secret, r) {
+                    (true, _, Err(e)) => {
+                        json!({ "sparkdown_ack": { "ok": false, "error": e } })
+                    }
+                    (_, true, _) => json!({ "sparkdown_ack": {
+                        "ok": false,
+                        "error": "external-agent handshake failed: SparkDown refuses this connection."
+                    } }),
+                    _ => external_ack_ok(is_external),
                 });
             }
         }
@@ -4856,5 +5033,33 @@ mod tests {
             core().early(&forward_msg(Some(&nonce)), false),
             Early::Continue
         );
+    }
+
+    #[test]
+    fn external_handshake_secret_compares_constant_time() {
+        assert!(secret_matches(Some("abcdef0123456789"), "abcdef0123456789"));
+        assert!(!secret_matches(
+            Some("abcdef0123456789"),
+            "abcdef012345678A"
+        ));
+        assert!(!secret_matches(Some("short"), "abcdef0123456789"));
+        assert!(!secret_matches(None, "abcdef0123456789"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_external_pipe_has_random_suffix() {
+        let p = discoverable_pipe_path();
+        let s = p.to_string_lossy();
+        assert!(s.starts_with(r"\\.\pipe\sparkdown-"));
+        assert!(s.ends_with("-mcp-external"));
+        let core = s
+            .trim_start_matches(r"\\.\pipe\sparkdown-")
+            .trim_end_matches("-mcp-external");
+        let token = core.rsplit('-').next().unwrap();
+        assert_eq!(token.len(), 32);
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(p, discoverable_pipe_path());
+        assert_eq!(discoverable_endpoint_secret().len(), 32);
     }
 }
