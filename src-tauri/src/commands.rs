@@ -179,13 +179,20 @@ pub async fn read_file(
     app: AppHandle,
     path: String,
 ) -> Result<String, AppError> {
-    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+    let label = webview_window.label().to_string();
+    crate::windows::spawn_scoped(label.clone(), move || {
         if crate::remote::is_active() {
             return crate::remote::read_file(&path);
         }
         let (contents, safe_path) = read_local_file(&path)?;
         if let Some(parent) = safe_path.parent() {
             let _ = app.asset_protocol_scope().allow_directory(parent, true);
+            let mut reg = crate::windows::registry();
+            if let Some(entry) = reg.windows.get_mut(&label) {
+                entry
+                    .opened_dirs
+                    .insert(parent.to_string_lossy().to_string());
+            }
         }
         Ok(contents)
     })
@@ -1026,10 +1033,13 @@ fn check_preview_image(path: &str) -> Result<PathBuf, AppError> {
 /// The asset scope ships empty and read_file / list_directory only grant the
 /// opened file's directory or the browsed folder. A file opened on its own
 /// that references `../img/x.png` would otherwise show a broken image. Each
-/// path must pass [`check_preview_image`]; only that exact file is allowed —
-/// never its directory. Returns one flag per input path (true = allowed).
+/// path must pass [`check_preview_image`] and be within the window's folder
+/// or one of the directories of files actually opened via read_file; only
+/// that exact file is allowed — never its directory. Returns one flag per
+/// input path (true = allowed).
 #[tauri::command]
 pub async fn allow_preview_assets(
+    webview_window: tauri::WebviewWindow,
     app: AppHandle,
     paths: Vec<String>,
 ) -> Result<Vec<bool>, AppError> {
@@ -1038,13 +1048,38 @@ pub async fn allow_preview_assets(
             "Too many preview assets in one call (max {MAX_PREVIEW_ASSETS_PER_CALL})"
         )));
     }
+    let label = webview_window.label().to_string();
     tauri::async_runtime::spawn_blocking(move || {
         let scope = app.asset_protocol_scope();
+        let reg = crate::windows::registry();
+        let entry = reg.windows.get(&label);
+        let folder = entry.and_then(|w| w.folder.clone());
+        let opened_dirs = entry.map(|w| &w.opened_dirs);
+
         Ok(paths
             .iter()
-            .map(|p| match check_preview_image(p) {
-                Ok(canonical) => scope.allow_file(&canonical).is_ok(),
-                Err(_) => false,
+            .map(|p| {
+                let canonical = match check_preview_image(p) {
+                    Ok(c) => c,
+                    Err(_) => return false,
+                };
+                let path_str = canonical.to_string_lossy().to_string();
+
+                let in_window_folder = folder.as_ref().is_some_and(|f| f.contains_local(&path_str));
+                let in_opened_dir = opened_dirs.is_some_and(|dirs| {
+                    dirs.iter().any(|d| {
+                        if let Ok(d_folder) = crate::windows::local_folder_id(d) {
+                            d_folder.contains_local(&path_str)
+                        } else {
+                            false
+                        }
+                    })
+                });
+
+                if !in_window_folder && !in_opened_dir {
+                    return false;
+                }
+                scope.allow_file(&canonical).is_ok()
             })
             .collect())
     })
@@ -1571,4 +1606,55 @@ mod create_entry_tests {
         let err = result.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(err.contains("Not a regular file"), "{err}");
     }
+
+    #[test]
+    fn preview_image_containment_respects_folder_and_opened_dirs() {
+        let dir =
+            std::env::temp_dir().join(format!("sparkdown_test_contain_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let inside = dir.join("docs");
+        let outside = dir.join("other");
+        fs::create_dir_all(&inside).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let img_in = inside.join("x.png");
+        let img_out = outside.join("y.png");
+        fs::write(&img_in, b"\x89PNG").unwrap();
+        fs::write(&img_out, b"\x89PNG").unwrap();
+
+        let folder = crate::windows::local_folder_id(inside.to_str().unwrap()).unwrap();
+        let canonical_in = check_preview_image(img_in.to_str().unwrap()).unwrap();
+        let canonical_out = check_preview_image(img_out.to_str().unwrap()).unwrap();
+
+        let in_folder = folder.contains_local(&canonical_in.to_string_lossy());
+        let out_folder = folder.contains_local(&canonical_out.to_string_lossy());
+
+        let _ = fs::remove_dir_all(&dir);
+        assert!(in_folder);
+        assert!(!out_folder);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_image_containment_prevents_symlink_escape() {
+        let dir =
+            std::env::temp_dir().join(format!("sparkdown_test_symlink_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let inside = dir.join("docs");
+        let outside = dir.join("secrets");
+        fs::create_dir_all(&inside).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let secret = outside.join("key.png");
+        let link = inside.join("img.png");
+        fs::write(&secret, b"\x89PNG").unwrap();
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let folder = crate::windows::local_folder_id(inside.to_str().unwrap()).unwrap();
+        let canonical = check_preview_image(link.to_str().unwrap()).unwrap();
+        let contained = folder.contains_local(&canonical.to_string_lossy());
+
+        let _ = fs::remove_dir_all(&dir);
+        assert!(!contained, "symlink escape should be prevented");
+    }
+
 }
