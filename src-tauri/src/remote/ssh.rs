@@ -1227,6 +1227,48 @@ fn config_scope_absent(result: &SshResult) -> bool {
             && result.stderr.contains("worktreeConfig"))
 }
 
+/// Shell function: succeeds when `$1` or one of its parents holds a usable
+/// repository, found the way git discovers one: a `.git` directory, a
+/// `.git` file whose `gitdir:` target exists, or a bare repository layout
+/// (`HEAD` and `objects`). A `.git` file that points nowhere ends the walk
+/// with no repository, as it does for git itself. A folder that cannot be
+/// entered counts as found, so that git's own error is reported. It reads
+/// the file system only, so the answer does not depend on git's message
+/// wording.
+const REPO_PROBE: &str = r#"sd_found() {
+d=$(CDPATH= cd -- "$1" 2>/dev/null && pwd -P) || return 0
+while :; do
+if [ -d "$d/.git" ]; then return 0; fi
+if [ -f "$d/.git" ]; then
+t=$(sed -n 's/^gitdir: *//p' "$d/.git" | head -n 1)
+[ -n "$t" ] || return 1
+case "$t" in /*) ;; *) t="$d/$t" ;; esac
+[ -d "$t" ]
+return
+fi
+if [ -f "$d/HEAD" ] && [ -d "$d/objects" ]; then return 0; fi
+[ "$d" = / ] && return 1
+d=$(dirname -- "$d")
+done
+}
+"#;
+
+/// The command that lists `filter.*` and `diff.*` config names for one scope.
+/// Exit status 128 is git's status for every fatal error, so it cannot tell
+/// a folder that is not a repository from a real failure. When git fails
+/// with 128 and no repository can be found on disk ([`REPO_PROBE`]), the
+/// command exits 1 with no output, which [`config_scope_absent`] reads as
+/// "nothing here". Any other failure keeps git's own status and message.
+fn driver_enumeration_command(root: &str, scope: &str) -> String {
+    let script = format!(
+        "{REPO_PROBE}LC_ALL=C LANG=C git -C \"$1\" config {scope} --includes --name-only --get-regexp '^(filter|diff)\\.'\n\
+         rc=$?\n\
+         if [ \"$rc\" -eq 128 ] && ! sd_found \"$1\"; then exit 1; fi\n\
+         exit \"$rc\"\n"
+    );
+    format!("sh -c {} sh {}", shell_quote(&script), shell_quote(root))
+}
+
 /// Enumeration behind [`remote_collect_driver_names`], with the command runner
 /// injected so it can be exercised against a local shell. Each scope is
 /// handled on its own: a scope that is absent contributes nothing, but names
@@ -1239,11 +1281,7 @@ fn collect_driver_names_with(
     let mut diffs = BTreeSet::new();
 
     for scope in ["--local", "--worktree"] {
-        let cmd = format!(
-            "LC_ALL=C LANG=C git -C {} config {} --includes --name-only --get-regexp '^(filter|diff)\\.'",
-            shell_quote(root),
-            scope
-        );
+        let cmd = driver_enumeration_command(root, scope);
         let result = exec(&cmd)?;
         if result.status != 0 {
             if config_scope_absent(&result) {
@@ -1512,6 +1550,75 @@ mod exec_tests {
             .expect("a dangling gitfile is a folder that is not a repository");
         assert!(filters.is_empty() && diffs.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `git` that fails like a newer release does for a gitfile whose
+    /// target is missing, ahead of the real one on PATH.
+    #[cfg(unix)]
+    fn local_exec_with_fake_git(bin: &Path, cmd: &str) -> Result<SshResult, String> {
+        local_exec(&format!(
+            "PATH={}:\"$PATH\"; export PATH; {cmd}",
+            shell_quote(bin.to_str().unwrap())
+        ))
+    }
+
+    #[cfg(unix)]
+    fn fake_git(dir: &Path, stderr_line: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("fakebin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = bin.join("git");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho '{stderr_line}' >&2\nexit 128\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_gitfile_is_not_a_repository_whatever_git_says() {
+        let base = scratch_dir("gitfile_msg");
+        let dir = base.join("folder");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".git"), "gitdir: ../nowhere\n").unwrap();
+        for msg in [
+            "fatal: not a git repository: ../nowhere",
+            "fatal: gitfile does not point to a valid repository: x/.git",
+            "fatal: some wording no release has used yet",
+        ] {
+            let bin = fake_git(&base, msg);
+            let (filters, diffs) = collect_driver_names_with(dir.to_str().unwrap(), |c| {
+                local_exec_with_fake_git(&bin, c)
+            })
+            .unwrap_or_else(|e| panic!("{msg}: {e}"));
+            assert!(filters.is_empty() && diffs.is_empty());
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gitfile_with_an_existing_target_keeps_git_failures_as_errors() {
+        let base = scratch_dir("gitfile_ok");
+        let dir = base.join("folder");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(base.join("realgit")).unwrap();
+        std::fs::write(dir.join(".git"), "gitdir: ../realgit\n").unwrap();
+        let bin = fake_git(&base, "fatal: some failure from git itself");
+        let err =
+            collect_driver_names_with(dir.to_str().unwrap(), |c| local_exec_with_fake_git(&bin, c))
+                .expect_err("a usable repository that fails is a real failure");
+        assert!(err.contains("config enumeration failed"), "{err}");
+        // A missing folder is reported by git, not read as 'no drivers'.
+        let missing = base.join("missing");
+        assert!(collect_driver_names_with(missing.to_str().unwrap(), |c| {
+            local_exec_with_fake_git(&bin, c)
+        })
+        .is_err());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[cfg(unix)]
