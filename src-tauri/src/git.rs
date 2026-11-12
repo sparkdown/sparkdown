@@ -147,8 +147,8 @@ fn read_safe_directories(probe: impl Fn(&[&str]) -> Option<String>) -> Vec<Strin
     dirs
 }
 
-/// `-c key=value` overrides that disable every repo-local `filter.<x>` and
-/// `diff.<x>` driver (covering local, worktree, and included config), so
+/// Config (key, value) overrides that disable every repo-local `filter.<x>`
+/// and `diff.<x>` driver (covering local, worktree, and included config), so
 /// viewing changes never runs a repo-supplied clean/smudge/process filter or
 /// diff textconv/command hook (these fire implicitly on `git status`/`git diff`
 /// through `.gitattributes`). We enumerate keys with --includes (to follow
@@ -156,7 +156,9 @@ fn read_safe_directories(probe: impl Fn(&[&str]) -> Option<String>) -> Vec<Strin
 /// the code-executing sub-keys and force `filter.<x>.required=false` so a
 /// still-referenced-but-disabled filter can't make the command fail.
 /// Enumeration failure is an error (fail-closed). Public for reuse by fetch.
-pub(crate) fn local_exec_neutralisers(root: &Path) -> Result<Vec<String>, String> {
+/// Returned as (key, value) pairs to be applied via GIT_CONFIG_COUNT env vars,
+/// which prevents subsection names containing '=' from being misparsed.
+pub(crate) fn local_exec_neutralisers(root: &Path) -> Result<Vec<(String, String)>, String> {
     fn collect_names(
         root: &Path,
         scope: &str,
@@ -218,24 +220,32 @@ pub(crate) fn local_exec_neutralisers(root: &Path) -> Result<Vec<String>, String
     filters.extend(wf);
     diffs.extend(wd);
 
-    let mut args = Vec::new();
+    let mut pairs = Vec::new();
     for f in filters {
-        args.push("-c".to_string());
-        args.push(format!("filter.{f}.clean="));
-        args.push("-c".to_string());
-        args.push(format!("filter.{f}.smudge="));
-        args.push("-c".to_string());
-        args.push(format!("filter.{f}.process="));
-        args.push("-c".to_string());
-        args.push(format!("filter.{f}.required=false"));
+        pairs.push((format!("filter.{f}.clean"), String::new()));
+        pairs.push((format!("filter.{f}.smudge"), String::new()));
+        pairs.push((format!("filter.{f}.process"), String::new()));
+        pairs.push((format!("filter.{f}.required"), "false".to_string()));
     }
     for d in diffs {
-        args.push("-c".to_string());
-        args.push(format!("diff.{d}.command="));
-        args.push("-c".to_string());
-        args.push(format!("diff.{d}.textconv="));
+        pairs.push((format!("diff.{d}.command"), String::new()));
+        pairs.push((format!("diff.{d}.textconv"), String::new()));
     }
-    Ok(args)
+    Ok(pairs)
+}
+
+/// Apply config overrides via GIT_CONFIG_COUNT/KEY/VALUE env vars. Key and
+/// value are transported separately, so a subsection name containing '=' is
+/// carried verbatim and cannot be misparsed as a key/value split.
+fn apply_config_env(cmd: &mut Command, overrides: &[(String, String)]) {
+    if overrides.is_empty() {
+        return;
+    }
+    cmd.env("GIT_CONFIG_COUNT", overrides.len().to_string());
+    for (i, (key, value)) in overrides.iter().enumerate() {
+        cmd.env(format!("GIT_CONFIG_KEY_{i}"), key);
+        cmd.env(format!("GIT_CONFIG_VALUE_{i}"), value);
+    }
 }
 
 /// Deadline for every read-only git invocation.
@@ -249,7 +259,7 @@ const READ_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20)
 fn run_git_raw(root: &Path, args: &[&str]) -> Result<Output, String> {
     let mut cmd = git_command(root)?;
     let neutralisers = local_exec_neutralisers(root)?;
-    cmd.args(neutralisers);
+    apply_config_env(&mut cmd, &neutralisers);
     cmd.args(args);
     let cwd = cmd
         .get_current_dir()
@@ -1132,6 +1142,87 @@ mod tests {
 
         let bad2 = git_diff_file_impl("/tmp".to_string(), "../etc/passwd".to_string(), false);
         assert!(bad2.is_err());
+    }
+
+    #[test]
+    fn git_neutralises_filter_name_with_equals() {
+        use std::fs;
+
+        let git = git_bin();
+        let base =
+            std::env::temp_dir().join(format!("sparkdown_filter_equals_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["config", "user.name", "test"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["config", "user.email", "test@example.com"])
+            .status()
+            .unwrap();
+
+        let marker = base.join("marker");
+        let marker_script = base.join("script.sh");
+        fs::write(
+            &marker_script,
+            format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&marker_script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args([
+                "config",
+                "filter.x=y.clean",
+                marker_script.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+
+        fs::write(repo.join(".gitattributes"), "*.txt filter=x=y\n").unwrap();
+        fs::write(repo.join("a.txt"), "content\n").unwrap();
+
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["add", ".gitattributes", "a.txt"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["commit", "-m", "initial"])
+            .status()
+            .unwrap();
+
+        let _ = fs::remove_file(&marker);
+
+        fs::write(repo.join("a.txt"), "modified\n").unwrap();
+
+        let status = git_status_impl(repo.to_string_lossy().into_owned()).unwrap();
+        assert!(
+            !marker.exists(),
+            "filter with '=' in name ran despite neutraliser"
+        );
+        assert_eq!(status.changes.len(), 1);
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

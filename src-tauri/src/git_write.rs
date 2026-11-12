@@ -949,22 +949,41 @@ pub(crate) fn fetch_impl(root: &str, extra: ExtraEnv) -> Result<FetchOutcome, Gi
     env.extend_from_slice(extra);
     let neutralisers = crate::git::local_exec_neutralisers(&root)
         .map_err(|e| GitActionError::new(GitErrorKind::Other, "Background fetch failed.", e))?;
-    let mut args = vec![
-        "-c",
-        "credential.interactive=false",
-        "-c",
-        "core.sshCommand=",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "credential.helper=",
-        "-c",
-        "protocol.allow=user",
-        "-c",
-        "protocol.ext.allow=never",
-    ];
-    args.extend(neutralisers.iter().map(|s| s.as_str()));
-    args.extend_from_slice(&[
+    let mut cmd = crate::proc::command(crate::git::git_bin());
+    cmd.current_dir(&root)
+        .env("PATH", crate::context::login_shell_path())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .env("SSH_ASKPASS_REQUIRE", "never")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .stdin(Stdio::null());
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+    cmd.env("GIT_CONFIG_COUNT", (neutralisers.len() + 5).to_string());
+    for (i, (key, value)) in neutralisers.iter().enumerate() {
+        cmd.env(format!("GIT_CONFIG_KEY_{i}"), key);
+        cmd.env(format!("GIT_CONFIG_VALUE_{i}"), value);
+    }
+    let base_idx = neutralisers.len();
+    cmd.env(
+        format!("GIT_CONFIG_KEY_{base_idx}"),
+        "credential.interactive",
+    );
+    cmd.env(format!("GIT_CONFIG_VALUE_{base_idx}"), "false");
+    cmd.env(format!("GIT_CONFIG_KEY_{}", base_idx + 1), "core.fsmonitor");
+    cmd.env(format!("GIT_CONFIG_VALUE_{}", base_idx + 1), "false");
+    cmd.env(format!("GIT_CONFIG_KEY_{}", base_idx + 2), "core.hooksPath");
+    cmd.env(format!("GIT_CONFIG_VALUE_{}", base_idx + 2), "/dev/null");
+    cmd.env(format!("GIT_CONFIG_KEY_{}", base_idx + 3), "protocol.allow");
+    cmd.env(format!("GIT_CONFIG_VALUE_{}", base_idx + 3), "user");
+    cmd.env(
+        format!("GIT_CONFIG_KEY_{}", base_idx + 4),
+        "protocol.ext.allow",
+    );
+    cmd.env(format!("GIT_CONFIG_VALUE_{}", base_idx + 4), "never");
+    cmd.args([
         "fetch",
         "--quiet",
         "--no-tags",
@@ -973,7 +992,48 @@ pub(crate) fn fetch_impl(root: &str, extra: ExtraEnv) -> Result<FetchOutcome, Gi
         "--",
         &up.remote,
     ]);
-    run_ok(&root, &env, &args, FETCH_TIMEOUT, Action::Pull)?;
+    match crate::mcp::run_command_with_timeout(cmd, &root, FETCH_TIMEOUT) {
+        Ok(crate::mcp::CliOutcome::Exited { code: Some(0), .. }) => {}
+        Ok(crate::mcp::CliOutcome::Exited { code, stderr, .. }) => {
+            let detail = format!("git fetch exited with code {code:?}: {stderr}");
+            let kind = if stderr.contains("Could not resolve host")
+                || stderr.contains("Failed to connect")
+                || stderr.contains("Connection refused")
+                || stderr.contains("Couldn't connect to server")
+            {
+                GitErrorKind::Network
+            } else if stderr.contains("Authentication failed")
+                || stderr.contains("could not read Username")
+                || stderr.contains("terminal prompts disabled")
+            {
+                GitErrorKind::Auth
+            } else {
+                GitErrorKind::Other
+            };
+            return Err(GitActionError::new(
+                kind,
+                "Background fetch failed.",
+                detail,
+            ));
+        }
+        Ok(crate::mcp::CliOutcome::TimedOut) => {
+            return Err(GitActionError::new(
+                GitErrorKind::Other,
+                "Background fetch timed out.",
+                format!(
+                    "git fetch did not complete within {} seconds",
+                    FETCH_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+        Err(e) => {
+            return Err(GitActionError::new(
+                GitErrorKind::Other,
+                "Background fetch failed.",
+                e,
+            ))
+        }
+    }
     Ok(FetchOutcome::Fetched)
 }
 
