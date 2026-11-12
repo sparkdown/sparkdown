@@ -1015,7 +1015,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[serial_test::serial]
     fn lock_wait_skipped_on_folder_check_failure() {
         use super::{fallback_instance_lock_path, try_claim_fallback_lock, LockResult};

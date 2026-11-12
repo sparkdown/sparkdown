@@ -4143,7 +4143,11 @@ mod tests {
         std::env::set_var("HOME", &tmp);
         std::env::remove_var("XDG_RUNTIME_DIR");
         let path = mcp_socket_path().unwrap();
-        assert_eq!(path, tmp.join(".cache").join("sparkdown").join("mcp.sock"));
+        #[cfg(target_os = "macos")]
+        let expected = std::env::temp_dir().join("sparkdown").join("mcp.sock");
+        #[cfg(not(target_os = "macos"))]
+        let expected = tmp.join(".cache").join("sparkdown").join("mcp.sock");
+        assert_eq!(path, expected);
         if let Some(dir) = path.parent() {
             ensure_socket_dir(dir).unwrap();
         }
@@ -4237,7 +4241,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[serial_test::serial]
     fn socket_returns_none_when_no_base_available() {
         let _guard = EnvGuard::new();

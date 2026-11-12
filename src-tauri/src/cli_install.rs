@@ -322,6 +322,8 @@ mod tests {
     #[test]
     fn foreign_file_is_not_removed() {
         let root = tmp();
+        #[cfg(target_os = "macos")]
+        let root = fs::canonicalize(&root).unwrap_or(root);
         let home = root.join("home");
         let dirs = vec![home.join(".local/bin")];
         let link = dirs[0].join(COMMAND_NAME);
