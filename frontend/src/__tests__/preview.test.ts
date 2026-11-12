@@ -275,6 +275,24 @@ describe('markdown sanitizer', () => {
       expect(norm(container.innerHTML)).toBe(norm(String(expected)));
     });
 
+    it('does not split at # inside a longer fence or with an info string', async () => {
+      const md = [
+        '# Start',
+        '',
+        '```js',
+        '# heading',
+        '```',
+        '',
+        'text',
+      ].join('\n');
+      const { pane, container } = makeLivePane();
+      await pane.renderImmediateForExport(md);
+      const expected = await marked.parse(md);
+      const norm = (s: string) => s.replace(/\s+/g, ' ').replace(/user-content-/g, '');
+      expect(norm(container.innerHTML)).toBe(norm(String(expected)));
+      expect(container.querySelectorAll('h1').length).toBe(1);
+    });
+
     it('re-renders mermaid when a diagram is added by a later edit', async () => {
       const { pane, container } = makeLivePane();
       await pane.renderImmediateForExport('# Doc\n\ntext\n');
@@ -282,6 +300,59 @@ describe('markdown sanitizer', () => {
         '# Doc\n\ntext\n\n```mermaid\ngraph TD; A-->B;\n```\n',
       );
       expect(container.querySelector('.mermaid')).not.toBeNull();
+    });
+
+    it('mermaid cache keys by full source, not hash', async () => {
+      const { pane, container } = makeLivePane();
+      const md = [
+        '```mermaid',
+        'graph TD; X-->Y;',
+        '```',
+        '',
+        '```mermaid',
+        'graph TD; A-->B;',
+        '```',
+      ].join('\n');
+      await pane.renderImmediateForExport(md);
+      const diagrams = container.querySelectorAll('.mermaid');
+      expect(diagrams.length).toBe(2);
+      const html0 = diagrams[0].innerHTML;
+      const html1 = diagrams[1].innerHTML;
+      expect(html0).not.toBe('');
+      expect(html1).not.toBe('');
+      expect(html0).not.toBe(html1);
+    });
+
+    it('mermaid LRU cache refreshes entry on hit', async () => {
+      const { pane, container } = makeLivePane();
+      await pane.renderImmediateForExport('```mermaid\ngraph TD; A-->B;\n```');
+      await pane.renderImmediateForExport('```mermaid\ngraph TD; X-->Y;\n```');
+      await pane.renderImmediateForExport('```mermaid\ngraph TD; A-->B;\n```');
+
+      const cache = pane['mermaidLoader']['svgCache'];
+      const keys = Array.from(cache.keys());
+      expect(keys[keys.length - 1]).toBe('graph TD; A-->B;');
+    });
+
+    it('mermaid cache evicts oldest when exceeding 64 entries', async () => {
+      const { pane } = makeLivePane();
+      pane['mermaidLoader'].resetCache();
+      for (let i = 0; i < 65; i++) {
+        await pane.renderImmediateForExport(`\`\`\`mermaid\ngraph TD; N${i}-->M${i};\n\`\`\``);
+      }
+
+      const cache = pane['mermaidLoader']['svgCache'];
+      expect(cache.size).toBe(64);
+      expect(cache.has('graph TD; N0-->M0;')).toBe(false);
+      expect(cache.has('graph TD; N64-->M64;')).toBe(true);
+    });
+
+    it('mermaid resetCache clears all cached diagrams', async () => {
+      const { pane } = makeLivePane();
+      await pane.renderImmediateForExport('```mermaid\ngraph TD; A-->B;\n```');
+      expect(pane['mermaidLoader']['svgCache'].size).toBeGreaterThan(0);
+      pane['mermaidLoader'].resetCache();
+      expect(pane['mermaidLoader']['svgCache'].size).toBe(0);
     });
 
     it('rerenderForTheme rebuilds unchanged content so diagrams pick up the theme', async () => {
