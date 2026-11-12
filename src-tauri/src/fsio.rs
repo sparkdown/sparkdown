@@ -7,6 +7,8 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -41,7 +43,16 @@ fn resolve_symlinks(path: &Path) -> io::Result<PathBuf> {
 
 /// Create a fresh temp file next to `name` in `dir`
 /// (`.<name>.sparkdown-tmp-<pid>-<n>`), never reusing an existing path.
-fn create_temp(dir: &Path, name: &std::ffi::OsStr) -> io::Result<(PathBuf, File)> {
+///
+/// On Unix the file is created with mode 0o600 so the staged contents are
+/// never readable by other local accounts, even for the window between the
+/// first write and the final `set_permissions`. Callers widen the mode
+/// afterwards (to match the existing target, or to 0o666 & ~umask for new
+/// files) only once the data has been written.
+fn create_temp(dir: &Path, name: &std::ffi::OsStr, mode: u32) -> io::Result<(PathBuf, File)> {
+    // The creation mode only applies on Unix.
+    #[cfg(not(unix))]
+    let _ = mode;
     let pid = std::process::id();
     loop {
         let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -49,7 +60,11 @@ fn create_temp(dir: &Path, name: &std::ffi::OsStr) -> io::Result<(PathBuf, File)
         tmp_name.push(name);
         tmp_name.push(format!(".sparkdown-tmp-{pid}-{n}"));
         let tmp = dir.join(tmp_name);
-        match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        opts.mode(mode);
+        match opts.open(&tmp) {
             Ok(f) => return Ok((tmp, f)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
@@ -80,7 +95,18 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
     let existing_perms = fs::metadata(&target).ok().map(|m| m.permissions());
 
-    let (tmp, mut file) = match create_temp(&dir, name) {
+    // For new files, use 0o666 and let the kernel apply umask.
+    // For existing files, use 0o600 (owner-only while the data is written) then widen to existing perms.
+    #[cfg(unix)]
+    let initial_mode = if existing_perms.is_some() {
+        0o600
+    } else {
+        0o666
+    };
+    #[cfg(not(unix))]
+    let initial_mode = 0o600;
+
+    let (tmp, mut file) = match create_temp(&dir, name, initial_mode) {
         Ok(t) => t,
         Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
             return fs::write(&target, data);
@@ -90,6 +116,9 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
 
     let result = (|| {
         file.write_all(data)?;
+        // Only widen the mode after the data is on disk. On Unix the file
+        // was created 0o600, so the staged contents are never readable by
+        // other local accounts; here we match the target's existing mode.
         if let Some(perms) = existing_perms {
             file.set_permissions(perms)?;
         }
@@ -205,6 +234,90 @@ mod tests {
         fs::create_dir_all(target.join("child")).unwrap();
         assert!(write_atomic(&target, b"x").is_err());
         assert!(temp_leftovers(&dir).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_file_matches_umask_default() {
+        // A brand-new target gets the same final mode `fs::write` would
+        // produce (0o666 with kernel-applied umask), so callers that rely
+        // on the usual default are unaffected by the owner-only staging.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("newperms");
+        let file = dir.join("fresh.md");
+        let reference = dir.join("reference.md");
+        write_atomic(&file, b"hello").unwrap();
+        fs::write(&reference, b"hello").unwrap();
+        let mode = fs::metadata(&file).unwrap().permissions().mode() & 0o7777;
+        let expected = fs::metadata(&reference).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, expected, "write_atomic should match fs::write mode");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_file_is_owner_only_during_write() {
+        // Regression test: previously the staging file was created with
+        // the process umask (typically 0o644), exposing the plaintext of
+        // 0o600 targets to other local users during the write window.
+        // Here we drive write_atomic with a large payload so we can
+        // observe the temp file mid-write from another thread.
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering as AO};
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let dir = temp_dir("stagingmode");
+        let file = dir.join("secret.md");
+        fs::write(&file, "old").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Prefix of the temp names create_temp produces.
+        let prefix = format!(".secret.md.sparkdown-tmp-{}-", std::process::id());
+        let dir_watch = dir.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_w = stop.clone();
+        let seen_modes = Arc::new(std::sync::Mutex::new(Vec::<u32>::new()));
+        let seen_w = seen_modes.clone();
+        let watcher = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !stop_w.load(AO::Relaxed) && Instant::now() < deadline {
+                if let Ok(rd) = fs::read_dir(&dir_watch) {
+                    for entry in rd.flatten() {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        if name.starts_with(&prefix) {
+                            if let Ok(meta) = entry.metadata() {
+                                let m = meta.permissions().mode() & 0o7777;
+                                seen_w.lock().unwrap().push(m);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // A payload large enough to make the write window observable.
+        let payload = vec![b'x'; 4 * 1024 * 1024];
+        for _ in 0..5 {
+            write_atomic(&file, &payload).unwrap();
+        }
+        stop.store(true, AO::Relaxed);
+        watcher.join().unwrap();
+
+        let seen = seen_modes.lock().unwrap().clone();
+        for mode in &seen {
+            assert_eq!(
+                *mode & 0o077,
+                0,
+                "staging file was observable to group/other: mode={mode:o}"
+            );
+        }
+        // Final target still restrictive.
+        let final_mode = fs::metadata(&file).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(final_mode, 0o600);
         let _ = fs::remove_dir_all(&dir);
     }
 }
