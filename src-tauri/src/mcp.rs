@@ -333,15 +333,20 @@ fn shim_for_target() -> Result<(String, bool), String> {
 /// (Unix: [`run_local_argv_unix`]; Windows: [`run_local_argv_windows`]).
 /// Stopped after `timeout` (#49). Errors carry the CLI's own stderr and its
 /// exit code. Blocking.
-fn run_agent_cli(argv: &[String], remote: bool, timeout: Duration) -> Result<String, String> {
+fn run_agent_cli(
+    app: &AppHandle,
+    argv: &[String],
+    remote: bool,
+    timeout: Duration,
+) -> Result<String, String> {
     let label = cli_label(argv);
     let outcome = if remote {
         let bin = argv.first().ok_or("empty agent command")?;
         crate::remote::run_agent_cli(&posix_command_line(argv), bin, timeout)?
     } else if cfg!(windows) {
-        run_local_argv_windows(argv, timeout)?
+        run_local_argv_windows(app, argv, timeout)?
     } else {
-        run_local_argv_unix(argv, timeout)?
+        run_local_argv_unix(app, argv, timeout)?
     };
     cli_result(&label, outcome, timeout)
 }
@@ -475,17 +480,19 @@ pub(crate) fn windows_runner(program: &std::path::Path) -> Vec<std::ffi::OsStrin
 /// parsed by PowerShell. Same timeout and error shape as the Unix
 /// [`run_local_argv_unix`]. Blocking.
 pub(crate) fn run_local_argv_windows(
+    app: &AppHandle,
     argv: &[String],
     timeout: Duration,
 ) -> Result<CliOutcome, String> {
     let (bin, rest) = argv.split_first().ok_or("empty agent command")?;
     let program =
         crate::context::find_on_path(bin).ok_or_else(|| format!("could not find {bin} on PATH"))?;
-    run_program_windows(&program, rest, timeout)
+    run_program_windows(Some(app), &program, rest, timeout)
 }
 
 /// Run a resolved agent `program` (see [`windows_runner`]) with `rest`.
 pub(crate) fn run_program_windows(
+    app: Option<&AppHandle>,
     program: &std::path::Path,
     rest: &[String],
     timeout: Duration,
@@ -495,7 +502,7 @@ pub(crate) fn run_program_windows(
     full.extend(rest.iter().map(std::ffi::OsString::from));
     let mut command = crate::proc::command(&runner);
     command.args(&full);
-    run_command_with_timeout(command, &std::env::temp_dir(), timeout)
+    run_command_with_timeout(command, &cli_working_dir(app), timeout)
 }
 
 /// How an agent CLI run ended.
@@ -808,6 +815,24 @@ const CLI_TIMEOUT: Duration = Duration::from_secs(20);
 /// The remove step that a Repair runs before `mcp add`: best effort.
 const REPAIR_REMOVE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// An empty private directory under the app cache for running agent CLIs,
+/// instead of shared /tmp: agent CLIs scan cwd for project config, so a
+/// planted `.mcp.json` in /tmp is picked up by another local user's agent.
+/// For tests (app = None), falls back to temp_dir.
+fn cli_working_dir(app: Option<&AppHandle>) -> PathBuf {
+    let dir = app
+        .and_then(|a| {
+            a.path()
+                .app_cache_dir()
+                .map(|d| d.join("agent-cli"))
+                .ok()
+        })
+        .unwrap_or_else(|| std::env::temp_dir().join("sparkdown-agent-cli"));
+    // Best effort: create the dir; if it fails, fall back to the path anyway.
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// Run `program args…` with a deadline: stdin closed, stdout/stderr drained
 /// on helper threads (so a chatty child never blocks on a full pipe), and the
 /// child killed if it outlives `timeout`. Returns (success, stdout, stderr).
@@ -922,15 +947,18 @@ fn kill_tree(child: &mut std::process::Child) {
 /// shell's PATH, then on the interactive shell's PATH (an rc file can add
 /// to PATH, e.g. nvm), and the CLI runs with that PATH. Only a name that is
 /// neither (an alias or shell function) still goes through `$SHELL -lic`,
-/// with the noise lines dropped from its error. The working directory is
-/// the temp dir, NOT the app's (home or `/` for a Dock launch): agent CLIs
-/// scan the cwd for project config, and a scan of `$HOME` touches
-/// Documents/Downloads/Desktop, which macOS attributes to SparkDown and
-/// prompts for. Blocking: call from a worker thread, never the UI.
+/// with the noise lines dropped from its error. The working directory is a
+/// private app cache folder: agent CLIs scan cwd for project config, and a
+/// planted `.mcp.json` in shared /tmp would be picked up by another user's
+/// CLI. Blocking: call from a worker thread, never the UI.
 #[cfg_attr(windows, allow(dead_code))]
-fn run_local_argv_unix(argv: &[String], timeout: Duration) -> Result<CliOutcome, String> {
+fn run_local_argv_unix(
+    app: &AppHandle,
+    argv: &[String],
+    timeout: Duration,
+) -> Result<CliOutcome, String> {
     let (bin, rest) = argv.split_first().ok_or("empty agent command")?;
-    let tmp = std::env::temp_dir();
+    let tmp = cli_working_dir(Some(app));
     let login = crate::context::login_shell_path();
     let found = crate::context::find_in_path(bin, &login, "", false)
         .map(|p| (p, login.clone()))
@@ -1025,15 +1053,16 @@ pub async fn mcp_install_agent(
     let (add, remove) = agent_mcp_commands(&bin, &exe)
         .ok_or_else(|| format!("{bin} has no MCP install command SparkDown knows"))?;
     let agent = bin.clone();
+    let app = webview_window.app_handle().clone();
     crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
         // Repair (#32): an existing entry (maybe pointing at a deleted
         // binary) is removed first, since most `mcp add` refuse to replace.
         // Each CLI call is stopped after CLI_TIMEOUT (#49); the best-effort
         // remove before a repair gets less, so a Repair ends within ~30 s.
         if agent_status_blocking(&agent).installed {
-            let _ = run_agent_cli(&remove, remote, REPAIR_REMOVE_TIMEOUT);
+            let _ = run_agent_cli(&app, &remove, remote, REPAIR_REMOVE_TIMEOUT);
         }
-        run_agent_cli(&add, remote, CLI_TIMEOUT)
+        run_agent_cli(&app, &add, remote, CLI_TIMEOUT)
     })
     .await
     .map_err(|e| format!("install task failed: {e}"))?
@@ -1058,8 +1087,9 @@ pub async fn mcp_uninstall_agent(
     }
     let (_add, remove) = agent_mcp_commands(&bin, "")
         .ok_or_else(|| format!("{bin} has no MCP config SparkDown manages"))?;
+    let app = webview_window.app_handle().clone();
     crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
-        run_agent_cli(&remove, remote, CLI_TIMEOUT)
+        run_agent_cli(&app, &remove, remote, CLI_TIMEOUT)
     })
     .await
     .map_err(|e| format!("uninstall task failed: {e}"))?
@@ -3181,7 +3211,7 @@ mod tests {
         let (add, _) = agent_mcp_commands("claude", exe).unwrap();
         for shim in ["claude.cmd", "claude.ps1"] {
             let _ = std::fs::remove_file(agents.default_out());
-            run_program_windows(&agents.bin_dir.join(shim), &add[1..], CLI_TIMEOUT)
+            run_program_windows(None, &agents.bin_dir.join(shim), &add[1..], CLI_TIMEOUT)
                 .and_then(|o| cli_result("claude mcp add", o, CLI_TIMEOUT))
                 .unwrap_or_else(|e| panic!("{shim}: {e}"));
             let text = wait_for_file(&agents.default_out(), Duration::from_secs(20))
