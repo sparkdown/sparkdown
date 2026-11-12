@@ -234,18 +234,31 @@ export class TerminalPane {
         e.preventDefault();
         void pasteOrCtrlV(
           () => api.readClipboardText(),
-          (data) => this.writeInput(data),
+          (data) => {
+            // '\x16' is the Ctrl+V (quoted-insert) fallback: a single
+            // control byte goes raw. Clipboard text goes through xterm's
+            // own paste pipeline so it is wrapped in ESC[200~ … ESC[201~
+            // when the pty enabled bracketed paste (DECSET 2004) and so
+            // \r\n / \n are normalised to \r. That stops a multi-line
+            // clipboard payload from being executed before the user can
+            // review it.
+            if (data === '\x16') this.writeInput(data);
+            else this.term.paste(data);
+          },
         );
         return false;
       }
       if (action === 'paste') {
         // Read through the core: WebKitGTK's navigator.clipboard can't read
         // without a user gesture (#130). preventDefault: no second, native paste.
+        // Route through xterm's Terminal.paste(): it emits ESC[200~ … ESC[201~
+        // when bracketed-paste is enabled and normalises CRLF, so a newline
+        // inside clipboard content no longer executes as Enter.
         e.preventDefault();
         void api
           .readClipboardText()
           .then((text) => {
-            if (text) this.writeInput(text);
+            if (text) this.term.paste(text);
           })
           .catch(() => {});
         return false;
@@ -504,14 +517,21 @@ export class TerminalPane {
    *  submitted without Enter. On a tmux-backed pane we go through tmux
    *  `send-keys` so the text is inserted into tmux's own serialized input/
    *  redraw cycle — writing raw pty bytes here races tmux's attach redraw and
-   *  the line renders twice. Plain shells take the direct pty write. */
+   *  the line renders twice. Plain shells take the direct pty write.
+   *
+   *  Strip CR/LF defensively: both the tmux `send-keys` path and the raw
+   *  write path would otherwise submit each line as Enter, which breaks the
+   *  "nothing is submitted without Enter" contract if a caller ever hands
+   *  this method text influenced by the clipboard or by agent/repo content.
+   */
   paste(text: string): void {
     if (!this.started) return;
+    const flat = text.replace(/[\r\n]+/g, ' ');
     const session = this.sessionName;
     if (session) {
       this.leaveTmuxScroll();
-      this.serialIo(() => api.tmuxSendKeys(session, text));
-    } else this.writeInput(text);
+      this.serialIo(() => api.tmuxSendKeys(session, flat));
+    } else this.writeInput(flat);
   }
 
   /** User input to the pty, after any pending tmux wheel step and after
