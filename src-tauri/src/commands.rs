@@ -4,6 +4,7 @@ use crate::PendingFiles;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -205,6 +206,13 @@ fn read_local_file(path: &str) -> Result<(String, PathBuf), AppError> {
             "Path is a directory: {path}"
         )));
     }
+    // Only regular files may back a tab. Character devices, block devices,
+    // FIFOs, sockets and procfs entries report `metadata.len() == 0` or a
+    // meaningless value, so trusting the stat size would let an unbounded read
+    // grow the heap until the process is OOM-killed or block a thread forever.
+    if !metadata.is_file() {
+        return Err(AppError::InvalidPath(format!("Not a regular file: {path}")));
+    }
     if metadata.len() > MAX_FILE_SIZE {
         return Err(AppError::FileTooLarge {
             size_mb: metadata.len() / 1024 / 1024,
@@ -212,7 +220,35 @@ fn read_local_file(path: &str) -> Result<(String, PathBuf), AppError> {
         });
     }
 
-    let contents = fs::read_to_string(&safe_path)?;
+    // Open with O_NONBLOCK so a FIFO doesn't block waiting for a writer, then
+    // fstat the opened fd and require is_file() to guard against TOCTOU races.
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&safe_path)?
+    };
+    #[cfg(not(unix))]
+    let file = fs::File::open(&safe_path)?;
+
+    let file_metadata = file.metadata()?;
+    if !file_metadata.is_file() {
+        return Err(AppError::InvalidPath(format!("Not a regular file: {path}")));
+    }
+
+    // Bound the read independently of `metadata.len()`: the stat value is a
+    // TOCTOU snapshot. Reading `MAX_FILE_SIZE + 1` lets us detect a file that
+    // grew past the limit between the stat and the read.
+    let mut contents = String::new();
+    let read = file.take(MAX_FILE_SIZE + 1).read_to_string(&mut contents)? as u64;
+    if read > MAX_FILE_SIZE {
+        return Err(AppError::FileTooLarge {
+            size_mb: read / 1024 / 1024,
+            max_mb: MAX_FILE_SIZE / 1024 / 1024,
+        });
+    }
     Ok((contents, safe_path))
 }
 
@@ -1205,17 +1241,52 @@ mod tests {
     }
 
     #[test]
+    fn read_file_reads_normal_small_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("sparkdown-test-small.txt");
+        std::fs::write(&path, "normal file content").unwrap();
+        let res = read_local_file(&path.to_string_lossy());
+        std::fs::remove_file(&path).ok();
+        assert!(res.is_ok(), "Expected Ok, got: {:?}", res);
+        assert_eq!(res.unwrap().0, "normal file content");
+    }
+
+    #[test]
     fn read_file_respects_size_limit() {
         let dir = std::env::temp_dir().join("sparkdown_test_size");
-        let _ = fs::create_dir_all(&dir);
-        let file = dir.join("small.txt");
-        fs::write(&file, "small content").unwrap();
-
-        let result = read_local_file(file.to_str().unwrap());
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().0, "small content");
-
         let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let large = dir.join("large.md");
+        let big = vec![b'x'; (MAX_FILE_SIZE + 1) as usize];
+        fs::write(&large, &big).unwrap();
+        let result = read_local_file(large.to_str().unwrap());
+        let _ = fs::remove_dir_all(&dir);
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_file_refuses_device_files() {
+        use std::os::unix::fs::DirBuilderExt;
+        let dir =
+            std::env::temp_dir().join(format!("sparkdown_test_device_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+
+        let fifo = dir.join("fifo");
+        let mkfifo = crate::proc::command("mkfifo").arg(&fifo).status().unwrap();
+        if !mkfifo.success() {
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let result = read_local_file(fifo.to_str().unwrap());
+        let _ = fs::remove_dir_all(&dir);
+        assert!(result.is_err());
+        match result {
+            Err(AppError::InvalidPath(msg)) if msg.contains("Not a regular file") => (),
+            other => panic!("Expected InvalidPath('Not a regular file'), got: {other:?}"),
+        }
     }
 
     #[test]
