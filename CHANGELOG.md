@@ -12,6 +12,7 @@ requests.
 - Preview: Key Mermaid diagram and fenced-code caches on exact source text.
 - Preview: Restrict preview images to the workspace folder.
 - Markdown: Include reference-link definitions in chunk cache key.
+- Diff: Show Unicode bidirectional and invisible control characters.
 
 ### Changed
 

@@ -145,6 +145,55 @@ export function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;');
 }
 
+/**
+ * Unicode bidirectional-override, isolate, and invisible-formatting code points
+ * that can affect how text is displayed in diff and review surfaces. These
+ * characters can cause the visual order to differ from the logical byte order,
+ * or be invisible to the reviewer. We replace them with a visible `<U+XXXX>`
+ * marker so a reviewer always sees what git actually stored, not what the bidi
+ * algorithm draws. The output is plain text (angle brackets included) and must
+ * still be HTML-escaped by the caller via {@link escapeHtml}.
+ *
+ *  - U+202A..U+202E  LRE, RLE, PDF, LRO, RLO (bidi overrides / embeddings)
+ *  - U+2066..U+2069  LRI, RLI, FSI, PDI (bidi isolates)
+ *  - U+200B..U+200F  ZWSP, ZWNJ, ZWJ, LRM, RLM (invisible / direction marks)
+ *  - U+2060          WORD JOINER (invisible)
+ *  - U+FEFF          BOM / zero-width no-break space
+ *  - U+00AD          SOFT HYPHEN (invisible unless broken)
+ */
+const UNICODE_CONTROL_CHARS_RE =
+  /[\u202A-\u202E\u2066-\u2069\u200B-\u200F\u2060\uFEFF\u00AD]/g;
+
+/**
+ * Replace Unicode bidi overrides and invisible formatting characters with a
+ * visible `<U+XXXX>` escape so they cannot reorder or hide neighbouring text
+ * in the review surfaces. HTML-escape the result before inserting into the
+ * DOM; this helper deliberately returns plain text so callers keep control of
+ * encoding (and so an existing `escapeHtml` in the caller still neutralises
+ * the literal `<` / `>` in the marker).
+ */
+export function neutralizeUnicodeControls(text: string): string {
+  return text.replace(UNICODE_CONTROL_CHARS_RE, (ch) => {
+    const hex = ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0');
+    return `<U+${hex}>`;
+  });
+}
+
+/** True if `text` contains any Unicode bidi/invisible control character that
+ *  {@link neutralizeUnicodeControls} would rewrite. */
+export function hasUnicodeControls(text: string): boolean {
+  UNICODE_CONTROL_CHARS_RE.lastIndex = 0;
+  const found = UNICODE_CONTROL_CHARS_RE.test(text);
+  UNICODE_CONTROL_CHARS_RE.lastIndex = 0;
+  return found;
+}
+
+/** Convenience: neutralize Unicode controls, then HTML-escape. The common
+ *  review-surface sink: diff lines and change-row file names. */
+export function escapeReviewText(text: string): string {
+  return escapeHtml(neutralizeUnicodeControls(text));
+}
+
 export type Debounced<T extends (...args: any[]) => void> = ((...args: Parameters<T>) => void) & {
   /** Drop a pending call, if any. */
   cancel(): void;
