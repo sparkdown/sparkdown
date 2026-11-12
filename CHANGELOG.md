@@ -37,6 +37,7 @@ requests.
 - Updater: Artifact URLs must be under the release download prefix, the signature must name the artifact being installed, and AppImage payloads must be ELF files.
 - Windows: The external-agent pipe has a random name and a per-launch handshake, and the shim checks the pipe's server process before connecting.
 - Windows: The per-window label tag is a 128-bit keyed hash, and a socket in use by another process is never replaced.
+- Agents: Changes to the editor-context and background-fetch preferences take effect in every window immediately.
 
 ### Changed
 

@@ -149,8 +149,16 @@ impl Default for McpState {
 pub fn mcp_publish(
     webview_window: tauri::WebviewWindow,
     state: tauri::State<'_, Arc<McpState>>,
-    snapshot: Snapshot,
+    store: tauri::State<'_, crate::session::ConfigStore>,
+    mut snapshot: Snapshot,
 ) {
+    // Override the renderer-supplied `enabled` with the authoritative value
+    // from the shared store, so a window whose in-memory config is stale
+    // (another window flipped Settings → Agents → Share editor context and
+    // this one has not reloaded) cannot keep publishing `enabled: true`
+    // and have snapshot_tool serve its buffer text. Default `true`
+    // matches AppConfig::default() / Snapshot::default().
+    snapshot.enabled = store.pref_bool("agent_context_enabled", true);
     publish_for(&state, webview_window.label(), snapshot);
 }
 

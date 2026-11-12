@@ -1067,8 +1067,17 @@ impl Drop for InFlight {
 #[tauri::command]
 pub async fn git_fetch(
     webview_window: tauri::WebviewWindow,
+    store: tauri::State<'_, crate::session::ConfigStore>,
     root: String,
 ) -> Result<FetchOutcome, GitActionError> {
+    // Live gate on the shared preference (Settings → Git → Fetch in the
+    // background). Reads the authoritative value from the shared store the
+    // same way externals_allowed does, so turning the toggle off in any
+    // window stops background fetches in every open window immediately,
+    // without waiting for a restart. Default `true` matches AppConfig.
+    if !store.pref_bool("git_background_fetch", true) {
+        return Ok(FetchOutcome::Busy);
+    }
     let label = webview_window.label().to_string();
     let Some(guard) = InFlight::claim(&label) else {
         return Ok(FetchOutcome::Busy);

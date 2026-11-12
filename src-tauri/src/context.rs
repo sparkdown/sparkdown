@@ -127,10 +127,21 @@ const CONTEXT_README: &str = "SparkDown agent context.\n\
 #[tauri::command]
 pub async fn agent_context_update(
     webview_window: tauri::WebviewWindow,
+    store: tauri::State<'_, crate::session::ConfigStore>,
     root: String,
     context_json: String,
     buffers: Vec<ShadowBuffer>,
 ) -> Result<String, String> {
+    // Live gate on the shared preference (Settings → Agents → Share editor
+    // context with agents). Reads the authoritative value from the shared
+    // store so a window that has not reloaded after another window flipped
+    // the toggle still refuses to write unsaved buffer text to the context
+    // dir. The command stays infallible for the caller: the frontend treats
+    // the empty string as "nothing published" and agent.clear() is
+    // responsible for removing any residue the bridge wrote before.
+    if !store.pref_bool("agent_context_enabled", true) {
+        return Ok(String::new());
+    }
     crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
         agent_context_update_impl(root, context_json, buffers)
     })

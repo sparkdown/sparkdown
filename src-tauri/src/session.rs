@@ -434,6 +434,20 @@ impl ConfigStore {
         self.lock().stored.clone()
     }
 
+    /// Read a boolean preference straight from the shared store (the
+    /// authoritative value, same source `externals_allowed` reads). Returns
+    /// `default` when the key is missing or not a bool. Lets the core gate
+    /// preferences live, so a window that has not reloaded after another
+    /// window flipped the preference still sees the new value.
+    pub fn pref_bool(&self, key: &str, default: bool) -> bool {
+        self.lock()
+            .stored
+            .prefs
+            .get(key)
+            .and_then(Value::as_bool)
+            .unwrap_or(default)
+    }
+
     /// Re-key the window sections to the labels the restore uses (folder
     /// windows get their stable label; duplicates are dropped).
     pub fn adopt(&self, plan: &[RestorePlan]) {
@@ -615,6 +629,32 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pref_bool_prefers_the_stored_value_over_the_default() {
+        let dir = std::env::temp_dir().join(format!("sd-pref-bool-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"version":2,"windows":{},"agent_context_enabled":false,"git_background_fetch":true}"#,
+        )
+        .unwrap();
+        let store = super::ConfigStore::open(path);
+        assert!(
+            !store.pref_bool("agent_context_enabled", true),
+            "stored false"
+        );
+        assert!(
+            store.pref_bool("git_background_fetch", false),
+            "stored true"
+        );
+        // A key that was never stored gives the caller's default.
+        assert!(store.pref_bool("never_stored_pref", true));
+        assert!(!store.pref_bool("never_stored_pref", false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn hyprland_tiled_resize_before_maximize_keeps_the_saved_size_154() {
         // Hyprland: a window restored maximized gets a Resized with its tiled
