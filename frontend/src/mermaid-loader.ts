@@ -1,13 +1,6 @@
 let mermaidModule: any = null;
 let loading: Promise<void> | null = null;
 
-function hashSource(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) {
-    h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
-  }
-  return h;
-}
 
 /**
  * Object.groupBy (ES2024) for older WebKit (Safari < 17.4; tauri.conf.json
@@ -64,6 +57,9 @@ export function installObjectGroupByPolyfill(): void {
  * passed here override those per-diagram defaults, so this keeps the
  * mermaid 11 rendering and stops flowcharts from loading the ~1.5 MB ELK
  * chunk.
+ *
+ * `securityLevel` is pinned explicitly because initialize() replaces the
+ * whole site config.
  */
 export function mermaidConfig(theme: 'light' | 'dark') {
   return {
@@ -71,11 +67,14 @@ export function mermaidConfig(theme: 'light' | 'dark') {
     theme: theme === 'dark' ? 'dark' : 'default',
     layout: 'dagre',
     look: 'classic',
+    securityLevel: 'strict',
   } as const;
 }
 
+const CACHE_MAX = 64;
+
 export class MermaidLoader {
-  private svgCache = new Map<number, string>();
+  private svgCache = new Map<string, string>();
   private theme: 'light' | 'dark' =
     document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
 
@@ -104,15 +103,15 @@ export class MermaidLoader {
     nodes.forEach((node) => {
       if (node.getAttribute('data-processed')) return;
       const source = node.textContent ?? '';
-      const key = hashSource(source);
-      const cached = this.svgCache.get(key);
+      const cached = this.svgCache.get(source);
       if (cached) {
+        this.svgCache.delete(source);
+        this.svgCache.set(source, cached);
         node.innerHTML = cached;
         node.setAttribute('data-processed', 'true');
         return;
       }
       node.id = `mermaid-${Date.now()}-${idx++}`;
-      // Stash the source so we can hash again after mermaid mutates the node
       node.dataset.mermaidSrc = source;
       toRender.push(node);
     });
@@ -124,7 +123,11 @@ export class MermaidLoader {
       for (const node of toRender) {
         const source = node.dataset.mermaidSrc ?? '';
         if (source) {
-          this.svgCache.set(hashSource(source), node.innerHTML);
+          this.svgCache.set(source, node.innerHTML);
+          if (this.svgCache.size > CACHE_MAX) {
+            const oldest = this.svgCache.keys().next().value;
+            if (oldest !== undefined) this.svgCache.delete(oldest);
+          }
           delete node.dataset.mermaidSrc;
         }
       }
@@ -138,5 +141,9 @@ export class MermaidLoader {
     this.svgCache.clear();
     if (!mermaidModule) return;
     mermaidModule.initialize(mermaidConfig(theme));
+  }
+
+  resetCache(): void {
+    this.svgCache.clear();
   }
 }

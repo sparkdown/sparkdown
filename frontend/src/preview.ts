@@ -168,13 +168,19 @@ function segmentAtHeadings(md: string): { segments: string[]; defsPrefix: string
   const segs: string[] = [];
   const defs: string[] = [];
   let cur: string[] = [];
-  let fence: string | null = null;
+  let fence: { ch: string; len: number } | null = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const fm = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    const fm = line.match(/^ {0,3}(`{3,}|~{3,})(.*)/);
     if (fm) {
       const ch = fm[1][0];
-      fence = fence === null ? ch : ch === fence ? null : fence;
+      const len = fm[1].length;
+      const rest = fm[2];
+      if (fence === null) {
+        fence = { ch, len };
+      } else if (ch === fence.ch && len >= fence.len && rest.trim() === '') {
+        fence = null;
+      }
     } else if (fence === null) {
       if (
         /^#{1,6}\s/.test(line) &&
@@ -439,6 +445,7 @@ export class PreviewPane {
       // Same text on another machine: reused DOM nodes hold images resolved
       // against the old machine. Force a full rebuild.
       this.renderedOrigin = origin;
+      this.mermaidLoader.resetCache();
       this.prevBlocks = [];
       this.prevNodeCounts = [];
     }
@@ -835,6 +842,7 @@ export class PreviewPane {
     if (dir === this.currentBaseDir) return;
     this.currentBaseDir = dir;
     this.images.resetRemoteCache();
+    this.mermaidLoader.resetCache();
     // Relative image srcs resolve against the base dir, but the incremental
     // renderer reuses DOM nodes whose block HTML is unchanged — and their
     // <img> src was already rewritten against the OLD dir. Two files in

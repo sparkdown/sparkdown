@@ -110,7 +110,7 @@ describe('markdown sanitizer', () => {
   });
 
   describe('code blocks', () => {
-    it('escapes the quote in a crafted fence language so it cannot break out of the class attribute', async () => {
+    it('escapes a quote in a fence language to keep it inside the class attribute', async () => {
       // token.lang is the fence info string. The escape that matters for
       // safety is the double-quote: with it escaped to &quot;, the class="..."
       // attribute cannot be terminated early, so nothing after it can become
@@ -328,6 +328,27 @@ describe('markdown sanitizer', () => {
         '# Doc\n\ntext\n\n```mermaid\ngraph TD; A-->B;\n```\n',
       );
       expect(container.querySelector('.mermaid')).not.toBeNull();
+    });
+
+    it('mermaid cache keys by full source, not hash', async () => {
+      const { pane, container } = makeLivePane();
+      const md = [
+        '```mermaid',
+        'graph TD; X-->Y;',
+        '```',
+        '',
+        '```mermaid',
+        'graph TD; A-->B;',
+        '```',
+      ].join('\n');
+      await pane.renderImmediateForExport(md);
+      const diagrams = container.querySelectorAll('.mermaid');
+      expect(diagrams.length).toBe(2);
+      const html0 = diagrams[0].innerHTML;
+      const html1 = diagrams[1].innerHTML;
+      expect(html0).not.toBe('');
+      expect(html1).not.toBe('');
+      expect(html0).not.toBe(html1);
     });
 
 
