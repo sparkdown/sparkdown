@@ -208,8 +208,9 @@ export const api = {
   /** #122: push the current branch to its upstream; never forced. */
   gitPush: (root: string) => invoke<GitActionResult>("git_push", { root }),
   /** #175: quiet background fetch of the upstream remote (local repos
-   *  only; never prompts). "busy": this window already has one running. */
-  gitFetch: (root: string) => invoke<"fetched" | "busy">("git_fetch", { root }),
+   *  only; never prompts). "busy": this window already has one running.
+   *  "skipped": the repo config has keys that can execute commands. */
+  gitFetch: (root: string) => invoke<"fetched" | "busy" | "skipped">("git_fetch", { root }),
   /** #172: what Discard would do to each path (fresh status). */
   gitDiscardPreview: (root: string, paths: string[]) =>
     invoke<DiscardItem[]>("git_discard_preview", { root, paths }),

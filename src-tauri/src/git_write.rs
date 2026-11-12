@@ -821,6 +821,115 @@ pub enum FetchOutcome {
     Fetched,
     /// Another fetch for this window was still running; nothing was done.
     Busy,
+    /// The fetch was skipped because the repo config has keys that can execute commands.
+    Skipped,
+}
+
+fn repo_config_has_exec_keys(root: &Path, extra: ExtraEnv) -> bool {
+    let mut cmd = crate::proc::command(crate::git::git_bin());
+    cmd.current_dir(root)
+        .env("PATH", crate::context::login_shell_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .arg("config")
+        .arg("--show-scope")
+        .arg("--includes")
+        .arg("--name-only")
+        .arg("--list");
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    let Ok(output) = cmd.output() else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let Some((scope, key)) = line.split_once('\t') else {
+            continue;
+        };
+        if !matches!(scope, "local" | "worktree") {
+            continue;
+        }
+        let key_lower = key.to_lowercase();
+        if key_lower.starts_with("remote.") && key_lower.contains(".uploadpack")
+            || key_lower.starts_with("remote.") && key_lower.contains(".receivepack")
+            || key_lower.starts_with("remote.") && key_lower.contains(".vcs")
+            || key_lower == "protocol.allow"
+            || key_lower.starts_with("protocol.") && key_lower.ends_with(".allow")
+            || key_lower.starts_with("url.") && key_lower.contains(".insteadof")
+            || key_lower == "core.sshcommand"
+            || key_lower == "core.gitproxy"
+            || key_lower == "core.askpass"
+            || key_lower == "core.alternaterefscommand"
+            || key_lower.starts_with("credential.") && key_lower.contains("helper")
+            || key_lower.starts_with("include.")
+        {
+            return true;
+        }
+    }
+
+    fn check_urls(root: &str, scope: &str, extra: ExtraEnv) -> Result<bool, ()> {
+        let mut url_cmd = crate::proc::command(crate::git::git_bin());
+        url_cmd
+            .current_dir(root)
+            .env("PATH", crate::context::login_shell_path())
+            .env("LC_ALL", "C")
+            .env("LANG", "C")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .args([
+                "config",
+                scope,
+                "--includes",
+                "--get-regexp",
+                r"^remote\..*\.url$",
+            ]);
+        for (k, v) in extra {
+            url_cmd.env(k, v);
+        }
+        let output = url_cmd.output().map_err(|_| ())?;
+        let code = output.status.code();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            if code == Some(1) {
+                return Ok(false);
+            }
+            if code == Some(128)
+                && (stderr.contains("cannot be used with multiple working trees")
+                    || stderr.contains("not a git repository")
+                    || stderr.contains("can only be used inside a git repository"))
+            {
+                return Ok(false);
+            }
+            return Err(());
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let line = line.trim();
+            if let Some((_key, url)) = line.split_once(char::is_whitespace) {
+                let url = url.trim();
+                if url.starts_with("ext::") || url.starts_with("fd::") || url.starts_with("file://")
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    if check_urls(root.as_os_str().to_str().unwrap_or(""), "--local", extra).unwrap_or(true) {
+        return true;
+    }
+    if check_urls(root.as_os_str().to_str().unwrap_or(""), "--worktree", extra).unwrap_or(true) {
+        return true;
+    }
+
+    false
 }
 
 /// Quietly fetch the current branch's upstream remote so the behind count
@@ -828,29 +937,43 @@ pub enum FetchOutcome {
 /// no submodules. Never prompts: on top of the runner's
 /// `GIT_TERMINAL_PROMPT=0`, both askpass programs are blanked (git then
 /// uses none), so a remote that needs credentials just fails and the
-/// caller stays silent. Times out after [`FETCH_TIMEOUT`].
+/// caller stays silent. Times out after [`FETCH_TIMEOUT`]. Skips the fetch
+/// if the repo config has keys that can execute commands.
 pub(crate) fn fetch_impl(root: &str, extra: ExtraEnv) -> Result<FetchOutcome, GitActionError> {
     let root = check_local(root, FETCH_UNSUPPORTED)?;
+    if repo_config_has_exec_keys(&root, extra) {
+        return Ok(FetchOutcome::Skipped);
+    }
     let up = upstream(&root, extra)?;
     let mut env: Vec<(&str, &str)> = vec![("GIT_ASKPASS", ""), ("SSH_ASKPASS", "")];
     env.extend_from_slice(extra);
-    run_ok(
-        &root,
-        &env,
-        &[
-            "-c",
-            "credential.interactive=false",
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            "--no-prune",
-            "--no-recurse-submodules",
-            "--",
-            &up.remote,
-        ],
-        FETCH_TIMEOUT,
-        Action::Pull,
-    )?;
+    let neutralisers = crate::git::local_exec_neutralisers(&root)
+        .map_err(|e| GitActionError::new(GitErrorKind::Other, "Background fetch failed.", e))?;
+    let mut args = vec![
+        "-c",
+        "credential.interactive=false",
+        "-c",
+        "core.sshCommand=",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "credential.helper=",
+        "-c",
+        "protocol.allow=user",
+        "-c",
+        "protocol.ext.allow=never",
+    ];
+    args.extend(neutralisers.iter().map(|s| s.as_str()));
+    args.extend_from_slice(&[
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--no-prune",
+        "--no-recurse-submodules",
+        "--",
+        &up.remote,
+    ]);
+    run_ok(&root, &env, &args, FETCH_TIMEOUT, Action::Pull)?;
     Ok(FetchOutcome::Fetched)
 }
 

@@ -155,8 +155,8 @@ fn read_safe_directories(probe: impl Fn(&[&str]) -> Option<String>) -> Vec<Strin
 /// include.path/includeIf) from both --local and --worktree scopes, then blank
 /// the code-executing sub-keys and force `filter.<x>.required=false` so a
 /// still-referenced-but-disabled filter can't make the command fail.
-/// Enumeration failure is an error (fail-closed).
-fn local_exec_neutralisers(root: &Path) -> Result<Vec<String>, String> {
+/// Enumeration failure is an error (fail-closed). Public for reuse by fetch.
+pub(crate) fn local_exec_neutralisers(root: &Path) -> Result<Vec<String>, String> {
     fn collect_names(
         root: &Path,
         scope: &str,
