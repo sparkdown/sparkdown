@@ -1226,11 +1226,54 @@ mod tests {
     }
 
     #[test]
-    fn git_status_does_not_run_post_index_change_hook() {
+    #[cfg(unix)]
+    fn git_diff_against_fifo_returns_within_timeout() {
         use std::fs;
 
         let git = git_bin();
-        let base = std::env::temp_dir().join(format!("sparkdown_hook_test_{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("sparkdown_fifo_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+
+        fs::write(repo.join("regular.txt"), "content\n").unwrap();
+
+        let fifo = repo.join("pipe");
+        crate::proc::command("mkfifo").arg(&fifo).status().unwrap();
+
+        let start = std::time::Instant::now();
+        let result = git_diff_file_impl(
+            repo.to_string_lossy().into_owned(),
+            "pipe".to_string(),
+            true,
+        );
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "diff against FIFO should fail");
+        assert!(
+            elapsed < READ_GIT_TIMEOUT,
+            "diff should return before timeout"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn git_neutralises_filter_from_include_path() {
+        use std::fs;
+
+        let git = git_bin();
+        let base =
+            std::env::temp_dir().join(format!("sparkdown_include_filter_{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         let repo = base.join("repo");
@@ -1253,22 +1296,44 @@ mod tests {
             .status()
             .unwrap();
 
-        let hooks = repo.join(".git/hooks");
-        fs::create_dir_all(&hooks).unwrap();
-        let hook = hooks.join("post-index-change");
+        let included = base.join("included.gitconfig");
         let marker = base.join("marker");
-        fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
-
-        #[cfg(unix)]
+        let marker_script = base.join("script.sh");
+        fs::write(
+            &marker_script,
+            format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+        )
+        .unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&marker_script, fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        fs::write(repo.join("a.txt"), "initial\n").unwrap();
+        fs::write(
+            &included,
+            format!(
+                "[filter \"external\"]\n\tclean = {}\n",
+                marker_script.display()
+            ),
+        )
+        .unwrap();
+
         crate::proc::command(&git)
             .current_dir(&repo)
-            .args(["add", "a.txt"])
+            .args([
+                "config",
+                "--local",
+                "include.path",
+                included.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+
+        fs::write(repo.join(".gitattributes"), "*.txt filter=external\n").unwrap();
+        fs::write(repo.join("a.txt"), "content\n").unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["add", ".gitattributes", "a.txt"])
             .status()
             .unwrap();
         crate::proc::command(&git)
@@ -1280,27 +1345,10 @@ mod tests {
         let _ = fs::remove_file(&marker);
         fs::write(repo.join("a.txt"), "modified\n").unwrap();
 
-        // Test the fix path first: git_status_impl should NOT run hooks.
-        let status = git_status_impl(repo.to_string_lossy().into_owned()).unwrap();
-        assert_eq!(status.changes.len(), 1);
-        assert!(
-            !marker.exists(),
-            "git_status_impl must not fire post-index-change hook"
-        );
-
-        // Check that index.lock was not created (no optional locks taken).
-        let index_lock = repo.join(".git").join("index.lock");
-        assert!(
-            !index_lock.exists(),
-            "index.lock must not be created with --no-optional-locks"
-        );
-
-        // Control: plain git status without our vars DOES fire the hook.
-        #[cfg(unix)]
         {
             let control = crate::proc::command(&git)
                 .current_dir(&repo)
-                .args(["status", "--porcelain"])
+                .args(["diff", "HEAD", "--", "a.txt"])
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .output()
@@ -1308,9 +1356,362 @@ mod tests {
             assert!(control.status.success());
             assert!(
                 marker.exists(),
-                "control: plain git status must fire post-index-change"
+                "control: plain git diff must run filter from include.path"
             );
+            let _ = fs::remove_file(&marker);
         }
+
+        let _ = run_git(&repo, &["diff", "HEAD", "--", "a.txt"]);
+        assert!(
+            !marker.exists(),
+            "filter from include.path ran despite neutraliser"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn git_neutralises_filter_from_worktree_config() {
+        use std::fs;
+
+        let git = git_bin();
+        let base =
+            std::env::temp_dir().join(format!("sparkdown_worktree_filter_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["config", "user.name", "test"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["config", "user.email", "test@example.com"])
+            .status()
+            .unwrap();
+
+        let marker = base.join("marker");
+        let marker_script = base.join("script.sh");
+        fs::write(
+            &marker_script,
+            format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&marker_script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let set_ext_status = crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["config", "extensions.worktreeConfig", "true"])
+            .status()
+            .unwrap();
+        assert!(
+            set_ext_status.success(),
+            "failed to set extensions.worktreeConfig"
+        );
+
+        let set_filter_status = crate::proc::command(&git)
+            .current_dir(&repo)
+            .args([
+                "config",
+                "--worktree",
+                "filter.wt.clean",
+                marker_script.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        assert!(set_filter_status.success(), "failed to set worktree filter");
+
+        let worktree_config = repo.join(".git/config.worktree");
+        assert!(
+            worktree_config.exists(),
+            "worktree config must exist in .git/config.worktree"
+        );
+        let wt_content = fs::read_to_string(&worktree_config).unwrap();
+        assert!(
+            wt_content.contains("[filter \"wt\"]") && wt_content.contains("clean ="),
+            "worktree filter must be in .git/config.worktree, got: {}",
+            wt_content
+        );
+
+        fs::write(repo.join(".gitattributes"), "*.txt filter=wt\n").unwrap();
+        fs::write(repo.join("a.txt"), "content\n").unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["add", ".gitattributes", "a.txt"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["commit", "-m", "initial"])
+            .status()
+            .unwrap();
+
+        let _ = fs::remove_file(&marker);
+        fs::write(repo.join("a.txt"), "modified\n").unwrap();
+
+        {
+            let control = crate::proc::command(&git)
+                .current_dir(&repo)
+                .args(["diff", "HEAD", "--", "a.txt"])
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(control.status.success());
+            assert!(
+                marker.exists(),
+                "control: plain git diff must run filter from worktree config"
+            );
+            let _ = fs::remove_file(&marker);
+        }
+
+        let _ = run_git(&repo, &["diff", "HEAD", "--", "a.txt"]);
+        assert!(
+            !marker.exists(),
+            "filter from worktree config ran despite neutraliser"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Repo with one committed file and an executable `post-index-change`
+    /// hook that creates `<base>/marker`. Returns `(base, repo, marker)`.
+    #[cfg(unix)]
+    fn repo_with_index_hook(
+        name: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let git = git_bin();
+        let base = std::env::temp_dir().join(format!("sparkdown_{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.name", "test"],
+            vec!["config", "user.email", "test@example.com"],
+        ] {
+            let st = crate::proc::command(&git)
+                .current_dir(&repo)
+                .args(&args)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        }
+        let marker = base.join("marker");
+        let hook = repo.join(".git/hooks/post-index-change");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+        fs::write(repo.join("a.txt"), "initial\n").unwrap();
+        for args in [vec!["add", "a.txt"], vec!["commit", "-q", "-m", "initial"]] {
+            let st = crate::proc::command(&git)
+                .current_dir(&repo)
+                .args(&args)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        }
+        let _ = fs::remove_file(&marker);
+        (base, repo, marker)
+    }
+
+    /// Give `a.txt` a modification time git has not recorded, without
+    /// changing its content (use a different `secs` each time): git must refresh the index entry, which is an
+    /// optional write for `status` and a required one for `update-index`.
+    #[cfg(unix)]
+    fn make_stat_dirty(repo: &std::path::Path, secs: u64) {
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(repo.join("a.txt"))
+            .unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_status_does_not_rewrite_the_index() {
+        let git = git_bin();
+        let (base, repo, _marker) = repo_with_index_hook("index_untouched");
+        let index = repo.join(".git/index");
+
+        make_stat_dirty(&repo, 1_000_000);
+        let before = std::fs::read(&index).unwrap();
+        let status = git_status_impl(repo.to_string_lossy().into_owned()).unwrap();
+        assert!(status.changes.is_empty(), "content is unchanged");
+        assert_eq!(
+            std::fs::read(&index).unwrap(),
+            before,
+            "read-only status must not take optional locks / rewrite the index"
+        );
+
+        // Control: a plain `git status` does refresh and rewrite the index
+        // for the same stat-dirty file, so the check above can fail.
+        let control = crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["status", "--porcelain"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(control.status.success());
+        assert_ne!(
+            std::fs::read(&index).unwrap(),
+            before,
+            "control: plain git status rewrites the index"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_commands_do_not_run_repo_hooks() {
+        let git = git_bin();
+        let (base, repo, marker) = repo_with_index_hook("hooks_off");
+
+        // `update-index --refresh` always writes the index, so the
+        // post-index-change hook would fire unless hooks are switched off in
+        // the command built by git_command.
+        make_stat_dirty(&repo, 1_000_000);
+        let out = git_command(&repo)
+            .unwrap()
+            .args(["update-index", "--refresh"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !marker.exists(),
+            "git_command must not run the repository's hooks"
+        );
+
+        // Control: the same refresh without that setting does run the hook.
+        make_stat_dirty(&repo, 2_000_000);
+        let control = crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["update-index", "--refresh"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(control.status.success());
+        assert!(marker.exists(), "control: plain update-index runs the hook");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn git_status_and_fetch_work_in_linked_worktree() {
+        use std::fs;
+
+        let git = git_bin();
+        let base = std::env::temp_dir().join(format!(
+            "sparkdown_linked_worktree_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let main_repo = base.join("main");
+        fs::create_dir_all(&main_repo).unwrap();
+
+        crate::proc::command(&git)
+            .current_dir(&main_repo)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&main_repo)
+            .args(["config", "user.name", "test"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&main_repo)
+            .args(["config", "user.email", "test@example.com"])
+            .status()
+            .unwrap();
+
+        fs::write(main_repo.join("a.txt"), "initial\n").unwrap();
+        crate::proc::command(&git)
+            .current_dir(&main_repo)
+            .args(["add", "a.txt"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&main_repo)
+            .args(["commit", "-m", "initial"])
+            .status()
+            .unwrap();
+
+        let linked_wt = base.join("linked");
+        crate::proc::command(&git)
+            .current_dir(&main_repo)
+            .args([
+                "worktree",
+                "add",
+                linked_wt.to_str().unwrap(),
+                "-b",
+                "feature",
+            ])
+            .status()
+            .unwrap();
+
+        let status = git_status_impl(linked_wt.to_string_lossy().into_owned()).unwrap();
+        assert!(
+            status.is_repo,
+            "linked worktree must be recognized as a repo"
+        );
+        assert_eq!(status.branch.as_deref(), Some("feature"));
+
+        fs::write(linked_wt.join("b.txt"), "new\n").unwrap();
+        let status2 = git_status_impl(linked_wt.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(status2.changes.len(), 1);
+
+        let bare = base.join("bare.git");
+        crate::proc::command(&git)
+            .args([
+                "clone",
+                "--bare",
+                main_repo.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&linked_wt)
+            .args(["remote", "set-url", "origin", bare.to_str().unwrap()])
+            .status()
+            .unwrap();
+
+        let fetch_result = crate::git_write::fetch_impl(
+            &linked_wt.to_string_lossy(),
+            &[("GIT_TERMINAL_PROMPT", "0")],
+        );
+        assert!(
+            !matches!(fetch_result, Ok(crate::git_write::FetchOutcome::Skipped)),
+            "fetch must not be skipped in linked worktree: {fetch_result:?}"
+        );
 
         let _ = fs::remove_dir_all(&base);
     }

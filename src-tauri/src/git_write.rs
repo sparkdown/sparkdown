@@ -2340,6 +2340,92 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fetch_skips_repo_with_uploadpack_command() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(
+            &sb.work,
+            &["config", "--local", "remote.origin.uploadpack", "/bin/sh"],
+        );
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn fetch_skips_repo_with_ext_transport() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(
+            &sb.work,
+            &[
+                "config",
+                "--local",
+                "remote.origin.url",
+                "ext::sh -c 'echo ext'",
+            ],
+        );
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn fetch_skips_repo_with_fd_transport() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(
+            &sb.work,
+            &["config", "--local", "remote.origin.url", "fd::17"],
+        );
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn fetch_skips_repo_with_file_url() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(
+            &sb.work,
+            &[
+                "config",
+                "--local",
+                "remote.origin.url",
+                "file:///tmp/repo.git",
+            ],
+        );
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn fetch_skips_repo_with_ssh_command() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(
+            &sb.work,
+            &["config", "--local", "core.sshCommand", "/bin/sh"],
+        );
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn fetch_proceeds_with_plain_upstream() {
+        let sb = sandbox();
+        let env = sb.env();
+        let other = sb.other();
+        sb.commit_in(&other, "up.md", "up\n", "upstream");
+        sb.git(&other, &["push", "-q"]);
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Fetched);
+    }
+
+    #[test]
+    fn fetch_proceeds_with_worktree_config_enabled() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(&sb.work, &["config", "extensions.worktreeConfig", "true"]);
+        let other = sb.other();
+        sb.commit_in(&other, "up.md", "up\n", "upstream");
+        sb.git(&other, &["push", "-q"]);
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Fetched);
+    }
+
     // --- Discard (#172) ---
 
     /// A fake trash: moves the path (never following a link) into the
