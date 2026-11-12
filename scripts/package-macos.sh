@@ -9,12 +9,22 @@ cd "$(dirname "$0")/.."
 # TAURI_SIGNING_PRIVATE_KEY is set, e.g. by scripts/release.sh; a plain dev
 # package run needs no key.
 #
+# --sign-only: skip the build and only sign an existing .app bundle. This
+# separates the build step (which never sees secrets) from the signing step.
+SIGN_ONLY=false
+if [ "$1" = "--sign-only" ]; then
+  SIGN_ONLY=true
+  shift
+fi
+
 # The key is taken out of the environment for the build itself (which runs
 # npm/vite and their plugins) and handed only to `tauri signer sign` below.
 SIGN_KEY="${TAURI_SIGNING_PRIVATE_KEY:-}"
 SIGN_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
-unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
-frontend/node_modules/.bin/tauri build "$@"
+if [ "$SIGN_ONLY" = false ]; then
+  unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+  frontend/node_modules/.bin/tauri build "$@"
+fi
 
 # macOS file associations come from src-tauri/Info.plist, which Tauri merges
 # into the bundle's Info.plist at build time. It REPLACES the
