@@ -227,6 +227,13 @@ export class PreviewPane {
   private visible = true;
   private currentBaseDir: string | null = null;
   private lastRendered: string | null = null;
+  /**
+   * Path of the document whose markup `lastRendered` holds. Tracked so
+   * setRenderMode can clear the cache on any path change (not only when
+   * framed/SVG category changes), and so setAllowScripts can refuse to
+   * re-render markup that no longer corresponds to the active tab.
+   */
+  private currentPath: string | null = null;
   private framedMode = false;
   private svgMode = false;
   private allowScripts = false;
@@ -238,6 +245,8 @@ export class PreviewPane {
   private originResolver: () => string | null = () => null;
   /** Origin the current DOM was rendered for. */
   private renderedOrigin: string | null = null;
+  /** Resolver for the path of the document being previewed. */
+  private pathResolver: () => string | null = () => null;
   private scrollState = createScrollState();
   private renderDebounced = debounce((c: string) => { void this.renderImmediate(c); }, TIMING.PREVIEW_RENDER_MS);
   // Invoked on interaction inside the (same-origin) preview iframe — its events
@@ -347,6 +356,7 @@ export class PreviewPane {
   }
 
   render(markdownContent: string): void {
+    this.renderDebounced.cancel();
     this.renderDebounced(markdownContent);
   }
 
@@ -369,12 +379,19 @@ export class PreviewPane {
   setRenderMode(path: string | null): void {
     const framed = isFramedFile(path);
     const svg = isSvgFile(path);
-    if (framed !== this.framedMode || svg !== this.svgMode) {
+    const modeChanged = framed !== this.framedMode || svg !== this.svgMode;
+    const pathChanged = path !== this.currentPath;
+    if (modeChanged || pathChanged) {
       this.framedMode = framed;
       this.svgMode = svg;
+      this.currentPath = path;
+      // Drop cached content from any previous document: a framed->framed
+      // (html->html or svg->svg) tab switch would otherwise leave the
+      // previous file's markup in lastRendered, and a later setAllowScripts
+      // could re-render it as the "current" document.
       this.lastRendered = null;
-      // Framed mode replaces the container's children with an iframe, so the
-      // incremental block cache no longer describes the DOM.
+      // Incremental block cache belongs to the previous document's DOM too;
+      // drop it so the next render is a full rebuild for this path.
       this.prevBlocks = [];
       this.prevNodeCounts = [];
     }
@@ -383,12 +400,23 @@ export class PreviewPane {
   /**
    * Enable/disable script execution in the HTML-preview iframe. Off by default;
    * scripts only run for HTML files when the user opts in via the View menu.
-   * Re-renders so the change takes effect on the current document immediately.
+   *
+   * When `forPath` is supplied, the pane only re-renders cached markup if it
+   * matches the path the permission was granted for. Callers that just want to
+   * flip the flag can omit `forPath`.
    */
-  setAllowScripts(allow: boolean): void {
+  setAllowScripts(allow: boolean, forPath?: string | null): void {
     if (allow === this.allowScripts) return;
     this.allowScripts = allow;
-    if (this.framedMode && this.lastRendered !== null) {
+    // Only re-render when the cached markup is for the same document the
+    // permission applies to. On a tab switch, setRenderMode has already
+    // cleared lastRendered (path changed), so this is a no-op.
+    if (
+      this.framedMode &&
+      this.lastRendered !== null &&
+      forPath !== undefined &&
+      forPath === this.currentPath
+    ) {
       const content = this.lastRendered;
       this.lastRendered = null;
       void this.renderImmediate(content);
@@ -606,14 +634,19 @@ export class PreviewPane {
     // SVG is wrapped in a host document that centres it; HTML is framed as-is
     // (with relative asset references rewritten through the asset protocol).
     const seq = ++this.htmlAssetSeq;
+    const scriptsDecision = this.allowScripts;
+    const docKey = this.currentDocKey();
     const resolved = this.svgMode
       ? this.wrapSvgDocument(content)
       : await this.rewriteHtmlAssets(content);
     // Remote images are fetched over SSH; a newer render may have finished
-    // while this one waited. Only the latest may reach the frame.
-    if (seq !== this.htmlAssetSeq) return;
+    // while this one waited. Only the latest may reach the frame. Also drop
+    // this render if the document changed (tab switch).
+    if (seq !== this.htmlAssetSeq || docKey !== this.currentDocKey()) return;
 
-    if (this.allowScripts) {
+    this.lastRendered = resolved;
+
+    if (scriptsDecision && this.allowScripts) {
       await this.renderHtmlWithScripts(resolved);
       return;
     }
@@ -670,7 +703,15 @@ export class PreviewPane {
 
   /** Serve the document from the custom protocol (own origin) so scripts run. */
   private async renderHtmlWithScripts(resolved: string): Promise<void> {
+    // Snapshot the seq and document key before the async IPC. A tab switch
+    // doesn't bump htmlAssetSeq, so also re-check the document key and scripts
+    // flag after await to ensure we don't frame a previous document when the
+    // user switched tabs while setHtmlPreview was pending.
+    const seq = this.htmlAssetSeq;
+    const docKey = this.currentDocKey();
+    const scriptsWereAllowed = this.allowScripts;
     await api.setHtmlPreview(resolved);
+    if (seq !== this.htmlAssetSeq || docKey !== this.currentDocKey() || !this.allowScripts || !scriptsWereAllowed) return;
     const frame = this.ensureFrame('scripts');
     frame.removeAttribute('srcdoc');
     // Cache-bust so live edits reload even though the path is constant.
@@ -770,6 +811,19 @@ export class PreviewPane {
    *  active tab's origin): null = local, otherwise the SSH host alias. */
   setOriginResolver(resolver: () => string | null): void {
     this.originResolver = resolver;
+  }
+
+  /** Tell the pane how to resolve the path of the document being previewed. */
+  setPathResolver(resolver: () => string | null): void {
+    this.pathResolver = resolver;
+  }
+
+  /** Document key for the current preview: origin\0path, or null. */
+  private currentDocKey(): string | null {
+    const path = this.pathResolver();
+    if (!path) return null;
+    const origin = this.originResolver();
+    return `${origin ?? ''}\0${path}`;
   }
 
   /** Settles once every pending image URL has been applied (tests). */

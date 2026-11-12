@@ -400,6 +400,7 @@ export class PreviewPaneStub {
   setFrameCallbacks(): void {}
   setOpenFileHandler(): void {}
   setOriginResolver(): void {}
+  setPathResolver(): void {}
   setBaseDir(): void {}
   setRenderMode(): void {}
   render(): void {}

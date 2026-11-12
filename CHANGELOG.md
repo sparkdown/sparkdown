@@ -8,6 +8,7 @@ requests.
 ## Unreleased (0.4.3)
 - Terminal: Quote the agent server path in the Claude launch line.
 - Files: Check that the opened file is a regular file and cap the read.
+- Preview: Bind HTML script execution to the confirmed document.
 
 ### Changed
 

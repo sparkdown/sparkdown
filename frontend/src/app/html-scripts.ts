@@ -123,7 +123,9 @@ export class HtmlScriptsController {
    */
   applyPolicy(syncMenu = true): void {
     const allowed = this.allowedForActive();
-    this.getPreview()?.setAllowScripts(allowed);
+    // Pass the active tab's path so the pane only re-renders cached markup
+    // when it actually belongs to the file the decision applies to.
+    this.getPreview()?.setAllowScripts(allowed, this.tabs.activeTab()?.path ?? null);
     this.updateButton();
     if (syncMenu && allowed !== this.lastHtmlJsMenuChecked) {
       this.lastHtmlJsMenuChecked = allowed;
