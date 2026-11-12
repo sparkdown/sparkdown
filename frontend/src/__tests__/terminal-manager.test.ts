@@ -198,6 +198,9 @@ vi.mock('@xterm/xterm', () => ({
     clearSelection() {
       this.selection = '';
     }
+    paste(data: string) {
+      if (this.dataHandler) this.dataHandler(data);
+    }
     dispose() {}
   },
 }));

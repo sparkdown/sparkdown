@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { clipboardAction, agentLaunchCommand, pasteOrCtrlV } from '../terminal';
+import {
+  clipboardAction,
+  agentLaunchCommand,
+  pasteOrCtrlV,
+  stripBracketedPasteMarkers,
+} from '../terminal';
 
 /** Build a minimal KeyboardEvent-like object for clipboardAction. */
 function key(k: string, mods: Partial<KeyboardEvent> = {}, type = 'keydown'): KeyboardEvent {
@@ -214,16 +219,44 @@ describe('clipboardAction', () => {
 });
 
 describe('pasteOrCtrlV (#130)', () => {
-  it('writes the clipboard text when there is some', async () => {
-    const out: string[] = [];
-    expect(await pasteOrCtrlV(async () => 'echo hi', (d) => out.push(d))).toBe('pasted');
-    expect(out).toEqual(['echo hi']);
+  it('pastes clipboard text through term.paste, not raw write', async () => {
+    const pasted: string[] = [];
+    const raw: string[] = [];
+    expect(await pasteOrCtrlV(async () => 'echo hi', (d) => pasted.push(d), (d) => raw.push(d))).toBe('pasted');
+    expect(pasted).toEqual(['echo hi']);
+    expect(raw).toEqual([]);
   });
 
-  it('sends ^V when the clipboard is empty or unreadable (quoted-insert keeps working)', async () => {
-    const out: string[] = [];
-    expect(await pasteOrCtrlV(async () => '', (d) => out.push(d))).toBe('ctrl-v');
-    expect(await pasteOrCtrlV(async () => { throw new Error('denied'); }, (d) => out.push(d))).toBe('ctrl-v');
-    expect(out).toEqual(['\x16', '\x16']);
+  it('sends ^V through raw write, not term.paste (vim block-select requires this)', async () => {
+    const pasted: string[] = [];
+    const raw: string[] = [];
+    expect(await pasteOrCtrlV(async () => '', (d) => pasted.push(d), (d) => raw.push(d))).toBe('ctrl-v');
+    expect(await pasteOrCtrlV(async () => { throw new Error('denied'); }, (d) => pasted.push(d), (d) => raw.push(d))).toBe('ctrl-v');
+    expect(pasted).toEqual([]);
+    expect(raw).toEqual(['\x16', '\x16']);
+  });
+
+  it('strips bracketed paste markers from clipboard text before pasting', async () => {
+    const pasted: string[] = [];
+    const raw: string[] = [];
+    expect(await pasteOrCtrlV(async () => '\x1b[200~hello\x1b[201~', (d) => pasted.push(d), (d) => raw.push(d))).toBe('pasted');
+    expect(pasted).toEqual(['hello']);
+    expect(raw).toEqual([]);
+  });
+
+  it('strips multiple bracketed paste markers from clipboard text', async () => {
+    const pasted: string[] = [];
+    const raw: string[] = [];
+    const text = 'line1\x1b[200~\nline2\x1b[201~\nline3';
+    expect(await pasteOrCtrlV(async () => text, (d) => pasted.push(d), (d) => raw.push(d))).toBe('pasted');
+    expect(pasted).toEqual(['line1\nline2\nline3']);
+  });
+});
+
+describe('stripBracketedPasteMarkers', () => {
+  it('removes \\x1b[200~ and \\x1b[201~ from text', () => {
+    expect(stripBracketedPasteMarkers('\x1b[200~hello\x1b[201~')).toBe('hello');
+    expect(stripBracketedPasteMarkers('plain text')).toBe('plain text');
+    expect(stripBracketedPasteMarkers('a\x1b[200~b\x1b[201~c')).toBe('abc');
   });
 });

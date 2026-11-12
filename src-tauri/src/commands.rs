@@ -1055,6 +1055,12 @@ pub async fn allow_preview_assets(
         let entry = reg.windows.get(&label);
         let folder = entry.and_then(|w| w.folder.clone());
         let opened_dirs = entry.map(|w| &w.opened_dirs);
+<<<<<<< HEAD
+=======
+        let doc_dir_folder = doc_dir
+            .as_ref()
+            .and_then(|d| crate::windows::local_folder_id(d).ok());
+>>>>>>> 7f7decc (terminal: paste through the terminal so bracketed paste applies)
 
         Ok(paths
             .iter()
@@ -1066,6 +1072,12 @@ pub async fn allow_preview_assets(
                 let path_str = canonical.to_string_lossy().to_string();
 
                 let in_window_folder = folder.as_ref().is_some_and(|f| f.contains_local(&path_str));
+<<<<<<< HEAD
+=======
+                let in_doc_dir = doc_dir_folder
+                    .as_ref()
+                    .is_some_and(|f| f.contains_local(&path_str));
+>>>>>>> 7f7decc (terminal: paste through the terminal so bracketed paste applies)
                 let in_opened_dir = opened_dirs.is_some_and(|dirs| {
                     dirs.iter().any(|d| {
                         if let Ok(d_folder) = crate::windows::local_folder_id(d) {

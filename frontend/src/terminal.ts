@@ -73,11 +73,18 @@ export function clipboardAction(
   return null;
 }
 
+/** Strip bracketed paste markers (\x1b[200~ and \x1b[201~) from clipboard text
+ *  before pasting (xterm 6.0.0 doesn't strip them itself). */
+export function stripBracketedPasteMarkers(text: string): string {
+  return text.replace(/\x1b\[200~/g, '').replace(/\x1b\[201~/g, '');
+}
+
 /** #130: paste the clipboard's text, or — when it is empty or unreadable —
  *  send ^V (0x16) so the shell's quoted-insert still works. */
 export async function pasteOrCtrlV(
   read: () => Promise<string>,
-  write: (data: string) => void,
+  paste: (data: string) => void,
+  writeRaw: (data: string) => void,
 ): Promise<'pasted' | 'ctrl-v'> {
   let text = '';
   try {
@@ -86,10 +93,10 @@ export async function pasteOrCtrlV(
     text = '';
   }
   if (text) {
-    write(text);
+    paste(stripBracketedPasteMarkers(text));
     return 'pasted';
   }
-  write('\x16');
+  writeRaw('\x16');
   return 'ctrl-v';
 }
 
@@ -234,6 +241,7 @@ export class TerminalPane {
         e.preventDefault();
         void pasteOrCtrlV(
           () => api.readClipboardText(),
+          (data) => this.term.paste(data),
           (data) => this.writeInput(data),
         );
         return false;
@@ -245,7 +253,7 @@ export class TerminalPane {
         void api
           .readClipboardText()
           .then((text) => {
-            if (text) this.writeInput(text);
+            if (text) this.term.paste(stripBracketedPasteMarkers(text));
           })
           .catch(() => {});
         return false;
