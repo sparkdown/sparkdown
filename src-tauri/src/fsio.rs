@@ -41,6 +41,8 @@ fn resolve_symlinks(path: &Path) -> io::Result<PathBuf> {
 
 /// Create a fresh temp file next to `name` in `dir`
 /// (`.<name>.sparkdown-tmp-<pid>-<n>`), never reusing an existing path.
+/// The temp is created with mode 0600 on Unix so content is private from
+/// the start (before the target's mode is applied).
 fn create_temp(dir: &Path, name: &std::ffi::OsStr) -> io::Result<(PathBuf, File)> {
     let pid = std::process::id();
     loop {
@@ -49,7 +51,14 @@ fn create_temp(dir: &Path, name: &std::ffi::OsStr) -> io::Result<(PathBuf, File)
         tmp_name.push(name);
         tmp_name.push(format!(".sparkdown-tmp-{pid}-{n}"));
         let tmp = dir.join(tmp_name);
-        match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&tmp) {
             Ok(f) => return Ok((tmp, f)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
@@ -89,10 +98,12 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     };
 
     let result = (|| {
-        file.write_all(data)?;
+        // Set the target's permissions before writing data, so content is
+        // never world-readable when the final file should be private.
         if let Some(perms) = existing_perms {
             file.set_permissions(perms)?;
         }
+        file.write_all(data)?;
         file.sync_all()?;
         drop(file);
         fs::rename(&tmp, &target)?;

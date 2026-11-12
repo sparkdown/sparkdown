@@ -718,8 +718,15 @@ pub async fn update_check(app: AppHandle) -> Result<Option<UpdateInfo>, String> 
         return Err("update checks are disabled (no updater public key)".to_owned());
     }
     blocking(move || {
-        let tmp =
-            std::env::temp_dir().join(format!("sparkdown-latest-{}.json", std::process::id()));
+        // Download the manifest into a private staging dir under the app's config
+        // directory, not in the shared temp dir.
+        let staging = app
+            .path()
+            .app_config_dir()
+            .map_err(|e| e.to_string())?
+            .join("update-staging");
+        fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+        let tmp = staging.join(format!("latest-{}.json", std::process::id()));
         let fetched = download(
             ENDPOINT,
             &tmp,
