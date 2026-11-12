@@ -80,7 +80,8 @@ pub(crate) struct ResolvedHost {
     pub hostname: String,
     pub port: u16,
     pub host_key_alias: Option<String>,
-    pub user_known_hosts: Option<String>,
+    pub user_known_hosts: Vec<String>,
+    pub global_known_hosts: Vec<String>,
     pub hash_known_hosts: bool,
     /// ProxyJump / ProxyCommand in effect: ssh-keyscan can't follow them.
     pub proxied: bool,
@@ -103,8 +104,10 @@ pub(crate) fn parse_ssh_g(out: &str) -> ResolvedHost {
             "port" => r.port = v.parse().unwrap_or(22),
             "hostkeyalias" if v != "none" => r.host_key_alias = Some(v.to_string()),
             "userknownhostsfile" => {
-                // Space-separated list; ssh writes new keys to the first.
-                r.user_known_hosts = v.split_whitespace().next().map(str::to_string)
+                r.user_known_hosts = v.split_whitespace().map(str::to_string).collect()
+            }
+            "globalknownhostsfile" => {
+                r.global_known_hosts = v.split_whitespace().map(str::to_string).collect()
             }
             "hashknownhosts" => r.hash_known_hosts = v == "yes",
             "proxyjump" if v != "none" => r.proxied = true,
@@ -231,12 +234,48 @@ fn random_id() -> String {
     format!("{n}-{t:x}-{}", std::process::id())
 }
 
+/// Check all known_hosts files to see if the host is already present.
+fn check_known_hosts(r: &ResolvedHost) -> Result<bool, String> {
+    let home = home_dir();
+    let name = known_hosts_name(r.host_key_alias.as_deref().unwrap_or(&r.hostname), r.port);
+    for raw in r
+        .user_known_hosts
+        .iter()
+        .chain(r.global_known_hosts.iter())
+    {
+        let file = expand_home(raw, &home);
+        if !file.exists() {
+            continue;
+        }
+        let out = crate::proc::command("ssh-keygen")
+            .arg("-F")
+            .arg(&name)
+            .arg("-f")
+            .arg(&file)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("failed to run ssh-keygen: {e}"))?;
+        if !out.status.success() {
+            continue;
+        }
+        if !out.stdout.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Scan `host`'s keys and remember them for [`trust_scan`].
 pub fn scan(host: &str) -> Result<HostKeyScan, String> {
     let r = resolve(host)?;
     if r.proxied {
         return Err(format!(
             "'{host}' goes through ProxyJump/ProxyCommand, which SparkDown can't scan. Run `ssh {host}` once in a terminal to check and accept its host key, then connect again."
+        ));
+    }
+    if check_known_hosts(&r)? {
+        return Err(format!(
+            "'{host}' is already in known_hosts. If ssh still refuses to connect, the host key may have changed. Check the error carefully before accepting a new key."
         ));
     }
     if !safe_scan_target(&r.hostname) {
@@ -257,12 +296,11 @@ pub fn scan(host: &str) -> Result<HostKeyScan, String> {
     }
     let name = known_hosts_name(r.host_key_alias.as_deref().unwrap_or(&r.hostname), r.port);
     let home = home_dir();
-    let file = expand_home(
-        r.user_known_hosts
-            .as_deref()
-            .unwrap_or("~/.ssh/known_hosts"),
-        &home,
-    );
+    let file = if let Some(first) = r.user_known_hosts.first() {
+        expand_home(first, &home)
+    } else {
+        home.join(".ssh").join("known_hosts")
+    };
     let lines = keys
         .iter()
         .map(|(kt, b64, _)| format!("{name} {kt} {b64}"))
@@ -429,7 +467,9 @@ mod tests {
         assert_eq!(r.hostname, "10.0.0.5");
         assert_eq!(r.port, 2222);
         assert_eq!(r.host_key_alias, None);
-        assert_eq!(r.user_known_hosts.as_deref(), Some("~/.ssh/known_hosts"));
+        assert_eq!(r.user_known_hosts.len(), 2);
+        assert_eq!(r.user_known_hosts[0], "~/.ssh/known_hosts");
+        assert_eq!(r.user_known_hosts[1], "~/.ssh/known_hosts2");
         assert!(r.hash_known_hosts);
         assert!(!r.proxied);
         let r = parse_ssh_g("hostname h\nport 22\nproxyjump bastion\nhostkeyalias box1\n");
@@ -565,6 +605,43 @@ mod tests {
         );
         assert!(trust_scan(&id).is_err(), "an id works once");
         assert!(trust_scan("nope").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_finds_rsa_and_hashed_entries() {
+        let probe = crate::proc::command("ssh-keygen").arg("-?").output();
+        if probe.is_err() {
+            return;
+        }
+        let dir = tmp("check");
+        let file = dir.join("known_hosts");
+        let rsa_line = "example.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC8";
+        append_known_hosts(&file, &[rsa_line.to_string()]).unwrap();
+        let r = ResolvedHost {
+            hostname: "example.com".into(),
+            port: 22,
+            user_known_hosts: vec![file.display().to_string()],
+            ..Default::default()
+        };
+        assert!(check_known_hosts(&r).unwrap());
+        let r2 = ResolvedHost {
+            hostname: "other.com".into(),
+            port: 22,
+            user_known_hosts: vec![file.display().to_string()],
+            ..Default::default()
+        };
+        assert!(!check_known_hosts(&r2).unwrap());
+        let ed_line = ED_LINE.replacen("github.com", "[127.0.0.1]:2222", 1);
+        let hashed = hash_lines(&[ed_line]).unwrap();
+        append_known_hosts(&file, &hashed).unwrap();
+        let r3 = ResolvedHost {
+            hostname: "127.0.0.1".into(),
+            port: 2222,
+            user_known_hosts: vec![file.display().to_string()],
+            ..Default::default()
+        };
+        assert!(check_known_hosts(&r3).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
