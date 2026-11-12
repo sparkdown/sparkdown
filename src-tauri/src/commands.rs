@@ -2,7 +2,7 @@ use crate::config::AppConfig;
 use crate::menu::AppMenuHandle;
 use crate::PendingFiles;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -163,11 +163,12 @@ fn validate_write_path(path: &str) -> Result<PathBuf, AppError> {
 /// Read a file's contents as UTF-8. Validates the path to prevent directory
 /// traversal and rejects files larger than 50 MB to prevent memory exhaustion.
 ///
-/// Opening a file also grants the asset protocol read access to that file's
-/// directory (recursively), so the markdown preview can load images referenced
-/// relative to it. The asset scope ships empty (see tauri.conf.json) and is
-/// widened only here and in [`list_directory`]: an injected webview script
-/// therefore cannot reach arbitrary files on disk via `asset:` URLs.
+/// Opening a file also grants the asset protocol read access to that file only,
+/// and records the file's canonical parent directory in `opened_dirs` so preview
+/// images in the same directory can be loaded. The asset scope ships empty (see
+/// tauri.conf.json) and is widened only here, in [`list_directory`] (one
+/// directory, non-recursively), and in [`allow_preview_assets`] (one image file
+/// at a time, bounded by containment).
 ///
 /// `async` + `spawn_blocking`: a synchronous `#[tauri::command]` runs on the
 /// main thread in Tauri 2, so when a remote session is active the (blocking)
@@ -179,14 +180,26 @@ pub async fn read_file(
     app: AppHandle,
     path: String,
 ) -> Result<String, AppError> {
-    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+    let label = webview_window.label().to_string();
+    crate::windows::spawn_scoped(label.clone(), move || {
         if crate::remote::is_active() {
             return crate::remote::read_file(&path);
         }
         let (contents, safe_path) = read_local_file(&path)?;
+        // Grant only the opened file, not the parent directory recursively
+        let _ = app.asset_protocol_scope().allow_file(&safe_path);
+
+        // Record the file's canonical parent directory in opened_dirs so
+        // preview images in the same directory can be loaded
         if let Some(parent) = safe_path.parent() {
-            let _ = app.asset_protocol_scope().allow_directory(parent, true);
+            let mut reg = crate::windows::registry();
+            if let Some(entry) = reg.windows.get_mut(&label) {
+                entry
+                    .opened_dirs
+                    .insert(parent.to_string_lossy().to_string());
+            }
         }
+
         Ok(contents)
     })
     .await
@@ -753,12 +766,26 @@ pub async fn list_directory(
         if crate::remote::is_active() {
             return crate::remote::list_directory(&path, include_hidden);
         }
+        let safe_path = validate_path(&path)?;
         let entries = list_directory_impl(&path, include_hidden)?;
-        // Grant the asset protocol read access to the browsed directory
-        // (recursively) so preview images anywhere under it load. See
-        // read_file for why the scope starts empty.
-        if let Ok(safe_path) = validate_path(&path) {
-            let _ = app.asset_protocol_scope().allow_directory(&safe_path, true);
+        // Grant the asset protocol read access to the browsed directory,
+        // non-recursively, so preview images that live directly in it
+        // load. Skip the grant for the filesystem root, `/Users`,
+        // `/home` and the home directory; such a wide grant is not useful
+        // for previews.
+        #[cfg(unix)]
+        let home = std::env::var_os("HOME").and_then(|h| fs::canonicalize(h).ok());
+        #[cfg(windows)]
+        let home = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .and_then(|h| fs::canonicalize(h).ok());
+        #[cfg(not(any(unix, windows)))]
+        let home: Option<PathBuf> = None;
+
+        if !is_too_shallow_for_asset_grant(&safe_path, home.as_deref()) {
+            let _ = app
+                .asset_protocol_scope()
+                .allow_directory(&safe_path, false);
         }
         Ok(entries)
     })
@@ -998,6 +1025,149 @@ pub(crate) fn has_image_extension(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Canonicalize a frontend-supplied base directory for preview-image
+/// containment checks. Returns `None` when the input is not an absolute,
+/// existing directory, or when it's too shallow (filesystem root or home).
+fn canonical_dir(path: &str, home: Option<&Path>) -> Option<PathBuf> {
+    let p = Path::new(path);
+    if !p.is_absolute() {
+        return None;
+    }
+    let canon = fs::canonicalize(p).ok()?;
+    if !canon.is_dir() {
+        return None;
+    }
+    // Refuse too-shallow directories
+    if is_too_shallow_for_asset_grant(&canon, home) {
+        return None;
+    }
+    Some(canon)
+}
+
+/// Component-wise containment check.
+fn path_within(child: &Path, parent: &Path) -> bool {
+    child == parent || child.starts_with(parent)
+}
+
+/// Validate a base directory for preview-image grants. Returns `Some` only when
+/// the directory is absolute, existing, not too shallow (not `/` or home), and
+/// is either inside the window folder or equal to one of the opened directories.
+fn validated_base_dir(
+    base: &str,
+    folder: Option<&crate::windows::FolderId>,
+    opened_dirs: &HashSet<String>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    let canon = canonical_dir(base, home)?;
+    // base_dir must be inside the window folder or equal to an opened dir
+    let in_folder = folder
+        .as_ref()
+        .is_some_and(|f| f.contains_local(&canon.to_string_lossy()));
+    let is_opened_dir = opened_dirs.iter().any(|od| {
+        if let Ok(od_canon) = fs::canonicalize(od) {
+            od_canon == canon
+        } else {
+            false
+        }
+    });
+    if in_folder || is_opened_dir {
+        Some(canon)
+    } else {
+        None
+    }
+}
+
+/// Decide whether a preview image path should be granted to the asset protocol.
+/// Returns `true` if the canonical image path is contained by the window folder,
+/// any opened directory, or the validated base directory.
+fn preview_image_allowed(
+    canonical: &Path,
+    folder: Option<&crate::windows::FolderId>,
+    opened_dirs: &HashSet<String>,
+    base_dir: Option<&Path>,
+) -> bool {
+    let path_str = canonical.to_string_lossy();
+
+    // Check if image is inside the window's root folder
+    if let Some(f) = folder {
+        if f.contains_local(&path_str) {
+            return true;
+        }
+    }
+
+    // Check if image is inside any directory that was opened in this window
+    for dir in opened_dirs {
+        if let Ok(d_folder) = crate::windows::local_folder_id(dir) {
+            if d_folder.contains_local(&path_str) {
+                return true;
+            }
+        }
+    }
+
+    // Check if image is inside the validated base directory
+    if let Some(base) = base_dir {
+        if path_within(canonical, base) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Skip the automatic asset-protocol grant for the filesystem root,
+/// `/Users`, `/home` and the home directory. Listing those paths still
+/// works; only the grant is skipped.
+fn is_too_shallow_for_asset_grant(path: &Path, home: Option<&Path>) -> bool {
+    if !path.is_absolute() {
+        return true;
+    }
+    // Check if path equals home directory
+    if let Some(h) = home {
+        if path == h {
+            return true;
+        }
+    }
+    let depth = path
+        .components()
+        .filter(|c| matches!(c, std::path::Component::Normal(_)))
+        .count();
+    depth < 2
+}
+
+/// Per-call grant logic of [`allow_preview_assets`], with the actual scope grant
+/// passed in so it can be tested: validates `base_dir`, checks each path with
+/// [`check_preview_image`] and [`preview_image_allowed`], and calls `grant` only
+/// for allowed images. Returns one flag per input path.
+fn grant_preview_images(
+    paths: &[String],
+    base_dir: Option<&str>,
+    folder: Option<&crate::windows::FolderId>,
+    opened_dirs: &HashSet<String>,
+    home: Option<&Path>,
+    mut grant: impl FnMut(&Path) -> bool,
+) -> Vec<bool> {
+    let base_dir_validated =
+        base_dir.and_then(|bd| validated_base_dir(bd, folder, opened_dirs, home));
+    paths
+        .iter()
+        .map(|p| {
+            let canonical = match check_preview_image(p) {
+                Ok(c) => c,
+                Err(_) => return false,
+            };
+            if !preview_image_allowed(
+                &canonical,
+                folder,
+                opened_dirs,
+                base_dir_validated.as_deref(),
+            ) {
+                return false;
+            }
+            grant(&canonical)
+        })
+        .collect()
+}
+
 /// Validate one preview image path: absolute, resolves (symlinks included)
 /// to a regular file, and the RESOLVED path has an image extension. Checking
 /// the canonical path means `logo.png -> ~/.ssh/id_rsa` is refused.
@@ -1025,27 +1195,50 @@ fn check_preview_image(path: &str) -> Result<PathBuf, AppError> {
 /// The asset scope ships empty and read_file / list_directory only grant the
 /// opened file's directory or the browsed folder. A file opened on its own
 /// that references `../img/x.png` would otherwise show a broken image. Each
-/// path must pass [`check_preview_image`]; only that exact file is allowed —
-/// never its directory. Returns one flag per input path (true = allowed).
+/// path must pass [`check_preview_image`] and be within the window's folder
+/// or one of the directories of files actually opened via read_file; only
+/// that exact file is allowed — never its directory. Returns one flag per
+/// input path (true = allowed).
 #[tauri::command]
 pub async fn allow_preview_assets(
+    webview_window: tauri::WebviewWindow,
     app: AppHandle,
     paths: Vec<String>,
+    base_dir: Option<String>,
 ) -> Result<Vec<bool>, AppError> {
     if paths.len() > MAX_PREVIEW_ASSETS_PER_CALL {
         return Err(AppError::Other(format!(
             "Too many preview assets in one call (max {MAX_PREVIEW_ASSETS_PER_CALL})"
         )));
     }
+    let label = webview_window.label().to_string();
     tauri::async_runtime::spawn_blocking(move || {
         let scope = app.asset_protocol_scope();
-        Ok(paths
-            .iter()
-            .map(|p| match check_preview_image(p) {
-                Ok(canonical) => scope.allow_file(&canonical).is_ok(),
-                Err(_) => false,
-            })
-            .collect())
+        let reg = crate::windows::registry();
+        let entry = reg.windows.get(&label);
+        let folder = entry.and_then(|w| w.folder.clone());
+        let opened_dirs_set = entry.map(|w| &w.opened_dirs).cloned().unwrap_or_default();
+
+        // Get home directory for validation
+        #[cfg(unix)]
+        let home = std::env::var_os("HOME").and_then(|h| fs::canonicalize(h).ok());
+        #[cfg(windows)]
+        let home = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .and_then(|h| fs::canonicalize(h).ok());
+        #[cfg(not(any(unix, windows)))]
+        let home: Option<PathBuf> = None;
+
+        drop(reg);
+
+        Ok(grant_preview_images(
+            &paths,
+            base_dir.as_deref(),
+            folder.as_ref(),
+            &opened_dirs_set,
+            home.as_deref(),
+            |canonical| scope.allow_file(canonical).is_ok(),
+        ))
     })
     .await
     .map_err(|e| AppError::Other(format!("allow task failed: {e}")))?
@@ -1571,6 +1764,461 @@ mod create_entry_tests {
         assert_eq!(
             file_uri("/home/u/a b/ü#.md"),
             "file:///home/u/a%20b/%C3%BC%23.md"
+        );
+    }
+
+    #[test]
+    fn preview_image_containment_respects_folder_and_opened_dirs() {
+        let dir =
+            std::env::temp_dir().join(format!("sparkdown_test_contain_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let inside = dir.join("docs");
+        let outside = dir.join("other");
+        fs::create_dir_all(&inside).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let img_in = inside.join("x.png");
+        let img_out = outside.join("y.png");
+        fs::write(&img_in, b"\x89PNG").unwrap();
+        fs::write(&img_out, b"\x89PNG").unwrap();
+
+        let folder = crate::windows::local_folder_id(inside.to_str().unwrap()).unwrap();
+        let canonical_in = check_preview_image(img_in.to_str().unwrap()).unwrap();
+        let canonical_out = check_preview_image(img_out.to_str().unwrap()).unwrap();
+
+        let in_folder = folder.contains_local(&canonical_in.to_string_lossy());
+        let out_folder = folder.contains_local(&canonical_out.to_string_lossy());
+
+        let _ = fs::remove_dir_all(&dir);
+        assert!(in_folder);
+        assert!(!out_folder);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_image_containment_rejects_symlink_to_outside_folder() {
+        let dir =
+            std::env::temp_dir().join(format!("sparkdown_test_symlink_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let inside = dir.join("docs");
+        let outside = dir.join("other");
+        fs::create_dir_all(&inside).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let outside_img = outside.join("photo.png");
+        let link = inside.join("img.png");
+        fs::write(&outside_img, b"\x89PNG").unwrap();
+        std::os::unix::fs::symlink(&outside_img, &link).unwrap();
+
+        let folder = crate::windows::local_folder_id(inside.to_str().unwrap()).unwrap();
+        let canonical = check_preview_image(link.to_str().unwrap()).unwrap();
+        let contained = folder.contains_local(&canonical.to_string_lossy());
+
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            !contained,
+            "symlink to path outside folder should be rejected"
+        );
+    }
+
+    #[test]
+    fn list_directory_impl_accepts_non_root_paths() {
+        // list_directory_impl does not check for root/home - that's done in the
+        // async wrapper. This test just ensures the impl doesn't fail on its own.
+        let temp = std::env::temp_dir();
+        let result = list_directory_impl(temp.to_str().unwrap(), false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn is_too_shallow_for_asset_grant_refuses_roots_and_user_home() {
+        assert!(is_too_shallow_for_asset_grant(Path::new("/"), None));
+        assert!(is_too_shallow_for_asset_grant(Path::new("/Users"), None));
+        assert!(is_too_shallow_for_asset_grant(Path::new("/home"), None));
+        assert!(!is_too_shallow_for_asset_grant(
+            Path::new("/Users/alice/code"),
+            None
+        ));
+        assert!(!is_too_shallow_for_asset_grant(
+            Path::new("/home/alice/code"),
+            None
+        ));
+        assert!(is_too_shallow_for_asset_grant(
+            Path::new("relative/path"),
+            None
+        ));
+
+        // Test home directory check with a passed-in home (no environment mutation)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fake_home = temp_dir.path().join("fakehome");
+        fs::create_dir(&fake_home).unwrap();
+        let fake_home_canon = fs::canonicalize(&fake_home).unwrap();
+
+        assert!(is_too_shallow_for_asset_grant(
+            &fake_home_canon,
+            Some(&fake_home_canon)
+        ));
+        assert!(!is_too_shallow_for_asset_grant(
+            &fake_home_canon.join("subfolder"),
+            Some(&fake_home_canon)
+        ));
+    }
+
+    #[test]
+    fn preview_image_allowed_respects_window_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj_dir = tmp.path().join("proj");
+        let inside_img = proj_dir.join("img.png");
+        let outside_img = tmp.path().join("other.png");
+
+        fs::create_dir(&proj_dir).unwrap();
+        fs::write(&inside_img, b"\x89PNG").unwrap();
+        fs::write(&outside_img, b"\x89PNG").unwrap();
+
+        let folder = crate::windows::local_folder_id(proj_dir.to_str().unwrap()).unwrap();
+        let inside_canon = fs::canonicalize(&inside_img).unwrap();
+        let outside_canon = fs::canonicalize(&outside_img).unwrap();
+        let opened_dirs = HashSet::new();
+
+        // Image inside folder allowed
+        assert!(preview_image_allowed(
+            &inside_canon,
+            Some(&folder),
+            &opened_dirs,
+            None
+        ));
+        // Image outside folder denied
+        assert!(!preview_image_allowed(
+            &outside_canon,
+            Some(&folder),
+            &opened_dirs,
+            None
+        ));
+    }
+
+    #[test]
+    fn preview_image_allowed_respects_opened_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let docs_dir = tmp.path().join("docs");
+        let img_in = docs_dir.join("x.png");
+        let img_out = tmp.path().join("y.png");
+
+        fs::create_dir(&docs_dir).unwrap();
+        fs::write(&img_in, b"\x89PNG").unwrap();
+        fs::write(&img_out, b"\x89PNG").unwrap();
+
+        let docs_canon = fs::canonicalize(&docs_dir).unwrap();
+        let mut opened_dirs = HashSet::new();
+        opened_dirs.insert(docs_canon.to_string_lossy().to_string());
+
+        let img_in_canon = fs::canonicalize(&img_in).unwrap();
+        let img_out_canon = fs::canonicalize(&img_out).unwrap();
+
+        // Image in opened dir allowed
+        assert!(preview_image_allowed(
+            &img_in_canon,
+            None,
+            &opened_dirs,
+            None
+        ));
+        // Image outside denied
+        assert!(!preview_image_allowed(
+            &img_out_canon,
+            None,
+            &opened_dirs,
+            None
+        ));
+    }
+
+    #[test]
+    fn preview_image_allowed_respects_base_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let docs_dir = tmp.path().join("docs");
+        let sibling_img = docs_dir.join("image.png");
+        let outside_img = tmp.path().join("other.png");
+
+        fs::create_dir(&docs_dir).unwrap();
+        fs::write(&sibling_img, b"\x89PNG").unwrap();
+        fs::write(&outside_img, b"\x89PNG").unwrap();
+
+        let docs_canon = fs::canonicalize(&docs_dir).unwrap();
+        let sibling_canon = fs::canonicalize(&sibling_img).unwrap();
+        let outside_canon = fs::canonicalize(&outside_img).unwrap();
+        let opened_dirs = HashSet::new();
+
+        // Sibling image allowed via base_dir
+        assert!(preview_image_allowed(
+            &sibling_canon,
+            None,
+            &opened_dirs,
+            Some(&docs_canon)
+        ));
+        // Image outside denied
+        assert!(!preview_image_allowed(
+            &outside_canon,
+            None,
+            &opened_dirs,
+            Some(&docs_canon)
+        ));
+    }
+
+    #[test]
+    fn preview_image_allowed_rejects_symlink_outside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj_dir = tmp.path().join("proj");
+        let outside_img = tmp.path().join("photo.png");
+
+        fs::create_dir(&proj_dir).unwrap();
+        fs::write(&outside_img, b"\x89PNG").unwrap();
+
+        let link = proj_dir.join("link.png");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside_img, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&outside_img, &link).unwrap();
+
+        // Canonicalized link resolves to outside_img outside proj_dir
+        let link_canon = fs::canonicalize(&link).unwrap();
+        let proj_canon = fs::canonicalize(&proj_dir).unwrap();
+        let opened_dirs = HashSet::new();
+
+        // Symlink to outside is denied
+        assert!(!preview_image_allowed(
+            &link_canon,
+            None,
+            &opened_dirs,
+            Some(&proj_canon)
+        ));
+    }
+
+    #[test]
+    fn canonical_dir_rejects_too_shallow() {
+        // Root is too shallow
+        assert!(canonical_dir("/", None).is_none());
+
+        // Home is too shallow when passed
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        fs::create_dir(&fake_home).unwrap();
+        let fake_home_canon = fs::canonicalize(&fake_home).unwrap();
+
+        assert!(
+            canonical_dir(&fake_home_canon.to_string_lossy(), Some(&fake_home_canon)).is_none()
+        );
+
+        // Subdirectory of home is OK
+        let subdir = fake_home.join("proj");
+        fs::create_dir(&subdir).unwrap();
+        assert!(canonical_dir(&subdir.to_string_lossy(), Some(&fake_home_canon)).is_some());
+    }
+
+    #[test]
+    fn canonical_dir_requires_absolute_path() {
+        assert!(canonical_dir("relative/path", None).is_none());
+    }
+
+    fn local(p: &str) -> FolderId {
+        FolderId::Local { path: p.into() }
+    }
+
+    #[test]
+    fn validated_base_dir_rejects_root() {
+        let folder_id = Some(local("/home/user/proj"));
+        let opened = HashSet::new();
+        assert!(validated_base_dir("/", folder_id.as_ref(), &opened, None).is_none());
+    }
+
+    #[test]
+    fn validated_base_dir_rejects_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        fs::create_dir(&fake_home).unwrap();
+        let fake_home_canon = fs::canonicalize(&fake_home).unwrap();
+
+        let folder_id = Some(local(&fake_home_canon.to_string_lossy()));
+        let opened = HashSet::new();
+        assert!(validated_base_dir(
+            &fake_home_canon.to_string_lossy(),
+            folder_id.as_ref(),
+            &opened,
+            Some(&fake_home_canon)
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn validated_base_dir_rejects_outside_folder_and_opened() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&proj).unwrap();
+        fs::create_dir(&outside).unwrap();
+
+        let proj_canon = fs::canonicalize(&proj).unwrap();
+        let folder_id = Some(local(&proj_canon.to_string_lossy()));
+        let opened = HashSet::new();
+
+        assert!(
+            validated_base_dir(outside.to_str().unwrap(), folder_id.as_ref(), &opened, None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn validated_base_dir_rejects_symlink_outside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        let outside = tmp.path().join("outside");
+        let link = proj.join("link");
+        fs::create_dir(&proj).unwrap();
+        fs::create_dir(&outside).unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&outside, &link).unwrap();
+
+        let proj_canon = fs::canonicalize(&proj).unwrap();
+        let folder_id = Some(local(&proj_canon.to_string_lossy()));
+        let opened = HashSet::new();
+
+        assert!(
+            validated_base_dir(link.to_str().unwrap(), folder_id.as_ref(), &opened, None).is_none()
+        );
+    }
+
+    #[test]
+    fn validated_base_dir_rejects_relative_path() {
+        let folder_id = Some(local("/home/user/proj"));
+        let opened = HashSet::new();
+        assert!(validated_base_dir("relative/path", folder_id.as_ref(), &opened, None).is_none());
+    }
+
+    #[test]
+    fn validated_base_dir_accepts_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        fs::create_dir(&proj).unwrap();
+
+        let proj_canon = fs::canonicalize(&proj).unwrap();
+        let folder_id = Some(local(&proj_canon.to_string_lossy()));
+        let opened = HashSet::new();
+
+        let result = validated_base_dir(proj.to_str().unwrap(), folder_id.as_ref(), &opened, None);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn validated_base_dir_accepts_subfolder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        let sub = proj.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+
+        let proj_canon = fs::canonicalize(&proj).unwrap();
+        let folder_id = Some(local(&proj_canon.to_string_lossy()));
+        let opened = HashSet::new();
+
+        let result = validated_base_dir(sub.to_str().unwrap(), folder_id.as_ref(), &opened, None);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn validated_base_dir_accepts_opened_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        let opened_dir = tmp.path().join("opened");
+        fs::create_dir(&proj).unwrap();
+        fs::create_dir(&opened_dir).unwrap();
+
+        let proj_canon = fs::canonicalize(&proj).unwrap();
+        let folder_id = Some(local(&proj_canon.to_string_lossy()));
+        let mut opened = HashSet::new();
+        opened.insert(opened_dir.to_string_lossy().to_string());
+
+        let result = validated_base_dir(
+            opened_dir.to_str().unwrap(),
+            folder_id.as_ref(),
+            &opened,
+            None,
+        );
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn grant_preview_images_grants_only_validated_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let proj = root.join("proj");
+        let other = root.join("other");
+        fs::create_dir(&proj).unwrap();
+        fs::create_dir(&other).unwrap();
+        let inside = proj.join("a.png");
+        let outside = other.join("b.png");
+        fs::write(&inside, b"\x89PNG").unwrap();
+        fs::write(&outside, b"\x89PNG").unwrap();
+        let folder = Some(local(&proj.to_string_lossy()));
+        let opened = HashSet::new();
+        let paths = vec![
+            inside.to_string_lossy().to_string(),
+            outside.to_string_lossy().to_string(),
+        ];
+
+        // A base_dir that is neither inside the folder nor an opened dir must
+        // not widen the grant to its own contents.
+        let mut granted = Vec::new();
+        let flags = grant_preview_images(
+            &paths,
+            Some(&other.to_string_lossy()),
+            folder.as_ref(),
+            &opened,
+            None,
+            |p| {
+                granted.push(p.to_path_buf());
+                true
+            },
+        );
+        assert_eq!(flags, vec![true, false]);
+        assert_eq!(granted, vec![inside.clone()]);
+
+        // A base_dir inside the folder is accepted; images outside stay denied.
+        let sub = proj.join("sub");
+        fs::create_dir(&sub).unwrap();
+        let sub_img = sub.join("c.png");
+        fs::write(&sub_img, b"\x89PNG").unwrap();
+        let flags = grant_preview_images(
+            &[sub_img.to_string_lossy().to_string()],
+            Some(&sub.to_string_lossy()),
+            folder.as_ref(),
+            &opened,
+            None,
+            |_| true,
+        );
+        assert_eq!(flags, vec![true]);
+    }
+
+    #[test]
+    fn grant_preview_images_uses_opened_dirs_and_reports_grant_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let docs = root.join("docs");
+        fs::create_dir(&docs).unwrap();
+        let img = docs.join("a.png");
+        fs::write(&img, b"\x89PNG").unwrap();
+        let mut opened = HashSet::new();
+        opened.insert(docs.to_string_lossy().to_string());
+        let paths = vec![img.to_string_lossy().to_string()];
+
+        assert_eq!(
+            grant_preview_images(&paths, None, None, &opened, None, |_| true),
+            vec![true]
+        );
+        assert_eq!(
+            grant_preview_images(&paths, None, None, &opened, None, |_| false),
+            vec![false]
+        );
+        assert_eq!(
+            grant_preview_images(&paths, None, None, &HashSet::new(), None, |_| true),
+            vec![false]
         );
     }
 }

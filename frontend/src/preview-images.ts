@@ -100,13 +100,15 @@ export function bytesToDataUrl(bytes: Uint8Array, mime: string): string {
 }
 
 export interface PreviewImageBackend {
-  allowPreviewAssets(paths: string[]): Promise<boolean[]>;
+  allowPreviewAssets(paths: string[], baseDir: string | null): Promise<boolean[]>;
   remoteReadImage(host: string, path: string): Promise<ArrayBuffer | Uint8Array | number[]>;
 }
 
 export class PreviewImageResolver {
   /** Local image paths the backend has granted (success only; failures retry). */
   private allowed = new Set<string>();
+  /** The base dir the current `allowed` set was granted for. */
+  private allowedBaseDir: string | null = null;
   /** `host\0path` -> data: URL (null = fetch failed). */
   private remoteCache = new Map<string, Promise<string | null>>();
   /** The resolution each <img> is waiting for; a newer one wins. */
@@ -135,6 +137,11 @@ export class PreviewImageResolver {
    * never loads a same-named local file in the meantime.
    */
   resolve(images: HTMLImageElement[], baseDir: string | null, origin: string | null): Promise<void> {
+    // Clear grants when baseDir changes: containment is scoped to it
+    if (origin === null && baseDir !== this.allowedBaseDir) {
+      this.allowed.clear();
+      this.allowedBaseDir = baseDir;
+    }
     const local: Array<[HTMLImageElement, string]> = [];
     const remote: Array<[HTMLImageElement, string]> = [];
     for (const img of images) {
@@ -153,7 +160,7 @@ export class PreviewImageResolver {
       (origin === null ? local : remote).push([img, path]);
     }
     const tasks: Promise<void>[] = [];
-    if (local.length > 0) tasks.push(this.resolveLocal(local));
+    if (local.length > 0) tasks.push(this.resolveLocal(local, baseDir));
     if (remote.length > 0 && origin !== null) tasks.push(this.resolveRemote(remote, origin));
     const done = Promise.all(tasks).then(() => {});
     this.work = Promise.all([this.work, done]).then(() => {});
@@ -161,8 +168,12 @@ export class PreviewImageResolver {
   }
 
   /** Grant + asset URL for one local path (HTML documents use this). */
-  async localUrl(path: string): Promise<string> {
-    await this.allow([path]);
+  async localUrl(path: string, baseDir: string | null): Promise<string> {
+    if (baseDir !== this.allowedBaseDir) {
+      this.allowed.clear();
+      this.allowedBaseDir = baseDir;
+    }
+    await this.allow([path], baseDir);
     return this.toAssetUrl(path);
   }
 
@@ -197,12 +208,12 @@ export class PreviewImageResolver {
     }
   }
 
-  private async allow(paths: string[]): Promise<void> {
+  private async allow(paths: string[], baseDir: string | null): Promise<void> {
     const need = [...new Set(paths)].filter((p) => !this.allowed.has(p));
     for (let i = 0; i < need.length; i += ALLOW_BATCH) {
       const batch = need.slice(i, i + ALLOW_BATCH);
       try {
-        const flags = await this.backend.allowPreviewAssets(batch);
+        const flags = await this.backend.allowPreviewAssets(batch, baseDir);
         batch.forEach((p, j) => {
           if (flags[j]) this.allowed.add(p);
         });
@@ -212,8 +223,8 @@ export class PreviewImageResolver {
     }
   }
 
-  private async resolveLocal(items: Array<[HTMLImageElement, string]>): Promise<void> {
-    await this.allow(items.map(([, p]) => p));
+  private async resolveLocal(items: Array<[HTMLImageElement, string]>, baseDir: string | null): Promise<void> {
+    await this.allow(items.map(([, p]) => p), baseDir);
     for (const [img, path] of items) {
       if (this.pending.get(img) !== `\0${path}`) continue;
       this.pending.delete(img);

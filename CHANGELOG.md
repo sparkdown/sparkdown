@@ -10,6 +10,7 @@ requests.
 - Files: Check that the opened file is a regular file and cap the read.
 - Preview: Bind HTML script execution to the confirmed document.
 - Preview: Key Mermaid diagram and fenced-code caches on exact source text.
+- Preview: Restrict preview images to the workspace folder.
 
 ### Changed
 

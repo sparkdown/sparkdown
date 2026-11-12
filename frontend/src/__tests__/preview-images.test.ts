@@ -69,7 +69,7 @@ describe('PreviewImageResolver', () => {
     const d = img('y.png');
     await r.resolve([a, c, d], '/docs/notes', null);
     expect(b.allowPreviewAssets).toHaveBeenCalledTimes(1);
-    expect(b.allowPreviewAssets).toHaveBeenCalledWith(['/docs/img/x.png', '/docs/notes/y.png']);
+    expect(b.allowPreviewAssets).toHaveBeenCalledWith(['/docs/img/x.png', '/docs/notes/y.png'], '/docs/notes');
     expect(a.getAttribute('src')).toBe('asset:/docs/img/x.png');
     expect(c.getAttribute('src')).toBe('asset:/docs/img/x.png');
     expect(a.dataset.originalSrc).toBe('../img/x.png');
@@ -79,6 +79,27 @@ describe('PreviewImageResolver', () => {
     await r.resolve([e], '/docs/notes', null);
     expect(b.allowPreviewAssets).toHaveBeenCalledTimes(1);
     expect(e.getAttribute('src')).toBe('asset:/docs/img/x.png');
+  });
+
+  it('local: clears grant cache when baseDir changes', async () => {
+    const b = backendMock();
+    const r = new PreviewImageResolver(b, (p) => `asset:${p}`);
+    
+    // Use same absolute path under two different baseDirs
+    const absPath = '/shared/logo.png';
+    const a = img(absPath);
+    
+    // Grant image for first baseDir
+    await r.resolve([a], '/docs/proj1', null);
+    expect(b.allowPreviewAssets).toHaveBeenCalledWith([absPath], '/docs/proj1');
+    expect(b.allowPreviewAssets).toHaveBeenCalledTimes(1);
+    
+    // Switch to different baseDir with same absolute image path
+    // The grant cache must be cleared, forcing a new allowPreviewAssets call
+    const c = img(absPath);
+    await r.resolve([c], '/docs/proj2', null);
+    expect(b.allowPreviewAssets).toHaveBeenCalledTimes(2);
+    expect(b.allowPreviewAssets).toHaveBeenLastCalledWith([absPath], '/docs/proj2');
   });
 
   it('local: a refused grant is retried on a later render', async () => {
@@ -159,7 +180,7 @@ describe('PreviewPane image wiring', () => {
       throw new Error(`unmocked ${String(cmd)}`);
     });
     const c = await render('![x](../img/x.png)', '/Users/me/notes', null);
-    expect(invoke).toHaveBeenCalledWith('allow_preview_assets', { paths: ['/Users/me/img/x.png'] });
+    expect(invoke).toHaveBeenCalledWith('allow_preview_assets', { paths: ['/Users/me/img/x.png'], baseDir: '/Users/me/notes' });
     expect(c.querySelector('img')!.getAttribute('src')).toBe(
       `asset://localhost/${encodeURIComponent('/Users/me/img/x.png')}`,
     );

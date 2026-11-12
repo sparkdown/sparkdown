@@ -126,9 +126,10 @@ export const api = {
     invoke<void>("show_app_menu", { x, y }),
   /** Open an http(s)/mailto URL in the system default handler (browser). */
   openExternal: (url: string) => invoke<void>("open_external", { url }),
-  /** Grant the asset protocol each local preview image (one flag per path). */
-  allowPreviewAssets: (paths: string[]) =>
-    invoke<boolean[]>("allow_preview_assets", { paths }),
+  /** Grant the asset protocol each local preview image (one flag per path).
+   *  `baseDir` is the previewed document's directory. */
+  allowPreviewAssets: (paths: string[], baseDir: string | null) =>
+    invoke<boolean[]>("allow_preview_assets", { paths, baseDir }),
   /** Raw bytes of an image on the SSH host `host` (must be the active one). */
   remoteReadImage: (host: string, path: string) =>
     invoke<ArrayBuffer>("remote_read_image", { host, path }),

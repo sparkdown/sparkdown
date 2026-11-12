@@ -3789,6 +3789,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-drag",
  "tauri-plugin-single-instance",
+ "tempfile",
  "thiserror 2.0.21",
  "trash",
  "ts-rs",

@@ -78,6 +78,7 @@ tauri-build = { version = "2", features = [] }
 minisign = "0.10"
 ts-rs = "12"
 serial_test = "3"
+tempfile = "3"
 
 [features]
 # Test-only (E2E on Windows): let WebDriver attach to WebView2 by passing

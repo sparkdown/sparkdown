@@ -769,6 +769,7 @@ export class PreviewPane {
   private async rewriteHtmlAssets(htmlContent: string): Promise<string> {
     const baseDir = this.currentBaseDir;
     const origin = this.originResolver();
+    const scriptsDecision = this.allowScripts;
     if (!baseDir && origin === null) return htmlContent;
     const doc = new DOMParser().parseFromString(htmlContent, 'text/html');
     const jobs: Promise<void>[] = [];
@@ -776,12 +777,16 @@ export class PreviewPane {
       const path = resolveImagePath(el.getAttribute('src') ?? '', baseDir);
       if (!path) return;
       if (origin !== null) {
+        if (scriptsDecision) {
+          el.removeAttribute('src');
+          return;
+        }
         el.removeAttribute('src');
         jobs.push(this.images.remoteUrl(origin, path).then((url) => {
           if (url) el.setAttribute('src', url);
         }));
       } else {
-        jobs.push(this.images.localUrl(path).then((url) => el.setAttribute('src', url)));
+        jobs.push(this.images.localUrl(path, baseDir).then((url) => el.setAttribute('src', url)));
       }
     });
     if (origin === null && baseDir) {

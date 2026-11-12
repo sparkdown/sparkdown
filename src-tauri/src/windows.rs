@@ -18,7 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// Scope used when no window scope was entered (tests, background threads
@@ -267,11 +267,13 @@ pub struct WindowEntry {
     /// The frontend reported unsaved tabs (decides "empty", #60 decision 7).
     pub dirty: bool,
     focus_seq: u64,
+    /// Directories of files opened via read_file (for preview image containment).
+    pub opened_dirs: HashSet<String>,
 }
 
 #[derive(Default)]
 pub struct Registry {
-    windows: HashMap<String, WindowEntry>,
+    pub windows: HashMap<String, WindowEntry>,
     focus_counter: u64,
     empty_counter: u64,
 }

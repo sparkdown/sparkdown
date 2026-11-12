@@ -471,6 +471,27 @@ describe('markdown sanitizer', () => {
       expect(frame!.hasAttribute('src')).toBe(false);
     });
 
+    it('does not inline remote images when scripts are enabled for HTML', async () => {
+      const pane = new PreviewPane(new EventBus());
+      const container = document.createElement('div');
+      pane.init(container);
+      pane.setRenderMode('test.html');
+      pane.setBaseDir('/home/u');
+      pane.setPathResolver(() => '/home/u/test.html');
+      pane.setOriginResolver(() => 'devbox');
+      pane['allowScripts'] = true;
+
+      const remoteUrlSpy = vi.spyOn(pane['images'], 'remoteUrl');
+      const html = '<html><body><img src="logo.png"></body></html>';
+      const result = await pane['rewriteHtmlAssets'](html);
+
+      expect(remoteUrlSpy).not.toHaveBeenCalled();
+      const doc = new DOMParser().parseFromString(result, 'text/html');
+      const img = doc.querySelector('img');
+      expect(img).not.toBeNull();
+      expect(img!.hasAttribute('src')).toBe(false);
+    });
+
     it('does not enable scripts for a new document when setHtmlPreview is still pending for the previous one', async () => {
       const pane = new PreviewPane(new EventBus());
       const container = document.createElement('div');
