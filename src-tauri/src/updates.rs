@@ -57,6 +57,10 @@ const ARTIFACT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 const SIZE_MARGIN_BYTES: u64 = 64 * 1024;
 /// Prefix of our staging dirs, created next to the install target.
 const STAGING_PREFIX: &str = ".sparkdown-update-";
+/// Prefix of the folders made only to test that the install folder is
+/// writable. Different from [`STAGING_PREFIX`] so a test folder can never be
+/// confused with, or remove, a staging folder that holds a downloaded update.
+const PROBE_PREFIX: &str = ".sparkdown-probe-";
 
 // ------------------------------------------------------------ versions ----
 
@@ -403,7 +407,7 @@ pub fn curl_args(url: &str, out: &Path, max_time_secs: u64, max_bytes: u64) -> V
 /// A short, random component for the per-call manifest staging
 /// directory. Not a secret — the directory is also 0700 — but it keeps the
 /// path from being predictable from PID alone.
-fn manifest_nonce() -> String {
+fn unique_suffix() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let n = NEXT.fetch_add(1, Ordering::SeqCst);
@@ -623,6 +627,60 @@ pub fn stage_update(
     }
 }
 
+/// SHA-256 of the file at `path`.
+fn sha256_file(path: &Path) -> io::Result<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    let mut f = fs::File::open(path)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize()[..].to_vec())
+}
+
+/// Before installing: the staging folder and the downloaded file must still
+/// be a plain folder and a plain file (not links) owned by this user, and the
+/// file must hash to `want`, the digest taken when it was verified.
+fn reverify_staged(staging: &Path, file: &Path, want: &[u8]) -> Result<(), String> {
+    plain_entry(staging, true).map_err(|e| format!("the update folder cannot be used: {e}"))?;
+    plain_entry(file, false).map_err(|e| format!("the update file cannot be used: {e}"))?;
+    let got = sha256_file(file).map_err(|e| format!("cannot read the update file: {e}"))?;
+    if got == want {
+        Ok(())
+    } else {
+        Err("the downloaded update changed after it was checked".to_owned())
+    }
+}
+
+/// `path` is a folder (`dir`) or a regular file, not a link, owned by the
+/// current user (on Unix).
+fn plain_entry(path: &Path, dir: bool) -> Result<(), String> {
+    let md = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    let ft = md.file_type();
+    if ft.is_symlink() {
+        return Err(format!("{} is a link", path.display()));
+    }
+    if dir && !ft.is_dir() {
+        return Err(format!("{} is not a folder", path.display()));
+    }
+    if !dir && !ft.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if md.uid() != crate::context::current_euid() {
+            return Err(format!("{} belongs to another user", path.display()));
+        }
+    }
+    Ok(())
+}
+
 // -------------------------------------------------------- install kind ----
 
 /// How an update gets onto this machine.
@@ -680,12 +738,31 @@ fn create_staging(target: &Path) -> io::Result<PathBuf> {
     let parent = target
         .parent()
         .ok_or_else(|| io::Error::other("install target has no parent folder"))?;
-    let dir = parent.join(format!("{STAGING_PREFIX}{}", std::process::id()));
-    if dir.exists() {
-        fs::remove_dir_all(&dir)?;
-    }
-    fs::create_dir(&dir)?;
+    // A new, uniquely named folder (mode 0700 on Unix): an earlier download's
+    // folder is never reused or removed here.
+    let dir = parent.join(format!(
+        "{STAGING_PREFIX}{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    create_private_dir(&dir)?;
     Ok(dir)
+}
+
+/// Check that a folder can be created next to `target`, without touching any
+/// other entry of that folder (in particular a staging folder).
+fn probe_writable(target: &Path) -> io::Result<()> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| io::Error::other("install target has no parent folder"))?;
+    let probe = parent.join(format!(
+        "{PROBE_PREFIX}{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    create_private_dir(&probe)?;
+    let _ = fs::remove_dir(&probe);
+    Ok(())
 }
 
 /// Remove staging dirs left by earlier runs (crash, cancelled restart).
@@ -694,7 +771,9 @@ fn sweep_staging(parent: &Path) {
         return;
     };
     for e in entries.flatten() {
-        if e.file_name().to_string_lossy().starts_with(STAGING_PREFIX) {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(STAGING_PREFIX) || name.starts_with(PROBE_PREFIX) {
             let _ = fs::remove_dir_all(e.path());
         }
     }
@@ -712,11 +791,8 @@ fn resolve_install(kind: InstallKind) -> (InstallKind, Option<String>) {
             Some("not running from an installed app".to_owned()),
         );
     };
-    match create_staging(&target) {
-        Ok(dir) => {
-            let _ = fs::remove_dir(&dir);
-            (kind, None)
-        }
+    match probe_writable(&target) {
+        Ok(()) => (kind, None),
         Err(e) => (
             InstallKind::Manual,
             Some(format!(
@@ -811,7 +887,7 @@ struct Pending {
 struct Inner {
     pending: Option<Pending>,
     /// Staging dir holding the verified artifact.
-    staged: Option<(PathBuf, PathBuf)>,
+    staged: Option<(PathBuf, PathBuf, Vec<u8>)>,
     busy: bool,
 }
 
@@ -872,7 +948,7 @@ pub async fn update_check(app: AppHandle) -> Result<Option<UpdateInfo>, String> 
         let dir = std::env::temp_dir().join(format!(
             "sparkdown-update-{}-{}",
             std::process::id(),
-            manifest_nonce()
+            unique_suffix()
         ));
         create_private_dir(&dir).map_err(|e| format!("update temp dir: {e}"))?;
         let tmp = dir.join("latest.json");
@@ -973,7 +1049,14 @@ pub async fn update_download(app: AppHandle) -> Result<(), String> {
             });
         let mut inner = state.0.lock().map_err(|e| e.to_string())?;
         inner.busy = false;
-        inner.staged = Some(result?);
+        // Remember the digest of the file that was just verified, so the
+        // install step can tell it is still the same file.
+        let staged = result.and_then(|(dir, file)| {
+            let digest = sha256_file(&file)
+                .map_err(|e| format!("cannot read the downloaded update: {e}"))?;
+            Ok((dir, file, digest))
+        });
+        inner.staged = Some(staged?);
         Ok(())
     })
     .await
@@ -986,8 +1069,13 @@ pub async fn update_install(app: AppHandle) -> Result<(), String> {
     blocking(move || {
         let state = app.state::<UpdateState>();
         let mut inner = state.0.lock().map_err(|e| e.to_string())?;
-        let (staging, file) = inner.staged.take().ok_or("the update is not downloaded")?;
+        let (staging, file, digest) = inner.staged.take().ok_or("the update is not downloaded")?;
         let p = inner.pending.as_ref().ok_or("no pending update")?;
+        // The file must still be the one that passed the signature check.
+        if let Err(e) = reverify_staged(&staging, &file, &digest) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(e);
+        }
         install_and_clean(p.install, &p.target, &staging, &file)
     })
     .await
@@ -1602,6 +1690,71 @@ mod tests {
         fs::write(dir.join("download"), "x").unwrap();
         sweep_staging(&s.0);
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_writability_check_leaves_a_downloaded_update_alone() {
+        let s = Scratch::new("probe");
+        let target = s.0.join("SparkDown.app");
+        let dir = create_staging(&target).unwrap();
+        fs::write(dir.join("download"), "x").unwrap();
+        probe_writable(&target).unwrap();
+        probe_writable(&target).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("download")).unwrap(), "x");
+        // The check leaves nothing behind, and each staging folder is new.
+        let left: Vec<_> = fs::read_dir(&s.0)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(PROBE_PREFIX))
+            .collect();
+        assert!(left.is_empty());
+        let second = create_staging(&target).unwrap();
+        assert_ne!(dir, second);
+        assert!(dir.join("download").exists());
+        sweep_staging(&s.0);
+        assert!(!dir.exists() && !second.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_folder_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let s = Scratch::new("staging-mode");
+        let dir = create_staging(&s.0.join("SparkDown.app")).unwrap();
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o7777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn install_requires_the_file_that_was_checked() {
+        let s = Scratch::new("reverify");
+        let dir = create_staging(&s.0.join("SparkDown.app")).unwrap();
+        let file = dir.join("download");
+        fs::write(&file, "verified bytes").unwrap();
+        let digest = sha256_file(&file).unwrap();
+        assert!(reverify_staged(&dir, &file, &digest).is_ok());
+        // Same folder, different contents.
+        fs::write(&file, "other bytes").unwrap();
+        let err = reverify_staged(&dir, &file, &digest).unwrap_err();
+        assert!(err.contains("changed"), "{err}");
+        // A folder that was removed and made again is not accepted either.
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(reverify_staged(&dir, &file, &digest).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_refuses_a_link_in_place_of_the_download() {
+        let s = Scratch::new("reverify-link");
+        let dir = create_staging(&s.0.join("SparkDown.app")).unwrap();
+        let real = s.0.join("real");
+        fs::write(&real, "verified bytes").unwrap();
+        let digest = sha256_file(&real).unwrap();
+        let file = dir.join("download");
+        std::os::unix::fs::symlink(&real, &file).unwrap();
+        assert!(reverify_staged(&dir, &file, &digest).is_err());
     }
 
     #[test]
@@ -2388,7 +2541,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_nonce_differs_between_calls() {
-        assert_ne!(manifest_nonce(), manifest_nonce());
+    fn unique_suffix_differs_between_calls() {
+        assert_ne!(unique_suffix(), unique_suffix());
     }
 }
