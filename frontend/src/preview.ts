@@ -240,6 +240,12 @@ export class PreviewPane {
    * re-render markup that no longer corresponds to the active tab.
    */
   private currentPath: string | null = null;
+  /**
+   * Machine (null = local, else SSH host) of the document `lastRendered`
+   * holds. Two documents with the same path on different machines are
+   * different documents.
+   */
+  private currentOrigin: string | null = null;
   private framedMode = false;
   private svgMode = false;
   private allowScripts = false;
@@ -386,11 +392,13 @@ export class PreviewPane {
     const framed = isFramedFile(path);
     const svg = isSvgFile(path);
     const modeChanged = framed !== this.framedMode || svg !== this.svgMode;
-    const pathChanged = path !== this.currentPath;
+    const origin = this.originResolver();
+    const pathChanged = path !== this.currentPath || origin !== this.currentOrigin;
     if (modeChanged || pathChanged) {
       this.framedMode = framed;
       this.svgMode = svg;
       this.currentPath = path;
+      this.currentOrigin = origin;
       // Drop cached content from any previous document: a framed->framed
       // (html->html or svg->svg) tab switch would otherwise leave the
       // previous file's markup in lastRendered, and a later setAllowScripts
@@ -408,20 +416,22 @@ export class PreviewPane {
    * scripts only run for HTML files when the user opts in via the View menu.
    *
    * When `forPath` is supplied, the pane only re-renders cached markup if it
-   * matches the path the permission was granted for. Callers that just want to
-   * flip the flag can omit `forPath`.
+   * matches the path the permission was granted for and the machine it came
+   * from is still the active one. Callers that just want to flip the flag can
+   * omit `forPath`.
    */
   setAllowScripts(allow: boolean, forPath?: string | null): void {
     if (allow === this.allowScripts) return;
     this.allowScripts = allow;
     // Only re-render when the cached markup is for the same document the
     // permission applies to. On a tab switch, setRenderMode has already
-    // cleared lastRendered (path changed), so this is a no-op.
+    // cleared lastRendered (path or machine changed), so this is a no-op.
     if (
       this.framedMode &&
       this.lastRendered !== null &&
       forPath !== undefined &&
-      forPath === this.currentPath
+      forPath === this.currentPath &&
+      this.originResolver() === this.currentOrigin
     ) {
       const content = this.lastRendered;
       this.lastRendered = null;
