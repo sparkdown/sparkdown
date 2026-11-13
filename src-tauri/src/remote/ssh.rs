@@ -227,10 +227,18 @@ pub fn shell_quote(s: &str) -> String {
     out
 }
 
+/// Host-key checking option for every ssh call SparkDown makes. It goes on
+/// the command line, which ssh ranks above `~/.ssh/config`, so a
+/// `StrictHostKeyChecking no` or `accept-new` line there cannot add or accept
+/// a key without the fingerprint confirmation that `hostkey.rs` shows first.
+pub(crate) fn hostkey_check_options() -> [&'static str; 2] {
+    ["-o", "StrictHostKeyChecking=yes"]
+}
+
 /// argv[0..] for an SSH call: BatchMode so we never prompt for a password.
 #[cfg(test)]
 pub(crate) fn ssh_argv(host: &str) -> Vec<String> {
-    vec![
+    let mut argv = vec![
         "ssh".into(),
         "-o".into(),
         "BatchMode=yes".into(),
@@ -248,8 +256,10 @@ pub(crate) fn ssh_argv(host: &str) -> Vec<String> {
         "PreferredAuthentications=publickey".into(),
         "-o".into(),
         "PubkeyAuthentication=yes".into(),
-        host.into(),
-    ]
+    ];
+    argv.extend(hostkey_check_options().map(String::from));
+    argv.push(host.into());
+    argv
 }
 
 pub(crate) fn validate_host_alias(host: &str) -> Result<(), String> {
@@ -421,6 +431,21 @@ const CODES: &[&str] = &[
     ERR_KEY_NEEDS_AGENT,
 ];
 
+/// Label put in front of a failed remote command's own output (as opposed to
+/// ssh's diagnostics). [`map_ssh_failure`] leaves a labelled message as it is.
+const REMOTE_OUTPUT_LABEL: &str = "remote command output: ";
+
+/// Text that came from the remote side with any leading error code removed.
+/// Only SparkDown writes those codes, so a remote command whose output starts
+/// with one must not make the interface treat it as a host-key result.
+fn without_error_codes(text: &str) -> &str {
+    let mut text = text;
+    while let Some(rest) = CODES.iter().find_map(|c| text.strip_prefix(c)) {
+        text = rest;
+    }
+    text
+}
+
 /// The known_hosts entry to pass to `ssh-keygen -R` for a changed key,
 /// shell-quoted when needed: `'[host]:port'` off port 22 (#52). Prefers the
 /// name ssh itself printed ("remove with: ssh-keygen ... -R ..."), then the
@@ -460,7 +485,7 @@ pub(crate) fn changed_key_entry(
 /// Map ssh(1) failure text into the v1 user-facing errors.
 pub fn map_ssh_failure(host: &str, stderr: &str) -> String {
     // Already mapped (connect maps the probe's error again): keep the code.
-    if CODES.iter().any(|c| stderr.starts_with(c)) {
+    if stderr.starts_with(REMOTE_OUTPUT_LABEL) || CODES.iter().any(|c| stderr.starts_with(c)) {
         return stderr.to_string();
     }
     let s = stderr.to_ascii_lowercase();
@@ -853,11 +878,19 @@ impl SshResult {
         String::from_utf8_lossy(&self.stdout).into_owned()
     }
 
+    /// The text to map into a user-facing failure. Everything here comes
+    /// from ssh or from the remote command, never from SparkDown, so a
+    /// leading error code is dropped; the remote command's stdout is labelled
+    /// so it is shown as output and not read as an ssh diagnostic.
     fn failure_text(&self) -> String {
         if self.stderr.trim().is_empty() {
-            self.stdout_lossy()
+            let out = self.stdout_lossy();
+            match without_error_codes(out.trim()) {
+                "" => String::new(),
+                text => format!("{REMOTE_OUTPUT_LABEL}{text}"),
+            }
         } else {
-            self.stderr.clone()
+            without_error_codes(&self.stderr).to_string()
         }
     }
 }
@@ -1055,15 +1088,10 @@ fn run_with_deadline(
     })
 }
 
-fn ssh_exec(host: &str, remote_cmd: &str, stdin: Option<&[u8]>) -> Result<SshResult, String> {
-    let dest = destination_args(host)?;
-    // Single choke point: hand the script to `/bin/sh`, never the user's login
-    // shell. ssh passes the command string to the remote login shell, which
-    // may be fish/csh/tcsh and would choke on the POSIX `( … )`, `$?`,
-    // `${VAR:-x}` constructs every remote command uses. `exec` replaces the
-    // login shell so exit status still propagates.
-    let sh_arg = format!("exec /bin/sh -c {}", shell_quote(&wrap_marked(remote_cmd)));
+/// The ssh command line for one remote script (see [`ssh_exec`]).
+fn ssh_exec_command(dest: &[String], sh_arg: &str) -> std::process::Command {
     let mut cmd = crate::proc::command("ssh");
+    cmd.args(hostkey_check_options());
     cmd.args(mux_options());
     // #27: with a session askpass broker, ssh may ask SparkDown for a KEY
     // passphrase (BatchMode=no is required for askpass), and can never ask
@@ -1101,8 +1129,20 @@ fn ssh_exec(host: &str, remote_cmd: &str, stdin: Option<&[u8]>) -> Result<SshRes
         "PubkeyAuthentication=yes",
         "-T",
     ]);
-    cmd.args(&dest);
-    cmd.args(["--", &sh_arg]);
+    cmd.args(dest);
+    cmd.args(["--", sh_arg]);
+    cmd
+}
+
+fn ssh_exec(host: &str, remote_cmd: &str, stdin: Option<&[u8]>) -> Result<SshResult, String> {
+    let dest = destination_args(host)?;
+    // Single choke point: hand the script to `/bin/sh`, never the user's login
+    // shell. ssh passes the command string to the remote login shell, which
+    // may be fish/csh/tcsh and would choke on the POSIX `( … )`, `$?`,
+    // `${VAR:-x}` constructs every remote command uses. `exec` replaces the
+    // login shell so exit status still propagates.
+    let sh_arg = format!("exec /bin/sh -c {}", shell_quote(&wrap_marked(remote_cmd)));
+    let cmd = ssh_exec_command(&dest, &sh_arg);
     let timeout = if stdin.is_some() {
         SSH_WRITE_TIMEOUT
     } else {
@@ -1125,7 +1165,7 @@ fn ssh_exec(host: &str, remote_cmd: &str, stdin: Option<&[u8]>) -> Result<SshRes
     if let Some(e) = out.stdin_err {
         return Err(format!(
             "{} (ssh stdin: {e})",
-            map_ssh_failure(host, &stderr)
+            map_ssh_failure(host, without_error_codes(&stderr))
         ));
     }
     // Markers absent means the remote shell never ran (connect/auth failure):
@@ -1451,6 +1491,68 @@ mod exec_tests {
 
     /// A child that never reads stdin (a half-open link) with a payload far
     /// larger than any pipe/channel buffer: the deadline must still fire.
+    #[test]
+    fn remote_output_does_not_carry_host_key_codes() {
+        let result = |stdout: &str, stderr: &str| SshResult {
+            status: 1,
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.to_string(),
+        };
+        for code in [
+            ERR_HOSTKEY_CHANGED,
+            ERR_HOSTKEY_UNKNOWN,
+            ERR_KEY_NEEDS_AGENT,
+        ] {
+            // Output of the remote command, with and without ssh's own stderr.
+            let from_stdout = result(&format!("{code}run this\n"), "").failure_text();
+            let mapped = map_ssh_failure("h", &from_stdout);
+            for c in [
+                ERR_HOSTKEY_CHANGED,
+                ERR_HOSTKEY_UNKNOWN,
+                ERR_KEY_NEEDS_AGENT,
+            ] {
+                assert!(!mapped.starts_with(c), "{mapped}");
+            }
+            assert!(mapped.contains("run this"), "{mapped}");
+            let from_stderr = result("", &format!("{code}run this\n")).failure_text();
+            let mapped = map_ssh_failure("h", &from_stderr);
+            for c in [
+                ERR_HOSTKEY_CHANGED,
+                ERR_HOSTKEY_UNKNOWN,
+                ERR_KEY_NEEDS_AGENT,
+            ] {
+                assert!(!mapped.starts_with(c), "{mapped}");
+            }
+        }
+        // Output that merely sounds like an ssh diagnostic is shown as output
+        // and is not classified, also when connect maps the text a second time.
+        let text = result("Host key verification failed.\n", "").failure_text();
+        let mapped = map_ssh_failure("h", &text);
+        assert!(!mapped.starts_with(ERR_HOSTKEY_UNKNOWN), "{mapped}");
+        assert_eq!(map_ssh_failure("h", &mapped), mapped);
+        // No output at all keeps the generic message.
+        assert_eq!(
+            map_ssh_failure("h", &result("", "").failure_text()),
+            "SSH to 'h' failed."
+        );
+    }
+
+    #[test]
+    fn exec_command_sets_host_key_checking_before_the_destination() {
+        let cmd = ssh_exec_command(&["dev".to_string()], "true");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = args
+            .iter()
+            .position(|a| a == "StrictHostKeyChecking=yes")
+            .expect("host-key option present");
+        assert_eq!(args[at - 1], "-o");
+        let dest = args.iter().position(|a| a == "dev").unwrap();
+        assert!(at < dest, "{args:?}");
+    }
+
     #[test]
     fn stdin_write_is_covered_by_the_deadline() {
         // `exec`: like ssh, the direct child is the one holding the pipes.
