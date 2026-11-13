@@ -313,6 +313,13 @@ describe('discard dialog', () => {
     expect(html).toContain('system Trash');
   });
 
+  it('keeps a name with CR, LF or TAB intact in the row it acts on', () => {
+    const name = 'docs/a\rb\nc\td.md';
+    const host = document.createElement('div');
+    host.innerHTML = discardDialogHtml([item(name, 'revert')], []);
+    expect(host.querySelector<HTMLElement>('.discard-item')!.dataset.path).toBe(name);
+  });
+
   it('shows direction and invisible characters in names as visible markers', () => {
     const html = discardDialogHtml(
       [{ ...item('docs/a\u202Egnp.md', 'revert'), detail: 'b\u200Bc' }],

@@ -146,6 +146,16 @@ export function escapeHtml(text: string): string {
 }
 
 /**
+ * Like {@link escapeHtml}, for text placed in an attribute value that is read
+ * back exactly (`data-path`). The HTML parser turns a raw CR, LF or TAB inside
+ * an attribute into another character, so those are written as numeric
+ * references and `dataset.*` returns the original bytes.
+ */
+export function escapeAttr(text: string): string {
+  return escapeHtml(text).replace(/\r/g, '&#13;').replace(/\n/g, '&#10;').replace(/\t/g, '&#9;');
+}
+
+/**
  * Unicode bidirectional-override, isolate, and invisible-formatting code points
  * that can affect how text is displayed in diff and review surfaces. These
  * characters can cause the visual order to differ from the logical byte order,
