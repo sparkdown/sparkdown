@@ -1146,6 +1146,20 @@ fn grant_preview_images(
     home: Option<&Path>,
     mut grant: impl FnMut(&Path) -> bool,
 ) -> Vec<bool> {
+    // An opened directory counts as a root for images below it, so one that
+    // is the filesystem root, `/Users`, `/home` or the home directory (a file
+    // opened straight from there records its parent) would cover far too much.
+    // The same guard `list_directory` applies to its grant is applied here.
+    let opened_dirs: HashSet<String> = opened_dirs
+        .iter()
+        .filter(|d| {
+            fs::canonicalize(d)
+                .map(|canon| !is_too_shallow_for_asset_grant(&canon, home))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    let opened_dirs = &opened_dirs;
     let base_dir_validated =
         base_dir.and_then(|bd| validated_base_dir(bd, folder, opened_dirs, home));
     paths
@@ -2219,6 +2233,32 @@ mod create_entry_tests {
         assert_eq!(
             grant_preview_images(&paths, None, None, &HashSet::new(), None, |_| true),
             vec![false]
+        );
+    }
+
+    #[test]
+    fn grant_preview_images_ignores_opened_dirs_at_home_or_root_depth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = fs::canonicalize(tmp.path()).unwrap().join("home");
+        let pics = fake_home.join("pictures");
+        fs::create_dir_all(&pics).unwrap();
+        let img = pics.join("private.png");
+        fs::write(&img, b"\x89PNG").unwrap();
+        let paths = vec![img.to_string_lossy().to_string()];
+
+        // A file opened straight from the home directory recorded it.
+        let mut opened = HashSet::new();
+        opened.insert(fake_home.to_string_lossy().to_string());
+        assert_eq!(
+            grant_preview_images(&paths, None, None, &opened, Some(&fake_home), |_| true),
+            vec![false]
+        );
+        // The folder's own images still load: here a deeper opened directory.
+        let mut deeper = HashSet::new();
+        deeper.insert(pics.to_string_lossy().to_string());
+        assert_eq!(
+            grant_preview_images(&paths, None, None, &deeper, Some(&fake_home), |_| true),
+            vec![true]
         );
     }
 }
