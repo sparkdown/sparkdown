@@ -209,7 +209,7 @@ pub fn init_token_secret(config_dir: &std::path::Path) {
         .filter(|s| s.len() >= 32)
         .unwrap_or_else(|| {
             let s = random_hex();
-            let _ = std::fs::create_dir_all(config_dir);
+            let _ = crate::fsio::create_private_dir_all(config_dir);
             let _ = write_private(&path, &s);
             s
         });

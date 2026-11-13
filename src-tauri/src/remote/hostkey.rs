@@ -653,7 +653,12 @@ pub(crate) fn hash_lines(lines: &[String]) -> Result<Vec<String>, String> {
     create_private_dir(&dir).map_err(|e| format!("temp dir: {e}"))?;
     let file = dir.join("known_hosts");
     let result = (|| {
-        std::fs::write(&file, lines.join("\n") + "\n").map_err(|e| e.to_string())?;
+        {
+            use std::io::Write;
+            crate::fsio::create_private_file(&file)
+                .and_then(|mut f| f.write_all((lines.join("\n") + "\n").as_bytes()))
+                .map_err(|e| e.to_string())?;
+        }
         let st = crate::proc::command("ssh-keygen")
             .arg("-H")
             .arg("-f")

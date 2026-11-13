@@ -278,7 +278,7 @@ pub fn append_crash_log(app_handle: AppHandle, entry: String) -> Result<(), AppE
         .path()
         .app_log_dir()
         .map_err(|e| AppError::Config(e.to_string()))?;
-    fs::create_dir_all(&dir)?;
+    crate::fsio::create_private_dir_all(&dir)?;
     let date = chrono_date_utc();
     let path = dir.join(format!("crash-{date}.log"));
     if let Ok(meta) = fs::metadata(&path) {
@@ -287,10 +287,14 @@ pub fn append_crash_log(app_handle: AppHandle, entry: String) -> Result<(), AppE
         }
     }
     use std::io::Write;
-    let mut f = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
+    let mut opts = fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(&path)?;
     f.write_all(entry.as_bytes())?;
     Ok(())
 }

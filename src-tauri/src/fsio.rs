@@ -134,6 +134,57 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     result
 }
 
+/// Create `dir` and any missing parents for an app-private folder: new
+/// folders get mode 0700 on Unix; folders that already exist are left as they
+/// are.
+pub fn create_private_dir_all(dir: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
+/// Open `path` for an app-private file (prefs, state, logs): created with
+/// mode 0600 on Unix when it is new. Contents are replaced, as `fs::write`
+/// does. User documents do not go through here; they keep the user's umask
+/// (see [`write_atomic`]).
+pub fn create_private_file(path: &Path) -> io::Result<File> {
+    let mut opts = OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    opts.open(path)
+}
+
+/// Write an app-private file in one piece: parent folders created here are
+/// 0700, the new file is 0600 from its first byte, and the old contents are
+/// replaced by a rename so a crash never leaves a partial file.
+pub fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    create_private_dir_all(&dir)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let (tmp, mut file) = create_temp(&dir, name, 0o600)?;
+    let result = (|| {
+        file.write_all(data)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// Best effort: persist the rename itself (the directory entry).
 #[cfg(unix)]
 fn sync_dir(dir: &Path) {
@@ -316,6 +367,62 @@ mod tests {
         // The saved file still has its original mode.
         let final_mode = fs::metadata(&file).unwrap().permissions().mode() & 0o7777;
         assert_eq!(final_mode, 0o600);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_writes_create_0600_files_in_0700_folders() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("private");
+        let file = dir.join("a").join("b").join("state.json");
+        write_private(&file, b"one").unwrap();
+        write_private(&file, b"two").unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"two");
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&file), 0o600);
+        assert_eq!(mode(file.parent().unwrap()), 0o700);
+        assert_eq!(mode(file.parent().unwrap().parent().unwrap()), 0o700);
+        assert!(temp_leftovers(file.parent().unwrap()).is_empty());
+        // A wider existing file is narrowed by the replace.
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&file, b"three").unwrap();
+        assert_eq!(mode(&file), 0o600);
+        // An existing folder keeps its mode.
+        fs::set_permissions(file.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
+        write_private(&file, b"four").unwrap();
+        assert_eq!(mode(file.parent().unwrap()), 0o755);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_private_file_is_0600_when_new() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("private-file");
+        let file = dir.join("log.txt");
+        create_private_file(&file).unwrap().write_all(b"x").unwrap();
+        assert_eq!(
+            fs::metadata(&file).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_documents_keep_the_default_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("doc-mode");
+        let probe = dir.join("probe");
+        fs::write(&probe, "").unwrap();
+        let normal = fs::metadata(&probe).unwrap().permissions().mode() & 0o7777;
+        let doc = dir.join("notes.md");
+        write_atomic(&doc, b"# notes\n").unwrap();
+        assert_eq!(
+            fs::metadata(&doc).unwrap().permissions().mode() & 0o7777,
+            normal
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }
