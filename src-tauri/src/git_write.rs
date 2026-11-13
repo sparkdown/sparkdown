@@ -426,6 +426,20 @@ fn check_local(root: &str, unsupported: &str) -> Result<PathBuf, GitActionError>
     Ok(p)
 }
 
+/// Refuse to act when the work tree git reports is not the folder that holds
+/// the checkout's `.git` (the repository config sets `core.worktree`
+/// elsewhere): the action would change files outside the opened folder.
+fn ensure_work_tree_is_checkout(root: &Path, top: &Path) -> Result<(), GitActionError> {
+    if crate::git::work_tree_holds_checkout(root, top) {
+        return Ok(());
+    }
+    Err(GitActionError::new(
+        GitErrorKind::NotARepo,
+        "The repository's work tree is not the folder you opened, so SparkDown will not change files there.",
+        format!("opened: {}\nwork tree: {}", root.display(), top.display()),
+    ))
+}
+
 /// Current branch and its upstream remote + merge ref, or a typed error.
 struct Upstream {
     branch: String,
@@ -530,6 +544,7 @@ pub(crate) fn commit_impl(
             )
         })?;
     let top = PathBuf::from(top);
+    ensure_work_tree_is_checkout(&root, &top)?;
     match paths {
         Some(p) if p.is_empty() => Err(GitActionError::new(
             GitErrorKind::NothingToCommit,
@@ -1505,6 +1520,7 @@ fn plan_discard(
                 "",
             )
         })?;
+    ensure_work_tree_is_checkout(&root, &top)?;
     let head = has_head(&top, extra);
     let recs = status_records(&top, extra)?;
     let mut items = Vec::new();
@@ -1967,6 +1983,24 @@ mod tests {
     fn empty_message_is_blocked_before_git_runs() {
         let e = commit_impl("/definitely/not/here", "  \n\t", None, &[]).unwrap_err();
         assert_eq!(e.kind, GitErrorKind::EmptyMessage);
+    }
+
+    #[test]
+    fn discard_and_commit_refuse_a_work_tree_outside_the_folder() {
+        let sb = sandbox();
+        let env = sb.env();
+        let files = vec!["README.md".to_string()];
+        fs::write(sb.work.join("README.md"), "changed\n").unwrap();
+        // The config moves the work tree to the folder above the opened one.
+        set_config(&sb, "core.worktree", "../..");
+        let err = plan_discard(&root(&sb), &files, &env).unwrap_err();
+        assert_eq!(err.kind, GitErrorKind::NotARepo, "{err:?}");
+        let err = commit_impl(&root(&sb), "msg", Some(files), &env).unwrap_err();
+        assert_eq!(err.kind, GitErrorKind::NotARepo, "{err:?}");
+        assert_eq!(
+            fs::read_to_string(sb.work.join("README.md")).unwrap(),
+            "changed\n"
+        );
     }
 
     #[test]
@@ -2443,16 +2477,6 @@ mod tests {
         assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Skipped);
     }
 
-    #[test]
-    fn fetch_proceeds_with_plain_upstream() {
-        let sb = sandbox();
-        let env = sb.env();
-        let other = sb.other();
-        sb.commit_in(&other, "up.md", "up\n", "upstream");
-        sb.git(&other, &["push", "-q"]);
-        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Fetched);
-    }
-
     fn set_config(sb: &Sandbox, key: &str, value: &str) {
         sb.git(&sb.work, &["config", "--local", key, value]);
     }
@@ -2497,6 +2521,16 @@ mod tests {
         assert!(fetch_url_needs_skip(" https://example.com/a.git"));
         assert!(fetch_url_needs_skip("https://example.com/\u{7}a"));
         assert!(fetch_url_needs_skip("File:///etc"));
+    }
+
+    #[test]
+    fn fetch_proceeds_with_plain_upstream() {
+        let sb = sandbox();
+        let env = sb.env();
+        let other = sb.other();
+        sb.commit_in(&other, "up.md", "up\n", "upstream");
+        sb.git(&other, &["push", "-q"]);
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Fetched);
     }
 
     #[test]

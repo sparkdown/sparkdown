@@ -17,6 +17,7 @@ requests.
 - Remote: The agent context and MCP shim folders on the host must be plain directories owned by your account; otherwise nothing is written there.
 - Remote: Preview images on a remote host must be inside the window's folder.
 - Git: The background fetch is skipped when the upstream remote or a remote URL uses a command or file transport, in any spelling; only https, http, ssh, git and file transports are allowed.
+- Git: Status, diff, commit and discard stop when the repository config places the work tree outside the folder that holds the checkout.
 
 ## [0.4.3] — 2026-11-13
 

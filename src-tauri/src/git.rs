@@ -375,8 +375,22 @@ pub(crate) fn git_status_impl(root: String) -> Result<GitStatus, String> {
     let top_level = run_git(root_path, &["rev-parse", "--show-toplevel"])
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(|canonical| top_level_in_root_spelling(root_path, canonical));
+        .filter(|s| !s.is_empty());
+    // A repository whose config moves the work tree away from the folder that
+    // holds its `.git` would list and diff files outside the opened folder.
+    // Treat it like a folder that is not a repository.
+    if top_level
+        .as_deref()
+        .is_some_and(|top| !work_tree_holds_checkout(root_path, Path::new(top)))
+    {
+        return Ok(GitStatus {
+            is_repo: false,
+            branch: None,
+            top_level: None,
+            changes: vec![],
+        });
+    }
+    let top_level = top_level.map(|canonical| top_level_in_root_spelling(root_path, canonical));
 
     let branch = run_git(root_path, &["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()
@@ -401,6 +415,22 @@ pub(crate) fn git_status_impl(root: String) -> Result<GitStatus, String> {
         top_level,
         changes: parse_porcelain(&raw),
     })
+}
+
+/// Is `top` (the work tree git reports for `root`) the folder that holds the
+/// checkout's `.git`? That is the nearest folder at or above `root` with a
+/// `.git` entry (a directory, or the file of a linked work tree or
+/// submodule). When the repository config sets `core.worktree` to some other
+/// folder, git answers with that folder instead, and status, diff and write
+/// actions would reach files outside the opened folder. Plain repositories,
+/// linked work trees and submodules all pass.
+pub(crate) fn work_tree_holds_checkout(root: &Path, top: &Path) -> bool {
+    let (Ok(root), Ok(top)) = (root.canonicalize(), top.canonicalize()) else {
+        return false;
+    };
+    root.ancestors()
+        .find(|dir| dir.join(".git").symlink_metadata().is_ok())
+        .is_some_and(|dir| dir == top)
 }
 
 /// The repo top level spelled the way the caller spelled `root`.
@@ -621,6 +651,119 @@ pub(crate) fn git_branch_status_impl(root: String) -> Result<GitBranchStatus, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Used by the Unix-only work tree test below.
+    #[cfg(unix)]
+    fn git_available() -> bool {
+        crate::proc::command(git_bin())
+            .arg("--version")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    // Used by the Unix-only work tree test below.
+    #[cfg(unix)]
+    fn git_in(dir: &Path, args: &[&str]) {
+        let ok = crate::proc::command(git_bin())
+            .current_dir(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(ok, "git {args:?} failed in {dir:?}");
+    }
+
+    #[test]
+    fn work_tree_holds_checkout_compares_with_the_folder_that_has_dot_git() {
+        let base = std::env::temp_dir()
+            .join(format!("sparkdown_wt_holds_{}", std::process::id()))
+            .canonicalize()
+            .unwrap_or_else(|_| {
+                std::env::temp_dir().join(format!("sparkdown_wt_holds_{}", std::process::id()))
+            });
+        let _ = std::fs::remove_dir_all(&base);
+        let sub = base.join("proj/src");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(base.join("proj/.git")).unwrap();
+        let base = base.canonicalize().unwrap();
+        let proj = base.join("proj");
+        assert!(work_tree_holds_checkout(&proj, &proj));
+        assert!(work_tree_holds_checkout(&proj.join("src"), &proj));
+        // A work tree above or beside the checkout is not the checkout.
+        assert!(!work_tree_holds_checkout(&proj, &base));
+        assert!(!work_tree_holds_checkout(&proj.join("src"), &base));
+        // No `.git` anywhere above the folder: nothing to compare with.
+        let loose = std::env::temp_dir().join(format!("sparkdown_wt_loose_{}", std::process::id()));
+        std::fs::create_dir_all(&loose).unwrap();
+        if !std::env::temp_dir()
+            .ancestors()
+            .any(|a| a.join(".git").exists())
+        {
+            assert!(!work_tree_holds_checkout(&loose, &loose));
+        }
+        let _ = std::fs::remove_dir_all(&loose);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A repository config that moves the work tree up to a parent folder
+    /// must not make status or diff report files outside the opened folder;
+    /// a work tree set by `--separate-git-dir` (as submodules have) must
+    /// keep working.
+    #[cfg(unix)]
+    #[test]
+    fn status_and_diff_ignore_a_work_tree_set_outside_the_folder() {
+        use std::fs;
+        if !git_available() {
+            return;
+        }
+        let _guard = crate::remote::TEST_SESSION_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("sparkdown_wt_moved_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let base = base.canonicalize().unwrap();
+        fs::write(base.join("outside.txt"), "outside\n").unwrap();
+        let proj = base.join("proj");
+        fs::create_dir_all(&proj).unwrap();
+        git_in(&proj, &["init", "-q"]);
+        fs::write(proj.join("inside.txt"), "inside\n").unwrap();
+
+        let status = git_status_impl(proj.to_string_lossy().into_owned()).unwrap();
+        assert!(status.is_repo);
+        assert!(status.changes.iter().all(|c| c.path == "inside.txt"));
+
+        // Point the work tree two levels up from the git dir (the parent of
+        // the opened folder).
+        let mut cfg = fs::read_to_string(proj.join(".git/config")).unwrap();
+        cfg.push_str("[core]\n\tworktree = ../..\n");
+        fs::write(proj.join(".git/config"), cfg).unwrap();
+        let status = git_status_impl(proj.to_string_lossy().into_owned()).unwrap();
+        assert!(!status.is_repo);
+        assert!(status.top_level.is_none());
+        assert!(status.changes.is_empty());
+        let diff = git_diff_file_impl(
+            proj.to_string_lossy().into_owned(),
+            "inside.txt".to_string(),
+            true,
+        );
+        assert!(diff.is_err(), "{diff:?}");
+
+        // A separate git dir with the work tree recorded in its config.
+        let sep = base.join("sep");
+        fs::create_dir_all(&sep).unwrap();
+        git_in(
+            &sep,
+            &["init", "-q", "--separate-git-dir", "../sep-git", "."],
+        );
+        fs::write(sep.join("a.txt"), "a\n").unwrap();
+        let status = git_status_impl(sep.to_string_lossy().into_owned()).unwrap();
+        assert!(status.is_repo);
+        assert!(status.changes.iter().any(|c| c.path == "a.txt"));
+
+        let _ = fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn lexical_join_posix_resolves_dots_without_fs() {
@@ -1901,6 +2044,12 @@ pub(crate) fn git_diff_file_impl(
         return crate::remote::git_diff_file(&root, &path, untracked);
     }
     let root_path = Path::new(&root);
+    if let Ok(top) = run_git(root_path, &["rev-parse", "--show-toplevel"]) {
+        let top = top.trim();
+        if !top.is_empty() && !work_tree_holds_checkout(root_path, Path::new(top)) {
+            return Err("the repository's work tree is not the opened folder".to_string());
+        }
+    }
 
     // Don't canonicalize the change path: it breaks legitimate cases (a file
     // deleted along with its directory no longer resolves; a changed tracked
