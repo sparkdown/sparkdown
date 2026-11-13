@@ -1547,7 +1547,10 @@ describe('TerminalPane links', () => {
 
     const first = await linksAt(1);
     expect(first.map((l) => l.text)).toEqual(['src/app.ts']);
-    first[0]!.activate({ button: 0 });
+    first[0]!.activate({ button: 0 }); // plain click: selection only
+    first[0]!.activate({ button: 2, ctrlKey: true });
+    expect(opened).toEqual([]);
+    first[0]!.activate({ button: 0, ctrlKey: true });
     expect(opened).toEqual(['src/app.ts']);
 
     const second = await linksAt(2);
@@ -1557,6 +1560,26 @@ describe('TerminalPane links', () => {
     second[0]!.activate({ button: 0, ctrlKey: true });
     expect(api.openExternal).toHaveBeenCalledWith('https://sparkdown.dev/a');
     expect(opened).toEqual(['src/app.ts']);
+  });
+
+  it('path links are offered only for files inside the open folder', async () => {
+    const opened: string[] = [];
+    const host = document.createElement('div');
+    document.body.append(host);
+    const mgr = new TerminalManager(host, (p) => opened.push(p));
+    mgr.setCwd('/repo');
+    await mgr.addTerminal();
+    await flush();
+    terms.all[0]!.rows_ = [
+      'Edited ./src/app.ts and ../other/x.ts',
+      'Read /repo/docs/a.md and /etc/hosts.conf',
+      'Wrote a/../../b.txt',
+    ];
+    expect((await linksAt(1)).map((l) => l.text)).toEqual(['./src/app.ts']);
+    expect((await linksAt(2)).map((l) => l.text)).toEqual(['/repo/docs/a.md']);
+    expect(await linksAt(3)).toEqual([]);
+    mgr.setCwd(null);
+    expect(await linksAt(1)).toEqual([]);
   });
 
   it('OSC 8 hyperlinks open only http(s) on primary click, through the same guard', async () => {

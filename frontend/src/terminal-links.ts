@@ -11,8 +11,7 @@ import { isAbsolutePath, isUnderRoot, joinPath } from './utils';
  * The file a path token printed in a terminal should open: the token resolved
  * against the workspace `root` (or taken as is when absolute), or null when it
  * has a `..` segment, there is no root, or the result is outside the root.
- * Terminal output is not under the user's control, so a link may only lead
- * into the folder that is open.
+ * A terminal link only leads into the folder that is open.
  */
 export function terminalPathTarget(token: string, root: string | null): string | null {
   if (!root || !token) return null;
@@ -21,10 +20,10 @@ export function terminalPathTarget(token: string, root: string | null): string |
   return isUnderRoot(target, root) ? target : null;
 }
 
-/** Path-like tokens: optional ./, a slashed path with an extension, or a
- *  bare dotted filename. Conservative so ordinary prose stays unlinkable. */
+/** Path-like tokens: optional ./ or leading /, a slashed path with an
+ *  extension, or a bare dotted filename. Conservative so ordinary prose stays unlinkable. */
 export const PATH_RE =
-  /(?:\.\/)?(?:[\w.-]+\/)+[\w.-]+\.[A-Za-z0-9]+|(?:\.\/)?[\w.-]+\.[A-Za-z0-9]{1,8}/g;
+  /(?:\.\/|\/)?(?:[\w.-]+\/)+[\w.-]+\.[A-Za-z0-9]+|(?:\.\/)?[\w.-]+\.[A-Za-z0-9]{1,8}/g;
 
 /** http/https URLs. Trailing punctuation is stripped after the match. */
 export const URL_RE = /https?:\/\/[^\s<>"{}|\\^`[\]]+/gi;

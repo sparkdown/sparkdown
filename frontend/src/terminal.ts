@@ -27,7 +27,7 @@ import {
   type SplitDir,
 } from './split-layout';
 import type { TerminalLayout } from './types/TerminalLayout';
-import { isSafeHttpUrl, linksForBufferRow } from './terminal-links';
+import { isSafeHttpUrl, linksForBufferRow, terminalPathTarget } from './terminal-links';
 import { TerminalSearch, type TerminalSearchTarget } from './terminal-search';
 import { TERMINAL_SCROLLBACK_DEFAULT, clampScrollback } from './terminal-scrollback';
 
@@ -116,9 +116,9 @@ const SEARCH_DECORATIONS = {
 } satisfies Record<'dark' | 'light', NonNullable<ISearchOptions['decorations']>>;
 
 /**
- * Whether a link click should open a URL in the browser: the primary button
- * with Ctrl (Cmd on macOS, where Ctrl+click is the context-menu click). A
- * plain click only selects text, so a stray click never launches a browser.
+ * Whether a link click should open its target: the primary button with Ctrl
+ * (Cmd on macOS, where Ctrl+click is the context-menu click). A plain click
+ * only selects text, so a stray click never launches a browser or a tab.
  */
 export function isUrlOpenClick(
   e: Pick<MouseEvent, 'button' | 'ctrlKey' | 'metaKey'>,
@@ -169,6 +169,8 @@ export class TerminalPane {
   private refitTimer: ReturnType<typeof setTimeout> | null = null;
   private onExit: (() => void) | null = null;
   private onOpenPath: (path: string) => void;
+  /** The open folder; path links are offered only for files inside it. */
+  private getRoot: () => string | null;
   /** Split-grid keys pressed while this terminal has focus (⌘D, ⌘] …). */
   private onAction: ((action: TerminalPaneAction) => void) | null;
   /** Timestamp of the last pty output — used to wait for the shell prompt
@@ -193,9 +195,11 @@ export class TerminalPane {
     onOpenPath: (path: string) => void,
     onAction: ((action: TerminalPaneAction) => void) | null = null,
     scrollback = TERMINAL_SCROLLBACK_DEFAULT,
+    getRoot: () => string | null = () => null,
   ) {
     this.id = id;
     this.onOpenPath = onOpenPath;
+    this.getRoot = getRoot;
     this.onAction = onAction;
     this.term = new XTerm({
       cursorBlink: true,
@@ -295,20 +299,20 @@ export class TerminalPane {
       provideLinks: (bufferLineNumber, callback) => {
         // Dispose can race a late hover; never read a disposed terminal's buffer.
         if (this.disposed) return callback(undefined);
-        const links = linksForBufferRow(this.term.buffer.active, bufferLineNumber - 1).map(
-          (m) => ({
+        const root = this.getRoot();
+        const links = linksForBufferRow(this.term.buffer.active, bufferLineNumber - 1)
+          // A path that leads outside the open folder is not shown as a link.
+          .filter((m) => m.kind === 'url' || terminalPathTarget(m.text, root) !== null)
+          .map((m) => ({
             range: m.range,
             text: m.text,
             activate: (e: MouseEvent) => {
-              if (this.disposed || e.button !== 0) return;
-              // URLs leave the app, so they need Ctrl/Cmd; a path opens
-              // in the editor on a plain click, as before.
-              if (m.kind === 'url') {
-                if (isUrlOpenClick(e, isMacOS())) openTerminalUrl(m.text);
-              } else this.onOpenPath(m.text);
+              // A plain click only selects text; Ctrl (Cmd on macOS) opens.
+              if (this.disposed || !isUrlOpenClick(e, isMacOS())) return;
+              if (m.kind === 'url') openTerminalUrl(m.text);
+              else this.onOpenPath(m.text);
             },
-          }),
-        );
+          }));
         callback(links.length ? links : undefined);
       },
     });
@@ -1438,6 +1442,7 @@ export class TerminalManager {
       this.onOpenPath,
       (action) => this.onPaneAction(id, action),
       this.scrollback,
+      () => this.cwd,
     );
     this.panes.set(id, pane);
     this.meta.set(id, meta);
