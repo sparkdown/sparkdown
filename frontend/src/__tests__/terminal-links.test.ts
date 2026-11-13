@@ -59,6 +59,13 @@ describe('findTerminalLinks', () => {
     expect(text.slice(url.start, url.end)).toBe(url.text);
   });
 
+  it('keeps the leading slash of an absolute path in the token', () => {
+    expect(findTerminalLinks('wrote /work/proj/out/a.txt now').map((l) => l.text)).toEqual([
+      '/work/proj/out/a.txt',
+    ]);
+    expect(findTerminalLinks('see ../x/y.ts').map((l) => l.text)).toEqual(['../x/y.ts']);
+  });
+
   it('never yields non-http schemes as URLs', () => {
     const links = findTerminalLinks('run javascript:alert(1) or file:///tmp/x.txt');
     expect(links.some((l) => l.kind === 'url')).toBe(false);
