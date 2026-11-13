@@ -286,26 +286,72 @@ fn heredoc_delimiter(bodies: &[&str]) -> String {
     }
 }
 
+/// Message printed by [`owned_dirs_prelude`] when a folder is not usable.
+pub(crate) const CACHE_DIR_REFUSED: &str =
+    "A SparkDown cache folder on this host is a link or belongs to another user.";
+
+/// The two folders SparkDown creates above a workspace's context dir: the
+/// per-user `sparkdown` root and this client's folder below it.
+fn cache_levels(session: &RemoteSession) -> (String, String) {
+    let cache = client_cache_dir(session);
+    let root = cache
+        .rsplit_once('/')
+        .map(|(p, _)| p.to_string())
+        .unwrap_or_else(|| cache.clone());
+    (root, cache)
+}
+
+/// POSIX sh that creates each folder in `levels` (parents first, mode 0700)
+/// and stops with exit status 4 unless every one is a real directory, not a
+/// link, owned by the ssh user. It runs before anything is written there, so
+/// a link or a folder owned by someone else cannot redirect the writes.
+/// The parent of the first level is created as needed and is not checked.
+fn owned_dirs_prelude(levels: &[String]) -> String {
+    let parent = levels
+        .first()
+        .and_then(|l| l.trim_end_matches('/').rsplit_once('/'))
+        .map(|(p, _)| if p.is_empty() { "/" } else { p })
+        .unwrap_or("/");
+    let list: Vec<String> = levels.iter().map(|l| shell_quote(l)).collect();
+    format!(
+        "umask 077; mkdir -p -- {parent}\n\
+         for sd_d in {list}; do\n\
+         mkdir -m 700 -- \"$sd_d\" 2>/dev/null\n\
+         if [ -L \"$sd_d\" ] || [ ! -d \"$sd_d\" ] || [ ! -O \"$sd_d\" ]; then echo '{CACHE_DIR_REFUSED}'; exit 4; fi\n\
+         done\n",
+        parent = shell_quote(parent),
+        list = list.join(" "),
+    )
+}
+
 /// Build the `sh -s` script that (re)writes a whole context dir in ONE round
-/// trip: mkdir 0700, context.json, README, wipe + rewrite the shadow buffers.
-/// Quoted heredocs keep every byte literal; the delimiter is chosen to be
-/// absent from all payloads.
-pub fn context_write_script(dir: &str, files: &[(String, String)]) -> String {
+/// trip: create and check the folders (`owned_levels`, parents first, then
+/// the context dir and `buffers`), then context.json, README, and wipe +
+/// rewrite the shadow buffers. Quoted heredocs keep every byte literal; the
+/// delimiter is chosen to be absent from all payloads. Each file is removed
+/// before it is written and written with noclobber, so an entry that is
+/// already there is never followed.
+pub fn context_write_script(
+    dir: &str,
+    files: &[(String, String)],
+    owned_levels: &[String],
+) -> String {
     let bodies: Vec<&str> = files.iter().map(|(_, c)| c.as_str()).collect();
     let eof = heredoc_delimiter(&bodies);
     let d = shell_quote(dir);
-    let mut s = format!(
-        "umask 077; mkdir -p {d}/buffers && chmod 700 {d} {d}/buffers && rm -f {d}/buffers/* 2>/dev/null\n"
-    );
+    let mut levels: Vec<String> = owned_levels.to_vec();
+    levels.push(dir.to_string());
+    levels.push(format!("{dir}/buffers"));
+    let mut s = owned_dirs_prelude(&levels);
+    s.push_str(&format!("rm -f -- {d}/buffers/* 2>/dev/null\n"));
     for (name, content) in files {
         // Heredoc bodies always end in a newline; a trailing newline in the
         // payload would be doubled, so strip exactly one if present and let
         // the heredoc supply it.
         let body = content.strip_suffix('\n').unwrap_or(content);
+        let q = shell_quote(name);
         s.push_str(&format!(
-            "cat > {}/{} <<'{eof}'\n{body}\n{eof}\n",
-            d,
-            shell_quote(name)
+            "rm -f -- {d}/{q}\n(set -C; cat > {d}/{q} <<'{eof}'\n{body}\n{eof}\n)\n"
         ));
     }
     s
@@ -329,7 +375,10 @@ pub fn agent_context_update(
     for (name, content) in buffers {
         files.push((format!("buffers/{name}"), content.clone()));
     }
-    let script = context_write_script(&dir, &files);
+    let (sd_root, cache) = cache_levels(&session);
+    validate_remote_path(&cache)?;
+    validate_remote_path(&sd_root)?;
+    let script = context_write_script(&dir, &files, &[sd_root, cache]);
     ssh_run_stdin(&session.host, "sh -s", Some(script.as_bytes()))?;
     Ok(dir)
 }
@@ -1597,11 +1646,13 @@ pub fn mcp_forward_start(session: &RemoteSession, local_sock: &Path) -> Result<S
     }
     let sock = remote_mcp_socket_path(session);
     let shim = remote_mcp_shim_path(session);
-    // 1. Private dir, fresh shim, and no stale socket file (sshd refuses to
-    //    bind over one unless StreamLocalBindUnlink is set).
+    // 1. Private dir (checked like the context dirs), fresh shim, and no
+    //    stale socket file (sshd refuses to bind over one unless
+    //    StreamLocalBindUnlink is set).
+    let (sd_root, cache) = cache_levels(session);
     let setup = format!(
-        "umask 077; mkdir -p {d} && rm -f {s} && cat > {sh} && chmod 700 {sh}",
-        d = shell_quote(&remote_cache_dir(session)),
+        "{prelude}rm -f -- {s} {sh}\n(set -C; cat > {sh}) && chmod 700 -- {sh}",
+        prelude = owned_dirs_prelude(&[sd_root, cache]),
         s = shell_quote(&sock),
         sh = shell_quote(&shim),
     );
@@ -3669,9 +3720,23 @@ Host *.example.com
                 "line1\n__SPARKDOWN_EOF_0__\nit's quoted\n".to_string(),
             ),
         ];
-        let s = context_write_script("/home/u/.cache/sparkdown/k", &files);
-        assert!(s.starts_with("umask 077; mkdir -p '/home/u/.cache/sparkdown/k'/buffers"));
-        assert!(s.contains("rm -f '/home/u/.cache/sparkdown/k'/buffers/*"));
+        let levels = vec![
+            "/home/u/.cache/sparkdown".to_string(),
+            "/home/u/.cache/sparkdown/c".to_string(),
+        ];
+        let s = context_write_script("/home/u/.cache/sparkdown/c/k", &files, &levels);
+        assert!(
+            s.starts_with("umask 077; mkdir -p -- '/home/u/.cache'"),
+            "{s}"
+        );
+        assert!(s.contains("rm -f -- '/home/u/.cache/sparkdown/c/k'/buffers/*"));
+        // Every folder is created and checked before the cleanup or any write.
+        assert!(
+            s.contains("'/home/u/.cache/sparkdown/c/k/buffers'; do"),
+            "{s}"
+        );
+        assert!(s.find("exit 4").unwrap() < s.find("rm -f --").unwrap());
+        assert!(s.contains("(set -C; cat > "), "{s}");
         assert!(s.contains("<<'__SPARKDOWN_EOF_1__'"), "{s}");
         assert!(!s.contains("<<'__SPARKDOWN_EOF_0__'"));
         // Payload bytes are literal (quoted heredoc), single quote intact.
@@ -3679,6 +3744,63 @@ Host *.example.com
         // Exactly one trailing newline per file body.
         assert!(s.contains("{\"a\":1}\n__SPARKDOWN_EOF_1__\n"));
         assert!(!s.contains("{\"a\":1}\n\n__SPARKDOWN_EOF_1__"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn context_write_script_refuses_linked_or_foreign_folders() {
+        let base = std::env::temp_dir().join(format!("sd-ctxdirs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let root = base.join(".cache/sparkdown");
+        let cache = root.join("c");
+        let dir = cache.join("k");
+        let files = vec![
+            ("context.json".to_string(), "{}\n".to_string()),
+            ("buffers/a.md".to_string(), "text\n".to_string()),
+        ];
+        let levels = vec![
+            root.to_string_lossy().into_owned(),
+            cache.to_string_lossy().into_owned(),
+        ];
+        let script = context_write_script(&dir.to_string_lossy(), &files, &levels);
+        let run = || {
+            use std::io::Write;
+            let mut child = crate::proc::command("sh")
+                .arg("-s")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(script.as_bytes())
+                .unwrap();
+            child.wait_with_output().unwrap()
+        };
+        // Fresh tree: everything is created, mode 0700.
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("buffers/a.md")).unwrap(),
+            "text\n"
+        );
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&cache).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        // The client folder replaced by a link: nothing is written through it.
+        std::fs::remove_dir_all(&cache).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &cache).unwrap();
+        let out = run();
+        assert_eq!(out.status.code(), Some(4), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stdout).contains(CACHE_DIR_REFUSED));
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -4073,9 +4195,10 @@ pub const MAX_REMOTE_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Shell script behind [`read_image`]: one round trip that resolves symlinks
 /// (`readlink -f`, falling back to the path itself), refuses a resolved path
-/// without an image extension, a non-regular file or an oversize file, and
-/// only then prints `__SD_OK__` and the raw bytes.
-pub(crate) fn remote_image_script(path: &str) -> String {
+/// without an image extension, a path that resolves outside `root` (the
+/// window's folder, compared by physical path), a non-regular file or an
+/// oversize file, and only then prints `__SD_OK__` and the raw bytes.
+pub(crate) fn remote_image_script(root: &str, path: &str) -> String {
     let exts = crate::commands::PREVIEW_IMAGE_EXTS
         .iter()
         .map(|e| format!("*.{e}"))
@@ -4083,12 +4206,17 @@ pub(crate) fn remote_image_script(path: &str) -> String {
         .join("|");
     format!(
         "r=$(readlink -f -- {p} 2>/dev/null); [ -n \"$r\" ] || r={p}; \
+         root={root}; rt=$(CDPATH= cd -- \"$root\" 2>/dev/null && pwd -P); ok=; \
+         case \"$r\" in \"$root\"/*) ok=1;; esac; \
+         if [ -n \"$rt\" ]; then case \"$r\" in \"$rt\"/*) ok=1;; esac; fi; \
+         [ -n \"$ok\" ] || {{ echo __SD_OUT__; exit 0; }}; \
          case \"$(printf '%s' \"$r\" | tr '[:upper:]' '[:lower:]')\" in {exts}) ;; \
          *) echo __SD_EXT__; exit 0;; esac; \
          if [ ! -f \"$r\" ]; then echo __SD_NF__; \
          else s=$(wc -c < \"$r\"); if [ \"$s\" -gt {max} ]; then echo __SD_BIG__ \"$s\"; \
          else echo __SD_OK__; cat -- \"$r\"; fi; fi",
         p = shell_quote(path),
+        root = shell_quote(root.trim_end_matches('/')),
         max = MAX_REMOTE_IMAGE_BYTES
     )
 }
@@ -4115,6 +4243,11 @@ pub(crate) fn parse_image_payload(raw: &[u8], path: &str) -> Result<Vec<u8>, App
     if status == "__SD_EXT__" {
         return Err(AppError::InvalidPath(format!("Not an image file: {path}")));
     }
+    if status == "__SD_OUT__" {
+        return Err(AppError::InvalidPath(format!(
+            "{path} is not inside this window's folder"
+        )));
+    }
     if let Some(size) = status.strip_prefix("__SD_BIG__") {
         let size: u64 = size.trim().parse().unwrap_or(0);
         return Err(AppError::FileTooLarge {
@@ -4128,16 +4261,22 @@ pub(crate) fn parse_image_payload(raw: &[u8], path: &str) -> Result<Vec<u8>, App
 }
 
 /// Read a remote preview image as exact bytes (byte-safe `ssh_run_bytes`).
-/// The requested path must already carry an image extension; the resolved
-/// target is checked again on the host (see [`remote_image_script`]).
+/// The requested path must already carry an image extension and sit inside
+/// the window's folder, as local preview images must; the resolved target is
+/// checked again on the host (see [`remote_image_script`]).
 pub fn read_image(path: &str) -> Result<Vec<u8>, AppError> {
     validate_remote_path(path).map_err(AppError::Other)?;
     if !crate::commands::has_image_extension(Path::new(path)) {
         return Err(AppError::InvalidPath(format!("Not an image file: {path}")));
     }
     let session = current_session().ok_or_else(|| AppError::Other("no remote session".into()))?;
-    let raw =
-        ssh_run_bytes(&session.host, &remote_image_script(path), None).map_err(AppError::Other)?;
+    remote_deletable(&session.path, path).map_err(AppError::InvalidPath)?;
+    let raw = ssh_run_bytes(
+        &session.host,
+        &remote_image_script(&session.path, path),
+        None,
+    )
+    .map_err(AppError::Other)?;
     parse_image_payload(&raw, path)
 }
 
@@ -4185,11 +4324,34 @@ mod image_tests {
 
     #[test]
     fn remote_image_script_quotes_path_and_lists_extensions() {
-        let s = remote_image_script("/home/u/it's a.png");
+        let s = remote_image_script("/home/u", "/home/u/it's a.png");
         assert!(s.contains(&shell_quote("/home/u/it's a.png")));
         assert!(s.contains("*.png|*.jpg|*.jpeg"));
         assert!(s.contains(&MAX_REMOTE_IMAGE_BYTES.to_string()));
         assert!(s.contains("cat -- \"$r\""));
+        assert!(s.contains("__SD_OUT__"));
+    }
+
+    #[test]
+    fn read_image_rejects_paths_outside_the_window_folder_before_ssh() {
+        let _guard = TEST_SESSION_LOCK.lock().unwrap();
+        set_session_for_test(Some(RemoteSession {
+            host: "dev".into(),
+            path: "/srv/proj".into(),
+            home: "/home/u".into(),
+        }));
+        for p in [
+            "/home/u/.ssh/pic.png",
+            "/srv/proj/../other/pic.png",
+            "/srv/projx/pic.png",
+        ] {
+            let err = read_image(p).unwrap_err();
+            assert!(
+                matches!(&err, AppError::InvalidPath(m) if !m.is_empty()),
+                "{p}: {err}"
+            );
+        }
+        set_session_for_test(None);
     }
 
     #[test]
@@ -4210,10 +4372,11 @@ mod image_tests {
         let link = dir.join("link.png");
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&secret, &link).unwrap();
+        let dir_s = dir.to_str().unwrap().to_string();
         let run = |p: &std::path::Path| {
             crate::proc::command("sh")
                 .arg("-c")
-                .arg(remote_image_script(p.to_str().unwrap()))
+                .arg(remote_image_script(&dir_s, p.to_str().unwrap()))
                 .output()
                 .unwrap()
                 .stdout
@@ -4227,6 +4390,32 @@ mod image_tests {
             Err(AppError::InvalidPath(_))
         ));
         assert!(parse_image_payload(&run(&dir.join("none.png")), "x").is_err());
+        // An image beside the folder is refused, and so is a link inside the
+        // folder that points to an image outside it.
+        let outside_dir = std::env::temp_dir().join("sparkdown_test_remote_image_outside");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let outside = outside_dir.join("out.png");
+        std::fs::write(&outside, [9u8, 9, 9]).unwrap();
+        let out_link = dir.join("out-link.png");
+        let _ = std::fs::remove_file(&out_link);
+        std::os::unix::fs::symlink(&outside, &out_link).unwrap();
+        for p in [&outside, &out_link] {
+            match parse_image_payload(&run(p), "x") {
+                Err(AppError::InvalidPath(m)) => {
+                    assert!(m.contains("not inside this window's folder"), "{m}")
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+        // A link that stays inside the folder still loads.
+        let in_link = dir.join("in-link.png");
+        let _ = std::fs::remove_file(&in_link);
+        std::os::unix::fs::symlink(&img, &in_link).unwrap();
+        assert_eq!(
+            parse_image_payload(&run(&in_link), "x").unwrap(),
+            vec![0u8, 1, 2, 255]
+        );
+        let _ = std::fs::remove_dir_all(&outside_dir);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

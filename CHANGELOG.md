@@ -14,6 +14,8 @@ requests.
 - MCP: A connection that SparkDown did not route to a window gets the routing message for every tool call, including `sparkdown_list_windows`.
 - SSH: Host-key checking is set on the ssh command line, so `StrictHostKeyChecking no` or `accept-new` in ~/.ssh/config no longer skips the fingerprint prompt for a new host.
 - SSH: Output from a failed remote command is shown as command output and no longer selects SparkDown's host-key messages.
+- Remote: The agent context and MCP shim folders on the host must be plain directories owned by your account; otherwise nothing is written there.
+- Remote: Preview images on a remote host must be inside the window's folder.
 
 ## [0.4.3] — 2026-11-13
 
