@@ -2276,18 +2276,25 @@ Host *.example.com
     }
 
     #[test]
-    fn ssh_calls_set_host_key_checking_on_the_command_line() {
+    fn ssh_calls_set_fixed_options_on_the_command_line() {
         let _guard = TEST_LOCK.lock().unwrap();
+        // Background and agent-tool calls: host-key checking and no forwarding.
         let argv = ssh_argv("dev");
-        assert!(argv
-            .windows(2)
-            .any(|w| w == ["-o", "StrictHostKeyChecking=yes"]));
+        for opt in [
+            "StrictHostKeyChecking=yes",
+            "ForwardAgent=no",
+            "ForwardX11=no",
+        ] {
+            assert!(argv.windows(2).any(|w| w == ["-o", opt]), "{opt}");
+        }
         let hosts = parse_ssh_config("Host dev\n  IdentityFile ~/.ssh/id\n");
         disconnect_now();
         connect_with(&hosts, "dev", "~/proj", |_h, _c| {
             Ok("/local/home/u/proj\n/local/home/u\n".into())
         })
         .unwrap();
+        // The interactive terminal checks host keys like every other call but
+        // leaves forwarding to the user's own ssh config.
         let (cmd, _) = terminal_command(Some("/proj"), None, None).unwrap();
         let argv: Vec<String> = cmd
             .get_argv()
@@ -2297,6 +2304,10 @@ Host *.example.com
         assert!(argv
             .windows(2)
             .any(|w| w == ["-o", "StrictHostKeyChecking=yes"]));
+        assert!(!argv
+            .iter()
+            .any(|a| a.starts_with("ForwardAgent") || a.starts_with("ForwardX11")));
+        assert!(!argv.iter().any(|a| a.starts_with("CheckHostIP")));
         disconnect_now();
     }
 
