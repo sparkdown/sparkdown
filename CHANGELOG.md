@@ -5,7 +5,7 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
-## Unreleased (0.4.3)
+## [0.4.3] — 2026-11-13
 - Terminal: Quote the agent server path in the Claude launch line.
 - Files: Check that the opened file is a regular file and cap the read.
 - Preview: Bind HTML script execution to the confirmed document.
@@ -222,6 +222,7 @@ The agent cockpit release.
 - **Linux `.deb`** as the preferred install; the AppImage is still built.
 - Hardening: the watcher ignores build and dependency folders, a stricter content policy, and dependency security updates.
 
+[0.4.3]: https://github.com/sparkdown/sparkdown/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/sparkdown/sparkdown/compare/v0.4.1...v0.4.2
 [0.3.1]: https://github.com/sparkdown/sparkdown/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/sparkdown/sparkdown/compare/v0.2.0...v0.3.0
