@@ -37,7 +37,7 @@
   ],
   "hunks": [
     { "kind": "substantive", "lines": [" ctx", "-const x = 1", "+const x = 2"] },
-    { "kind": "whitespace", "lines": ["-  foo()", "+    foo()"] },
+    { "kind": "substantive", "lines": ["-  foo()", "+    foo()"] },
     { "kind": "substantive", "lines": ["-a", "-b", "+b", "+a"] },
     { "kind": "whitespace", "lines": ["+", "+", " ctx"] },
     { "kind": "whitespace", "lines": ["-", "-"] },
@@ -59,13 +59,16 @@
 
     { "kind": "import", "lines": ["+use std::io;\r"] },
     { "kind": "import", "lines": ["+import a from 'a';\r", "-import b from 'b';\r"] },
-    { "kind": "whitespace", "lines": ["-  foo()\r", "+    foo()\r"] },
+    { "kind": "substantive", "lines": ["-  foo()\r", "+    foo()\r"] },
     { "kind": "substantive", "lines": [" ctx\r", "-return 1\r", "+return 2\r"] },
 
     { "kind": "import", "lines": ["-import { a } from './a';", " import { b } from './b';", "-import { c } from './c';", "+import { a } from './a';", " import { d } from './d';", "+import { c } from './c';"] },
     { "kind": "substantive", "lines": ["-first();", "-second();", "+second();", "+first();"] },
     { "kind": "whitespace", "lines": ["-export function byPath(a: Entry, b: Entry): number {", "-  return a.path.localeCompare(b.path);", "+export function byPath( a: Entry, b: Entry ): number {", "+  return a.path.localeCompare( b.path );"] },
     { "kind": "whitespace", "lines": ["-call(alpha, beta);", "+call(alpha,", "+     beta);"] },
+    { "kind": "whitespace", "lines": ["-f(a, b);", "+f( a, b );"] },
+    { "kind": "substantive", "lines": [" def run(job):", "     if job.ready:", "-        start(job)", "+    start(job)"] },
+    { "kind": "substantive", "lines": [" parent:", "-  child: 1", "+ child: 1"] },
 
     { "kind": "substantive", "lines": ["+import os; os.system(\"id\")"] },
     { "kind": "substantive", "lines": ["+import(\"./x.js\").then(m => m.run())"] },

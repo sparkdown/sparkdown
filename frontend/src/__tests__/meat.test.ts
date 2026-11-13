@@ -3,6 +3,7 @@ import {
   classifyFile,
   partitionChanges,
   classifyHunk,
+  isIndentChangeOnly,
   parseHunks,
   abridgeHunks,
   noiseReasonLabel,
@@ -116,8 +117,23 @@ describe('classifyHunk', () => {
     );
   });
 
-  it('classifies pure reindentation as whitespace', () => {
-    expect(classifyHunk(hunk(['-  foo()', '+    foo()']))).toBe('whitespace');
+  it('tells a re-indent-only hunk from other substantive hunks', () => {
+    expect(isIndentChangeOnly(hunk(['-  foo()', '+    foo()']))).toBe(true);
+    expect(isIndentChangeOnly(hunk([' parent:', '-  child: 1', '+ child: 1']))).toBe(true);
+    expect(isIndentChangeOnly(hunk(['-foo()', '+bar()']))).toBe(false);
+    // Interior spacing only folds; it is not a re-indent.
+    expect(isIndentChangeOnly(hunk(['-f(a, b);', '+f( a, b );']))).toBe(false);
+    expect(isIndentChangeOnly(hunk([' ctx']))).toBe(false);
+  });
+
+  it('never folds a changed leading indent as formatting', () => {
+    expect(classifyHunk(hunk(['-  foo()', '+    foo()']))).toBe('substantive');
+    expect(
+      classifyHunk(
+        hunk([' def run(job):', '     if job.ready:', '-        start(job)', '+    start(job)']),
+      ),
+    ).toBe('substantive');
+    expect(classifyHunk(hunk([' parent:', '-  child: 1', '+ child: 1']))).toBe('substantive');
   });
 
   it('never folds a reorder as formatting', () => {
@@ -226,8 +242,8 @@ describe('abridgeHunks', () => {
     const hunks = [
       H('@@ a @@', ["+import a from 'a'"]), // import
       H('@@ b @@', ['-real()', '+realNew()']), // substantive
-      H('@@ c @@', ['-  x', '+    x']), // whitespace
-      H('@@ d @@', ['-  y', '+    y']), // whitespace
+      H('@@ c @@', ['-f(x)', '+f( x )']), // whitespace
+      H('@@ d @@', ['-g(y)', '+g( y )']), // whitespace
     ];
     const parts = abridgeHunks(hunks);
     expect(parts.map((p) => p.kind)).toEqual(['omitted', 'hunk', 'omitted']);

@@ -217,9 +217,29 @@ function importSpanLines(hunk: DiffHunk): Set<number> {
   return spans;
 }
 
+/** One side of a hunk (context plus the lines not starting with `drop`) with
+ *  all whitespace removed. */
+function sideWithoutSpace(hunk: DiffHunk, drop: string): string {
+  return hunk.lines
+    .filter((l) => !l.startsWith(drop) && !l.startsWith('\\'))
+    .map((l) => l.slice(1).replace(/\s+/g, ''))
+    .join('');
+}
+
+/** True for a hunk that stays visible in the Reading diff only because a
+ *  leading indent changed: its text is otherwise the same once whitespace is
+ *  dropped. The renderer marks it "whitespace only" so it reads as low-noise. */
+export function isIndentChangeOnly(hunk: DiffHunk): boolean {
+  return (
+    sideWithoutSpace(hunk, '+') === sideWithoutSpace(hunk, '-') &&
+    classifyHunk(hunk) === 'substantive'
+  );
+}
+
 /** Classify a hunk by its changed (+/-) lines only (context is ignored):
- *  - 'whitespace' when the change is whitespace-only: blank lines,
- *    reindentation, spacing inside a line, or re-wrapping (in order)
+ *  - 'whitespace' when the change is whitespace-only: blank lines, spacing
+ *    inside a line, or re-wrapping (in order); a changed leading indent is
+ *    substantive
  *  - 'import' when every change is an import/use/include line (including
  *    lines inside a multi-line import statement)
  *  - 'substantive' otherwise. Pure-metadata hunks with no +/- default to
@@ -244,12 +264,23 @@ export function classifyHunk(
   // (like `git diff -w`, plus re-wrapping one line into several). Comparing
   // whole sides keeps order: any move, even relative to context, is a real
   // change (statement order can matter), never "formatting".
-  const side = (drop: string) =>
-    hunk.lines
-      .filter((l) => !l.startsWith(drop) && !l.startsWith('\\'))
-      .map((l) => l.slice(1).replace(/\s+/g, ''))
-      .join('');
-  if (side('+') === side('-')) return 'whitespace';
+  const side = (drop: string) => sideWithoutSpace(hunk, drop);
+  // Leading indentation can carry meaning (Python blocks, YAML nesting, make
+  // recipes), so a change of it is not formatting. The non-blank changed
+  // lines of the two sides are compared in order, up to the shorter side
+  // (a re-wrap that only adds continuation lines still folds).
+  const indents = (keep: '+' | '-'): string[] =>
+    changedIdx
+      .filter((i) => hunk.lines[i].startsWith(keep) && body(i).trim() !== '')
+      .map((i) => body(i).match(/^[\t ]*/)![0]);
+  const sameIndent = (): boolean => {
+    const a = indents('+');
+    const b = indents('-');
+    const n = Math.min(a.length, b.length);
+    for (let i = 0; i < n; i++) if (a[i] !== b[i]) return false;
+    return true;
+  };
+  if (side('+') === side('-') && sameIndent()) return 'whitespace';
 
   const spans = importSpanLines(hunk);
   if (changedIdx.every((i) => isImportLine(body(i)) || spans.has(i))) {

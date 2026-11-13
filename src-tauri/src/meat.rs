@@ -342,7 +342,30 @@ pub fn classify_hunk(hunk: &Hunk) -> HunkKind {
             })
             .collect()
     };
-    if side('+') == side('-') {
+    // Leading indentation can carry meaning (Python blocks, YAML nesting, make
+    // recipes), so a change of it is not formatting: the non-blank changed
+    // lines of the two sides are compared in order, up to the shorter side
+    // (a re-wrap that only adds continuation lines still folds). Keep in sync
+    // with meat.ts.
+    let indents = |keep: char| -> Vec<String> {
+        changed
+            .iter()
+            .filter(|&&i| hunk.lines[i].starts_with(keep) && !body(i).trim().is_empty())
+            .map(|&i| {
+                body(i)
+                    .chars()
+                    .take_while(|c| *c == ' ' || *c == '\t')
+                    .collect()
+            })
+            .collect()
+    };
+    let same_indent = || {
+        indents('+')
+            .iter()
+            .zip(indents('-').iter())
+            .all(|(a, b)| a == b)
+    };
+    if side('+') == side('-') && same_indent() {
         return HunkKind::Whitespace;
     }
     let spans = import_span_lines(hunk);
@@ -501,8 +524,32 @@ mod tests {
             classify_hunk(&hunk(&[" ctx", "-const x = 1", "+const x = 2"])),
             Substantive
         );
+        // A changed leading indent can change meaning (block membership,
+        // nesting), so it is never "formatting".
         assert_eq!(
             classify_hunk(&hunk(&["-  foo()", "+    foo()"])),
+            Substantive
+        );
+        assert_eq!(
+            classify_hunk(&hunk(&[
+                " def run(job):",
+                "     if job.ready:",
+                "-        start(job)",
+                "+    start(job)",
+            ])),
+            Substantive
+        );
+        assert_eq!(
+            classify_hunk(&hunk(&[" parent:", "-  child: 1", "+ child: 1"])),
+            Substantive
+        );
+        // Re-wrapping with the same first indent still folds.
+        assert_eq!(
+            classify_hunk(&hunk(&[
+                "-call(alpha, beta);",
+                "+call(alpha,",
+                "+     beta);"
+            ])),
             Whitespace
         );
         // A reorder is never "formatting" (statement order can matter).
@@ -554,7 +601,7 @@ mod tests {
     fn abridge_keeps_preamble_and_substantive_hunks_and_marks_omissions() {
         let diff = "diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n\
 @@ -1,2 +1,2 @@\n-import a from 'a';\n+import b from 'b';\n\
-@@ -10,2 +10,2 @@\n-  f()\n+    f()\n\
+@@ -10,2 +10,2 @@\n-f(x)\n+f( x )\n\
 @@ -20,1 +20,1 @@\n-return 1\n+return 2\n";
         let (out, omitted) = abridge_diff(diff);
         assert_eq!(omitted, 2);

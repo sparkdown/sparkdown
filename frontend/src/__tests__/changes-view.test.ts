@@ -27,6 +27,24 @@ describe('renderUnifiedDiff', () => {
     expect(html).toContain('diff-add');
   });
 
+  it('labels a re-indented hunk "whitespace only" in Reading and not in Full', () => {
+    const diff = [
+      '@@ -1,2 +1,2 @@',
+      ' def run(job):',
+      '-        start(job)',
+      '+    start(job)',
+      '@@ -20 +20 @@',
+      '-return 1',
+      '+return 2',
+    ].join('\n');
+    const reading = renderUnifiedDiff(diff);
+    expect(reading.match(/diff-hunk-note/g)).toHaveLength(1);
+    expect(reading).toContain('whitespace only');
+    expect(reading).toContain('start(job)');
+    const full = renderUnifiedDiff(diff, { reading: false });
+    expect(full).not.toContain('diff-hunk-note');
+  });
+
   it('drops the git file-header preamble', () => {
     const diff = [
       'diff --git a/x.ts b/x.ts',
