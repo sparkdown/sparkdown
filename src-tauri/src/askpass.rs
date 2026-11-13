@@ -22,6 +22,11 @@
 //! wrong-passphrase retry works. On Unix the broker also verifies the peer
 //! uid matches the running app.
 //!
+//! The broker answers only while an ssh call that SparkDown started is
+//! running (see [`Broker::pending_guard`]). When the last such call ends, every
+//! outstanding ticket is dropped, so a ticket left in the environment of a
+//! lingering ssh process (a kept-open control connection) is of no use later.
+//!
 //! The passphrase itself never goes into env, argv, files, logs or config:
 //! it travels app → helper over the IPC, and helper → ssh over the
 //! helper's stdout pipe (the askpass contract).
@@ -67,6 +72,10 @@ const MAX_TICKETS: usize = 32;
 /// wrong-passphrase retry (OpenSSH invokes the askpass helper again in the
 /// same ssh process after a wrong answer).
 const MAX_TICKET_ATTEMPTS: usize = 5;
+/// How long a connected peer gets to send its request (header and prompt).
+/// The real helper sends both at once right after it connects. The wait for
+/// the user's answer is separate and is not bounded by this.
+const SERVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 // --- Prompt classifier ------------------------------------------------------
 
@@ -157,6 +166,22 @@ fn fallback_token() -> String {
 //
 // helper → app: "SDASK1 <token> <prompt_len>\n<prompt bytes>"
 // app → helper: "OK <len>\n<passphrase bytes>"  or  "NO\n"
+
+/// Reads from `inner` until `until`, then fails with `TimedOut`, so a peer
+/// that sends a byte at a time cannot hold the listener past the limit.
+struct ReadDeadline<'a, R: Read> {
+    inner: &'a mut R,
+    until: Instant,
+}
+
+impl<R: Read> Read for ReadDeadline<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if Instant::now() >= self.until {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.inner.read(buf)
+    }
+}
 
 fn read_line_capped<R: Read>(r: &mut R, cap: usize) -> Option<String> {
     let mut out = Vec::new();
@@ -280,24 +305,33 @@ fn serve_request<S: Read + Write>(stream: &mut S, broker: &Broker) {
         let _ = s.write_all(b"NO\n");
         let _ = s.flush();
     };
-    let Some(head) = read_line_capped(stream, 256) else {
-        return reply_no(stream);
+    let request = {
+        let mut incoming = ReadDeadline {
+            inner: &mut *stream,
+            until: Instant::now() + SERVE_TIMEOUT,
+        };
+        (|| {
+            let head = read_line_capped(&mut incoming, 256)?;
+            let mut parts = head.split(' ');
+            let (Some(MAGIC), Some(token), Some(len), None) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            else {
+                return None;
+            };
+            // Answer only while an ssh call that SparkDown started is running.
+            if !broker.is_pending() {
+                return None;
+            }
+            // A ticket is valid for one session. `take_ticket` validates the
+            // ticket and enforces the attempt cap.
+            if !broker.take_ticket(token) {
+                return None;
+            }
+            let len = len.parse::<usize>().ok()?;
+            read_exact_vec(&mut incoming, len)
+        })()
     };
-    let mut parts = head.split(' ');
-    let (Some(MAGIC), Some(token), Some(len), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return reply_no(stream);
-    };
-    // A ticket is valid for one session. `take_ticket` validates the ticket
-    // and enforces the attempt cap.
-    if !broker.take_ticket(token) {
-        return reply_no(stream);
-    }
-    let Some(len) = len.parse::<usize>().ok() else {
-        return reply_no(stream);
-    };
-    let Some(prompt) = read_exact_vec(stream, len) else {
+    let Some(prompt) = request else {
         return reply_no(stream);
     };
     let Ok(prompt) = std::str::from_utf8(&prompt) else {
@@ -409,6 +443,16 @@ pub struct Outcome {
     pub refused: bool,
 }
 
+/// Keeps the broker answering helper requests while an ssh call runs; see
+/// [`Broker::pending_guard`].
+pub struct PendingGuard(Arc<Broker>);
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.0.close_pending();
+    }
+}
+
 /// One remote connection's askpass endpoint, token and passphrase cache.
 pub struct Broker {
     endpoint: PathBuf,
@@ -427,6 +471,10 @@ pub struct Broker {
     /// wrong-passphrase retry works. Expired entries and those over the cap
     /// are discarded.
     tickets: Mutex<HashMap<String, (Instant, usize)>>,
+    /// Number of SparkDown-started ssh calls running now. The broker refuses
+    /// every helper request while this is zero. A counter lets overlapping
+    /// calls open and close their windows independently.
+    pending: std::sync::atomic::AtomicUsize,
     /// Tests: make the peer check refuse every connection.
     #[cfg(test)]
     refuse_peers: std::sync::atomic::AtomicBool,
@@ -474,6 +522,7 @@ impl Broker {
             provider,
             cache: Mutex::new(HashMap::new()),
             tickets: Mutex::new(HashMap::new()),
+            pending: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             refuse_peers: std::sync::atomic::AtomicBool::new(false),
             cancelled: std::sync::atomic::AtomicBool::new(false),
@@ -503,6 +552,13 @@ impl Broker {
                         let _ = stream.write_all(b"NO\n");
                         let _ = stream.flush();
                         continue;
+                    }
+                    // A peer that stops talking is dropped after SERVE_TIMEOUT
+                    // instead of holding up the next request.
+                    #[cfg(unix)]
+                    {
+                        let _ = stream.set_read_timeout(Some(SERVE_TIMEOUT));
+                        let _ = stream.set_write_timeout(Some(SERVE_TIMEOUT));
                     }
                     // One request at a time: prompts are rare and sequential.
                     serve_request(&mut stream, &b);
@@ -593,6 +649,39 @@ impl Broker {
             true
         } else {
             false
+        }
+    }
+
+    /// Open a window in which the broker answers helper requests: hold the
+    /// returned guard for as long as the ssh call that carries a ticket from
+    /// [`Broker::ssh_env`] runs. Dropping the last guard closes the window and
+    /// drops every outstanding ticket.
+    pub fn pending_guard(self: &Arc<Self>) -> PendingGuard {
+        self.pending
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        PendingGuard(self.clone())
+    }
+
+    fn is_pending(&self) -> bool {
+        self.pending.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+
+    fn close_pending(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let mut prev = self.pending.load(SeqCst);
+        while prev > 0 {
+            match self
+                .pending
+                .compare_exchange_weak(prev, prev - 1, SeqCst, SeqCst)
+            {
+                Ok(_) => break,
+                Err(now) => prev = now,
+            }
+        }
+        if prev <= 1 {
+            if let Ok(mut g) = self.tickets.lock() {
+                g.clear();
+            }
         }
     }
 
@@ -904,6 +993,14 @@ mod tests {
     }
 
     fn test_broker(answer: Option<&'static str>) -> (Arc<Broker>, Arc<Mutex<Vec<String>>>) {
+        let (b, asked) = test_broker_closed(answer);
+        // These tests drive the broker directly, so keep its window open.
+        let _keep_open = std::mem::ManuallyDrop::new(b.pending_guard());
+        (b, asked)
+    }
+
+    /// A broker with no ssh call running: it refuses every request.
+    fn test_broker_closed(answer: Option<&'static str>) -> (Arc<Broker>, Arc<Mutex<Vec<String>>>) {
         let asked = Arc::new(Mutex::new(Vec::new()));
         let log = asked.clone();
         let provider: Provider = Arc::new(move |key: &str, retry: bool| {
@@ -986,7 +1083,10 @@ mod tests {
     #[test]
     fn cancel_is_reported_and_endpoint_is_private() {
         use std::os::unix::fs::PermissionsExt;
-        let (b, _) = test_broker(None);
+        // Not `test_broker`: its guard is never dropped, so the broker
+        // would never be dropped either.
+        let (b, _) = test_broker_closed(None);
+        let open = b.pending_guard();
         let dir_mode = std::fs::metadata(&b.dir).unwrap().permissions().mode();
         let sock_mode = std::fs::metadata(&b.endpoint).unwrap().permissions().mode();
         assert_eq!(dir_mode & 0o777, 0o700);
@@ -1000,6 +1100,7 @@ mod tests {
         assert!(b.take_cancelled());
         assert!(!b.take_cancelled());
         let dir = b.dir.clone();
+        drop(open);
         drop(b);
         // The serving thread may hold the last reference for a moment after
         // replying; the endpoint goes when that one drops.
@@ -1157,5 +1258,65 @@ mod tests {
             request(&mut connect(&b), &ticket, prompt).is_none(),
             "a refused peer must not get an answer even with a valid ticket"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn requests_are_refused_unless_an_ssh_call_is_running() {
+        let (b, asked) = test_broker_closed(Some("pw"));
+        let prompt = "Enter passphrase for key '/k/id': ";
+        let ticket = b.mint_ticket();
+        assert!(
+            request(&mut connect(&b), &ticket, prompt).is_none(),
+            "no ssh call is running"
+        );
+        assert!(asked.lock().unwrap().is_empty(), "the user is not asked");
+        let guard = b.pending_guard();
+        let ticket = b.mint_ticket();
+        assert!(request(&mut connect(&b), &ticket, prompt).is_some());
+        drop(guard);
+        let ticket = b.mint_ticket();
+        assert!(
+            request(&mut connect(&b), &ticket, prompt).is_none(),
+            "the window closed with the call"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_last_ssh_call_to_end_drops_every_ticket() {
+        let (b, _) = test_broker_closed(Some("pw"));
+        let prompt = "Enter passphrase for key '/k/id': ";
+        let first = b.pending_guard();
+        let second = b.pending_guard();
+        let ticket = b.mint_ticket();
+        drop(first);
+        // One call is still running: its ticket still works.
+        assert!(request(&mut connect(&b), &ticket, prompt).is_some());
+        drop(second);
+        // Re-open a window: the ticket from before is gone.
+        let _again = b.pending_guard();
+        assert!(
+            request(&mut connect(&b), &ticket, prompt).is_none(),
+            "a ticket does not outlive the calls it was minted for"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_peer_that_stops_talking_does_not_block_the_next_request() {
+        let (b, _) = test_broker(Some("pw"));
+        let prompt = "Enter passphrase for key '/k/id': ";
+        // Connects, sends half a header, then goes quiet.
+        let mut idle = connect(&b);
+        idle.write_all(b"SDASK1 ").unwrap();
+        let start = Instant::now();
+        let got = request(&mut connect(&b), &b.mint_ticket(), prompt);
+        assert!(got.is_some(), "the next request is served");
+        assert!(
+            start.elapsed() < SERVE_TIMEOUT + Duration::from_secs(5),
+            "served within the read limit"
+        );
+        drop(idle);
     }
 }

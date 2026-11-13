@@ -1158,6 +1158,8 @@ fn ssh_exec(host: &str, remote_cmd: &str, stdin: Option<&[u8]>) -> Result<SshRes
     // `${VAR:-x}` constructs every remote command uses. `exec` replaces the
     // login shell so exit status still propagates.
     let sh_arg = format!("exec /bin/sh -c {}", shell_quote(&wrap_marked(remote_cmd)));
+    // The key-passphrase broker answers only while this call runs.
+    let _ask_window = crate::askpass::current().map(|b| b.pending_guard());
     let cmd = ssh_exec_command(&dest, &sh_arg);
     let timeout = if stdin.is_some() {
         SSH_WRITE_TIMEOUT
