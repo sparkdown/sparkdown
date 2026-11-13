@@ -176,8 +176,13 @@ export type AbridgedPart =
   | { kind: 'hunk'; hunk: DiffHunk }
   | { kind: 'omitted'; count: number; reason: 'import' | 'whitespace' };
 
+// The whole changed line must be an import, not just start like one: after the
+// statement only an optional `;`, whitespace and a `//` comment may follow, so
+// `import os; run()` stays in the Reading diff. `import(...)` (a call) and a
+// `require(...)` followed by more code do not count either. Keep in sync with
+// is_import_line in meat.rs.
 const IMPORT_RE =
-  /^\s*(import\b|export\s+(?:\*|\{)|from\s+['"]|const\s+\w+\s*=\s*require\()|^\s*(use\s+[\w:]+;|#include\b)/;
+  /^\s*(?:import\b(?!\s*\()[^;]*|export\s+(?:\*|\{)[^;]*|from\s+['"][^;]*|const\s+\w+\s*=\s*require\([^;()]*\)|use\s+[\w:]+(?=;)|#include\b[^;]*);?\s*(?:\/\/[^]*)?$/;
 
 /** True for a changed (+/-) line that is import/use/include boilerplate. */
 function isImportLine(body: string): boolean {
