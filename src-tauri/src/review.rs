@@ -509,13 +509,9 @@ pub(crate) fn load_store(path: &Path) -> ReviewStore {
 
 /// Write the store atomically (temp file + rename).
 pub(crate) fn save_store(path: &Path, store: &ReviewStore) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
     let json = serde_json::to_string(store).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, path).map_err(|e| e.to_string())
+    // App-private state: 0600 in a 0700 folder.
+    crate::fsio::write_private(path, json.as_bytes()).map_err(|e| e.to_string())
 }
 
 fn store_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -564,6 +560,21 @@ mod tests {
             path: path.into(),
             status: status.into(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_review_store_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("sd-review-mode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("state").join("review-state.json");
+        save_store(&path, &ReviewStore::default()).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        let _ = load_store(&path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

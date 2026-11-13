@@ -775,7 +775,7 @@ pub(crate) fn encrypted_key_without_agent(host: &str) -> Option<String> {
 pub(crate) fn mux_options() -> Vec<String> {
     use std::os::unix::fs::PermissionsExt;
     let (dir, name) = control_location(&home_dir(), &crate::windows::current_label());
-    if std::fs::create_dir_all(&dir).is_err() {
+    if crate::fsio::create_private_dir_all(&dir).is_err() {
         return vec![];
     }
     let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));

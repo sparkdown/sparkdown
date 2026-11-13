@@ -182,9 +182,9 @@ fn agent_context_update_impl(
     // hit those targets instead.
     secure_context_tree(&buf_dir).map_err(|e| format!("context dir: {e}"))?;
 
-    std::fs::write(dir.join("context.json"), context_json)
+    write_private_file(&dir.join("context.json"), context_json.as_bytes())
         .map_err(|e| format!("context write: {e}"))?;
-    let _ = std::fs::write(dir.join("README.md"), CONTEXT_README);
+    let _ = write_private_file(&dir.join("README.md"), CONTEXT_README.as_bytes());
 
     // Replace the shadow set wholesale so stale buffers don't linger.
     if let Ok(entries) = std::fs::read_dir(&buf_dir) {
@@ -194,7 +194,7 @@ fn agent_context_update_impl(
     }
     for buf in &buffers {
         let content = truncate_at_char_boundary(&buf.content, MAX_BUFFER_BYTES);
-        let _ = std::fs::write(buf_dir.join(sanitize_name(&buf.name)), content);
+        let _ = write_private_file(&buf_dir.join(sanitize_name(&buf.name)), content.as_bytes());
     }
 
     Ok(dir.to_string_lossy().into_owned())
@@ -245,6 +245,12 @@ pub(crate) fn truncate_at_char_boundary(s: &str, max: usize) -> &str {
         end -= 1;
     }
     &s[..end]
+}
+
+/// Write one file of the context folder: new files are 0600.
+fn write_private_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    crate::fsio::create_private_file(path)?.write_all(data)
 }
 
 /// Create `<runtime>/sparkdown/<key>/buffers` and its parents down from the

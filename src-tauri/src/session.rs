@@ -619,12 +619,8 @@ impl ConfigStore {
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension(format!("json.tmp{}", std::process::id()));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    // The prefs and session file is app-private: 0600 in a 0700 folder.
+    crate::fsio::write_private(path, bytes)
 }
 
 #[cfg(test)]
@@ -746,6 +742,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d.canonicalize().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_config_file_is_owner_only_and_a_wider_one_is_narrowed() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmpdir("private-mode");
+        let path = d.join("sub").join("config.json");
+        let store = ConfigStore::open(path.clone());
+        store.save_from("w-a", &AppConfig::default(), None).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        store.flush().unwrap();
+        assert_eq!(mode(&path), 0o600);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -949,7 +962,7 @@ mod tests {
         let leftovers: Vec<_> = std::fs::read_dir(&d)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .filter(|e| e.file_name().to_string_lossy().contains("tmp"))
             .collect();
         assert!(leftovers.is_empty());
     }
