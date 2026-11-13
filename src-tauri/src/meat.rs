@@ -164,23 +164,68 @@ fn starts_with_word(s: &str, prefix: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// `^\s*(import\b|export\s+(\*|\{)|from\s+['"]|const\s+\w+\s*=\s*require\()`
-/// `| ^\s*(use\s+[\w:]+;|#include\b)`
+/// Is the whole changed line an import? It must start like one, and after the
+/// statement only an optional `;`, whitespace and a `//` comment may follow, so
+/// `import os; run()` stays in the Reading diff. `import(...)` (a call) and a
+/// `require(...)` followed by more code do not count. Keep in sync with
+/// IMPORT_RE in meat.ts:
+/// `^\s*(?:import\b(?!\s*\()[^;]*|export\s+(?:\*|\{)[^;]*|from\s+['"][^;]*`
+/// `|const\s+\w+\s*=\s*require\([^;()]*\)|use\s+[\w:]+(?=;)|#include\b[^;]*)`
+/// `;?\s*(?://[^]*)?$`
 fn is_import_line(body: &str) -> bool {
     let s = body.trim_start();
-    if starts_with_word(s, "import") || starts_with_word(s, "#include") {
-        return true;
+    match import_head_rest(s) {
+        Some((rest, whole_statement)) => {
+            // A head that ends the statement (`require(...)`, `use path`)
+            // leaves only the tail rule; the others take anything up to `;`.
+            let rest = if whole_statement {
+                rest.trim_start()
+            } else {
+                rest
+            };
+            (!whole_statement || rest.is_empty() || rest.starts_with(';') || rest.starts_with("//"))
+                && import_tail_ok(rest)
+        }
+        None => false,
+    }
+}
+
+/// Text after `;` (or the end) may hold only whitespace or a `//` comment.
+/// `rest` is what follows the statement head; anything up to the first `;`
+/// belongs to the statement.
+fn import_tail_ok(rest: &str) -> bool {
+    let after = match rest.find(';') {
+        Some(i) => &rest[i + 1..],
+        None => return true,
+    };
+    let after = after.trim_start();
+    after.is_empty() || after.starts_with("//")
+}
+
+/// Strip the import-shaped head from `s`; the remainder is what the tail rule
+/// looks at. The flag is true when the head itself ends the statement
+/// (`require(...)`, `use path`), so nothing but the tail may follow it.
+/// `None` when `s` does not start with one.
+fn import_head_rest(s: &str) -> Option<(&str, bool)> {
+    if let Some(rest) = s.strip_prefix("import") {
+        if rest.starts_with(is_word) || rest.trim_start().starts_with('(') {
+            return None;
+        }
+        return Some((rest, false));
+    }
+    if let Some(rest) = s.strip_prefix("#include") {
+        return (!rest.starts_with(is_word)).then_some((rest, false));
     }
     if let Some(rest) = s.strip_prefix("export") {
         let r = rest.trim_start();
         if r.len() < rest.len() && (r.starts_with('*') || r.starts_with('{')) {
-            return true;
+            return Some((r, false));
         }
     }
     if let Some(rest) = s.strip_prefix("from") {
         let r = rest.trim_start();
         if r.len() < rest.len() && (r.starts_with('\'') || r.starts_with('"')) {
-            return true;
+            return Some((r, false));
         }
     }
     if let Some(rest) = s.strip_prefix("const") {
@@ -189,10 +234,13 @@ fn is_import_line(body: &str) -> bool {
             let ident_len = r.chars().take_while(|c| is_word(*c)).count();
             if ident_len > 0 {
                 let after = r[ident_len..].trim_start();
-                if let Some(a) = after.strip_prefix('=') {
-                    if a.trim_start().starts_with("require(") {
-                        return true;
-                    }
+                if let Some(call) = after
+                    .strip_prefix('=')
+                    .and_then(|a| a.trim_start().strip_prefix("require("))
+                {
+                    // `[^;()]*\)`: the argument holds no `;` or parenthesis.
+                    let close = call.find([';', '(', ')'])?;
+                    return call[close..].strip_prefix(')').map(|r| (r, true));
                 }
             }
         }
@@ -200,18 +248,18 @@ fn is_import_line(body: &str) -> bool {
     if let Some(rest) = s.strip_prefix("use") {
         let r = rest.trim_start();
         if r.len() < rest.len() {
-            // meat.ts's `use\s+[\w:]+;` has no end anchor, so trailing text
-            // after the `;` (e.g. `use std::io; // note`) still counts. Match
-            // that: require `[\w:]+;`, ignore anything after the semicolon.
-            if let Some(semi) = r.find(';') {
-                let path = &r[..semi];
-                if !path.is_empty() && path.chars().all(|c| is_word(c) || c == ':') {
-                    return true;
-                }
+            // `use\s+[\w:]+;` — the path must be followed by `;`.
+            let path_len = r
+                .chars()
+                .take_while(|c| is_word(*c) || *c == ':')
+                .map(char::len_utf8)
+                .sum::<usize>();
+            if path_len > 0 && r[path_len..].starts_with(';') {
+                return Some((&r[path_len..], true));
             }
         }
     }
-    false
+    None
 }
 
 /// Opens a multi-line import span: `^\s*(import\b|export\s+(type\s+)?\{)`.

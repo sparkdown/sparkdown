@@ -24,6 +24,7 @@ requests.
 - Agents: The shared editor context includes only the tabs of the machine the window is connected to, so local buffers are not sent to a remote host and remote ones are not shown locally.
 - Changes: The discard dialog, hunk headers and git output show direction and invisible Unicode characters as `<U+XXXX>` markers.
 - Diff: Removed or added lines whose text starts with `-- ` or `++ ` are no longer dropped from the rendered diff and its counts.
+- Diff: Reading mode folds a changed line as an import only when the whole line is an import, so code after the statement stays visible.
 
 ## [0.4.3] — 2026-11-13
 

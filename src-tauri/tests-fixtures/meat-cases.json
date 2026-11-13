@@ -65,6 +65,18 @@
     { "kind": "import", "lines": ["-import { a } from './a';", " import { b } from './b';", "-import { c } from './c';", "+import { a } from './a';", " import { d } from './d';", "+import { c } from './c';"] },
     { "kind": "substantive", "lines": ["-first();", "-second();", "+second();", "+first();"] },
     { "kind": "whitespace", "lines": ["-export function byPath(a: Entry, b: Entry): number {", "-  return a.path.localeCompare(b.path);", "+export function byPath( a: Entry, b: Entry ): number {", "+  return a.path.localeCompare( b.path );"] },
-    { "kind": "whitespace", "lines": ["-call(alpha, beta);", "+call(alpha,", "+     beta);"] }
+    { "kind": "whitespace", "lines": ["-call(alpha, beta);", "+call(alpha,", "+     beta);"] },
+
+    { "kind": "substantive", "lines": ["+import os; os.system(\"id\")"] },
+    { "kind": "substantive", "lines": ["+import(\"./x.js\").then(m => m.run())"] },
+    { "kind": "substantive", "lines": ["+import ('./x.js')"] },
+    { "kind": "substantive", "lines": ["+use std::process; run();"] },
+    { "kind": "substantive", "lines": ["+#include \"x.h\"; run();"] },
+    { "kind": "substantive", "lines": ["+from './x'; run();"] },
+    { "kind": "substantive", "lines": ["+export * from './x'; run();"] },
+    { "kind": "substantive", "lines": ["+const fs = require('fs'); run();"] },
+    { "kind": "substantive", "lines": ["+const fs = require('fs').run();"] },
+    { "kind": "import", "lines": ["+import x from 'x'; // note", "+const y = require('y');"] },
+    { "kind": "import", "lines": ["+import os, sys"] }
   ]
 }
