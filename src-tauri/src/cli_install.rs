@@ -260,16 +260,46 @@ pub fn user_bin_dirs() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// A scratch directory that no other test (or run) shares. The clock
+    /// alone is not enough: on macOS `SystemTime` ticks in microseconds, so
+    /// tests that start together can read the same value. The process id and a
+    /// counter make the name unique, and `create_dir` fails on a leftover
+    /// directory instead of adopting it.
     fn tmp() -> PathBuf {
         let n = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let p = std::env::temp_dir().join(format!("sd-cli-install-{n}"));
-        fs::create_dir_all(&p).unwrap();
-        p
+        tmp_at(n)
+    }
+
+    fn tmp_at(stamp: u128) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+            let p = std::env::temp_dir().join(format!(
+                "sd-cli-install-{}-{stamp}-{seq}",
+                std::process::id()
+            ));
+            match fs::create_dir(&p) {
+                Ok(()) => return p,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("could not create {}: {e}", p.display()),
+            }
+        }
+    }
+
+    #[test]
+    fn scratch_dirs_differ_even_with_the_same_clock_reading() {
+        let a = tmp_at(1_700_000_000_000_000_000);
+        let b = tmp_at(1_700_000_000_000_000_000);
+        assert_ne!(a, b);
+        assert!(a.is_dir() && b.is_dir());
+        let _ = fs::remove_dir_all(a);
+        let _ = fs::remove_dir_all(b);
     }
 
     fn touch(p: &Path) {
