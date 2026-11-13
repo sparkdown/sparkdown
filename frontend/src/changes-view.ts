@@ -711,7 +711,12 @@ function summarizeNoise(noise: ReadonlyArray<{ reason: NoiseReason }>): string {
 // --- Diff rendering ---------------------------------------------------------
 
 /** Is this line part of git's file-header preamble (dropped from the render —
- *  the panel already names the file)? */
+ *  the panel already names the file)? Only meaningful for lines that appear
+ *  BEFORE the first `@@` hunk header: inside a hunk body every line carries a
+ *  `+`, `-` or space marker and a content line such as `-- comment` is emitted
+ *  by git as `--- comment`, which would collide with the `--- ` / `+++ ` file
+ *  header tests. The caller must therefore only apply this to the preamble
+ *  section (see `stripPreamble`). */
 function isPreamble(line: string): boolean {
   return (
     line.startsWith('diff --git') ||
@@ -725,6 +730,31 @@ function isPreamble(line: string): boolean {
     line.startsWith('similarity ') ||
     line.startsWith('rename ')
   );
+}
+
+/** Split `diff` on newlines and drop git's file-header preamble, defined as
+ *  the lines BEFORE the first `@@` hunk header. Everything from the first
+ *  `@@` onward (headers and hunk bodies) is preserved verbatim so a content
+ *  line that happens to start with `-- ` or `++ ` (rendered by git as
+ *  `--- ...` / `+++ ...`) is never dropped. Lines inside the leading
+ *  preamble that do not match `isPreamble` (e.g. a stray blank) are kept so
+ *  nothing gets quietly discarded. */
+function stripPreamble(diff: string): string[] {
+  const lines = diff.split('\n');
+  let firstHunk = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith('@@')) {
+      firstHunk = i;
+      break;
+    }
+  }
+  if (firstHunk < 0) {
+    // No hunk header at all — the whole input is preamble/noise. Still filter
+    // the recognised header lines so a bare `diff --git` block renders empty.
+    return lines.filter((l) => !isPreamble(l));
+  }
+  const head = lines.slice(0, firstHunk).filter((l) => !isPreamble(l));
+  return head.concat(lines.slice(firstHunk));
 }
 
 /** Render one diff body line (add / del / context) to HTML. The +/− marker
@@ -816,7 +846,7 @@ export interface DiffSummary {
 }
 
 export function summarizeDiff(diff: string): DiffSummary {
-  const body = diff.split('\n').filter((l) => !isPreamble(l));
+  const body = stripPreamble(diff);
   const hunks = parseHunks(body).filter((h) => h.header);
   let adds = 0;
   let dels = 0;
@@ -879,7 +909,7 @@ export function renderUnifiedDiff(diff: string, opts: RenderDiffOptions = {}): s
   if (!diff.trim()) {
     return '<div class="diff-empty">No textual changes (binary file or identical).</div>';
   }
-  const body = diff.split('\n').filter((l) => !isPreamble(l));
+  const body = stripPreamble(diff);
   // A trailing newline in git's output is not a context line.
   if (body.length > 0 && body[body.length - 1] === '') body.pop();
   const hunks = parseHunks(body);
