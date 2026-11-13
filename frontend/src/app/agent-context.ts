@@ -124,8 +124,14 @@ export class AgentContextBridge {
     // enabled flag so its tools can answer "sharing is off" instead of
     // serving stale data.
     const enabled = this.ctx.config.agent_context_enabled && this.terminalEverOpened;
-    const tabs = this.ctx.tabs.getAllTabs();
-    const active = this.ctx.tabs.activeTab();
+    // Active machine only: the backend routes both the MCP snapshot and the
+    // file-bridge write by the current session, so a tab that belongs to
+    // another machine (its path or its unsaved text) is left out. A tab with
+    // no path belongs to the machine it was created on (`Tab.origin`).
+    const origin = this.ctx.tabs.getOrigin();
+    const tabs = this.ctx.tabs.tabsOfOrigin(origin);
+    const activeTab = this.ctx.tabs.activeTab();
+    const active = activeTab && activeTab.origin === origin ? activeTab : null;
     const liveContent = (t: { content: string }) =>
       t === active ? this.ctx.editor.getContent() : t.content;
 
@@ -168,7 +174,6 @@ export class AgentContextBridge {
 
     // Below: the file bridge (fallback for agents without MCP).
     if (!enabled) return;
-    const origin = this.ctx.tabs.getOrigin();
     this.publishedContextRoots.set(`${origin ?? ''}\0${root}`, { origin, root });
     let untitledSeq = 0;
     const shadowName = (t: { path: string | null; title: string }) =>
