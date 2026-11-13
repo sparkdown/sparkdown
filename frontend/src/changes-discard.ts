@@ -20,7 +20,7 @@
 import type { DiscardItem, DiscardRequest, DiscardResult, GitActionError, GitActionResult } from './api';
 import type { GitReporter } from './git-output';
 import { trapFocus } from './modal';
-import { escapeHtml, joinPath, normalizePathForCompare } from './utils';
+import { escapeHtml, escapeReviewText, hasUnicodeControls, joinPath, normalizePathForCompare } from './utils';
 
 export const REMOTE_DISCARD_REASON =
   "Discard isn't available in remote sessions yet. Use the terminal on the remote host.";
@@ -106,21 +106,35 @@ function actionLabel(it: DiscardItem): string {
 export function discardDialogHtml(items: DiscardItem[], dirty: DirtyTab[]): string {
   const n = items.length;
   const rows = items
-    .map(
-      (it) =>
-        `<li class="discard-item" data-path="${escapeHtml(it.path)}" data-action="${it.action}">` +
+    .map((it) => {
+      // `data-path` must stay the real repo-relative path so the row acts on
+      // the file git reported; the visible name and detail are rendered
+      // through `escapeReviewText` so a U+202E in the name cannot show one
+      // extension while the row discards another. Flag the row with the
+      // existing bidi warning class so the stylesheet / reviewer sees the
+      // name contains bidi or invisible characters.
+      const bidi =
+        hasUnicodeControls(it.path) || hasUnicodeControls(it.detail) ? ' change-row-bidi' : '';
+      return (
+        `<li class="discard-item${bidi}" data-path="${escapeHtml(it.path)}" data-action="${it.action}">` +
         `<span class="discard-action discard-action-${it.action}">${actionLabel(it)}</span> ` +
-        `<code class="discard-path">${escapeHtml(it.path)}</code>` +
-        `<small class="discard-detail">${escapeHtml(it.detail)}</small>` +
-        `</li>`,
-    )
+        `<code class="discard-path">${escapeReviewText(it.path)}</code>` +
+        `<small class="discard-detail">${escapeReviewText(it.detail)}</small>` +
+        `</li>`
+      );
+    })
     .join('');
   const dirtyHtml =
     dirty.length === 0
       ? ''
       : `<div class="discard-dirty" role="alert">` +
         `<p><strong>${dirty.length === 1 ? 'An open tab has' : `${dirty.length} open tabs have`} unsaved edits:</strong> ` +
-        dirty.map((d) => `<code>${escapeHtml(d.rel)}</code>`).join(', ') +
+        dirty
+          .map(
+            (d) =>
+              `<code${hasUnicodeControls(d.rel) ? ' class="change-row-bidi"' : ''}>${escapeReviewText(d.rel)}</code>`,
+          )
+          .join(', ') +
         `</p>` +
         `<label><input type="checkbox" class="discard-drop-buffers" /> Also drop the unsaved edits in ${dirty.length === 1 ? 'that tab' : 'those tabs'}</label>` +
         `<small>Unticked, the tabs keep your text and are marked as changed on disk.</small>` +

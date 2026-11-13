@@ -1,5 +1,5 @@
 import type { GitActionError, GitActionResult } from './api';
-import { escapeHtml } from './utils';
+import { escapeHtml, escapeReviewText } from './utils';
 
 /**
  * Git feedback outside the Changes view (0.4.1): a status-bar item and a
@@ -120,8 +120,8 @@ export class GitOutputLog {
           `<section class="git-output-entry" data-state="${e.state}" data-id="${e.id}">` +
           `<div class="git-output-head"><span class="git-output-time">${escapeHtml(time)}</span> ` +
           `<code class="git-output-cmd">$ ${escapeHtml(e.command)}</code> ` +
-          `<span class="git-output-msg">${escapeHtml(e.message)}</span></div>` +
-          (e.output ? `<pre class="git-output-text">${escapeHtml(e.output)}</pre>` : '') +
+          `<span class="git-output-msg">${escapeReviewText(e.message)}</span></div>` +
+          (e.output ? `<pre class="git-output-text">${escapeReviewText(e.output)}</pre>` : '') +
           `</section>`
         );
       })

@@ -313,6 +313,22 @@ describe('discard dialog', () => {
     expect(html).toContain('system Trash');
   });
 
+  it('shows direction and invisible characters in names as visible markers', () => {
+    const html = discardDialogHtml(
+      [{ ...item('docs/a\u202Egnp.md', 'revert'), detail: 'b\u200Bc' }],
+      [{ id: 't', path: '/repo/x', rel: 'n\u2066ame.md' }],
+    );
+    // Only the data attribute (the real path) keeps the raw character.
+    const visible = html.replace(/data-path="[^"]*"/g, '');
+    expect(visible).not.toMatch(/[\u202A-\u202E\u2066-\u2069\u200B-\u200F]/);
+    expect(html).toContain('a&lt;U+202E&gt;gnp.md');
+    expect(html).toContain('b&lt;U+200B&gt;c');
+    expect(html).toContain('n&lt;U+2066&gt;ame.md');
+    expect(html).toContain('change-row-bidi');
+    // The row still acts on the path git reported.
+    expect(html).toContain('data-path="docs/a\u202Egnp.md"');
+  });
+
   it('names the dirty tabs and the drop checkbox starts unticked', async () => {
     const p = showDiscardDialog([item('a.md', 'revert')], [{ id: 't', path: '/repo/a.md', rel: 'a.md' }]);
     const box = document.querySelector<HTMLInputElement>('.discard-drop-buffers')!;
