@@ -25,6 +25,7 @@ requests.
 - Changes: The discard dialog, hunk headers and git output show direction and invisible Unicode characters as `<U+XXXX>` markers.
 - Diff: Removed or added lines whose text starts with `-- ` or `++ ` are no longer dropped from the rendered diff and its counts.
 - Diff: Reading mode folds a changed line as an import only when the whole line is an import, so code after the statement stays visible.
+- Terminal: Clicking a path printed in the terminal opens it only when it is inside the open folder.
 
 ## [0.4.3] — 2026-11-13
 

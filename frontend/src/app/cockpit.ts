@@ -3,7 +3,7 @@ import { api } from '../api';
 import { LAYOUT } from '../constants';
 import { attachResizeDrag } from '../resize-drag';
 import { TypeAhead } from '../type-ahead';
-import { isAbsolutePath, joinPath } from '../utils';
+import { terminalPathTarget } from '../terminal-links';
 import { applyWorkspaceLayout, workspaceLayoutFromConfig } from '../workspace-layout';
 import type { AppContext } from './context';
 import type { TerminalLayout } from '../types/TerminalLayout';
@@ -355,27 +355,22 @@ export class CockpitController {
 
   /**
    * Open a path clicked in the terminal. Agent output usually prints paths
-   * relative to the working directory, so resolve against the folder root
-   * (and try the raw path as a fallback for absolute paths). Silently ignores
-   * paths that don't resolve to a readable file — a false-positive match on
+   * relative to the working directory, so resolve against the folder root.
+   * Paths outside the folder are ignored, as are paths that don't resolve to
+   * a readable file — a false-positive match on
    * ordinary output shouldn't pop errors.
    */
   private async openPathFromTerminal(path: string): Promise<void> {
     const root = this.ctx.fileTree.getRoot() ?? this.ctx.baseDir;
-    const candidates = isAbsolutePath(path)
-      ? [path]
-      : root
-        ? [joinPath(root, path.replace(/^\.\//, '')), path]
-        : [path];
-    for (const candidate of candidates) {
-      try {
-        const content = await api.readFile(candidate);
-        this.deps.closePristineUntitled();
-        this.ctx.tabs.openTab(candidate, content);
-        return;
-      } catch {
-        // try next candidate
-      }
+    // Only files inside the open folder: see terminalPathTarget.
+    const target = terminalPathTarget(path, root);
+    if (!target) return;
+    try {
+      const content = await api.readFile(target);
+      this.deps.closePristineUntitled();
+      this.ctx.tabs.openTab(target, content);
+    } catch {
+      // not a readable file: ignore
     }
   }
 }

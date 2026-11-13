@@ -5,6 +5,22 @@
  * (including wrap groups) and opens URLs only on an explicit click.
  */
 
+import { isAbsolutePath, isUnderRoot, joinPath } from './utils';
+
+/**
+ * The file a path token printed in a terminal should open: the token resolved
+ * against the workspace `root` (or taken as is when absolute), or null when it
+ * has a `..` segment, there is no root, or the result is outside the root.
+ * Terminal output is not under the user's control, so a link may only lead
+ * into the folder that is open.
+ */
+export function terminalPathTarget(token: string, root: string | null): string | null {
+  if (!root || !token) return null;
+  if (/(^|[\\/])\.\.([\\/]|$)/.test(token)) return null;
+  const target = isAbsolutePath(token) ? token : joinPath(root, token.replace(/^\.\//, ''));
+  return isUnderRoot(target, root) ? target : null;
+}
+
 /** Path-like tokens: optional ./, a slashed path with an extension, or a
  *  bare dotted filename. Conservative so ordinary prose stays unlinkable. */
 export const PATH_RE =

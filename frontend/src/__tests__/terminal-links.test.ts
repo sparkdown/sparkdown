@@ -4,6 +4,7 @@ import {
   indexToLinkRange,
   isSafeHttpUrl,
   linksForBufferRow,
+  terminalPathTarget,
   trimUrlMatch,
   type LinkBuffer,
 } from '../terminal-links';
@@ -109,5 +110,24 @@ describe('linksForBufferRow', () => {
 
   it('returns nothing for a missing row', () => {
     expect(linksForBufferRow(buffer([]), 0)).toEqual([]);
+  });
+});
+
+describe('terminalPathTarget', () => {
+  it('resolves relative tokens against the folder and keeps absolute ones inside it', () => {
+    expect(terminalPathTarget('src/a.ts', '/work/proj')).toBe('/work/proj/src/a.ts');
+    expect(terminalPathTarget('./README.md', '/work/proj')).toBe('/work/proj/README.md');
+    expect(terminalPathTarget('/work/proj/src/a.ts', '/work/proj')).toBe('/work/proj/src/a.ts');
+    expect(terminalPathTarget('C:\\work\\proj\\a.ts', 'C:\\work\\proj')).toBe('C:\\work\\proj\\a.ts');
+  });
+
+  it('refuses tokens that leave the folder or have no folder to stay in', () => {
+    expect(terminalPathTarget('../../.ssh/id_rsa.pub', '/work/proj')).toBeNull();
+    expect(terminalPathTarget('src/../../x.ts', '/work/proj')).toBeNull();
+    expect(terminalPathTarget('/etc/hosts.conf', '/work/proj')).toBeNull();
+    expect(terminalPathTarget('/work/project2/a.ts', '/work/proj')).toBeNull();
+    expect(terminalPathTarget('C:\\other\\a.ts', 'C:\\work\\proj')).toBeNull();
+    expect(terminalPathTarget('src/a.ts', null)).toBeNull();
+    expect(terminalPathTarget('', '/work/proj')).toBeNull();
   });
 });
