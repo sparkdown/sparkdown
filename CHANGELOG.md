@@ -19,6 +19,7 @@ requests.
 - Git: The background fetch is skipped when the upstream remote or a remote URL uses a command or file transport, in any spelling; only https, http, ssh, git and file transports are allowed.
 - Git: Status, diff, commit and discard stop when the repository config places the work tree outside the folder that holds the checkout.
 - CLI (macOS): The `sparkdown` command opens the app bundle it belongs to by path, not by the name "SparkDown".
+- Preview: A file opened straight from your home folder no longer lets every image below it load in the preview.
 
 ## [0.4.3] — 2026-11-13
 
