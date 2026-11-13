@@ -478,6 +478,16 @@
   text-overflow: ellipsis;
 }
 
+/* Marks a hunk that is only re-indented, so it reads as low-noise. */
+.diff-hunk-note {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  font-style: italic;
+  color: var(--text-subtle);
+}
+
 .diff-open-line {
   flex-shrink: 0;
   padding: 0;

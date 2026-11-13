@@ -4,6 +4,7 @@ import {
   partitionChanges,
   noiseReasonLabel,
   abridgeHunks,
+  isIndentChangeOnly,
   parseHunks,
   type DiffHunk,
   type NoiseReason,
@@ -872,6 +873,11 @@ export interface RenderDiffOptions {
  *  "Open in editor") and its lines. */
 function renderHunk(hunk: DiffHunk, opts: RenderDiffOptions): string {
   const out: string[] = ['<section class="diff-hunk">'];
+  // Reading mode keeps a re-indented hunk visible; say it is only whitespace.
+  const note =
+    (opts.reading ?? true) && isIndentChangeOnly(hunk)
+      ? '<span class="diff-hunk-note">whitespace only</span>'
+      : '';
   if (hunk.header) {
     const h = parseHunkHeader(hunk.header);
     const line = firstChangedLine(hunk);
@@ -883,12 +889,14 @@ function renderHunk(hunk: DiffHunk, opts: RenderDiffOptions): string {
     }
     out.push(
       `<div class="diff-hunk-head"><span class="diff-hunk-label" title="${escapeReviewText(hunk.header)}">${escapeReviewText(label)}</span>` +
+        note +
         (opts.openInEditor !== false && h
           ? `<button type="button" class="diff-open-line" data-line="${line}">Open in editor</button>`
           : '') +
         `</div>`,
     );
   }
+  if (!hunk.header && note) out.push(`<div class="diff-hunk-head">${note}</div>`);
   for (const line of hunk.lines) out.push(renderDiffLine(line));
   out.push('</section>');
   return out.join('');
