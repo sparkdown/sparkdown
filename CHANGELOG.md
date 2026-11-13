@@ -16,6 +16,7 @@ requests.
 - SSH: Output from a failed remote command is shown as command output and no longer selects SparkDown's host-key messages.
 - Remote: The agent context and MCP shim folders on the host must be plain directories owned by your account; otherwise nothing is written there.
 - Remote: Preview images on a remote host must be inside the window's folder.
+- Git: The background fetch is skipped when the upstream remote or a remote URL uses a command or file transport, in any spelling; only https, http, ssh, git and file transports are allowed.
 
 ## [0.4.3] — 2026-11-13
 

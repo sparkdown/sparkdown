@@ -872,6 +872,8 @@ fn repo_config_has_exec_keys(root: &Path, extra: ExtraEnv) -> bool {
         }
     }
 
+    // `--null` frames each entry as `key\nvalue\0`, so a value that starts
+    // with a line break cannot hide its scheme on a line of its own.
     fn check_urls(root: &str, scope: &str, extra: ExtraEnv) -> Result<bool, ()> {
         let mut url_cmd = crate::proc::command(crate::git::git_bin());
         url_cmd
@@ -886,6 +888,7 @@ fn repo_config_has_exec_keys(root: &Path, extra: ExtraEnv) -> bool {
                 "config",
                 scope,
                 "--includes",
+                "--null",
                 "--get-regexp",
                 r"^remote\..*\.url$",
             ]);
@@ -909,14 +912,10 @@ fn repo_config_has_exec_keys(root: &Path, extra: ExtraEnv) -> bool {
             return Err(());
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let line = line.trim();
-            if let Some((_key, url)) = line.split_once(char::is_whitespace) {
-                let url = url.trim();
-                if url.starts_with("ext::") || url.starts_with("fd::") || url.starts_with("file://")
-                {
-                    return Ok(true);
-                }
+        for record in stdout.split('\0') {
+            let value = record.split_once('\n').map_or("", |(_, v)| v);
+            if fetch_url_needs_skip(value) {
+                return Ok(true);
             }
         }
         Ok(false)
@@ -932,6 +931,26 @@ fn repo_config_has_exec_keys(root: &Path, extra: ExtraEnv) -> bool {
     false
 }
 
+/// Should a configured fetch URL (or a branch's `remote` value, which git
+/// also accepts as a URL) stop the background fetch? Yes when it starts with
+/// whitespace or holds a control character, since a prefix test cannot place
+/// it, or when it names a command or local-file transport. The scheme is
+/// compared without regard to case.
+fn fetch_url_needs_skip(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    if value.starts_with(char::is_whitespace) || value.chars().any(char::is_control) {
+        return true;
+    }
+    let head: String = value
+        .chars()
+        .take(8)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    head.starts_with("ext::") || head.starts_with("fd::") || head.starts_with("file://")
+}
+
 /// Quietly fetch the current branch's upstream remote so the behind count
 /// is current (#175). Local repos with an upstream only; no tags, no prune,
 /// no submodules. Never prompts: on top of the runner's
@@ -945,6 +964,9 @@ pub(crate) fn fetch_impl(root: &str, extra: ExtraEnv) -> Result<FetchOutcome, Gi
         return Ok(FetchOutcome::Skipped);
     }
     let up = upstream(&root, extra)?;
+    if fetch_url_needs_skip(&up.remote) {
+        return Ok(FetchOutcome::Skipped);
+    }
     let mut env: Vec<(&str, &str)> = vec![("GIT_ASKPASS", ""), ("SSH_ASKPASS", "")];
     env.extend_from_slice(extra);
     let neutralisers = crate::git::local_exec_neutralisers(&root)
@@ -961,28 +983,35 @@ pub(crate) fn fetch_impl(root: &str, extra: ExtraEnv) -> Result<FetchOutcome, Gi
     for (k, v) in &env {
         cmd.env(k, v);
     }
-    cmd.env("GIT_CONFIG_COUNT", (neutralisers.len() + 5).to_string());
+    // Fixed overrides after the neutralisers. Transports are an allow list:
+    // everything is refused except the ones named here, so a transport name
+    // spelled in another case is refused too.
+    let fixed: [(&str, &str); 9] = [
+        ("credential.interactive", "false"),
+        ("core.fsmonitor", "false"),
+        ("core.hooksPath", "/dev/null"),
+        ("protocol.allow", "never"),
+        ("protocol.https.allow", "always"),
+        ("protocol.http.allow", "always"),
+        ("protocol.ssh.allow", "always"),
+        ("protocol.git.allow", "always"),
+        ("protocol.file.allow", "always"),
+    ];
+    cmd.env(
+        "GIT_CONFIG_COUNT",
+        (neutralisers.len() + fixed.len()).to_string(),
+    );
     for (i, (key, value)) in neutralisers.iter().enumerate() {
         cmd.env(format!("GIT_CONFIG_KEY_{i}"), key);
         cmd.env(format!("GIT_CONFIG_VALUE_{i}"), value);
     }
-    let base_idx = neutralisers.len();
-    cmd.env(
-        format!("GIT_CONFIG_KEY_{base_idx}"),
-        "credential.interactive",
-    );
-    cmd.env(format!("GIT_CONFIG_VALUE_{base_idx}"), "false");
-    cmd.env(format!("GIT_CONFIG_KEY_{}", base_idx + 1), "core.fsmonitor");
-    cmd.env(format!("GIT_CONFIG_VALUE_{}", base_idx + 1), "false");
-    cmd.env(format!("GIT_CONFIG_KEY_{}", base_idx + 2), "core.hooksPath");
-    cmd.env(format!("GIT_CONFIG_VALUE_{}", base_idx + 2), "/dev/null");
-    cmd.env(format!("GIT_CONFIG_KEY_{}", base_idx + 3), "protocol.allow");
-    cmd.env(format!("GIT_CONFIG_VALUE_{}", base_idx + 3), "user");
-    cmd.env(
-        format!("GIT_CONFIG_KEY_{}", base_idx + 4),
-        "protocol.ext.allow",
-    );
-    cmd.env(format!("GIT_CONFIG_VALUE_{}", base_idx + 4), "never");
+    for (i, (key, value)) in fixed.iter().enumerate() {
+        cmd.env(format!("GIT_CONFIG_KEY_{}", neutralisers.len() + i), key);
+        cmd.env(
+            format!("GIT_CONFIG_VALUE_{}", neutralisers.len() + i),
+            value,
+        );
+    }
     cmd.args([
         "fetch",
         "--quiet",
@@ -2422,6 +2451,52 @@ mod tests {
         sb.commit_in(&other, "up.md", "up\n", "upstream");
         sb.git(&other, &["push", "-q"]);
         assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Fetched);
+    }
+
+    fn set_config(sb: &Sandbox, key: &str, value: &str) {
+        sb.git(&sb.work, &["config", "--local", key, value]);
+    }
+
+    #[test]
+    fn fetch_skips_when_the_branch_remote_is_a_command_or_file_url() {
+        for value in ["file:///tmp/other", "ext::sh -c 'echo ext'", "fd::17"] {
+            let sb = sandbox();
+            let env = sb.env();
+            set_config(&sb, "branch.main.remote", value);
+            assert_eq!(
+                fetch_impl(&root(&sb), &env).unwrap(),
+                FetchOutcome::Skipped,
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn fetch_skips_url_schemes_written_in_other_case() {
+        let sb = sandbox();
+        let env = sb.env();
+        set_config(&sb, "remote.origin.url", "EXT::sh -c 'echo ext'");
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn fetch_skips_url_that_starts_with_a_line_break() {
+        let sb = sandbox();
+        let env = sb.env();
+        set_config(&sb, "remote.origin.url", "\next::sh -c 'echo ext'");
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn fetch_url_check_accepts_ordinary_urls() {
+        assert!(!fetch_url_needs_skip(""));
+        assert!(!fetch_url_needs_skip("origin"));
+        assert!(!fetch_url_needs_skip("https://example.com/a.git"));
+        assert!(!fetch_url_needs_skip("git@example.com:a/b.git"));
+        assert!(!fetch_url_needs_skip("../sibling"));
+        assert!(fetch_url_needs_skip(" https://example.com/a.git"));
+        assert!(fetch_url_needs_skip("https://example.com/\u{7}a"));
+        assert!(fetch_url_needs_skip("File:///etc"));
     }
 
     #[test]
