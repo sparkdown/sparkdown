@@ -20,7 +20,7 @@
 import type { DiscardItem, DiscardRequest, DiscardResult, GitActionError, GitActionResult } from './api';
 import type { GitReporter } from './git-output';
 import { trapFocus } from './modal';
-import { escapeHtml, escapeReviewText, hasUnicodeControls, joinPath, normalizePathForCompare } from './utils';
+import { escapeAttr, escapeHtml, escapeReviewText, hasUnicodeControls, joinPath, normalizePathForCompare } from './utils';
 
 export const REMOTE_DISCARD_REASON =
   "Discard isn't available in remote sessions yet. Use the terminal on the remote host.";
@@ -116,7 +116,7 @@ export function discardDialogHtml(items: DiscardItem[], dirty: DirtyTab[]): stri
       const bidi =
         hasUnicodeControls(it.path) || hasUnicodeControls(it.detail) ? ' change-row-bidi' : '';
       return (
-        `<li class="discard-item${bidi}" data-path="${escapeHtml(it.path)}" data-action="${it.action}">` +
+        `<li class="discard-item${bidi}" data-path="${escapeAttr(it.path)}" data-action="${it.action}">` +
         `<span class="discard-action discard-action-${it.action}">${actionLabel(it)}</span> ` +
         `<code class="discard-path">${escapeReviewText(it.path)}</code>` +
         `<small class="discard-detail">${escapeReviewText(it.detail)}</small>` +

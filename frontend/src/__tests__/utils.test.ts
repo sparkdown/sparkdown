@@ -9,6 +9,7 @@ import {
   basename,
   parentDir,
   escapeHtml,
+  escapeAttr,
   neutralizeUnicodeControls,
   hasUnicodeControls,
   escapeReviewText,
@@ -156,6 +157,15 @@ describe('escapeHtml', () => {
 
   it('leaves plain text untouched', () => {
     expect(escapeHtml('plain text')).toBe('plain text');
+  });
+});
+
+describe('escapeAttr', () => {
+  it('writes CR, LF and TAB as numeric references and escapes like escapeHtml', () => {
+    expect(escapeAttr('a\rb')).toBe('a&#13;b');
+    expect(escapeAttr('a\nb')).toBe('a&#10;b');
+    expect(escapeAttr('a\tb')).toBe('a&#9;b');
+    expect(escapeAttr('<"x">&')).toBe(escapeHtml('<"x">&'));
   });
 });
 

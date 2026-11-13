@@ -1,5 +1,5 @@
 import { api, type GitActionError, type GitActionResult, type GitBranchStatus, type GitChange } from './api';
-import { escapeHtml } from './utils';
+import { escapeAttr, escapeHtml } from './utils';
 import type { GitAction, GitReporter } from './git-output';
 import { fetchedAgo } from './git-fetch';
 
@@ -264,7 +264,7 @@ export class GitActions {
     this.dom.files.innerHTML = this.changes
       .map(
         (c) =>
-          `<label class="git-file" title="${escapeHtml(c.path)}"><input type="checkbox" data-path="${escapeHtml(c.path)}"${this.excluded.has(c.path) ? '' : ' checked'} /> <span>${escapeHtml(c.path)}</span></label>`,
+          `<label class="git-file" title="${escapeHtml(c.path)}"><input type="checkbox" data-path="${escapeAttr(c.path)}"${this.excluded.has(c.path) ? '' : ' checked'} /> <span>${escapeHtml(c.path)}</span></label>`,
       )
       .join('');
   }

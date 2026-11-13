@@ -97,6 +97,18 @@ describe('ChangesView review queue', () => {
     expect(listEl.querySelectorAll('.change-row-noise').length).toBe(2);
   });
 
+  it('a file name with CR or TAB keeps its exact path on the row', async () => {
+    const odd = 'docs/a\rb\tc.md';
+    files.push([odd, 'modified']);
+    try {
+      const { cv, listEl } = setup();
+      await cv.refresh();
+      expect(rowPaths(listEl)).toContain(odd);
+    } finally {
+      files.pop();
+    }
+  });
+
   it('↓/↑ move and open; Space marks reviewed and opens the next pending', async () => {
     const { cv, listEl, opened, pending } = setup();
     await cv.refresh();

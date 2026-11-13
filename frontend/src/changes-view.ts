@@ -1,5 +1,5 @@
 import { api, type ChangeStat, type GitChange } from './api';
-import { escapeHtml, escapeReviewText, hasUnicodeControls } from './utils';
+import { escapeAttr, escapeHtml, escapeReviewText, hasUnicodeControls } from './utils';
 import {
   partitionChanges,
   noiseReasonLabel,
@@ -642,7 +642,7 @@ export class ChangesView {
       // actually tracks; the visible name/dir are rendered through
       // `escapeReviewText` so a U+202E in the name cannot show one extension
       // while the row opens / discards another.
-      `<div class="${rowCls}" role="option" aria-selected="false" data-path="${escapeHtml(c.path)}" data-status="${c.status}" title="${escapeReviewText(title)}">` +
+      `<div class="${rowCls}" role="option" aria-selected="false" data-path="${escapeAttr(c.path)}" data-status="${c.status}" title="${escapeReviewText(title)}">` +
       `<span class="change-check" role="checkbox" aria-checked="${reviewed}" aria-label="Reviewed" title="${reviewed ? 'Mark as pending' : 'Mark reviewed (Space)'}">${reviewed ? CHECK_SVG : ''}</span>` +
       `<span class="change-badge change-${c.status}">${STATUS_LETTER[c.status]}</span>` +
       `<span class="change-file"><b class="change-name">${escapeReviewText(name)}</b>` +
