@@ -44,6 +44,13 @@ describe('renderUnifiedDiff', () => {
     expect(html).toContain('hello');
   });
 
+  it('shows direction characters in a hunk header as visible markers', () => {
+    const diff = ['@@ -1 +1 @@ fn a\u202Eb()', '-x', '+y'].join('\n');
+    const html = renderUnifiedDiff(diff);
+    expect(html).not.toMatch(/[\u202A-\u202E\u2066-\u2069\u200B-\u200F]/);
+    expect(html).toContain('&lt;U+202E&gt;');
+  });
+
   it('escapes HTML in diff content (no injection)', () => {
     const diff = ['@@ -1 +1 @@', '+<script>alert(1)</script>'].join('\n');
     const html = renderUnifiedDiff(diff);

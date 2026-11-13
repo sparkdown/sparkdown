@@ -852,7 +852,7 @@ function renderHunk(hunk: DiffHunk, opts: RenderDiffOptions): string {
       label = where ? `${where} · line ${line}` : `line ${line}`;
     }
     out.push(
-      `<div class="diff-hunk-head"><span class="diff-hunk-label" title="${escapeHtml(hunk.header)}">${escapeHtml(label)}</span>` +
+      `<div class="diff-hunk-head"><span class="diff-hunk-label" title="${escapeReviewText(hunk.header)}">${escapeReviewText(label)}</span>` +
         (opts.openInEditor !== false && h
           ? `<button type="button" class="diff-open-line" data-line="${line}">Open in editor</button>`
           : '') +

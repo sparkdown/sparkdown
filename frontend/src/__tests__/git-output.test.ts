@@ -63,4 +63,12 @@ describe('GitFeedback', () => {
     fb.fail('push', { kind: 'other', message: 'x', detail: '<img src=x onerror=alert(1)>' });
     expect(out.querySelector('img')).toBeNull();
   });
+
+  it('shows direction characters in git output as visible markers', () => {
+    const { fb, out } = make();
+    fb.start('push');
+    fb.fail('push', { kind: 'other', message: 'm\u202Ex', detail: 'file\u202Egnp.md' });
+    expect(out.textContent).not.toMatch(/[\u202A-\u202E\u2066-\u2069\u200B-\u200F]/);
+    expect(out.textContent).toContain('<U+202E>');
+  });
 });
