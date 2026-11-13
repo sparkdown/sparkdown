@@ -3092,9 +3092,20 @@ Host *.example.com
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let agent = dir.join("fakeagent");
+        // The script forks its watchdog right after starting the agent and
+        // stops it when the agent exits. A watchdog stopped before it has
+        // finished starting can miss that signal and run out its whole timer,
+        // which the script then reports as a timeout. Under CPU load an agent
+        // that exits instantly makes that likely; real agents run far longer.
+        // So `ok` and `fail` first wait until this run's watchdog (a sibling
+        // process of the agent that already has a running `sleep`) is up.
         std::fs::write(
             &agent,
-            "#!/bin/sh\ncase \"$1\" in ok) echo added;; fail) echo 'Error: bad config' >&2; exit 3;; hang) sleep 60;; esac\n",
+            "#!/bin/sh\n\
+             wait_watchdog() { n=0; while [ $n -lt 100 ]; do\n\
+             for c in $(pgrep -P $PPID); do [ \"$c\" = \"$$\" ] && continue; pgrep -x -P \"$c\" sleep >/dev/null 2>&1 && return; done\n\
+             sleep 0.1; n=$((n + 1)); done; }\n\
+             case \"$1\" in ok) wait_watchdog; echo added;; fail) wait_watchdog; echo 'Error: bad config' >&2; exit 3;; hang) sleep 60;; esac\n",
         )
         .unwrap();
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
