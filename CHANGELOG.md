@@ -10,6 +10,7 @@ requests.
 ### Fixed
 
 - Build no longer warns about mixed static/dynamic imports of `@tauri-apps/api/webviewWindow`.
+- MCP: `sparkdown_list_windows` answers with the same refusal as every other tool while editor context sharing is switched off.
 
 ## [0.4.3] — 2026-11-13
 

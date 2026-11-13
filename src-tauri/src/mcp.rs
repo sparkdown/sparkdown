@@ -2937,9 +2937,6 @@ fn call_tool(app: &AppHandle, state: &Arc<McpState>, params: &Value) -> Result<V
         .and_then(Value::as_str)
         .ok_or("missing tool name")?;
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
-    if name == "sparkdown_list_windows" {
-        return Ok(list_windows_result());
-    }
     let snap = state.snapshot_of(&crate::windows::current_label());
     if let Some(result) = snapshot_tool(&snap, name, &args) {
         return Ok(result);
@@ -3018,6 +3015,7 @@ fn snapshot_tool(snap: &Snapshot, name: &str, args: &Value) -> Option<Value> {
             })
             .to_string(),
         ),
+        "sparkdown_list_windows" => list_windows_result(),
         _ => return None,
     })
 }
@@ -3823,6 +3821,20 @@ mod tests {
         }
         // Enabled: tools that need the app are left to the caller.
         assert!(snapshot_tool(&snap(), "sparkdown_edit_buffer", &json!({})).is_none());
+    }
+
+    #[test]
+    fn list_windows_answers_only_while_context_sharing_is_on() {
+        let (err, text) = call(&snap(), "sparkdown_list_windows", json!({}));
+        assert!(!err, "{text}");
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert!(v["windows"].is_array(), "{text}");
+        let mut off = snap();
+        off.enabled = false;
+        let (err, text) = call(&off, "sparkdown_list_windows", json!({}));
+        assert!(err);
+        assert!(text.contains("switched off"), "{text}");
+        assert!(!text.contains("windows"), "{text}");
     }
 
     #[test]
