@@ -2706,20 +2706,21 @@ impl Conn {
     }
 }
 
-/// A connection with no window: everything but tool calls works; tool
-/// calls (except listing windows) answer the routing error.
+/// Whether a request on a connection with no window is answered with the
+/// routing error: every `tools/call`, whatever the tool.
+fn refused_when_unrouted(msg: &Value) -> bool {
+    msg.get("method").and_then(Value::as_str) == Some("tools/call")
+}
+
+/// A connection with no window: everything but tool calls works; every tool
+/// call answers the routing error.
 fn dispatch_unrouted(
     app: &AppHandle,
     state: &Arc<McpState>,
     msg: &Value,
     err: &str,
 ) -> Option<Value> {
-    let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
-    let name = msg
-        .pointer("/params/name")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if method == "tools/call" && name != "sparkdown_list_windows" {
+    if refused_when_unrouted(msg) {
         let id = msg.get("id").cloned()?;
         return Some(rpc_result(
             id,
@@ -3413,6 +3414,21 @@ mod tests {
         );
         // A client with no hello (old shim / remote bridge) is a terminal.
         assert_eq!(resolve_route(&one, None, false).unwrap(), "w-only");
+    }
+
+    #[test]
+    fn unrouted_connections_refuse_every_tool_call() {
+        for name in ["sparkdown_get_context", "sparkdown_list_windows"] {
+            let call = json!({
+                "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                "params": { "name": name, "arguments": {} }
+            });
+            assert!(refused_when_unrouted(&call), "{name}");
+        }
+        for method in ["initialize", "tools/list", "ping"] {
+            let msg = json!({ "jsonrpc": "2.0", "id": 1, "method": method });
+            assert!(!refused_when_unrouted(&msg), "{method}");
+        }
     }
 
     #[test]
