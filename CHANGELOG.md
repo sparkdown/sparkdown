@@ -26,6 +26,24 @@ requests.
 - Diff: Removed or added lines whose text starts with `-- ` or `++ ` are no longer dropped from the rendered diff and its counts.
 - Diff: Reading mode folds a changed line as an import only when the whole line is an import, so code after the statement stays visible.
 - Terminal: Clicking a path printed in the terminal opens it only when it is inside the open folder.
+### Improved
+
+- **Diff view** shows direction and invisible characters in the discard dialog, in hunk headers and in git messages. Lines that start with `-- ` or `++ ` are no longer dropped, and the Reading view no longer folds code that follows an import on the same line, or a changed indent, as formatting only.
+- **Changes** and Discard keep file names that contain line breaks or tabs exactly as they are.
+- **Git** skips the background fetch for repositories set up to fetch through a command or a file, and ftp is no longer used for it. Status, diff, commit and discard stop with a message when a repository's config puts its work tree outside the folder that holds the checkout.
+- **Agents**: the window list follows the editor context setting like every other tool, a connection that is not tied to a window gets the same routing message for every tool, and the shared editor context covers only the tabs of the machine the window is connected to.
+- **Preview** treats the same path on another machine as a different document, and a file opened straight from your home folder no longer lets every image below it load.
+- **Remote (SSH)**: failed remote commands show their output as plain output. Preview images must be inside the open folder, and the folders SparkDown uses on the host must be plain folders owned by your account.
+- **macOS**: the `sparkdown` command opens the app it came with instead of any app named SparkDown.
+- **Updates**: a downloaded update stays in place until you install it, and is checked once more right before it is installed.
+- SparkDown's own preferences, session, review state and log files are readable only by you. Files you save keep your usual permissions.
+
+### Changed
+
+- **Terminal**: file paths in terminal output open with Ctrl+click (Cmd+click on macOS), like web links. Only files inside the open folder are shown as links.
+- **Remote (SSH)**: new hosts always show the fingerprint prompt, whatever `StrictHostKeyChecking` says in `~/.ssh/config`.
+- **Remote (SSH)**: SparkDown's own background ssh connections no longer forward your SSH agent or X11, even if `~/.ssh/config` asks for it. The terminal keeps using your own ssh config.
+- **Diff view** (Reading mode): a changed leading indent now stays visible instead of being folded as formatting, marked "whitespace only".
 
 ## [0.4.3] — 2026-11-13
 
