@@ -11,6 +11,7 @@ requests.
 
 - Build no longer warns about mixed static/dynamic imports of `@tauri-apps/api/webviewWindow`.
 - MCP: `sparkdown_list_windows` answers with the same refusal as every other tool while editor context sharing is switched off.
+- MCP: A connection that SparkDown did not route to a window gets the routing message for every tool call, including `sparkdown_list_windows`.
 
 ## [0.4.3] — 2026-11-13
 
