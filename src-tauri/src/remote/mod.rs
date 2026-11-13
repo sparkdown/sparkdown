@@ -1776,6 +1776,10 @@ pub(crate) fn strip_job_noise(stderr: &str) -> String {
 /// and take PATH after a marker, so rc output cannot corrupt it. With
 /// `setsid` (Linux) the CLI gets its own process group and the watchdog
 /// kills the whole group; without it (macOS), the CLI and its children.
+/// The signal traps are cleared while the watchdog is forked, so the stop sent
+/// when the CLI exits early cannot be swallowed by a handler the watchdog
+/// inherited before it finished starting (that left the script waiting out
+/// the whole timer and reporting a timeout).
 pub(crate) fn remote_agent_cli_script(cmd_line: &str, bin: &str, secs: u64) -> String {
     let bin = shell_quote(bin);
     format!(
@@ -1806,8 +1810,10 @@ pub(crate) fn remote_agent_cli_script(cmd_line: &str, bin: &str, secs: u64) -> S
          if command -v setsid >/dev/null 2>&1; then sd_g=1; setsid {cmd_line} </dev/null & else sd_g=; {cmd_line} </dev/null & fi\n\
          sd_c=$!\n\
          sd_kill() {{ if [ -n \"$sd_g\" ]; then kill -$1 -$sd_c; else pkill -$1 -P $sd_c; kill -$1 $sd_c; fi; }} 2>/dev/null\n\
+         trap - INT TERM HUP\n\
          ( sleep {secs}; (set -C; umask 077; : > \"$sd_t\") 2>/dev/null; sd_kill TERM; sleep 2; sd_kill KILL ) </dev/null >/dev/null 2>&1 &\n\
          sd_w=$!\n\
+         trap sd_rm_cwd INT TERM HUP\n\
          wait $sd_c; sd_s=$?\n\
          kill $sd_w 2>/dev/null; wait $sd_w 2>/dev/null\n\
          if [ -e \"$sd_t\" ]; then rm -f -- \"$sd_t\"; rmdir -- \"$sd_d\" 2>/dev/null; echo {CLI_TIMEOUT_MARK} >&2; exit 124; fi\n\
