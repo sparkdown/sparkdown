@@ -1321,6 +1321,9 @@ pub fn terminal_command(
     let dir = cwd.filter(|d| !d.is_empty()).unwrap_or(&sess.path);
     let launch = launch.filter(|s| !s.is_empty());
     let mut cmd = CommandBuilder::new("ssh");
+    for opt in ssh::hostkey_check_options() {
+        cmd.arg(opt);
+    }
     // Reuse the session's SSH control (mux) connection so new terminals open
     // in channel-setup time instead of a full SSH handshake.
     for opt in mux_options() {
@@ -2219,6 +2222,31 @@ Host *.example.com
             .windows(2)
             .any(|w| w == ["-o", "PreferredAuthentications=publickey"]));
         assert_eq!(argv.last().unwrap(), "dev");
+    }
+
+    #[test]
+    fn ssh_calls_set_host_key_checking_on_the_command_line() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let argv = ssh_argv("dev");
+        assert!(argv
+            .windows(2)
+            .any(|w| w == ["-o", "StrictHostKeyChecking=yes"]));
+        let hosts = parse_ssh_config("Host dev\n  IdentityFile ~/.ssh/id\n");
+        disconnect_now();
+        connect_with(&hosts, "dev", "~/proj", |_h, _c| {
+            Ok("/local/home/u/proj\n/local/home/u\n".into())
+        })
+        .unwrap();
+        let (cmd, _) = terminal_command(Some("/proj"), None, None).unwrap();
+        let argv: Vec<String> = cmd
+            .get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(argv
+            .windows(2)
+            .any(|w| w == ["-o", "StrictHostKeyChecking=yes"]));
+        disconnect_now();
     }
 
     #[test]
