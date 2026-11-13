@@ -15,9 +15,9 @@
 //! - Windows: a named pipe whose DACL allows only the current user (and
 //!   SYSTEM), the same descriptor as the MCP pipe.
 //!
-//! The helper presents a random nonce passed in its environment
-//! (`SPARKDOWN_ASKPASS_TOKEN`): the broker mints a fresh nonce for every ssh
-//! child it spawns and tracks attempt counts per nonce. A given nonce stays
+//! The helper presents a random ticket passed in its environment
+//! (`SPARKDOWN_ASKPASS_TOKEN`): the broker mints a fresh ticket for every ssh
+//! child it spawns and tracks attempt counts per ticket. A given ticket stays
 //! valid for the ssh child's lifetime with a small attempt cap, so a
 //! wrong-passphrase retry works. On Unix the broker also verifies the peer
 //! uid matches the running app.
@@ -46,7 +46,7 @@ use zeroize::Zeroizing;
 
 /// Env var naming the broker's IPC endpoint (also the askpass-mode switch).
 pub const ENV_IPC: &str = "SPARKDOWN_ASKPASS_IPC";
-/// Env var carrying the helper's per-connection nonce (fresh per ssh spawn,
+/// Env var carrying the helper's per-connection ticket (fresh per ssh spawn,
 /// valid for the ssh session with a small attempt cap).
 pub const ENV_TOKEN: &str = "SPARKDOWN_ASKPASS_TOKEN";
 
@@ -57,16 +57,16 @@ const MAX_LEN: usize = 4096;
 /// A repeat ask for the same key this soon after an answer is ssh retrying a
 /// wrong passphrase: drop the cached one and ask the user again.
 const RETRY_WINDOW: Duration = Duration::from_secs(15);
-/// A minted nonce is accepted at most this long after it was handed to an
+/// A minted ticket is accepted at most this long after it was handed to an
 /// ssh child. Matches the helper's IPC read timeout: if ssh hasn't invoked
 /// the askpass helper within this window, it never will.
-const NONCE_TTL: Duration = Duration::from_secs(300);
-/// A hard cap on outstanding (unconsumed, unexpired) nonces.
-const MAX_NONCES: usize = 32;
-/// A given nonce is accepted at most this many times. Allows a
+const TICKET_TTL: Duration = Duration::from_secs(300);
+/// A hard cap on outstanding (unconsumed, unexpired) tickets.
+const MAX_TICKETS: usize = 32;
+/// A given ticket is accepted at most this many times. Allows a
 /// wrong-passphrase retry (OpenSSH invokes the askpass helper again in the
 /// same ssh process after a wrong answer).
-const MAX_NONCE_ATTEMPTS: usize = 5;
+const MAX_TICKET_ATTEMPTS: usize = 5;
 
 // --- Prompt classifier ------------------------------------------------------
 
@@ -184,7 +184,7 @@ fn read_exact_vec<R: Read>(r: &mut R, len: usize) -> Option<Zeroizing<Vec<u8>>> 
 ///
 /// Implementations are platform-specific: on Unix, SO_PEERCRED gives the
 /// peer's effective uid; on Windows the pipe DACL restricts callers to the
-/// current user. The per-connection nonce is the primary check; this one
+/// current user. The per-connection ticket is the primary check; this one
 /// is an additional condition on the caller.
 trait PeerVerify {
     fn verify_peer(&self, broker: &Broker) -> bool;
@@ -222,7 +222,7 @@ impl PeerVerify for interprocess::local_socket::Stream {
         // The pipe's DACL already restricts callers to the current user +
         // SYSTEM; a stricter per-request check would require a HANDLE we
         // don't currently expose from `interprocess`. Leave the per-connection
-        // nonce as the authoritative check for now.
+        // ticket as the authoritative check for now.
         true
     }
 }
@@ -289,9 +289,9 @@ fn serve_request<S: Read + Write>(stream: &mut S, broker: &Broker) {
     else {
         return reply_no(stream);
     };
-    // A nonce is valid for one session. `take_nonce` validates the nonce
+    // A ticket is valid for one session. `take_ticket` validates the ticket
     // and enforces the attempt cap.
-    if !broker.take_nonce(token) {
+    if !broker.take_ticket(token) {
         return reply_no(stream);
     }
     let Some(len) = len.parse::<usize>().ok() else {
@@ -414,19 +414,19 @@ pub struct Broker {
     endpoint: PathBuf,
     /// Session-scoped entropy source: used to name the private endpoint
     /// directory (Unix) and the pipe (Windows). It is *not* accepted as a
-    /// wire token; the broker accepts only per-connection nonces from helpers
-    /// (see `nonces`, `mint_nonce`, `take_nonce`).
+    /// wire token; the broker accepts only per-connection tickets from helpers
+    /// (see `tickets`, `mint_ticket`, `take_ticket`).
     #[allow(dead_code)]
     token: Zeroizing<String>,
     helper_exe: PathBuf,
     provider: Provider,
     cache: Mutex<HashMap<String, CachedPass>>,
-    /// Outstanding nonces minted by `ssh_env` (visible in the environment of
-    /// exactly one ssh child), with (mint time, attempt count). A nonce stays
+    /// Outstanding tickets minted by `ssh_env` (visible in the environment of
+    /// exactly one ssh child), with (mint time, attempt count). A ticket stays
     /// valid for the ssh child's lifetime with a small attempt cap, so a
     /// wrong-passphrase retry works. Expired entries and those over the cap
     /// are discarded.
-    nonces: Mutex<HashMap<String, (Instant, usize)>>,
+    tickets: Mutex<HashMap<String, (Instant, usize)>>,
     /// Tests: make the peer check refuse every connection.
     #[cfg(test)]
     refuse_peers: std::sync::atomic::AtomicBool,
@@ -473,7 +473,7 @@ impl Broker {
             helper_exe,
             provider,
             cache: Mutex::new(HashMap::new()),
-            nonces: Mutex::new(HashMap::new()),
+            tickets: Mutex::new(HashMap::new()),
             #[cfg(test)]
             refuse_peers: std::sync::atomic::AtomicBool::new(false),
             cancelled: std::sync::atomic::AtomicBool::new(false),
@@ -513,16 +513,16 @@ impl Broker {
 
     /// Environment for an ssh child that may need the key passphrase.
     ///
-    /// Mints a fresh nonce for this ssh invocation and stores it in the
-    /// broker's accept-set. The nonce is valid for one session with a
+    /// Mints a fresh ticket for this ssh invocation and stores it in the
+    /// broker's accept-set. The ticket is valid for one session with a
     /// small attempt cap.
     pub fn ssh_env(&self) -> Vec<(&'static str, std::ffi::OsString)> {
-        let nonce = self.mint_nonce();
+        let ticket = self.mint_ticket();
         let mut env = vec![
             ("SSH_ASKPASS", self.helper_exe.clone().into_os_string()),
             ("SSH_ASKPASS_REQUIRE", "force".into()),
             (ENV_IPC, self.endpoint.clone().into_os_string()),
-            (ENV_TOKEN, nonce.into()),
+            (ENV_TOKEN, ticket.into()),
         ];
         // OpenSSH before 8.4 ignores SSH_ASKPASS_REQUIRE and only uses the
         // askpass program when DISPLAY is set (any value; it is not opened).
@@ -535,16 +535,16 @@ impl Broker {
         env
     }
 
-    /// Mint a fresh nonce and record it in the accept-set with zero attempts.
+    /// Mint a fresh ticket and record it in the accept-set with zero attempts.
     ///
-    /// Also GCs expired entries and enforces `MAX_NONCES` by dropping the
+    /// Also GCs expired entries and enforces `MAX_TICKETS` by dropping the
     /// oldest.
-    fn mint_nonce(&self) -> String {
+    fn mint_ticket(&self) -> String {
         let fresh = new_token();
-        if let Ok(mut g) = self.nonces.lock() {
+        if let Ok(mut g) = self.tickets.lock() {
             let now = Instant::now();
-            g.retain(|_, (t, _)| now.duration_since(*t) < NONCE_TTL);
-            while g.len() >= MAX_NONCES {
+            g.retain(|_, (t, _)| now.duration_since(*t) < TICKET_TTL);
+            while g.len() >= MAX_TICKETS {
                 // Drop the oldest entry; HashMap has no ordering so pick
                 // the min by mint time explicitly.
                 let oldest = g
@@ -564,20 +564,20 @@ impl Broker {
     }
 
     /// Check and increment the attempt count for `got` if it is a known,
-    /// unexpired nonce under the attempt cap.
+    /// unexpired ticket under the attempt cap.
     ///
     /// Comparison is constant-time against each candidate (the live set is
-    /// at most `MAX_NONCES`, with ~typical size 1–2). Returns true and
-    /// increments the attempt count on match; removes the nonce when the cap
-    /// is reached. A given ssh child's nonce stays valid for retry (OpenSSH
+    /// at most `MAX_TICKETS`, with ~typical size 1–2). Returns true and
+    /// increments the attempt count on match; removes the ticket when the cap
+    /// is reached. A given ssh child's ticket stays valid for retry (OpenSSH
     /// invokes the helper again after a wrong passphrase).
-    fn take_nonce(&self, got: &str) -> bool {
-        let Ok(mut g) = self.nonces.lock() else {
+    fn take_ticket(&self, got: &str) -> bool {
+        let Ok(mut g) = self.tickets.lock() else {
             return false;
         };
         let now = Instant::now();
         // Expire first so a stale match cannot succeed.
-        g.retain(|_, (t, _)| now.duration_since(*t) < NONCE_TTL);
+        g.retain(|_, (t, _)| now.duration_since(*t) < TICKET_TTL);
         let hit = g
             .keys()
             .find(|k| tokens_match(k.as_bytes(), got.as_bytes()))
@@ -585,7 +585,7 @@ impl Broker {
         if let Some(k) = hit {
             let (mint_time, attempts) = g.get(&k).copied().unwrap();
             let new_attempts = attempts + 1;
-            if new_attempts >= MAX_NONCE_ATTEMPTS {
+            if new_attempts >= MAX_TICKET_ATTEMPTS {
                 g.remove(&k);
             } else {
                 g.insert(k, (mint_time, new_attempts));
@@ -928,7 +928,7 @@ mod tests {
     fn broker_answers_with_the_right_token_only() {
         let (b, asked) = test_broker(Some("s3cret pass"));
         let prompt = "Enter passphrase for key '/k/id': ";
-        let got = request(&mut connect(&b), &b.mint_nonce(), prompt).unwrap();
+        let got = request(&mut connect(&b), &b.mint_ticket(), prompt).unwrap();
         assert_eq!(&got[..], b"s3cret pass");
         assert_eq!(*asked.lock().unwrap(), vec!["/k/id".to_string()]);
         // Wrong token: refused, and the user is not asked.
@@ -950,7 +950,7 @@ mod tests {
             "Are you sure you want to continue connecting (yes/no)? ",
         ] {
             assert!(
-                request(&mut connect(&b), &b.mint_nonce(), prompt).is_none(),
+                request(&mut connect(&b), &b.mint_ticket(), prompt).is_none(),
                 "{prompt}"
             );
         }
@@ -966,9 +966,9 @@ mod tests {
     fn broker_caches_for_the_session_but_re_asks_after_a_wrong_passphrase() {
         let (b, asked) = test_broker(Some("pw"));
         let prompt = "Enter passphrase for key '/k/id': ";
-        request(&mut connect(&b), &b.mint_nonce(), prompt).unwrap();
+        request(&mut connect(&b), &b.mint_ticket(), prompt).unwrap();
         // An immediate repeat is ssh retrying: ask the user again.
-        request(&mut connect(&b), &b.mint_nonce(), prompt).unwrap();
+        request(&mut connect(&b), &b.mint_ticket(), prompt).unwrap();
         // #52: the second prompt is flagged so the dialog says "incorrect".
         assert_eq!(
             *asked.lock().unwrap(),
@@ -978,7 +978,7 @@ mod tests {
         if let Ok(mut c) = b.cache.lock() {
             c.get_mut("/k/id").unwrap().1 = None;
         }
-        request(&mut connect(&b), &b.mint_nonce(), prompt).unwrap();
+        request(&mut connect(&b), &b.mint_ticket(), prompt).unwrap();
         assert_eq!(asked.lock().unwrap().len(), 2);
     }
 
@@ -993,7 +993,7 @@ mod tests {
         assert_eq!(sock_mode & 0o777, 0o600);
         assert!(request(
             &mut connect(&b),
-            &b.mint_nonce(),
+            &b.mint_ticket(),
             "Enter passphrase for /k: "
         )
         .is_none());
@@ -1011,11 +1011,11 @@ mod tests {
     }
 
     #[test]
-    fn ssh_env_mints_a_fresh_per_connection_nonce() {
+    fn ssh_env_mints_a_fresh_per_connection_ticket() {
         let (b, _) = test_broker(Some("never-in-env"));
         let env1 = b.ssh_env();
         let env2 = b.ssh_env();
-        // Each spawn gets a distinct nonce.
+        // Each spawn gets a distinct ticket.
         let n1 = env1
             .iter()
             .find(|(k, _)| *k == ENV_TOKEN)
@@ -1026,7 +1026,7 @@ mod tests {
             .find(|(k, _)| *k == ENV_TOKEN)
             .map(|(_, v)| v.clone())
             .unwrap();
-        assert_ne!(n1, n2, "ssh_env must mint a fresh nonce per spawn");
+        assert_ne!(n1, n2, "ssh_env must mint a fresh ticket per spawn");
         // And neither is the static session token (which only names the
         // private endpoint dir and is never a valid wire credential).
         let session_token: std::ffi::OsString = b.token.as_str().into();
@@ -1053,74 +1053,74 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn nonce_stays_valid_for_wrong_passphrase_retry() {
-        // A given ssh child keeps one nonce in its environment. OpenSSH
+    fn ticket_stays_valid_for_wrong_passphrase_retry() {
+        // A given ssh child keeps one ticket in its environment. OpenSSH
         // invokes the askpass helper again in the same process after a wrong
-        // passphrase; the second request must succeed with the same nonce.
+        // passphrase; the second request must succeed with the same ticket.
         let (b, _) = test_broker(Some("pw"));
-        let nonce = b.mint_nonce();
+        let ticket = b.mint_ticket();
         let prompt = "Enter passphrase for key '/k/id': ";
         // First request succeeds.
-        request(&mut connect(&b), &nonce, prompt).unwrap();
-        // Second request with the same nonce also succeeds (retry).
-        request(&mut connect(&b), &nonce, prompt).unwrap();
+        request(&mut connect(&b), &ticket, prompt).unwrap();
+        // Second request with the same ticket also succeeds (retry).
+        request(&mut connect(&b), &ticket, prompt).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
-    fn nonce_is_refused_after_attempt_cap() {
-        // A nonce is accepted at most MAX_NONCE_ATTEMPTS times.
+    fn ticket_is_refused_after_attempt_cap() {
+        // A ticket is accepted at most MAX_TICKET_ATTEMPTS times.
         let (b, _) = test_broker(Some("pw"));
-        let nonce = b.mint_nonce();
+        let ticket = b.mint_ticket();
         let prompt = "Enter passphrase for key '/k/id': ";
         // Use up the cap.
-        for _ in 0..MAX_NONCE_ATTEMPTS {
+        for _ in 0..MAX_TICKET_ATTEMPTS {
             assert!(
-                request(&mut connect(&b), &nonce, prompt).is_some(),
+                request(&mut connect(&b), &ticket, prompt).is_some(),
                 "within cap"
             );
         }
         // The next attempt is refused.
         assert!(
-            request(&mut connect(&b), &nonce, prompt).is_none(),
+            request(&mut connect(&b), &ticket, prompt).is_none(),
             "over cap"
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn an_expired_nonce_is_refused() {
+    fn an_expired_ticket_is_refused() {
         let (b, _) = test_broker(Some("pw"));
         let prompt = "Enter passphrase for key '/k/id': ";
-        let nonce = b.mint_nonce();
-        let Some(old) = Instant::now().checked_sub(NONCE_TTL + Duration::from_secs(1)) else {
+        let ticket = b.mint_ticket();
+        let Some(old) = Instant::now().checked_sub(TICKET_TTL + Duration::from_secs(1)) else {
             return;
         };
-        b.nonces.lock().unwrap().insert(nonce.clone(), (old, 0));
+        b.tickets.lock().unwrap().insert(ticket.clone(), (old, 0));
         assert!(
-            request(&mut connect(&b), &nonce, prompt).is_none(),
-            "a nonce older than the lifetime must be refused"
+            request(&mut connect(&b), &ticket, prompt).is_none(),
+            "a ticket older than the lifetime must be refused"
         );
-        assert!(b.nonces.lock().unwrap().get(&nonce).is_none());
+        assert!(b.tickets.lock().unwrap().get(&ticket).is_none());
     }
 
     #[cfg(unix)]
     #[test]
-    fn minting_past_the_cap_drops_the_oldest_nonce() {
+    fn minting_past_the_cap_drops_the_oldest_ticket() {
         let (b, _) = test_broker(Some("pw"));
         let prompt = "Enter passphrase for key '/k/id': ";
-        let first = b.mint_nonce();
+        let first = b.mint_ticket();
         if let Some(t) = Instant::now().checked_sub(Duration::from_secs(10)) {
-            b.nonces.lock().unwrap().insert(first.clone(), (t, 0));
+            b.tickets.lock().unwrap().insert(first.clone(), (t, 0));
         }
         let mut last = String::new();
-        for _ in 0..MAX_NONCES {
-            last = b.mint_nonce();
+        for _ in 0..MAX_TICKETS {
+            last = b.mint_ticket();
         }
-        assert!(b.nonces.lock().unwrap().len() <= MAX_NONCES);
+        assert!(b.tickets.lock().unwrap().len() <= MAX_TICKETS);
         assert!(
             request(&mut connect(&b), &first, prompt).is_none(),
-            "the oldest nonce is dropped once the cap is reached"
+            "the oldest ticket is dropped once the cap is reached"
         );
         assert!(request(&mut connect(&b), &last, prompt).is_some());
     }
@@ -1149,13 +1149,13 @@ mod tests {
     fn listener_answers_no_when_the_peer_check_refuses() {
         let (b, _) = test_broker(Some("pw"));
         let prompt = "Enter passphrase for key '/k/id': ";
-        let nonce = b.mint_nonce();
-        assert!(request(&mut connect(&b), &nonce, prompt).is_some());
+        let ticket = b.mint_ticket();
+        assert!(request(&mut connect(&b), &ticket, prompt).is_some());
         b.refuse_peers
             .store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(
-            request(&mut connect(&b), &nonce, prompt).is_none(),
-            "a refused peer must not get an answer even with a valid nonce"
+            request(&mut connect(&b), &ticket, prompt).is_none(),
+            "a refused peer must not get an answer even with a valid ticket"
         );
     }
 }
