@@ -454,6 +454,43 @@ describe('markdown sanitizer', () => {
       expect(renderCount).toBe(1);
     });
 
+    it('clears lastRendered when only the machine changes', () => {
+      const pane = new PreviewPane(new EventBus());
+      const container = document.createElement('div');
+      pane.init(container);
+
+      let origin: string | null = null;
+      pane.setPathResolver(() => '/p/x.html');
+      pane.setOriginResolver(() => origin);
+      pane.setRenderMode('/p/x.html');
+      pane['lastRendered'] = '<html><body>local</body></html>';
+
+      // Same path on another machine is another document.
+      origin = 'devbox';
+      pane.setRenderMode('/p/x.html');
+      expect(pane['lastRendered']).toBeNull();
+    });
+
+    it('does not re-render cached markup when the machine differs from where it came from', () => {
+      const pane = new PreviewPane(new EventBus());
+      const container = document.createElement('div');
+      pane.init(container);
+
+      let renderCount = 0;
+      pane['renderImmediate'] = async () => {
+        renderCount++;
+      };
+      let origin: string | null = null;
+      pane.setPathResolver(() => '/p/x.html');
+      pane.setOriginResolver(() => origin);
+      pane.setRenderMode('/p/x.html');
+      pane['lastRendered'] = '<html><body>local</body></html>';
+
+      origin = 'devbox';
+      pane.setAllowScripts(true, '/p/x.html');
+      expect(renderCount).toBe(0);
+    });
+
     it('clears lastRendered when path changes', () => {
       const pane = new PreviewPane(new EventBus());
       const container = document.createElement('div');

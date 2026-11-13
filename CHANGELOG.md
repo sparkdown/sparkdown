@@ -20,6 +20,7 @@ requests.
 - Git: Status, diff, commit and discard stop when the repository config places the work tree outside the folder that holds the checkout.
 - CLI (macOS): The `sparkdown` command opens the app bundle it belongs to by path, not by the name "SparkDown".
 - Preview: A file opened straight from your home folder no longer lets every image below it load in the preview.
+- Preview: A file with the same path on another machine is treated as a different document when HTML scripts are switched on or off.
 
 ## [0.4.3] — 2026-11-13
 
