@@ -23,6 +23,7 @@ requests.
 - Preview: A file with the same path on another machine is treated as a different document when HTML scripts are switched on or off.
 - Agents: The shared editor context includes only the tabs of the machine the window is connected to, so local buffers are not sent to a remote host and remote ones are not shown locally.
 - Changes: The discard dialog, hunk headers and git output show direction and invisible Unicode characters as `<U+XXXX>` markers.
+- Diff: Removed or added lines whose text starts with `-- ` or `++ ` are no longer dropped from the rendered diff and its counts.
 
 ## [0.4.3] — 2026-11-13
 

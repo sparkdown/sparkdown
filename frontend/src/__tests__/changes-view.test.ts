@@ -89,6 +89,35 @@ describe('renderUnifiedDiff', () => {
     expect((html.match(/diff-add/g) || []).length).toBe(1);
     expect((html.match(/diff-del/g) || []).length).toBe(1);
   });
+
+  it('keeps hunk-body lines whose content starts with "-- " or "++ "', () => {
+    // git emits a removed `-- comment` line as `--- comment` in the hunk
+    // body and an added `++ marker` line as `+++ marker`. These must NOT be
+    // treated as file-header preamble — they are real content and have to
+    // show up in both Reading and Full mode and be counted in the summary.
+    const diff = [
+      'diff --git a/x.sql b/x.sql',
+      '--- a/x.sql',
+      '+++ b/x.sql',
+      '@@ -1,3 +1,3 @@',
+      ' SELECT 1;',
+      '--- DROP TABLE users;',
+      '+++ added marker',
+      ' keep',
+    ].join('\n');
+    const full = renderUnifiedDiff(diff, { reading: false });
+    expect(full).toContain('DROP TABLE users;');
+    expect(full).toContain('added marker');
+    expect((full.match(/diff-del/g) || []).length).toBe(1);
+    expect((full.match(/diff-add/g) || []).length).toBe(1);
+    // The file-header `--- a/x.sql` / `+++ b/x.sql` preamble is still dropped.
+    expect(full).not.toContain('a/x.sql');
+    expect(full).not.toContain('b/x.sql');
+    const reading = renderUnifiedDiff(diff, { reading: true });
+    expect(reading).toContain('DROP TABLE users;');
+    expect(reading).toContain('added marker');
+    expect(summarizeDiff(diff)).toEqual({ hunks: 1, adds: 1, dels: 1, firstLine: 2 });
+  });
 });
 
 describe('hunk helpers (open in editor, hunk labels)', () => {
