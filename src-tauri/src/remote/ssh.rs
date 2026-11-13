@@ -227,12 +227,31 @@ pub fn shell_quote(s: &str) -> String {
     out
 }
 
-/// Host-key checking option for every ssh call SparkDown makes. It goes on
-/// the command line, which ssh ranks above `~/.ssh/config`, so a
-/// `StrictHostKeyChecking no` or `accept-new` line there cannot add or accept
-/// a key without the fingerprint confirmation that `hostkey.rs` shows first.
+/// Host-key option for every ssh connection SparkDown opens, the interactive
+/// terminal included. It goes on the command line, which ssh ranks above
+/// `~/.ssh/config`, so a `StrictHostKeyChecking no` or `accept-new` line there
+/// cannot add or accept a key without the fingerprint confirmation that
+/// `hostkey.rs` shows first.
 pub(crate) fn hostkey_check_options() -> [&'static str; 2] {
     ["-o", "StrictHostKeyChecking=yes"]
+}
+
+/// Fixed options for SparkDown's own background and agent-tool ssh calls: the
+/// host-key option plus `ForwardAgent=no` and `ForwardX11=no`, so a
+/// `ForwardAgent yes` or `ForwardX11 yes` line in `~/.ssh/config` does not hand
+/// the local agent or display to the remote host from these calls. The
+/// interactive terminal keeps the user's own ssh config for forwarding.
+///
+/// `CheckHostIP` is left at the user's setting.
+pub(crate) fn background_options() -> [&'static str; 6] {
+    [
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        "ForwardAgent=no",
+        "-o",
+        "ForwardX11=no",
+    ]
 }
 
 /// argv[0..] for an SSH call: BatchMode so we never prompt for a password.
@@ -257,7 +276,7 @@ pub(crate) fn ssh_argv(host: &str) -> Vec<String> {
         "-o".into(),
         "PubkeyAuthentication=yes".into(),
     ];
-    argv.extend(hostkey_check_options().map(String::from));
+    argv.extend(background_options().map(String::from));
     argv.push(host.into());
     argv
 }
@@ -1091,7 +1110,7 @@ fn run_with_deadline(
 /// The ssh command line for one remote script (see [`ssh_exec`]).
 fn ssh_exec_command(dest: &[String], sh_arg: &str) -> std::process::Command {
     let mut cmd = crate::proc::command("ssh");
-    cmd.args(hostkey_check_options());
+    cmd.args(background_options());
     cmd.args(mux_options());
     // #27: with a session askpass broker, ssh may ask SparkDown for a KEY
     // passphrase (BatchMode=no is required for askpass), and can never ask
@@ -1107,9 +1126,6 @@ fn ssh_exec_command(dest: &[String], sh_arg: &str) -> std::process::Command {
                 "PasswordAuthentication=no",
                 "-o",
                 "KbdInteractiveAuthentication=no",
-                // DISPLAY may be a placeholder for old ssh (see ssh_env).
-                "-o",
-                "ForwardX11=no",
             ]);
         }
         None => {
@@ -1551,6 +1567,13 @@ mod exec_tests {
         assert_eq!(args[at - 1], "-o");
         let dest = args.iter().position(|a| a == "dev").unwrap();
         assert!(at < dest, "{args:?}");
+        for opt in ["ForwardAgent=no", "ForwardX11=no"] {
+            let o = args.iter().position(|a| a == opt).expect(opt);
+            assert_eq!(args[o - 1], "-o");
+            assert!(o < dest, "{args:?}");
+            assert_eq!(args.iter().filter(|a| *a == opt).count(), 1, "{args:?}");
+        }
+        assert!(!args.iter().any(|a| a.starts_with("CheckHostIP")));
     }
 
     #[test]
