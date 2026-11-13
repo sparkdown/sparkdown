@@ -6,44 +6,31 @@ All notable user-visible changes to SparkDown. The format follows
 requests.
 
 ## [0.4.3] — 2026-11-13
-- Terminal: Quote the agent server path in the Claude launch line.
-- Files: Check that the opened file is a regular file and cap the read.
-- Preview: Bind HTML script execution to the confirmed document.
-- Preview: Key Mermaid diagram and fenced-code caches on exact source text.
-- Preview: Restrict preview images to the workspace folder.
-- Markdown: Include reference-link definitions in chunk cache key.
-- Diff: Show Unicode bidirectional and invisible control characters.
-- Preview: Optimize preview search match filtering.
-- Search: Bound fuzzy-path matching steps.
-- Markdown: Cache reference-link definition parsing.
-- Read-only git operations no longer trigger hooks from the repository.
-- Git diff operations now timeout after 20 seconds and reject special file types.
-- Filter and diff driver enumeration now covers included config and worktree scope.
-- Filter and diff driver config is applied via environment variables to handle names containing special characters.
-- Remote git operations over SSH apply filter and diff driver neutralization.
-- Read-only git operations block partial clone lazy fetches and protocol execution.
-- Background fetch is skipped for repositories whose config sets commands.
-- Remote: Delete and create operations verify paths resolve inside the window's folder on the host.
-- Remote: Agent CLI watchdog creates timeout marker directory with exclusive permissions.
-- SSH: Host-key trust flow checks all known_hosts files before scanning.
-- SSH: Passphrase broker uses per-connection nonces and verifies peer credentials.
-- MCP: sparkdown_forward is restricted to the core local socket and needs a per-launch nonce; each window's forwarded socket needs a per-window token.
-- Remote MCP on SSH hosts requires Python 3 on the remote host. Terminals opened before an app restart need to be reopened for MCP to work.
-- Files: Saving over an existing file stages the new contents in an owner-only temporary file until the data is written.
-- Updater: The update check downloads its manifest into a per-run directory that only the current user can open.
-- Terminal: Pasting from the clipboard uses bracketed-paste markers when the shell enables them.
-- Release: The release gate fails on missing binaries and on multi-line default feature lists.
-- Release: The macOS updater tarball is signed in a separate step, under its final asset name.
-- Updater: Artifact URLs must be under the release download prefix, the signature must name the artifact being installed, and AppImage payloads must be ELF files.
-- Windows: The external-agent pipe has a random name and a per-launch handshake, and the shim checks the pipe's server process before connecting.
-- Windows: The per-window label tag is a 128-bit keyed hash, and a socket in use by another process is never replaced.
-- Agents: Changes to the editor-context and background-fetch preferences take effect in every window immediately.
-- Agents: CLI checks and agent detection run in a per-call working directory, and executable lookup ignores relative PATH entries.
-- CLI: Forwarding a command line to a running window checks the peer user and requires a well-formed acknowledgement.
+
+Fixes and reliability improvements on top of 0.4.2.
+
+### Improved
+
+- **Diff view** handles invisible and bidirectional characters better.
+- **Search** is faster and more reliable, including preview search and fuzzy file matching in large folders.
+- **Preview** stays in sync with the document: diagrams, code blocks, and reference-style links update when the text changes, and images load from the open folder.
+- **Git** diffs time out after 20 seconds and skip special file types, with the same behaviour locally and over SSH. Viewing changes no longer runs hooks from the repository or triggers extra fetches in a partial clone. Settings from included config and worktrees are picked up correctly, including names with unusual characters.
+- Changes to **editor context** and **background fetch** in Settings apply in every window right away.
+
+### Fixed
+
+- Pasting in the terminal is treated as text when the shell supports it, so a multi-line paste is not run as separate commands.
+- Saving a file writes the new contents completely before replacing the old one. Opening unusual or very large files is handled more reliably.
+- Creating and deleting files on a remote host stays inside the open folder. Remote connections check all of your known_hosts files when confirming the host, and the SSH key passphrase prompt is tied to that connection.
+- JavaScript in an HTML preview stays with that document. Starting Claude from the terminal handles unusual paths correctly.
+- The `sparkdown` command only talks to a window running as you, and waits for a clear reply. Agent tools talk only to the window they belong to; on Windows, external agents connect to the right running app, and SparkDown will not replace a path another process is already using.
+- SparkDown finds installed agents from your PATH without depending on the current folder, and will not run an agent from a relative path. Background fetch is skipped when a repository's git config customizes how fetch runs.
+- Update checks use a fresh folder for each run, and only install the official build that matches the release.
 
 ### Changed
 
-- **MCP socket folder location** (Unix): on Linux without `XDG_RUNTIME_DIR` set, the socket moves from `/tmp/sparkdown/mcp.sock` to `~/.cache/sparkdown/mcp.sock`. The folder is created with mode 0700 and verified to be owned by your user and not a symlink before binding or connecting. macOS is unchanged (still the per-user `$TMPDIR/sparkdown`), and Linux with `XDG_RUNTIME_DIR` set is unchanged. Terminal sessions started before the upgrade will need to be restarted to reconnect to the new socket location.
+- **Agent tools on Linux** without `XDG_RUNTIME_DIR` now use `~/.cache/sparkdown` instead of `/tmp/sparkdown`. macOS is unchanged (still the per-user `$TMPDIR/sparkdown`), and Linux with `XDG_RUNTIME_DIR` set is unchanged. Terminals started before the upgrade need to be restarted to reconnect.
+- **Agent tools on a remote (SSH) host** need Python 3 on that host. Terminals that were already open need to be reopened after this upgrade.
 
 ## [0.4.2] — 2026-11-09
 
