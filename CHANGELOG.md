@@ -26,6 +26,10 @@ Fixes and reliability improvements on top of 0.4.2.
 - The `sparkdown` command only talks to a window running as you, and waits for a clear reply. Agent tools talk only to the window they belong to; on Windows, external agents connect to the right running app, and SparkDown will not replace a path another process is already using.
 - SparkDown finds installed agents from your PATH without depending on the current folder, and will not run an agent from a relative path. Background fetch is skipped when a repository's git config customizes how fetch runs.
 - Update checks use a fresh folder for each run, and only install the official build that matches the release.
+- **Saving while you type** writes the text the editor holds when the write starts, and a save you made yourself no longer makes the next Save ask whether to overwrite. The explorer no longer flashes the row of a file you just saved.
+- The **status bar** shows the cursor position of the file you open or switch to, and of a new file.
+- A **folder in the explorer** stays open when you click it twice quickly or the list refreshes while it loads, and one failed refresh no longer closes the folders you have open.
+- **Terminal:** keys typed right after opening it go to the terminal, in order, instead of the editor or getting lost while the shell starts.
 
 ### Changed
 
