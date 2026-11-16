@@ -774,6 +774,61 @@ describe('App integration', () => {
     });
   });
 
+  describe('status bar caret position', () => {
+    const cursorText = () => document.getElementById('status-cursor')!.textContent;
+    const openDoc = async (path: string) => {
+      emitTauriEvent(MENU.OPEN_FILE_PATH, { path });
+      await flush();
+    };
+    const clickTab = async (title: string) => {
+      Array.from(document.querySelectorAll<HTMLElement>('.tab'))
+        .find((el) => el.querySelector('.tab-title')?.textContent === title)!
+        .querySelector<HTMLElement>('.tab-title')!
+        .click();
+      await flush();
+    };
+
+    it('shows the caret of the tab that is loaded, switched to, or newly created', async () => {
+      vfs.set('/docs/a.md', 'line one\nline two is longer\nline three');
+      vfs.set('/docs/b.md', 'short');
+      await startApp();
+      await openDoc('/docs/a.md');
+      const view = await editorView();
+      view.dispatch({ selection: { anchor: view.state.doc.length } });
+      await flush();
+      expect(cursorText()).toBe('Ln 3, Col 11');
+
+      // A freshly loaded file starts at its top, not at the previous caret.
+      await openDoc('/docs/b.md');
+      expect(activeTitle()).toBe('b.md');
+      expect(cursorText()).toBe('Ln 1, Col 1');
+
+      // Switching back restores the caret that tab had.
+      await clickTab('a.md');
+      expect(cursorText()).toBe('Ln 3, Col 11');
+
+      // A new empty buffer starts at Ln 1, Col 1.
+      emitTauriEvent(MENU.NEW_FILE);
+      await flush();
+      expect(activeTitle()).toBe('Untitled');
+      expect(cursorText()).toBe('Ln 1, Col 1');
+    });
+
+    it('shows Ln 1, Col 1 again on the welcome screen', async () => {
+      vfs.set('/docs/a.md', 'one\ntwo');
+      await startApp();
+      await openDoc('/docs/a.md');
+      const view = await editorView();
+      view.dispatch({ selection: { anchor: view.state.doc.length } });
+      await flush();
+      expect(cursorText()).toBe('Ln 2, Col 4');
+      document.querySelectorAll<HTMLElement>('.tab .tab-close').forEach((el) => el.click());
+      await flush();
+      expect(document.querySelectorAll('.tab').length).toBe(0);
+      expect(cursorText()).toBe('Ln 1, Col 1');
+    });
+  });
+
   describe('files changed on disk (agent writes)', () => {
     const fsChange = async (path: string, kind = 'modify') => {
       emitTauriEvent('watcher://changes', [{ path, kind }]);
