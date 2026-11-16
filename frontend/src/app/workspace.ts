@@ -18,7 +18,7 @@ const MAX_RECENT_FOLDERS = 8;
 export interface WorkspaceDeps {
   documents: Pick<
     DocumentController,
-    'openFilesInOrder' | 'blockLocalPathWhileRemote' | 'closePristineUntitled' | 'isSaving'
+    'openFilesInOrder' | 'blockLocalPathWhileRemote' | 'closePristineUntitled' | 'isSaving' | 'wroteRecently'
   >;
   panes: Pick<PaneController, 'renderPreview' | 'setBaseDir'>;
   diff: Pick<
@@ -269,7 +269,12 @@ export class WorkspaceController {
       this.debouncedTreeRefresh();
     }
     // Flash the changed files in the explorer so agent activity is visible.
-    this.ctx.fileTree.markChanged(changes.map((c) => c.path));
+    // Our own save is not agent activity: it must not flash its own row.
+    this.ctx.fileTree.markChanged(
+      changes
+        .filter((c) => !(c.kind === 'modify' && this.deps.documents.wroteRecently(c.path)))
+        .map((c) => c.path),
+    );
     // Keep the Changes list live if it's showing; otherwise just the badge.
     this.deps.diff.refreshSoon();
 

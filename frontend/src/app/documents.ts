@@ -48,9 +48,24 @@ export class DocumentController {
     private readonly deps: DocumentDeps,
   ) {}
 
+  /** When we last wrote each path ourselves (ms since epoch). */
+  private ownWrites = new Map<string, number>();
+
   /** True while save() is writing this tab (see syncTabWithDisk). */
   isSaving(tabId: string): boolean {
     return this.savesInFlight.has(tabId);
+  }
+
+  /** True when this app wrote `path` within the last `withinMs`: the watcher
+   *  event for that write is our own save, not someone else's edit. */
+  wroteRecently(path: string, withinMs = 3000): boolean {
+    const at = this.ownWrites.get(path);
+    return at !== undefined && Date.now() - at < withinMs;
+  }
+
+  private async writeOwn(path: string, content: string): Promise<void> {
+    await api.writeFile(path, content);
+    this.ownWrites.set(path, Date.now());
   }
 
   async openFile(path: string): Promise<void> {
@@ -193,7 +208,7 @@ export class DocumentController {
         // meanwhile are not in the text taken above. Take it again right
         // before the write so the file gets what the editor holds now.
         if (id === this.ctx.tabs.activeTab()?.id) content = this.ctx.editor.getContent();
-        await api.writeFile(originalPath, content);
+        await this.writeOwn(originalPath, content);
         if (this.ctx.tabs.getTab(id)?.content !== content) {
           // Typing landed during the write. The file now holds `content`, so
           // that is the baseline: the tab stays dirty and our own write is
@@ -285,7 +300,7 @@ export class DocumentController {
     try {
       // The picker is async: take the text again so keys typed meanwhile count.
       if (id === this.ctx.tabs.activeTab()?.id) content = this.ctx.editor.getContent();
-      await api.writeFile(path, content);
+      await this.writeOwn(path, content);
       if (this.ctx.tabs.getTab(id)?.content !== content) {
         // Typing landed during the write: the file exists with `content`, so
         // bind the tab to it and keep the tab dirty for the newer text.

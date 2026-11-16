@@ -818,6 +818,34 @@ describe('App integration', () => {
       expect(vfs.get('/docs/b.md')).toBe('B from agent!');
     });
 
+    it('does not flash the explorer row for our own save, but still flashes an outside edit', async () => {
+      await openTwo();
+      const flashed = vi.spyOn(FileTree.prototype, 'markChanged');
+      const view = await editorView();
+      view.dispatch({ changes: { from: view.state.doc.length, insert: '!' } });
+      await flush();
+      expect(activeTabDot().style.display).not.toBe('none');
+      emitTauriEvent(MENU.SAVE);
+      await flush();
+      await flush();
+      expect(vfs.get('/docs/b.md')).toBe('B original!');
+      expect(activeTabDot().style.display).toBe('none');
+
+      // The watcher reports our own write: no flash, no conflict, still clean.
+      await fsChange('/docs/b.md');
+      const flashedPaths = flashed.mock.calls.flatMap(([paths]) => paths);
+      expect(flashedPaths).not.toContain('/docs/b.md');
+      expect(document.querySelectorAll('.tree-flash').length).toBe(0);
+      expect(activeTabDot().style.display).toBe('none');
+      expect(tabEl('b.md').classList.contains('tab-conflict')).toBe(false);
+
+      // Someone else's edit still flashes.
+      vfs.set('/docs/a.md', 'A from agent');
+      await fsChange('/docs/a.md');
+      expect(flashed.mock.calls.flatMap(([paths]) => paths)).toContain('/docs/a.md');
+      flashed.mockRestore();
+    });
+
     it('refreshes background tabs on a remote (root-only) change event', async () => {
       await openTwo();
       await clickTab('a.md');
