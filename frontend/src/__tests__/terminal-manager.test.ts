@@ -950,12 +950,64 @@ describe('TerminalPane resize / write / paste', () => {
     expect(api.terminalWrite).not.toHaveBeenCalled();
     release('shell');
     await initP;
+    await flush();
+    // Keys typed while the shell was starting are kept and sent first.
+    expect(api.terminalWrite).toHaveBeenCalledTimes(1);
+    expect(api.terminalWrite).toHaveBeenLastCalledWith('p3', 'early');
     term.dataHandler!('ls\r');
-    expect(api.terminalWrite).toHaveBeenCalledWith('p3', 'ls\r');
+    await flush();
+    expect(api.terminalWrite).toHaveBeenLastCalledWith('p3', 'ls\r');
     // After the shell exits, input is dropped.
     bus.emit('terminal://exit', { id: 'p3' });
     term.dataHandler!('late');
-    expect(api.terminalWrite).toHaveBeenCalledTimes(1);
+    await flush();
+    expect(api.terminalWrite).toHaveBeenCalledTimes(2);
+    pane.destroy();
+  });
+
+  it('sends text typed before the pane existed ahead of keys typed during startup', async () => {
+    let release!: (m: string) => void;
+    api.terminalStart.mockImplementationOnce(
+      () => new Promise<string>((r) => (release = r)),
+    );
+    const pane = new TerminalPane('p4', () => {});
+    pane.takeEarlyInput = () => 'echo hi\r';
+    const initP = pane.init(document.createElement('div'), '/cwd');
+    await flush();
+    last(terms.all)!.dataHandler!(' there');
+    release('shell');
+    await initP;
+    await flush();
+    expect(api.terminalWrite.mock.calls).toEqual([['p4', 'echo hi\r there']]);
+    pane.destroy();
+  });
+
+  it('writes to the pty one call at a time, in typing order', async () => {
+    const { pane, term } = await startedPane(null);
+    const log: string[] = [];
+    const finish: Array<() => void> = [];
+    api.terminalWrite.mockImplementation(async (_id: string, d: string) => {
+      log.push(`start ${d}`);
+      await new Promise<void>((r) => finish.push(r));
+      log.push(`end ${d}`);
+    });
+    term.dataHandler!('a');
+    await flush();
+    term.dataHandler!('b');
+    term.dataHandler!('c');
+    await flush();
+    // The first write is in flight; the rest wait and go out together.
+    expect(log).toEqual(['start a']);
+    finish.shift()!();
+    await flush();
+    expect(log).toEqual(['start a', 'end a', 'start bc']);
+    term.dataHandler!('d');
+    finish.shift()!();
+    await flush();
+    expect(log).toEqual(['start a', 'end a', 'start bc', 'end bc', 'start d']);
+    finish.shift()!();
+    await flush();
+    api.terminalWrite.mockImplementation(async () => {});
     pane.destroy();
   });
 
@@ -968,6 +1020,7 @@ describe('TerminalPane resize / write / paste', () => {
 
     const plain = await startedPane(null);
     plain.pane.paste('hello');
+    await flush();
     expect(api.terminalWrite).toHaveBeenCalledWith('p1', 'hello');
     plain.pane.destroy();
 
@@ -996,6 +1049,7 @@ describe('TerminalPane resize / write / paste', () => {
     // navigator.clipboard can't), and cancels the native paste.
     expect(term.keyHandler!(key('v'))).toBe(false);
     await flush();
+    await flush();
     expect(api.readClipboardText).toHaveBeenCalled();
     expect(api.terminalWrite).toHaveBeenCalledWith('p1', 'pasted text');
     expect(prevent).toHaveBeenCalled();
@@ -1003,6 +1057,7 @@ describe('TerminalPane resize / write / paste', () => {
     // Shift+Insert pastes too.
     vi.mocked(api.terminalWrite).mockClear();
     expect(term.keyHandler!(key('Insert', { shiftKey: true }))).toBe(false);
+    await flush();
     await flush();
     expect(api.terminalWrite).toHaveBeenCalledWith('p1', 'pasted text');
 
@@ -1083,6 +1138,7 @@ describe('TerminalPane resize / write / paste', () => {
   it('paste() flattens CR/LF into spaces on a plain pane (nothing is submitted)', async () => {
     const { pane } = await startedPane(null);
     pane.paste('one\r\ntwo\nthree\r\r\nfour');
+    await flush();
     expect(api.terminalWrite).toHaveBeenCalledTimes(1);
     expect(api.terminalWrite).toHaveBeenCalledWith('p1', 'one two three four');
     expect(api.tmuxSendKeys).not.toHaveBeenCalled();
@@ -1733,7 +1789,8 @@ describe('TerminalPane wheel on tmux panes', () => {
     expect(order).toEqual(['wheel 1']);
     release();
     await flush();
-    expect(order).toEqual(['wheel 1', 'wheel 0', 'write l', 'write s']);
+    // Both keys were typed while the wheel call was in flight: one write.
+    expect(order).toEqual(['wheel 1', 'wheel 0', 'write ls']);
     expect(api.tmuxWheel).toHaveBeenCalledWith(session, 0);
     api.tmuxWheel.mockImplementation(async () => {});
     api.terminalWrite.mockImplementation(async () => {});

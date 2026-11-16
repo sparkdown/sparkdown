@@ -30,6 +30,11 @@ const terminalStub = vi.hoisted(() => ({
     isDismissed(bin: string): boolean;
     dismiss(bin: string): void;
   },
+  /** restoreOrCreate waits on this, so a test can hold the first shell back. */
+  gate: Promise.resolve() as Promise<void>,
+  earlySource: null as null | (() => string),
+  /** What the new shell took from the type-ahead box. */
+  taken: null as null | string,
 }));
 
 vi.mock('../terminal', () => ({
@@ -40,6 +45,12 @@ vi.mock('../terminal', () => ({
     setAgentArgs() {}
     setOnEmpty() {}
     setOnTerminalsOnly() {}
+    setEarlyInput(source: (() => string) | null) {
+      terminalStub.earlySource = source;
+    }
+    hasPanes() {
+      return false;
+    }
     refitAll() {}
     setLayoutStore(store: typeof terminalStub.store) {
       terminalStub.store = store;
@@ -50,7 +61,10 @@ vi.mock('../terminal', () => ({
     hasFocus() {
       return false;
     }
-    async restoreOrCreate() {}
+    async restoreOrCreate() {
+      await terminalStub.gate;
+      terminalStub.taken = terminalStub.earlySource?.() ?? null;
+    }
   },
 }));
 
@@ -1844,6 +1858,38 @@ describe('App integration', () => {
 
       dragDropHandler!({ payload: { type: 'leave' } });
       expect(appEl.classList.contains('drag-over')).toBe(false);
+    });
+  });
+
+  describe('opening the terminal while typing', () => {
+    it('moves focus off the editor at once and hands the typed keys to the new shell', async () => {
+      vfs.set('/docs/doc.md', 'hello');
+      await startApp();
+      emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/docs/doc.md' });
+      await flush();
+      const view = await editorView();
+      view.focus();
+      let release!: () => void;
+      terminalStub.gate = new Promise<void>((r) => (release = r));
+      terminalStub.taken = null;
+
+      emitTauriEvent(MENU.TOGGLE_TERMINAL);
+      await flush();
+      await flush();
+      // The shell is not up yet; keys must not reach the document.
+      const box = document.activeElement as HTMLTextAreaElement;
+      expect(box.classList.contains('terminal-type-ahead')).toBe(true);
+      box.value = 'echo e\nls';
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      expect(view.state.doc.toString()).toBe('hello');
+
+      release();
+      await flush();
+      await flush();
+      expect(terminalStub.taken).toBe('echo e\rls');
+      expect(document.querySelector('.terminal-type-ahead')).toBeNull();
+      expect(view.state.doc.toString()).toBe('hello');
+      terminalStub.gate = Promise.resolve();
     });
   });
 
