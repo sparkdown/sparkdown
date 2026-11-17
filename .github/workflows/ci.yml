@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 # Least privilege: CI only reads the code. No job here writes to the repo.
 permissions:
@@ -44,19 +45,9 @@ jobs:
       - name: Dependency audit
         # Retry transient npm registry 503s (seen twice on #66). Still fails
         # the job on real high-severity findings after a successful audit run.
-        run: |
-          set -euo pipefail
-          attempt=1
-          max=3
-          until npm audit --audit-level=high; do
-            status=$?
-            if [ "$attempt" -ge "$max" ]; then
-              exit "$status"
-            fi
-            echo "npm audit failed (exit $status); retry $attempt/$max in 15s"
-            attempt=$((attempt + 1))
-            sleep 15
-          done
+        # The script allows temporary exceptions for dev-only advisories without
+        # fixed releases (see scripts/ci/npm-audit.mjs for current allowances).
+        run: node ../scripts/ci/npm-audit.mjs
 
   rust:
     name: Rust (fmt, clippy, tests) — Linux
