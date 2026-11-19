@@ -45,6 +45,10 @@ requests.
 - **Remote (SSH)**: SparkDown's own background ssh connections no longer forward your SSH agent or X11, even if `~/.ssh/config` asks for it. The terminal keeps using your own ssh config.
 - **Diff view** (Reading mode): a changed leading indent now stays visible instead of being folded as formatting, marked "whitespace only".
 
+### Fixed
+
+- **Commit** of a renamed file no longer fails or stops the app when other changed files have names with accented or other non-ASCII characters.
+
 ## [0.4.3] — 2026-11-13
 
 Fixes and reliability improvements on top of 0.4.2.
