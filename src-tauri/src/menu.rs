@@ -307,8 +307,7 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
     let shortcuts = MenuItemBuilder::with_id("show-shortcuts", "Keyboard Shortcuts")
         .accelerator("CmdOrCtrl+Shift+H")
         .build(app)?;
-    let send_feedback = MenuItemBuilder::with_id("send-feedback", "Send Feedback...")
-        .build(app)?;
+    let send_feedback = MenuItemBuilder::with_id("send-feedback", "Send Feedback...").build(app)?;
     let help_menu = SubmenuBuilder::new(app, "Help").item(&shortcuts);
     #[cfg(not(target_os = "macos"))]
     let help_menu = help_menu.separator().item(&check_updates);
