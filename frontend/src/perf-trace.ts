@@ -3,16 +3,25 @@
  * bench harness runs in jsdom, which has no layout/paint — the costs that
  * dominate a real WebKit webview).
  *
- * Enable by creating the marker file, launch the app, then read the trace:
+ * Enable by creating the marker file, launch a DEV build of the app, then
+ * read the trace:
  *
  *   touch /tmp/sparkdown-trace-enable
  *   open -a SparkDown /tmp/perf-test-large.md
  *   cat /tmp/sparkdown-trace.log
  *
+ * Tracing only runs in dev builds (`import.meta.env.DEV`). In a release
+ * bundle every exported function returns at once, without reading the
+ * marker, writing the log or calling the backend.
+ *
  * Spans are buffered in memory and flushed (debounced) to the trace file.
  * When the marker file is absent, every call here is a no-op.
  */
 import { api } from './api';
+
+// Vite inlines `import.meta.env.DEV` as `false` in release builds, so the
+// body of every exported function below is dropped there.
+const DEV = import.meta.env.DEV;
 
 const MARKER = '/tmp/sparkdown-trace-enable';
 const TRACE_FILE = '/tmp/sparkdown-trace.log';
@@ -23,6 +32,7 @@ let flushTimer: number | null = null;
 const t0 = performance.now();
 
 export async function initPerfTrace(): Promise<void> {
+  if (!DEV) return;
   try {
     await api.readFile(MARKER);
     enabled = true;
@@ -34,6 +44,7 @@ export async function initPerfTrace(): Promise<void> {
 
 /** Record a completed span. Durations in ms. */
 export function trace(name: string, durationMs: number, detail?: string): void {
+  if (!DEV) return;
   if (!enabled) return;
   const at = (performance.now() - t0).toFixed(1);
   buffer.push(
@@ -44,6 +55,7 @@ export function trace(name: string, durationMs: number, detail?: string): void {
 
 /** Start a span; call the returned function to record it. */
 export function span(name: string, detail?: string): () => void {
+  if (!DEV) return () => {};
   if (!enabled) return () => {};
   const start = performance.now();
   return () => trace(name, performance.now() - start, detail);
@@ -55,6 +67,7 @@ export function span(name: string, detail?: string): () => void {
  * frame actually presented after `label`'s DOM changes.
  */
 export function traceNextPaint(label: string, container?: HTMLElement): void {
+  if (!DEV) return;
   if (!enabled) return;
   const start = performance.now();
   if (container) {
@@ -70,6 +83,7 @@ export function traceNextPaint(label: string, container?: HTMLElement): void {
 }
 
 function scheduleFlush(): void {
+  if (!DEV) return;
   if (flushTimer !== null) return;
   flushTimer = window.setTimeout(() => {
     flushTimer = null;
@@ -78,6 +92,7 @@ function scheduleFlush(): void {
 }
 
 async function flush(): Promise<void> {
+  if (!DEV) return;
   if (!enabled || buffer.length === 0) return;
   const lines = buffer;
   buffer = [];
