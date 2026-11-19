@@ -35,5 +35,5 @@ body:
     id: version
     attributes:
       label: SparkDown version (optional)
-      description: Check Help → About or the welcome screen
+      description: Check SparkDown → About
       placeholder: e.g., 0.4.3

@@ -103,6 +103,8 @@ export function registerMenuListeners(t: ActionTargets): void {
       const params = new URLSearchParams({ version, os });
       const url = `https://github.com/sparkdown/sparkdown/issues/new?template=feedback.yml&${params}`;
       void api.openExternal(url);
+    }).catch(() => {
+      void api.openExternal('https://github.com/sparkdown/sparkdown/issues/new?template=feedback.yml');
     });
   });
   reg(MENU.CLOSE_TAB, () => closeTabOrPane(t));
