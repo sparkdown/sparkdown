@@ -163,6 +163,11 @@ export class FileTree {
   private filterQuery = '';
   // Invalidates an in-flight root or child-directory read when the tree changes.
   private renderGeneration = 0;
+  // Folders whose first (lazy) listing is in flight, path -> request token. A
+  // click on such a folder is ignored and only the newest token may apply its
+  // result, so a second click or a refresh cannot undo or overwrite the expand.
+  private dirRequests = new Map<string, number>();
+  private dirRequestSeq = 0;
 
   constructor(
     bus: EventBus,
@@ -305,6 +310,7 @@ export class FileTree {
     this.selectedDir = null;
     this.pending = null;
     this.expandedDirs.clear();
+    this.dirRequests.clear();
     this.childrenCache.clear();
     this.updateTitle();
     await this.renderTree({ resetScroll: true });
@@ -319,6 +325,7 @@ export class FileTree {
     this.selectedDir = null;
     this.pending = null;
     this.expandedDirs.clear();
+    this.dirRequests.clear();
     this.childrenCache.clear();
     this.gitStatus.clear();
     this.dirGitStatus.clear();
@@ -468,6 +475,7 @@ export class FileTree {
     if (this.expandedDirs.size === 0) return;
     ++this.renderGeneration;
     this.expandedDirs.clear();
+    this.dirRequests.clear();
     this.rebuildRows();
     this.viewport.scrollTop = 0;
     this.renderViewport();
@@ -610,25 +618,49 @@ export class FileTree {
       if (generation !== this.renderGeneration || this.rootPath !== rootPath) return;
 
       // Reload expanded directories before rebuilding so a refresh preserves
-      // both the expansion state and the visible children. A folder removed
-      // during the refresh is pruned instead of leaving a dead open row.
+      // both the expansion state and the visible children. A folder that is
+      // gone is pruned; one that only failed to list this time (the parent
+      // still lists it) stays open with what it showed before.
       const expanded = [...this.expandedDirs];
       const loaded = await Promise.all(expanded.map(async (path) => {
         try {
           return [path, await api.listDirectory(path, this.showHidden)] as const;
         } catch {
-          return null;
+          return [path, null] as const;
         }
       }));
       if (generation !== this.renderGeneration || this.rootPath !== rootPath) return;
 
       const nextExpanded = new Set<string>();
       const nextChildren = new Map<string, FileEntry[]>();
-      for (const result of loaded) {
-        if (!result) continue;
-        const [path, entries] = result;
+      for (const [path, entries] of loaded) {
+        // Collapsed (or cleared) while the listing was in flight: stay collapsed.
+        if (!entries || !this.expandedDirs.has(path)) continue;
         nextExpanded.add(path);
         nextChildren.set(path, entries);
+      }
+      const parentListing = (path: string): FileEntry[] | undefined => {
+        const parent = parentDir(path);
+        if (parent === null) return undefined;
+        if (normalizePathForCompare(parent) === normalizePathForCompare(rootPath)) return rootEntries;
+        return nextChildren.get(parent) ?? this.childrenCache.get(parent);
+      };
+      for (const [path, entries] of loaded) {
+        if (entries || !this.expandedDirs.has(path)) continue;
+        const listed = parentListing(path);
+        const target = normalizePathForCompare(path);
+        if (listed && !listed.some((e) => normalizePathForCompare(e.path) === target)) continue;
+        nextExpanded.add(path);
+        const before = this.childrenCache.get(path);
+        if (before) nextChildren.set(path, before);
+      }
+      // Folders expanded after this refresh began: keep them, and keep what
+      // their own lazy listing has already delivered.
+      for (const path of this.expandedDirs) {
+        if (expanded.includes(path)) continue;
+        nextExpanded.add(path);
+        const cached = this.childrenCache.get(path);
+        if (cached) nextChildren.set(path, cached);
       }
 
       const nextSignature = this.treeStructureSignature(rootEntries, nextExpanded, nextChildren);
@@ -1023,7 +1055,9 @@ export class FileTree {
   }
 
   private async toggleDir(path: string): Promise<void> {
-    const generation = ++this.renderGeneration;
+    // The folder is still loading its first listing: extra clicks do nothing,
+    // so a double click leaves it expanded instead of toggling it back shut.
+    if (this.dirRequests.has(path)) return;
     if (this.expandedDirs.has(path)) {
       this.expandedDirs.delete(path);
       this.rebuildRows();
@@ -1033,14 +1067,25 @@ export class FileTree {
     this.expandedDirs.add(path);
     // Lazily load and cache children, then rebuild the flat list.
     if (!this.childrenCache.has(path)) {
+      const token = ++this.dirRequestSeq;
+      this.dirRequests.set(path, token);
+      let entries: FileEntry[] | null;
       try {
-        const entries = await api.listDirectory(path, this.showHidden);
-        if (generation !== this.renderGeneration || !this.expandedDirs.has(path)) return;
-        this.childrenCache.set(path, entries);
+        entries = await api.listDirectory(path, this.showHidden);
       } catch {
+        entries = null;
+      }
+      // Only the newest request for this path may apply; a root change or
+      // Collapse all while it was in flight dropped the token.
+      if (this.dirRequests.get(path) !== token) return;
+      this.dirRequests.delete(path);
+      if (!entries) {
         this.expandedDirs.delete(path);
         return;
       }
+      if (!this.expandedDirs.has(path)) return;
+      // A refresh may have listed this folder meanwhile; its data is newer.
+      if (!this.childrenCache.has(path)) this.childrenCache.set(path, entries);
     }
     this.rebuildRows();
     this.renderViewport();

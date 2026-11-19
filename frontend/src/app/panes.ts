@@ -199,6 +199,7 @@ export class PaneController {
         const tab = this.ctx.tabs.activeTab();
         return tab ? tab.origin : this.ctx.tabs.getOrigin();
       });
+      p.setPathResolver(() => this.ctx.tabs.activeTab()?.path ?? null);
       if (this.ctx.baseDir) p.setBaseDir(this.ctx.baseDir);
       this.pane = p;
       return p;

@@ -18,12 +18,12 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 pub mod hostkey;
-mod ssh;
+pub(crate) mod ssh;
 pub use ssh::display_home_path;
 use ssh::{
     classify_remote_watch_delta, close_mux, load_ssh_hosts, map_ssh_failure, mux_options,
     shell_quote, ssh_git, ssh_run, ssh_run_bytes, ssh_run_status, ssh_run_stdin,
-    validate_host_alias, validate_remote_input, validate_remote_path, watch_fingerprint_script,
+    validate_host_alias, validate_remote_input, validate_remote_path,
 };
 pub use ssh::{RemoteSession, SshHost};
 
@@ -598,10 +598,61 @@ pub(crate) fn remote_deletable(root: &str, path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// POSIX sh snippet that confines `check_path` to `root` on the host.
+///
+/// Mirrors the pattern used by `ssh_git` at `src-tauri/src/remote/ssh.rs:1160`:
+/// `CDPATH= cd -- <root> && pwd -P` canonicalizes the root through any
+/// symlinks, then the target's dirname is resolved the same way. The two
+/// physical paths are compared with `case`.
+///
+/// Additionally: every component of `check_path` strictly below `root` is
+/// tested with `[ -L ]` (on its raw, non-resolved spelling) so a symlinked
+/// directory *inside* the opened folder cannot carry the operation outside
+/// it. `check_path` may equal `root` (used by `New File`/`New Folder` on
+/// the window's root); the walk is a no-op in that case.
+///
+/// Markers printed on stderr/stdout and dedicated exit codes let the
+/// caller distinguish refusal reasons from genuine `rm`/`mkdir` errors:
+///   __SD_OUT__  (exit 2) — path escapes the window's folder.
+///   __SD_LINK__ (exit 4) — a component below the root is a symlink.
+fn remote_confine_prelude(root: &str, check_path: &str) -> String {
+    let r = shell_quote(root);
+    let p = shell_quote(check_path);
+    format!(
+        "root={r}; path={p}; \
+         root_phys=$(CDPATH= cd -- \"$root\" && pwd -P) || {{ echo __SD_OUT__; exit 2; }}; \
+         if [ \"$path\" = \"$root\" ]; then rel=''; \
+         else case \"$path\" in \"$root\"/*) rel=${{path#\"$root\"/}} ;; *) echo __SD_OUT__; exit 2 ;; esac; fi; \
+         rest=$rel; cur=$root; \
+         while [ -n \"$rest\" ]; do \
+         case \"$rest\" in */*) comp=${{rest%%/*}}; rest=${{rest#*/}} ;; *) comp=$rest; rest='' ;; esac; \
+         [ -z \"$comp\" ] && continue; \
+         cur=\"$cur/$comp\"; \
+         if [ -L \"$cur\" ]; then echo __SD_LINK__; exit 4; fi; \
+         done; \
+         tgt_dir=$(CDPATH= cd -- \"$(dirname -- \"$path\")\" && pwd -P) || {{ echo __SD_OUT__; exit 2; }}; \
+         target_phys=\"$tgt_dir/$(basename -- \"$path\")\"; \
+         if [ -z \"$rel\" ]; then \
+           : ; \
+         else \
+           case \"$target_phys\" in \"$root_phys\"/*) ;; *) echo __SD_OUT__; exit 2 ;; esac; \
+         fi;"
+    )
+}
+
 /// POSIX sh: remove one file (or symlink); refuse a directory (exit 3).
-pub(crate) fn remote_delete_script(path: &str) -> String {
+///
+/// Also refuses to run if `path` is not strictly inside `root` once the
+/// host has resolved both ends through symlinks (exit 2 / `__SD_OUT__`),
+/// or if any component of `path` below `root` is itself a symlink
+/// (exit 4 / `__SD_LINK__`). The Rust-side `remote_deletable` is kept as
+/// a cheap pre-filter; this is the enforcing check.
+pub(crate) fn remote_delete_script(root: &str, path: &str) -> String {
+    let prelude = remote_confine_prelude(root, path);
     let q = shell_quote(path);
-    format!("if [ -d {q} ] && [ ! -L {q} ]; then echo __SD_DIR__; exit 3; fi; rm -f -- {q}")
+    format!(
+        "{prelude} if [ -d {q} ] && [ ! -L {q} ]; then echo __SD_DIR__; exit 3; fi; rm -f -- {q}"
+    )
 }
 
 /// Explorer New File / New Folder: `parent` must be this window's folder or
@@ -621,14 +672,25 @@ pub(crate) fn remote_creatable(root: &str, parent: &str) -> Result<(), String> {
 
 /// POSIX sh: create one empty file or folder, never replacing anything
 /// (exit 3 + marker when the name is taken; `set -C` closes the race).
-pub(crate) fn remote_create_script(path: &str, is_dir: bool) -> String {
-    let q = shell_quote(path);
+///
+/// Also refuses the operation when `parent` escapes `root` after the host
+/// resolves it (exit 2 / `__SD_OUT__`) or when any component of `parent`
+/// below `root` is a symlink (exit 4 / `__SD_LINK__`). The Rust-side
+/// `remote_creatable` is kept as a cheap pre-filter.
+pub(crate) fn remote_create_script(root: &str, parent: &str, name: &str, is_dir: bool) -> String {
+    let prelude = remote_confine_prelude(root, parent);
+    // Build the target path from the host-resolved `parent` plus `name`,
+    // but perform the create at the originally-requested spelling so an
+    // operation under a non-symlinked parent still works even if the root
+    // itself is reached via a symlinked prefix.
+    let path = format!("{}/{}", parent.trim_end_matches('/'), name);
+    let q = shell_quote(&path);
     let make = if is_dir {
         format!("mkdir -- {q}")
     } else {
         format!("set -C; : > {q}")
     };
-    format!("if [ -e {q} ] || [ -L {q} ]; then echo __SD_EXISTS__; exit 3; fi; {make}")
+    format!("{prelude} if [ -e {q} ] || [ -L {q} ]; then echo __SD_EXISTS__; exit 3; fi; {make}")
 }
 
 /// Explorer New File / New Folder on the remote host.
@@ -637,10 +699,19 @@ pub fn create_entry(parent: &str, name: &str, is_dir: bool) -> Result<String, Ap
     crate::commands::valid_entry_name(name).map_err(AppError::InvalidPath)?;
     remote_creatable(&session.path, parent).map_err(AppError::InvalidPath)?;
     let path = format!("{}/{}", parent.trim_end_matches('/'), name);
-    let (code, out, err) = ssh_run_status(&session.host, &remote_create_script(&path, is_dir))
-        .map_err(AppError::Other)?;
+    let (code, out, err) = ssh_run_status(
+        &session.host,
+        &remote_create_script(&session.path, parent, name, is_dir),
+    )
+    .map_err(AppError::Other)?;
     match code {
         0 => Ok(path),
+        2 if out.contains("__SD_OUT__") || out.contains("__SD_LINK__") => Err(
+            AppError::InvalidPath(format!("{parent} is not inside this window's folder")),
+        ),
+        4 if out.contains("__SD_LINK__") => Err(AppError::InvalidPath(format!(
+            "{parent} is not inside this window's folder"
+        ))),
         3 if out.contains("__SD_EXISTS__") => {
             Err(AppError::Other(format!("“{name}” already exists")))
         }
@@ -674,7 +745,12 @@ mod create_tests {
         let run = |p: &std::path::Path, d: bool| {
             crate::proc::command("sh")
                 .arg("-c")
-                .arg(remote_create_script(p.to_str().unwrap(), d))
+                .arg(remote_create_script(
+                    dir.to_str().unwrap(),
+                    p.parent().unwrap().to_str().unwrap(),
+                    p.file_name().unwrap().to_str().unwrap(),
+                    d,
+                ))
                 .output()
                 .unwrap()
         };
@@ -691,6 +767,37 @@ mod create_tests {
         assert_eq!(run(&d, true).status.code(), Some(3));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_create_script_refuses_symlinked_parent_escape() {
+        // A symlinked parent *inside* the opened folder must not
+        // let `mkdir`/`: >` land outside it.
+        use std::os::unix::fs::symlink;
+        let base =
+            std::env::temp_dir().join(format!("sd_remote_create_link_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        let parent = root.join("escape");
+        let out = crate::proc::command("sh")
+            .arg("-c")
+            .arg(remote_create_script(
+                root.to_str().unwrap(),
+                parent.to_str().unwrap(),
+                "other.txt",
+                false,
+            ))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(4));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("__SD_LINK__"));
+        assert!(!outside.join("other.txt").exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 }
 
 /// #121: delete a remote file for good (SSH has no trash).
@@ -698,9 +805,16 @@ pub fn delete_file(path: &str) -> Result<(), AppError> {
     let session = current_session().ok_or_else(|| AppError::Other("no remote session".into()))?;
     remote_deletable(&session.path, path).map_err(AppError::InvalidPath)?;
     let (code, out, err) =
-        ssh_run_status(&session.host, &remote_delete_script(path)).map_err(AppError::Other)?;
+        ssh_run_status(&session.host, &remote_delete_script(&session.path, path))
+            .map_err(AppError::Other)?;
     match code {
         0 => Ok(()),
+        2 if out.contains("__SD_OUT__") || out.contains("__SD_LINK__") => Err(
+            AppError::InvalidPath(format!("{path} is not inside this window's folder")),
+        ),
+        4 if out.contains("__SD_LINK__") => Err(AppError::InvalidPath(format!(
+            "{path} is not inside this window's folder"
+        ))),
         3 if out.contains("__SD_DIR__") => Err(AppError::InvalidPath(
             "Deleting folders on a remote host isn't supported".into(),
         )),
@@ -961,25 +1075,28 @@ const GIT_SECTION_SEP: &str = "__SD_SEP__";
 pub fn git_status(root: &str) -> Result<GitStatus, String> {
     let session = current_session().ok_or_else(|| "no remote session".to_string())?;
     validate_remote_path(root)?;
-    let raw = ssh_run(&session.host, &git_status_script(root))?;
+    let script = git_status_script(root)?;
+    let raw = ssh_run(&session.host, &script)?;
     Ok(parse_status_sections(&raw, root))
 }
 
-fn git_status_script(root: &str) -> String {
+fn git_status_script(root: &str) -> Result<String, String> {
     // One round trip for all the git questions (repo? top-level, the way up
     // to it, branch, porcelain status), sectioned by a sentinel line. The old
     // shape was up to four ssh calls — and the Changes badge asks on every
     // watcher tick. The `--show-cdup` section (see parse_status_sections)
     // lets the top level keep the root's spelling through symlinks.
+    let (filters, diffs) = ssh::remote_collect_driver_names(root)?;
+    let neutralizers = ssh::remote_filter_neutralizers_env(&filters, &diffs);
     let r = shell_quote(root);
-    format!(
-        "env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c core.fsmonitor=false -c diff.external= -C {r} rev-parse --is-inside-work-tree 2>/dev/null; echo {sep}; \
-         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c core.fsmonitor=false -c diff.external= -C {r} rev-parse --show-toplevel 2>/dev/null; echo {sep}; \
-         c=$(env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c core.fsmonitor=false -c diff.external= -C {r} rev-parse --show-cdup 2>/dev/null) && printf 'cdup=%s\\n' \"$c\" && (cd {r} && cd \"./$c\" && printf 'phys=%s\\n' \"$(pwd -P)\") 2>/dev/null; echo {sep}; \
-         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c core.fsmonitor=false -c diff.external= -C {r} rev-parse --abbrev-ref HEAD 2>/dev/null; echo {sep}; \
-         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -c core.fsmonitor=false -c diff.external= -C {r} status --ignore-submodules=all --porcelain -z --untracked-files=all 2>/dev/null; true",
+    Ok(format!(
+        "env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= {neutralizers}git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c protocol.allow=never -c fetch.negotiationAlgorithm=noop -C {r} rev-parse --is-inside-work-tree 2>/dev/null; echo {sep}; \
+         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= {neutralizers}git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c protocol.allow=never -c fetch.negotiationAlgorithm=noop -C {r} rev-parse --show-toplevel 2>/dev/null; echo {sep}; \
+         c=$(env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= {neutralizers}git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c protocol.allow=never -c fetch.negotiationAlgorithm=noop -C {r} rev-parse --show-cdup 2>/dev/null) && printf 'cdup=%s\\n' \"$c\" && (cd {r} && cd \"./$c\" && printf 'phys=%s\\n' \"$(pwd -P)\") 2>/dev/null; echo {sep}; \
+         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= {neutralizers}git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c protocol.allow=never -c fetch.negotiationAlgorithm=noop -C {r} rev-parse --abbrev-ref HEAD 2>/dev/null; echo {sep}; \
+         env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= {neutralizers}git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null -c diff.external= -c protocol.allow=never -c fetch.negotiationAlgorithm=noop -C {r} status --ignore-submodules=all --porcelain -z --untracked-files=all 2>/dev/null; true",
         sep = GIT_SECTION_SEP
-    )
+    ))
 }
 
 /// Parse the sectioned git_status payload (see GIT_SECTION_SEP script).
@@ -1117,7 +1234,6 @@ pub fn watch_start(app: AppHandle, root: &str) -> Result<(), String> {
     let my_generation = watch_generation().load(Ordering::SeqCst);
     let host = session.host;
     let root = root.to_string();
-    let script = watch_fingerprint_script(&root);
     let label = crate::windows::current_label();
     std::thread::spawn(move || {
         let _scope = crate::windows::enter(&label);
@@ -1128,6 +1244,14 @@ pub fn watch_start(app: AppHandle, root: &str) -> Result<(), String> {
             {
                 break;
             }
+            let script = match ssh::watch_fingerprint_script(&root) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Failed to build watch script: {}", e);
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                    continue;
+                }
+            };
             match ssh_run(&host, &script) {
                 Ok(fp) => {
                     // Structure-only deltas remount the explorer; content/git
@@ -1154,6 +1278,36 @@ pub fn watch_start(app: AppHandle, root: &str) -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+/// Map stored key types from known_hosts to SSH algorithm names.
+/// OpenSSH 8.8+ does not offer ssh-rsa signatures, so an ssh-rsa entry
+/// must map to rsa-sha2-512,rsa-sha2-256,ssh-rsa for compatibility.
+pub(crate) fn map_stored_types_to_algorithms(stored: &[String]) -> Vec<String> {
+    let mut algorithms = Vec::new();
+    for t in stored {
+        match t.as_str() {
+            "ssh-rsa" => {
+                // OpenSSH 8.8+ servers don't offer SHA-1 ssh-rsa signatures.
+                // Map to SHA-2 variants first, then ssh-rsa as fallback.
+                if !algorithms.contains(&"rsa-sha2-512".to_string()) {
+                    algorithms.push("rsa-sha2-512".into());
+                }
+                if !algorithms.contains(&"rsa-sha2-256".to_string()) {
+                    algorithms.push("rsa-sha2-256".into());
+                }
+                if !algorithms.contains(&"ssh-rsa".to_string()) {
+                    algorithms.push("ssh-rsa".into());
+                }
+            }
+            other => {
+                if !algorithms.contains(&other.to_string()) {
+                    algorithms.push(other.to_string());
+                }
+            }
+        }
+    }
+    algorithms
 }
 
 /// When a remote session is active, the embedded PTY runs `ssh -tt host`
@@ -1189,6 +1343,14 @@ pub fn terminal_command(
         "-o",
         "PubkeyAuthentication=yes",
     ]);
+    // When a host has stored keys, pin HostKeyAlgorithms to those stored
+    // types to restrict negotiation to pinned algorithms.
+    let stored_algos = hostkey::stored_key_types_for(&sess.host);
+    if !stored_algos.is_empty() {
+        let algorithms = map_stored_types_to_algorithms(&stored_algos);
+        cmd.arg("-o");
+        cmd.arg(format!("HostKeyAlgorithms={}", algorithms.join(",")));
+    }
     for a in ssh::destination_args(&sess.host).ok()? {
         cmd.arg(a);
     }
@@ -1217,6 +1379,15 @@ pub fn terminal_command(
         }
         if let Some(sock) = remote_mcp_socket() {
             f.push_str(&format!("export SPARKDOWN_MCP={}; ", shell_quote(&sock)));
+            // Per-session secret for the window socket's sparkdown_hello.
+            // Exported alongside SPARKDOWN_MCP so the shim can send it.
+            if let Some(wtok) = crate::mcp::window_socket_token(&crate::windows::current_label()) {
+                f.push_str(&format!(
+                    "export {}={}; ",
+                    crate::mcp::WINDOW_TOKEN_ENV,
+                    shell_quote(&wtok)
+                ));
+            }
         }
         if let Some(t) = crate::windows::token_for_current_window(None) {
             f.push_str(&format!(
@@ -1294,7 +1465,20 @@ pub fn terminal_command(
     // app only where this names a live socket — here the reverse-forwarded
     // one. Unset when the forward is down, so they fall back to the bridge.
     let remote = match remote_mcp_socket() {
-        Some(sock) => format!("export SPARKDOWN_MCP={}; {remote}", shell_quote(&sock)),
+        Some(sock) => {
+            // Also export the per-session window token (used by the shim to
+            // send to the forwarded socket) in the non-tmux fallback
+            // shell.
+            let mut head = format!("export SPARKDOWN_MCP={}; ", shell_quote(&sock));
+            if let Some(wtok) = crate::mcp::window_socket_token(&crate::windows::current_label()) {
+                head.push_str(&format!(
+                    "export {}={}; ",
+                    crate::mcp::WINDOW_TOKEN_ENV,
+                    shell_quote(&wtok)
+                ));
+            }
+            format!("{head}{remote}")
+        }
         None => remote,
     };
     cmd.arg(remote);
@@ -1592,24 +1776,48 @@ pub(crate) fn strip_job_noise(stderr: &str) -> String {
 /// and take PATH after a marker, so rc output cannot corrupt it. With
 /// `setsid` (Linux) the CLI gets its own process group and the watchdog
 /// kills the whole group; without it (macOS), the CLI and its children.
+/// The signal traps are cleared while the watchdog is forked, so the stop sent
+/// when the CLI exits early cannot be swallowed by a handler the watchdog
+/// inherited before it finished starting (that left the script waiting out
+/// the whole timer and reporting a timeout).
 pub(crate) fn remote_agent_cli_script(cmd_line: &str, bin: &str, secs: u64) -> String {
     let bin = shell_quote(bin);
     format!(
-        "cd /tmp 2>/dev/null || cd\n\
+        // Private per-run cwd. Agent CLIs scan `cwd` for project config, so
+        // a `cd /tmp` on a shared remote lets any other local account on
+        // that host place `.mcp.json` etc. for this CLI to load.
+        // `mktemp -d` creates a unique mode-0700 directory under TMPDIR
+        // (POSIX; present on every remote host we support); the trailing
+        // template keeps GNU and BSD mktemp happy. We fall back to the
+        // login dir only if the private dir cannot be created at all.
+        "sd_cwd=$(mktemp -d \"${{TMPDIR:-/tmp}}/sparkdown-cli-XXXXXXXX\" 2>/dev/null)\n\
+         if [ -n \"$sd_cwd\" ]; then cd \"$sd_cwd\" || cd; else cd; fi\n\
+         sd_rm_cwd() {{ [ -n \"$sd_cwd\" ] && rm -rf \"$sd_cwd\" 2>/dev/null; }}\n\
+         trap sd_rm_cwd EXIT INT TERM HUP\n\
          sd_probe() {{ \"${{SHELL:-/bin/sh}}\" \"$1\" 'printf \"\\n__SD_PATH__%s\\n\" \"$PATH\"' </dev/null 2>/dev/null | sed -n 's/^__SD_PATH__//p' | tail -n 1; }}\n\
          for sd_m in -lc -lic; do\n\
          command -v {bin} >/dev/null 2>&1 && break\n\
          sd_p=$(sd_probe $sd_m); [ -n \"$sd_p\" ] && PATH=$sd_p && export PATH\n\
          done\n\
-         sd_t=\"${{TMPDIR:-/tmp}}/.sparkdown-cli-$$\"; rm -f \"$sd_t\"\n\
+         sd_d=\"${{TMPDIR:-/tmp}}/.sparkdown-cli-$$.d\"\n\
+         sd_n=0\n\
+         while ! (umask 077; mkdir -- \"$sd_d\") 2>/dev/null; do\n\
+         sd_n=$((sd_n + 1))\n\
+         if [ \"$sd_n\" -ge 32 ]; then echo {CLI_TIMEOUT_MARK} >&2; exit 124; fi\n\
+         sd_d=\"${{TMPDIR:-/tmp}}/.sparkdown-cli-$$.$sd_n.d\"\n\
+         done\n\
+         sd_t=\"$sd_d/t\"\n\
          if command -v setsid >/dev/null 2>&1; then sd_g=1; setsid {cmd_line} </dev/null & else sd_g=; {cmd_line} </dev/null & fi\n\
          sd_c=$!\n\
          sd_kill() {{ if [ -n \"$sd_g\" ]; then kill -$1 -$sd_c; else pkill -$1 -P $sd_c; kill -$1 $sd_c; fi; }} 2>/dev/null\n\
-         ( sleep {secs}; : > \"$sd_t\"; sd_kill TERM; sleep 2; sd_kill KILL ) </dev/null >/dev/null 2>&1 &\n\
+         trap - INT TERM HUP\n\
+         ( sleep {secs}; (set -C; umask 077; : > \"$sd_t\") 2>/dev/null; sd_kill TERM; sleep 2; sd_kill KILL ) </dev/null >/dev/null 2>&1 &\n\
          sd_w=$!\n\
+         trap sd_rm_cwd INT TERM HUP\n\
          wait $sd_c; sd_s=$?\n\
          kill $sd_w 2>/dev/null; wait $sd_w 2>/dev/null\n\
-         if [ -e \"$sd_t\" ]; then rm -f \"$sd_t\"; echo {CLI_TIMEOUT_MARK} >&2; exit 124; fi\n\
+         if [ -e \"$sd_t\" ]; then rm -f -- \"$sd_t\"; rmdir -- \"$sd_d\" 2>/dev/null; echo {CLI_TIMEOUT_MARK} >&2; exit 124; fi\n\
+         rmdir -- \"$sd_d\" 2>/dev/null\n\
          exit $sd_s"
     )
 }
@@ -1760,6 +1968,103 @@ mod tests {
     use super::*;
 
     use super::TEST_SESSION_LOCK as TEST_LOCK;
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_cli_script_creates_exclusive_temp_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        // Verify the watchdog marker directory is created with mode 0700 by
+        // running the script and polling for the directory to appear.
+        let test_tmp = std::env::temp_dir().join(format!("sd-test-{}", std::process::id()));
+        std::fs::create_dir_all(&test_tmp).unwrap();
+        // Use a script that stays alive briefly so the directory persists.
+        let script = remote_agent_cli_script("sleep 0.5", "sleep", 2);
+        let script_path = test_tmp.join("agent-cli.sh");
+        std::fs::write(&script_path, &script).unwrap();
+        // Run in background so we can poll for the directory.
+        let mut child = crate::proc::command("sh")
+            .arg(&script_path)
+            .env("TMPDIR", &test_tmp)
+            .spawn()
+            .expect("script should start");
+        // Poll for the marker directory to appear.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let marker_dir = loop {
+            if let Ok(entries) = std::fs::read_dir(&test_tmp) {
+                if let Some(dir) = entries.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .starts_with(".sparkdown-cli-")
+                }) {
+                    break dir;
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("marker dir did not appear within timeout");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let mode = std::fs::metadata(&marker_dir)
+            .expect("marker dir should exist")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "marker dir mode should be 0700");
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&test_tmp);
+    }
+
+    /// The marker write must refuse an existing path instead of truncating
+    /// it. A `mkdir` stand-in leaves a link named `t` inside the new
+    /// directory; the watchdog fires, and the file the link names must keep
+    /// its contents.
+    #[cfg(unix)]
+    #[test]
+    fn agent_cli_marker_write_does_not_follow_an_existing_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("sd-marker-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin = root.join("bin");
+        let tmpdir = root.join("tmp");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&tmpdir).unwrap();
+        let target = root.join("target.txt");
+        std::fs::write(&target, "keep me\n").unwrap();
+        let wrapper = bin.join("mkdir");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\n/bin/mkdir \"$@\" || exit $?\nfor a; do d=$a; done\nln -s {} \"$d/t\"\n",
+                target.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script_path = root.join("agent-cli.sh");
+        std::fs::write(&script_path, remote_agent_cli_script("sleep 4", "sleep", 1)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out = crate::proc::command("sh")
+            .arg(&script_path)
+            .env("TMPDIR", &tmpdir)
+            .env("PATH", path)
+            .output()
+            .expect("script runs");
+        assert_eq!(out.status.code(), Some(124), "{out:?}");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "keep me\n",
+            "the file behind the link must not be truncated"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     const SAMPLE: &str = r#"
 # comment
@@ -1918,7 +2223,9 @@ Host *.example.com
 
     #[test]
     fn watch_and_git_scripts_run_on_remote() {
-        let watch = watch_fingerprint_script("/home/u/proj");
+        let _guard = TEST_LOCK.lock().unwrap();
+        let watch = ssh::watch_fingerprint_script("/home/u/proj")
+            .expect("watch_fingerprint_script should succeed");
         assert!(watch.contains("core.fsmonitor=false"));
         // -H: follow a symlinked root (e.g. /home/user) or the
         // fingerprint is permanently empty and changes never surface.
@@ -1944,6 +2251,7 @@ Host *.example.com
     #[cfg(unix)]
     #[test]
     fn watch_fingerprint_script_runs_under_local_sh() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("sd-watch-fp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
@@ -1951,7 +2259,8 @@ Host *.example.com
         std::fs::write(dir.join("a.md"), "hello").unwrap();
 
         let run = || {
-            let script = watch_fingerprint_script(dir.to_str().unwrap());
+            let script = ssh::watch_fingerprint_script(dir.to_str().unwrap())
+                .expect("watch_fingerprint_script should succeed");
             let out = crate::proc::command("sh")
                 .arg("-c")
                 .arg(&script)
@@ -2033,11 +2342,25 @@ Host *.example.com
         use ssh::{ERR_HOSTKEY_CHANGED, ERR_HOSTKEY_UNKNOWN};
         let unknown = map_ssh_failure("me@h:2222", "Host key verification failed.\r\n");
         assert!(unknown.starts_with(ERR_HOSTKEY_UNKNOWN), "{unknown}");
+        // OpenSSH's "No <TYPE> host key is known for <host> ... strict
+        // checking." maps to [hostkey-unknown] so the user sees the accept
+        // dialog on first connect. scan() then checks for existing entries and
+        // refuses if another key type is already pinned.
         let strict = map_ssh_failure(
             "h",
             "No ED25519 host key is known for h and you have requested strict checking.\nHost key verification failed.",
         );
         assert!(strict.starts_with(ERR_HOSTKEY_UNKNOWN), "{strict}");
+        // An administrator-revoked host key is also a hard stop: never offer
+        // to append it.
+        let revoked = map_ssh_failure(
+            "h",
+            "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\
+             @       WARNING: REVOKED HOST KEY DETECTED!               @\n\
+             The ED25519 host key for h is marked as revoked.\n\
+             Host key verification failed.",
+        );
+        assert!(revoked.starts_with(ERR_HOSTKEY_CHANGED), "{revoked}");
         // The real changed-key banner also says "Password authentication is
         // disabled": it must not read as a password error, and must never be
         // the accept-able unknown case.
@@ -2382,7 +2705,8 @@ Host *.example.com
         let dest = std::env::var("SPARKDOWN_SSH_TEST_DEST").expect("SPARKDOWN_SSH_TEST_DEST");
         let repo = std::env::var("SPARKDOWN_SSH_TEST_REPO").expect("SPARKDOWN_SSH_TEST_REPO");
         let s = connect_with(&[], &dest, &repo, ssh_run).unwrap();
-        let script = watch_fingerprint_script(&s.path);
+        let script = ssh::watch_fingerprint_script(&s.path)
+            .expect("watch_fingerprint_script should succeed");
         let before = ssh_run(&dest, &script).unwrap();
         let status0 = git_status(&s.path).unwrap();
         assert!(status0.is_repo, "not a repo");
@@ -3157,6 +3481,7 @@ Host *.example.com
     #[cfg(unix)]
     #[test]
     fn remote_git_status_script_runs_through_a_symlink() {
+        let _guard = TEST_LOCK.lock().unwrap();
         use std::fs;
         let git_ok = crate::proc::command("git")
             .arg("--version")
@@ -3185,8 +3510,9 @@ Host *.example.com
         let link = base.join("link");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let root = format!("{}/docs", link.to_string_lossy());
+        let script = git_status_script(&root).expect("git_status_script should succeed");
         let out = crate::proc::command("/bin/sh")
-            .args(["-c", &git_status_script(&root)])
+            .args(["-c", &script])
             .output()
             .unwrap();
         let _ = fs::remove_dir_all(&base);
@@ -3203,7 +3529,8 @@ Host *.example.com
 
     #[test]
     fn remote_git_status_script_asks_for_the_way_up() {
-        let script = git_status_script("/tmp/x");
+        let _guard = TEST_LOCK.lock().unwrap();
+        let script = git_status_script("/tmp/x").expect("git_status_script should succeed");
         assert_eq!(script.matches(GIT_SECTION_SEP).count(), 4, "{script}");
         assert!(script.contains("rev-parse --show-cdup"), "{script}");
         assert!(script.contains("printf 'cdup=%s\\n'"), "{script}");
@@ -3375,7 +3702,14 @@ Host *.example.com
         let s = REMOTE_SHIM_SCRIPT;
         assert!(s.starts_with("#!/bin/sh\n"));
         assert!(s.contains("SPARKDOWN_MCP"), "gate on the env var");
-        assert!(s.contains("UNIX-CONNECT"), "socat bridge");
+        assert!(
+            s.contains("SPARKDOWN_MCP_WINDOW_TOKEN"),
+            "per-connection token must be required by the shim"
+        );
+        assert!(
+            s.contains("sparkdown_hello"),
+            "shim must send sparkdown_hello before relaying"
+        );
         assert!(s.contains("AF_UNIX"), "python bridge");
         assert!(
             s.contains("\"tools\": []"),
@@ -3413,6 +3747,183 @@ Host *.example.com
         remote_mcp_slot().set(None);
         disconnect_now();
     }
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(hostkey_cache)]
+    fn remote_terminal_pins_host_key_algorithms_and_exports_the_window_token() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let hosts = parse_ssh_config("Host dev\n  HostName dev.example\n");
+        disconnect_now();
+        connect_with(&hosts, "dev", "~/proj", |_h, _c| {
+            Ok("/local/home/u/proj\n/local/home/u\n".into())
+        })
+        .unwrap();
+        let label = crate::windows::current_label();
+        remote_mcp_slot().set(Some("/local/home/u/.cache/sparkdown/mcp.sock".into()));
+        crate::mcp::set_window_token_for_test(&label, Some("wtok-1"));
+        // tmux path and plain login-shell path
+        for session in [Some("sd-x-zsh"), None] {
+            // Re-seed each time: a finished host-key trust in another test
+            // clears the shared cache.
+            hostkey::seed_stored_key_types("dev", &["ssh-rsa", "ssh-ed25519"]);
+            let (cmd, _) = terminal_command(Some("/proj"), session, None).unwrap();
+            let argv = format!("{:?}", cmd.get_argv());
+            assert!(
+                argv.contains("HostKeyAlgorithms=rsa-sha2-512,rsa-sha2-256,ssh-rsa,ssh-ed25519"),
+                "{session:?}: {argv}"
+            );
+            // Exported for the plain login shell, and (tmux) inside the pane.
+            assert!(
+                argv.contains("export SPARKDOWN_MCP_WINDOW_TOKEN='wtok-1'"),
+                "{session:?}: {argv}"
+            );
+            if session.is_some() {
+                assert!(
+                    argv.contains(r"export SPARKDOWN_MCP_WINDOW_TOKEN='\\''wtok-1'\\''"),
+                    "pane command lacks the token: {argv}"
+                );
+            }
+        }
+        // No stored keys and no window token: neither is added.
+        hostkey::seed_stored_key_types("dev", &[]);
+        crate::mcp::set_window_token_for_test(&label, None);
+        let (cmd, _) = terminal_command(Some("/proj"), None, None).unwrap();
+        let argv = format!("{:?}", cmd.get_argv());
+        assert!(!argv.contains("HostKeyAlgorithms"), "{argv}");
+        assert!(!argv.contains("SPARKDOWN_MCP_WINDOW_TOKEN"), "{argv}");
+        hostkey::invalidate_stored_key_types_cache();
+        remote_mcp_slot().set(None);
+        disconnect_now();
+    }
+
+    /// Runs the shim against a stand-in window socket that behaves like the
+    /// app: the first line must be a `sparkdown_hello` with the exact token,
+    /// anything else (or a wrong token) is refused.
+    #[cfg(unix)]
+    fn run_shim_against_stand_in(
+        token_env: Option<&str>,
+        server_token: &str,
+    ) -> (bool, String, String) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::os::unix::net::UnixListener;
+        let dir =
+            std::env::temp_dir().join(format!("sd-shim-{}-{}", std::process::id(), server_token));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("w.sock");
+        let shim = dir.join("shim.sh");
+        std::fs::write(&shim, REMOTE_SHIM_SCRIPT).unwrap();
+        let listener = UnixListener::bind(&sock).unwrap();
+        let want = server_token.to_string();
+        let server = std::thread::spawn(move || {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+            let mut w = stream.try_clone().unwrap();
+            let mut lines = BufReader::new(stream).lines();
+            let first = lines.next().and_then(|l| l.ok()).unwrap_or_default();
+            let hello: serde_json::Value = serde_json::from_str(&first).unwrap_or_default();
+            let ok = hello["sparkdown_hello"]["token"].as_str() == Some(want.as_str());
+            let _ = writeln!(
+                w,
+                "{}",
+                serde_json::json!({ "sparkdown_ack": { "ok": ok } })
+            );
+            if !ok {
+                return;
+            }
+            for line in lines.map_while(Result::ok) {
+                let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                let Some(id) = msg.get("id") else { continue };
+                let reply = serde_json::json!({ "jsonrpc": "2.0", "id": id,
+                    "result": { "tools": [{ "name": "stand_in_marker" }] } });
+                let _ = writeln!(w, "{reply}");
+            }
+        });
+        let mut cmd = crate::proc::command("sh");
+        cmd.arg(&shim)
+            .env_remove("SPARKDOWN_MCP_WINDOW_TOKEN")
+            .env("SPARKDOWN_MCP", &sock)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Some(t) = token_env {
+            cmd.env("SPARKDOWN_MCP_WINDOW_TOKEN", t);
+        }
+        let mut child = cmd.spawn().unwrap();
+        {
+            let mut stdin = child.stdin.take().unwrap();
+            let _ = stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
+        }
+        let mut out = String::new();
+        let mut err = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut out)
+            .unwrap();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut err)
+            .unwrap();
+        let status = child.wait().unwrap();
+        // Unblock a stand-in that was never connected to (offline shim).
+        let _ = std::os::unix::net::UnixStream::connect(&sock);
+        let _ = server.join();
+        let _ = std::fs::remove_dir_all(&dir);
+        (status.success(), out, err)
+    }
+
+    #[cfg(unix)]
+    fn have_python3() -> bool {
+        crate::proc::command("python3")
+            .arg("-c")
+            .arg("pass")
+            .output()
+            .is_ok()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shim_sends_its_window_token_in_the_first_line_and_relays() {
+        if !have_python3() {
+            return;
+        }
+        let (ok, out, err) = run_shim_against_stand_in(Some("tok-a"), "tok-a");
+        assert!(ok, "shim failed: {err}");
+        assert!(out.contains("stand_in_marker"), "{out}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shim_stops_when_the_window_refuses_its_token() {
+        if !have_python3() {
+            return;
+        }
+        let (ok, out, err) = run_shim_against_stand_in(Some("tok-b"), "something-else");
+        assert!(!ok);
+        assert!(!out.contains("stand_in_marker"), "{out}");
+        assert!(err.contains("refused"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shim_without_a_window_token_stays_offline() {
+        if !have_python3() {
+            return;
+        }
+        let (ok, out, _err) = run_shim_against_stand_in(None, "tok-c");
+        assert!(ok);
+        assert!(out.contains("\"tools\": []"), "{out}");
+        assert!(!out.contains("stand_in_marker"), "{out}");
+    }
+
     /// Live end-to-end check of phase 4 against a real host. Ignored by
     /// default; run with:
     ///   SPARKDOWN_LIVE_HOST=myhost cargo test --release -- --ignored live_remote
@@ -3443,6 +3954,14 @@ Host *.example.com
                 let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
                     continue;
                 };
+                // The shim sends sparkdown_hello as the first line, with its
+                // per-connection token; the stand-in acks any token so the rest
+                // of the handshake is exercised.
+                if msg.get("sparkdown_hello").is_some() {
+                    let ack = serde_json::json!({ "sparkdown_ack": { "ok": true } });
+                    let _ = writeln!(w, "{ack}");
+                    continue;
+                }
                 let Some(id) = msg.get("id") else { continue };
                 let result = if msg["method"] == "tools/list" {
                     serde_json::json!({ "tools": [{ "name": "sparkdown_live_marker" }] })
@@ -3472,7 +3991,7 @@ Host *.example.com
             "\n",
         );
         let cmd = format!(
-            "test -S {s} && test -x {sh} && SPARKDOWN_MCP={s} {sh}",
+            "test -S {s} && test -x {sh} && SPARKDOWN_MCP={s} SPARKDOWN_MCP_WINDOW_TOKEN=live-test-token {sh}",
             s = shell_quote(&sock),
             sh = shell_quote(&shim)
         );
@@ -3837,7 +4356,7 @@ pub fn git_change_stats(
         return Ok(Vec::new());
     }
     let (tracked, hashed, untracked) = remote_plan(&changes);
-    let script = remote_stats_script(root, tracked, &hashed, &untracked, shell_quote);
+    let script = remote_stats_script(root, tracked, &hashed, &untracked, shell_quote)?;
     let raw = ssh_run(&session.host, &script)?;
     let parsed = parse_remote_stats(&raw, hashed.len(), untracked.len());
     Ok(remote_stats_from(&changes, &hashed, &parsed))
@@ -3867,7 +4386,10 @@ mod delete_tests {
         let run = |p: &std::path::Path| {
             crate::proc::command("sh")
                 .arg("-c")
-                .arg(remote_delete_script(p.to_str().unwrap()))
+                .arg(remote_delete_script(
+                    dir.to_str().unwrap(),
+                    p.to_str().unwrap(),
+                ))
                 .output()
                 .unwrap()
         };
@@ -3879,5 +4401,146 @@ mod delete_tests {
         assert_eq!(out.status.code(), Some(3));
         assert!(d.exists());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remote_delete_script_refuses_symlinked_parent_escape() {
+        // The host must refuse to `rm` a file reached through a
+        // symlinked directory *inside* the opened folder.
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("sd-rdel-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret");
+        std::fs::write(&secret, "keep").unwrap();
+        // A symlink inside the workspace that points outside it.
+        symlink(&outside, root.join("escape")).unwrap();
+        let target = root.join("escape").join("secret");
+        let out = crate::proc::command("sh")
+            .arg("-c")
+            .arg(remote_delete_script(
+                root.to_str().unwrap(),
+                target.to_str().unwrap(),
+            ))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(4));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("__SD_LINK__"));
+        // The file outside the workspace survives.
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "keep");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remote_delete_script_refuses_paths_outside_root() {
+        let base = std::env::temp_dir().join(format!("sd-rdel-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("s");
+        std::fs::write(&secret, "keep").unwrap();
+        let out = crate::proc::command("sh")
+            .arg("-c")
+            .arg(remote_delete_script(
+                root.to_str().unwrap(),
+                secret.to_str().unwrap(),
+            ))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("__SD_OUT__"));
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "keep");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A path that stays under the folder by spelling but climbs out through
+    /// `..` is refused by the host-side check even if the cheap pre-filter is
+    /// skipped.
+    #[test]
+    #[cfg(unix)]
+    fn remote_delete_script_refuses_parent_segments_that_leave_the_root() {
+        let base = std::env::temp_dir().join(format!("sd-rdel-dots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        let secret = base.join("outside").join("s");
+        std::fs::write(&secret, "keep").unwrap();
+        let spelled = format!("{}/sub/../../outside/s", root.display());
+        let out = crate::proc::command("sh")
+            .arg("-c")
+            .arg(remote_delete_script(root.to_str().unwrap(), &spelled))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("__SD_OUT__"));
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "keep");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remote_create_script_refuses_parent_segments_that_leave_the_root() {
+        let base = std::env::temp_dir().join(format!("sd-rcre-dots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        let spelled = format!("{}/sub/../../outside", root.display());
+        let out = crate::proc::command("sh")
+            .arg("-c")
+            .arg(super::remote_create_script(
+                root.to_str().unwrap(),
+                &spelled,
+                "made",
+                false,
+            ))
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert!(!base.join("outside").join("made").exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn map_stored_types_to_algorithms_handles_ssh_rsa() {
+        // ssh-rsa must map to SHA-2 variants for OpenSSH 8.8+ compatibility.
+        let result = super::map_stored_types_to_algorithms(&["ssh-rsa".into()]);
+        assert_eq!(result, vec!["rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"]);
+    }
+
+    #[test]
+    fn map_stored_types_to_algorithms_preserves_other_types() {
+        let result = super::map_stored_types_to_algorithms(&[
+            "ssh-ed25519".into(),
+            "ecdsa-sha2-nistp256".into(),
+        ]);
+        assert_eq!(result, vec!["ssh-ed25519", "ecdsa-sha2-nistp256"]);
+    }
+
+    #[test]
+    fn map_stored_types_to_algorithms_handles_mixed_types() {
+        let result = super::map_stored_types_to_algorithms(&[
+            "ssh-ed25519".into(),
+            "ssh-rsa".into(),
+            "ecdsa-sha2-nistp521".into(),
+        ]);
+        assert_eq!(
+            result,
+            vec![
+                "ssh-ed25519",
+                "rsa-sha2-512",
+                "rsa-sha2-256",
+                "ssh-rsa",
+                "ecdsa-sha2-nistp521"
+            ]
+        );
     }
 }

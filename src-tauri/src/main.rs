@@ -140,25 +140,140 @@ fn open_forwarded_argv(
     open_forwarded_paths(app, paths, new_window);
 }
 
+/// The effective uid of this process.
+#[cfg(unix)]
+fn our_uid() -> u32 {
+    // SAFETY: geteuid() has no arguments and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// Decide whether a socket peer may receive the forwarded command line: its
+/// uid must have been read successfully and equal ours. A lookup error is
+/// a refusal.
+#[cfg(unix)]
+fn peer_uid_allowed(peer: std::io::Result<u32>, ours: u32) -> bool {
+    matches!(peer, Ok(uid) if uid == ours)
+}
+
+/// The uid of the process at the other end of `stream` (Linux: SO_PEERCRED).
+#[cfg(all(unix, target_os = "linux"))]
+fn peer_uid(stream: &std::os::unix::net::UnixStream) -> std::io::Result<u32> {
+    use std::os::unix::io::AsRawFd;
+
+    #[repr(C)]
+    struct Ucred {
+        pid: libc::pid_t,
+        uid: libc::uid_t,
+        gid: libc::gid_t,
+    }
+
+    let mut ucred = Ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut size = std::mem::size_of::<Ucred>() as libc::socklen_t;
+    // SAFETY: the buffer and its size match what SO_PEERCRED writes.
+    let ret = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut ucred as *mut Ucred as *mut libc::c_void,
+            &mut size,
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(ucred.uid)
+}
+
+/// The uid of the process at the other end of `stream` (macOS: getpeereid).
+#[cfg(all(unix, target_os = "macos"))]
+fn peer_uid(stream: &std::os::unix::net::UnixStream) -> std::io::Result<u32> {
+    use std::os::unix::io::AsRawFd;
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: both out-pointers are valid for the call.
+    let ret = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(uid)
+}
+
+/// Other Unix systems have no peer-credential call wired up here: the
+/// socket directory's 0700 mode is the only check, so report our own uid.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn peer_uid(_stream: &std::os::unix::net::UnixStream) -> std::io::Result<u32> {
+    Ok(our_uid())
+}
+
+/// Whether the reply to a forwarded command line is a well-formed
+/// `{"sparkdown_ack":{"ok":true}}`. Anything else (empty, not JSON, no ack
+/// object, `ok` missing or not `true`) counts as "not handed over".
+#[cfg(unix)]
+fn forward_ack_ok(reply: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(reply) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
+        return false;
+    };
+    value
+        .get("sparkdown_ack")
+        .and_then(|ack| ack.get("ok"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// Hand argv + cwd to a running SparkDown over its core socket. True when
 /// one took them.
 #[cfg(unix)]
 fn forward_to_running_core() -> bool {
-    use std::io::{Read, Write};
-    let Ok(mut s) = std::os::unix::net::UnixStream::connect(mcp::mcp_socket_path()) else {
+    let Some(path) = mcp::mcp_socket_path() else {
         return false;
     };
+    if let Some(dir) = path.parent() {
+        if mcp::ensure_socket_dir(dir).is_err() {
+            return false;
+        }
+    }
+    let Ok(s) = std::os::unix::net::UnixStream::connect(&path) else {
+        return false;
+    };
+    // The running instance refuses forwards that lack its per-launch nonce;
+    // we read it from the file it placed next to the socket. The read
+    // succeeds only for the owning user.
+    let Some(nonce) = mcp::read_forward_nonce() else {
+        return false;
+    };
+    forward_over(s, our_uid(), &nonce)
+}
+
+/// Send argv + cwd over `s` and wait for the ack, provided the process at
+/// the other end runs as `ours`. Returns true only for a well-formed ack.
+#[cfg(unix)]
+fn forward_over(mut s: std::os::unix::net::UnixStream, ours: u32, nonce: &str) -> bool {
+    use std::io::{Read, Write};
+    if !peer_uid_allowed(peer_uid(&s), ours) {
+        return false;
+    }
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
     let argv: Vec<String> = std::env::args().collect();
-    let msg = serde_json::json!({ "sparkdown_forward": { "argv": argv, "cwd": cwd } });
+    let msg = mcp::forward_message(&argv, &cwd, nonce);
     if writeln!(s, "{msg}").is_err() {
         return false;
     }
     let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-    let mut b = [0u8; 64];
-    matches!(s.read(&mut b), Ok(n) if n > 0)
+    let mut buf = [0u8; 512];
+    match s.read(&mut buf) {
+        Ok(n) if n > 0 => forward_ack_ok(&buf[..n]),
+        _ => false,
+    }
 }
 
 #[cfg(not(unix))]
@@ -199,31 +314,53 @@ fn dbus_address_looks_valid(v: &str) -> bool {
 /// Path of the lock file that serializes the D-Bus-fallback first instance
 /// before the MCP socket exists (#160).
 #[cfg(unix)]
-fn fallback_instance_lock_path() -> std::path::PathBuf {
-    mcp::mcp_socket_path().with_extension("instance.lock")
+fn fallback_instance_lock_path() -> Option<std::path::PathBuf> {
+    mcp::mcp_socket_path().map(|p| p.with_extension("instance.lock"))
 }
 
-/// Exclusive non-blocking flock. `Some(file)` holds the lock for the process
-/// lifetime; `None` means another process already holds it.
+/// Result of trying to claim the fallback instance lock.
 #[cfg(unix)]
-fn try_claim_fallback_lock() -> Option<std::fs::File> {
+enum LockResult {
+    Claimed(std::fs::File),
+    Held,
+    Failed,
+}
+
+/// Exclusive non-blocking flock. Returns the lock holder when successful,
+/// `Held` when another process holds it, or `Failed` when the folder check fails.
+#[cfg(unix)]
+fn try_claim_fallback_lock() -> LockResult {
     use std::os::unix::io::AsRawFd;
-    let path = fallback_instance_lock_path();
+    let Some(path) = fallback_instance_lock_path() else {
+        return LockResult::Failed;
+    };
+    // Create the base recursively and harden the leaf with the same ownership
+    // check used by `mcp::start`, so a fresh HOME with no ~/.cache works.
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        if mcp::ensure_socket_dir(dir).is_err() {
+            return LockResult::Failed;
+        }
     }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&path)
-        .ok()?;
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+        {
+            Ok(f) => f,
+            Err(_) => return LockResult::Failed,
+        }
+    };
     let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 };
     if ok {
-        Some(file)
+        LockResult::Claimed(file)
     } else {
-        None
+        LockResult::Held
     }
 }
 
@@ -257,9 +394,19 @@ fn fallback_single_instance_or_forward() -> bool {
     }
     #[cfg(unix)]
     {
-        if let Some(lock) = try_claim_fallback_lock() {
-            hold_fallback_lock(lock);
-            return false; // we are primary
+        match try_claim_fallback_lock() {
+            LockResult::Claimed(lock) => {
+                hold_fallback_lock(lock);
+                return false; // we are primary
+            }
+            LockResult::Failed => {
+                // Folder check failed (no per-user base, or not owned by us):
+                // skip the socket entirely, start normally.
+                return false;
+            }
+            LockResult::Held => {
+                // Another process holds the lock: fall through to wait.
+            }
         }
         // Another process holds the lock (starting or running): wait for its
         // socket and forward, never a second GUI.
@@ -267,7 +414,7 @@ fn fallback_single_instance_or_forward() -> bool {
             return true;
         }
         // Lock holder vanished without a socket: try to take over.
-        if let Some(lock) = try_claim_fallback_lock() {
+        if let LockResult::Claimed(lock) = try_claim_fallback_lock() {
             hold_fallback_lock(lock);
             return false;
         }
@@ -942,6 +1089,67 @@ fn release_window(app: &tauri::AppHandle, label: &str) {
 mod tests {
     use super::PendingFiles;
 
+    #[cfg(all(unix, not(target_os = "macos")))]
+    struct EnvGuard {
+        home: Option<std::ffi::OsString>,
+        xdg: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    impl EnvGuard {
+        fn new() -> Self {
+            Self {
+                home: std::env::var_os("HOME"),
+                xdg: std::env::var_os("XDG_RUNTIME_DIR"),
+            }
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(ref h) = self.home {
+                std::env::set_var("HOME", h);
+            } else {
+                std::env::remove_var("HOME");
+            }
+            if let Some(ref x) = self.xdg {
+                std::env::set_var("XDG_RUNTIME_DIR", x);
+            } else {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[serial_test::serial]
+    fn lock_wait_skipped_on_folder_check_failure() {
+        use super::{fallback_instance_lock_path, try_claim_fallback_lock, LockResult};
+
+        let _guard = EnvGuard::new();
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        std::env::remove_var("HOME");
+
+        let start = std::time::Instant::now();
+        let result = try_claim_fallback_lock();
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, LockResult::Failed),
+            "lock returns Failed when no per-user base is available"
+        );
+        assert!(
+            elapsed.as_secs() < 1,
+            "lock check completes quickly without waiting ({}s)",
+            elapsed.as_secs()
+        );
+        assert!(
+            fallback_instance_lock_path().is_none(),
+            "lock path is None when no per-user base is available"
+        );
+    }
+
     fn v(xs: &[&str]) -> Vec<String> {
         xs.iter().map(|s| s.to_string()).collect()
     }
@@ -1159,5 +1367,120 @@ mod tests {
                 .any(|r| r.as_str() == Some("resources/bin/sparkdown")),
             "tauri.conf.json must bundle the macOS launcher"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn peer_uid_decision_accepts_only_our_uid() {
+        assert!(super::peer_uid_allowed(Ok(1000), 1000), "same uid");
+        assert!(!super::peer_uid_allowed(Ok(1001), 1000), "different uid");
+        assert!(!super::peer_uid_allowed(Ok(0), 1000), "root is not us");
+        assert!(
+            !super::peer_uid_allowed(Ok(1000), 0),
+            "we are root, peer is not"
+        );
+        assert!(super::peer_uid_allowed(Ok(0), 0), "root talking to root");
+        let lookup_error = Err(std::io::Error::other("getsockopt failed"));
+        assert!(
+            !super::peer_uid_allowed(lookup_error, 1000),
+            "a failed lookup is a refusal"
+        );
+    }
+
+    /// Both ends of a real socket pair belong to this user, so the real
+    /// lookup reports our own uid.
+    #[test]
+    #[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
+    fn peer_uid_of_a_real_socket_is_our_uid() {
+        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert_eq!(super::peer_uid(&a).unwrap(), super::our_uid());
+        assert_eq!(super::peer_uid(&b).unwrap(), super::our_uid());
+    }
+
+    /// Run `forward_over` against a server thread that replies with `reply`.
+    /// Returns (result, bytes the server received).
+    #[cfg(unix)]
+    fn forward_with(reply: &'static str, ours: u32) -> (bool, Vec<u8>) {
+        const NONCE: &str = "test-nonce-0123";
+        use std::io::{Read, Write};
+        let (client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            let mut byte = [0u8; 1];
+            // One request line, or EOF when the client sent nothing.
+            while let Ok(1) = server.read(&mut byte) {
+                got.push(byte[0]);
+                if byte[0] == b'\n' {
+                    let _ = server.write_all(reply.as_bytes());
+                    break;
+                }
+            }
+            got
+        });
+        let result = super::forward_over(client, ours, NONCE);
+        (result, handle.join().unwrap())
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
+    fn forward_over_hands_over_to_a_peer_with_our_uid() {
+        let (ok, request) = forward_with("{\"sparkdown_ack\":{\"ok\":true}}\n", super::our_uid());
+        assert!(ok);
+        let text = String::from_utf8(request).unwrap();
+        assert!(text.contains("sparkdown_forward"), "{text}");
+        assert!(text.contains("test-nonce-0123"), "nonce is sent: {text}");
+    }
+
+    /// A peer running as another uid never receives the command line.
+    #[test]
+    #[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
+    fn forward_over_refuses_a_peer_with_another_uid_without_sending() {
+        let other = super::our_uid().wrapping_add(1);
+        let (ok, request) = forward_with("{\"sparkdown_ack\":{\"ok\":true}}\n", other);
+        assert!(!ok);
+        assert!(request.is_empty(), "nothing was sent: {request:?}");
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
+    fn forward_over_needs_a_well_formed_ack() {
+        let ours = super::our_uid();
+        for reply in ["{\"sparkdown_ack\":{\"ok\":false}}\n", "ok\n", "{}\n"] {
+            let (ok, _) = forward_with(reply, ours);
+            assert!(!ok, "{reply:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn forward_ack_accepts_only_ok_true() {
+        let ok = |s: &str| super::forward_ack_ok(s.as_bytes());
+        assert!(ok(r#"{"sparkdown_ack":{"ok":true}}"#));
+        assert!(
+            ok("{\"sparkdown_ack\":{\"ok\":true}}\n"),
+            "trailing newline"
+        );
+        assert!(
+            ok(r#"{"sparkdown_ack":{"ok":true,"secret":"x"}}"#),
+            "extra fields"
+        );
+        assert!(!ok(r#"{"sparkdown_ack":{"ok":false}}"#), "ok false");
+        assert!(
+            !ok(r#"{"sparkdown_ack":{"ok":false,"error":"no"}}"#),
+            "refused"
+        );
+        assert!(!ok(r#"{"sparkdown_ack":{}}"#), "ok missing");
+        assert!(!ok(r#"{"sparkdown_ack":{"ok":"true"}}"#), "ok is a string");
+        assert!(!ok(r#"{"sparkdown_ack":{"ok":1}}"#), "ok is a number");
+        assert!(!ok(r#"{"sparkdown_ack":null}"#), "ack is null");
+        assert!(!ok(r#"{"sparkdown_ack":true}"#), "ack is not an object");
+        assert!(!ok(r#"{"ok":true}"#), "ok outside the ack");
+        assert!(!ok(r#"{"other":{"ok":true}}"#), "no ack key");
+        assert!(!ok("[]"), "wrong shape");
+        assert!(!ok("true"), "bare value");
+        assert!(!ok("not json"), "malformed");
+        assert!(!ok(r#"{"sparkdown_ack":{"ok":true}"#), "truncated");
+        assert!(!ok(""), "empty");
+        assert!(!super::forward_ack_ok(&[0xff, 0xfe, 0x7b]), "invalid utf-8");
     }
 }

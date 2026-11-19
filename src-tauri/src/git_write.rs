@@ -821,6 +821,115 @@ pub enum FetchOutcome {
     Fetched,
     /// Another fetch for this window was still running; nothing was done.
     Busy,
+    /// The fetch was skipped because the repo config has keys that can execute commands.
+    Skipped,
+}
+
+fn repo_config_has_exec_keys(root: &Path, extra: ExtraEnv) -> bool {
+    let mut cmd = crate::proc::command(crate::git::git_bin());
+    cmd.current_dir(root)
+        .env("PATH", crate::context::login_shell_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .arg("config")
+        .arg("--show-scope")
+        .arg("--includes")
+        .arg("--name-only")
+        .arg("--list");
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    let Ok(output) = cmd.output() else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let Some((scope, key)) = line.split_once('\t') else {
+            continue;
+        };
+        if !matches!(scope, "local" | "worktree") {
+            continue;
+        }
+        let key_lower = key.to_lowercase();
+        if key_lower.starts_with("remote.") && key_lower.contains(".uploadpack")
+            || key_lower.starts_with("remote.") && key_lower.contains(".receivepack")
+            || key_lower.starts_with("remote.") && key_lower.contains(".vcs")
+            || key_lower == "protocol.allow"
+            || key_lower.starts_with("protocol.") && key_lower.ends_with(".allow")
+            || key_lower.starts_with("url.") && key_lower.contains(".insteadof")
+            || key_lower == "core.sshcommand"
+            || key_lower == "core.gitproxy"
+            || key_lower == "core.askpass"
+            || key_lower == "core.alternaterefscommand"
+            || key_lower.starts_with("credential.") && key_lower.contains("helper")
+            || key_lower.starts_with("include.")
+        {
+            return true;
+        }
+    }
+
+    fn check_urls(root: &str, scope: &str, extra: ExtraEnv) -> Result<bool, ()> {
+        let mut url_cmd = crate::proc::command(crate::git::git_bin());
+        url_cmd
+            .current_dir(root)
+            .env("PATH", crate::context::login_shell_path())
+            .env("LC_ALL", "C")
+            .env("LANG", "C")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .args([
+                "config",
+                scope,
+                "--includes",
+                "--get-regexp",
+                r"^remote\..*\.url$",
+            ]);
+        for (k, v) in extra {
+            url_cmd.env(k, v);
+        }
+        let output = url_cmd.output().map_err(|_| ())?;
+        let code = output.status.code();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            if code == Some(1) {
+                return Ok(false);
+            }
+            if code == Some(128)
+                && (stderr.contains("cannot be used with multiple working trees")
+                    || stderr.contains("not a git repository")
+                    || stderr.contains("can only be used inside a git repository"))
+            {
+                return Ok(false);
+            }
+            return Err(());
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let line = line.trim();
+            if let Some((_key, url)) = line.split_once(char::is_whitespace) {
+                let url = url.trim();
+                if url.starts_with("ext::") || url.starts_with("fd::") || url.starts_with("file://")
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    if check_urls(root.as_os_str().to_str().unwrap_or(""), "--local", extra).unwrap_or(true) {
+        return true;
+    }
+    if check_urls(root.as_os_str().to_str().unwrap_or(""), "--worktree", extra).unwrap_or(true) {
+        return true;
+    }
+
+    false
 }
 
 /// Quietly fetch the current branch's upstream remote so the behind count
@@ -828,29 +937,103 @@ pub enum FetchOutcome {
 /// no submodules. Never prompts: on top of the runner's
 /// `GIT_TERMINAL_PROMPT=0`, both askpass programs are blanked (git then
 /// uses none), so a remote that needs credentials just fails and the
-/// caller stays silent. Times out after [`FETCH_TIMEOUT`].
+/// caller stays silent. Times out after [`FETCH_TIMEOUT`]. Skips the fetch
+/// if the repo config has keys that can execute commands.
 pub(crate) fn fetch_impl(root: &str, extra: ExtraEnv) -> Result<FetchOutcome, GitActionError> {
     let root = check_local(root, FETCH_UNSUPPORTED)?;
+    if repo_config_has_exec_keys(&root, extra) {
+        return Ok(FetchOutcome::Skipped);
+    }
     let up = upstream(&root, extra)?;
     let mut env: Vec<(&str, &str)> = vec![("GIT_ASKPASS", ""), ("SSH_ASKPASS", "")];
     env.extend_from_slice(extra);
-    run_ok(
-        &root,
-        &env,
-        &[
-            "-c",
-            "credential.interactive=false",
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            "--no-prune",
-            "--no-recurse-submodules",
-            "--",
-            &up.remote,
-        ],
-        FETCH_TIMEOUT,
-        Action::Pull,
-    )?;
+    let neutralisers = crate::git::local_exec_neutralisers(&root)
+        .map_err(|e| GitActionError::new(GitErrorKind::Other, "Background fetch failed.", e))?;
+    let mut cmd = crate::proc::command(crate::git::git_bin());
+    cmd.current_dir(&root)
+        .env("PATH", crate::context::login_shell_path())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .env("SSH_ASKPASS_REQUIRE", "never")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .stdin(Stdio::null());
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+    cmd.env("GIT_CONFIG_COUNT", (neutralisers.len() + 5).to_string());
+    for (i, (key, value)) in neutralisers.iter().enumerate() {
+        cmd.env(format!("GIT_CONFIG_KEY_{i}"), key);
+        cmd.env(format!("GIT_CONFIG_VALUE_{i}"), value);
+    }
+    let base_idx = neutralisers.len();
+    cmd.env(
+        format!("GIT_CONFIG_KEY_{base_idx}"),
+        "credential.interactive",
+    );
+    cmd.env(format!("GIT_CONFIG_VALUE_{base_idx}"), "false");
+    cmd.env(format!("GIT_CONFIG_KEY_{}", base_idx + 1), "core.fsmonitor");
+    cmd.env(format!("GIT_CONFIG_VALUE_{}", base_idx + 1), "false");
+    cmd.env(format!("GIT_CONFIG_KEY_{}", base_idx + 2), "core.hooksPath");
+    cmd.env(format!("GIT_CONFIG_VALUE_{}", base_idx + 2), "/dev/null");
+    cmd.env(format!("GIT_CONFIG_KEY_{}", base_idx + 3), "protocol.allow");
+    cmd.env(format!("GIT_CONFIG_VALUE_{}", base_idx + 3), "user");
+    cmd.env(
+        format!("GIT_CONFIG_KEY_{}", base_idx + 4),
+        "protocol.ext.allow",
+    );
+    cmd.env(format!("GIT_CONFIG_VALUE_{}", base_idx + 4), "never");
+    cmd.args([
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--no-prune",
+        "--no-recurse-submodules",
+        "--",
+        &up.remote,
+    ]);
+    match crate::mcp::run_command_with_timeout(cmd, &root, FETCH_TIMEOUT) {
+        Ok(crate::mcp::CliOutcome::Exited { code: Some(0), .. }) => {}
+        Ok(crate::mcp::CliOutcome::Exited { code, stderr, .. }) => {
+            let detail = format!("git fetch exited with code {code:?}: {stderr}");
+            let kind = if stderr.contains("Could not resolve host")
+                || stderr.contains("Failed to connect")
+                || stderr.contains("Connection refused")
+                || stderr.contains("Couldn't connect to server")
+            {
+                GitErrorKind::Network
+            } else if stderr.contains("Authentication failed")
+                || stderr.contains("could not read Username")
+                || stderr.contains("terminal prompts disabled")
+            {
+                GitErrorKind::Auth
+            } else {
+                GitErrorKind::Other
+            };
+            return Err(GitActionError::new(
+                kind,
+                "Background fetch failed.",
+                detail,
+            ));
+        }
+        Ok(crate::mcp::CliOutcome::TimedOut) => {
+            return Err(GitActionError::new(
+                GitErrorKind::Other,
+                "Background fetch timed out.",
+                format!(
+                    "git fetch did not complete within {} seconds",
+                    FETCH_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+        Err(e) => {
+            return Err(GitActionError::new(
+                GitErrorKind::Other,
+                "Background fetch failed.",
+                e,
+            ))
+        }
+    }
     Ok(FetchOutcome::Fetched)
 }
 
@@ -884,8 +1067,17 @@ impl Drop for InFlight {
 #[tauri::command]
 pub async fn git_fetch(
     webview_window: tauri::WebviewWindow,
+    store: tauri::State<'_, crate::session::ConfigStore>,
     root: String,
 ) -> Result<FetchOutcome, GitActionError> {
+    // Live gate on the shared preference (Settings → Git → Fetch in the
+    // background). Reads the authoritative value from the shared store the
+    // same way externals_allowed does, so turning the toggle off in any
+    // window stops background fetches in every open window immediately,
+    // without waiting for a restart. Default `true` matches AppConfig.
+    if !store.pref_bool("git_background_fetch", true) {
+        return Ok(FetchOutcome::Busy);
+    }
     let label = webview_window.label().to_string();
     let Some(guard) = InFlight::claim(&label) else {
         return Ok(FetchOutcome::Busy);
@@ -2155,6 +2347,92 @@ mod tests {
             InFlight::claim("test-window-a").is_some(),
             "released on drop"
         );
+    }
+
+    #[test]
+    fn fetch_skips_repo_with_uploadpack_command() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(
+            &sb.work,
+            &["config", "--local", "remote.origin.uploadpack", "/bin/sh"],
+        );
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn fetch_skips_repo_with_ext_transport() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(
+            &sb.work,
+            &[
+                "config",
+                "--local",
+                "remote.origin.url",
+                "ext::sh -c 'echo ext'",
+            ],
+        );
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn fetch_skips_repo_with_fd_transport() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(
+            &sb.work,
+            &["config", "--local", "remote.origin.url", "fd::17"],
+        );
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn fetch_skips_repo_with_file_url() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(
+            &sb.work,
+            &[
+                "config",
+                "--local",
+                "remote.origin.url",
+                "file:///tmp/repo.git",
+            ],
+        );
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn fetch_skips_repo_with_ssh_command() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(
+            &sb.work,
+            &["config", "--local", "core.sshCommand", "/bin/sh"],
+        );
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
+    fn fetch_proceeds_with_plain_upstream() {
+        let sb = sandbox();
+        let env = sb.env();
+        let other = sb.other();
+        sb.commit_in(&other, "up.md", "up\n", "upstream");
+        sb.git(&other, &["push", "-q"]);
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Fetched);
+    }
+
+    #[test]
+    fn fetch_proceeds_with_worktree_config_enabled() {
+        let sb = sandbox();
+        let env = sb.env();
+        sb.git(&sb.work, &["config", "extensions.worktreeConfig", "true"]);
+        let other = sb.other();
+        sb.commit_in(&other, "up.md", "up\n", "upstream");
+        sb.git(&other, &["push", "-q"]);
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Fetched);
     }
 
     // --- Discard (#172) ---

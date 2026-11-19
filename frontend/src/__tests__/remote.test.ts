@@ -360,8 +360,12 @@ describe('remote sessions UI', () => {
     };
     let connectCalls: number;
     let firstError: string;
+    let scanError: string | null = null;
+    let trustError: string | null = null;
     function mock(): void {
       connectCalls = 0;
+      scanError = null;
+      trustError = null;
       invoke.mockImplementation(async (...args: unknown[]) => {
         const cmd = args[0] as string;
         switch (cmd) {
@@ -374,8 +378,11 @@ describe('remote sessions UI', () => {
             if (connectCalls === 1) throw firstError;
             return { host: 'dev', path: '/home/u/proj' };
           case 'remote_hostkey_scan':
+            if (scanError) throw scanError;
             return SCAN;
           case 'remote_hostkey_trust':
+            if (trustError) throw trustError;
+            return null;
           case 'remote_hostkey_forget':
             return null;
           default:
@@ -440,6 +447,54 @@ describe('remote sessions UI', () => {
       });
       expect(calls('remote_hostkey_scan')).toHaveLength(0);
       expect(document.querySelector('.remote-hostkey')).toBeNull();
+    });
+
+    it('a scan that finds the host already stored is the same hard stop', async () => {
+      firstError = "[hostkey-unknown] 'dev' is not in your known_hosts yet.";
+      mock();
+      scanError = "[hostkey-changed] 'dev' is already pinned in your known_hosts (/home/u/.ssh/known_hosts).";
+      await start();
+      await vi.waitFor(() => {
+        const err = document.querySelector('.remote-error') as HTMLElement;
+        expect(err.textContent).toContain('already pinned');
+        expect(err.classList.contains('remote-error-danger')).toBe(true);
+        expect(err.textContent).not.toContain('[hostkey-changed]');
+        expect(err.textContent).not.toContain('Could not check the host key');
+      });
+      expect(calls('remote_hostkey_scan')).toHaveLength(1);
+      expect(calls('remote_hostkey_trust')).toHaveLength(0);
+      expect(document.querySelector('.remote-hostkey')).toBeNull();
+      expect(connectCalls).toBe(1);
+    });
+
+    it('a scan that fails for another reason keeps the generic message', async () => {
+      firstError = "[hostkey-unknown] 'dev' is not in your known_hosts yet.";
+      mock();
+      scanError = 'ssh-keyscan timed out';
+      await start();
+      await vi.waitFor(() => {
+        const err = document.querySelector('.remote-error') as HTMLElement;
+        expect(err.textContent).toContain("Could not check the host key of 'dev'");
+        expect(err.textContent).toContain('ssh-keyscan timed out');
+        expect(err.classList.contains('remote-error-danger')).toBe(false);
+      });
+      expect(document.querySelector('.remote-hostkey')).toBeNull();
+    });
+
+    it('a host that became stored before Trust is the same hard stop', async () => {
+      firstError = "[hostkey-unknown] 'dev' is not in your known_hosts yet.";
+      mock();
+      trustError = "[hostkey-changed] 'dev' is already pinned in your known_hosts (/home/u/.ssh/known_hosts).";
+      await start();
+      await vi.waitFor(() => expect(document.querySelector('.remote-hostkey')).not.toBeNull());
+      (document.getElementById('remote-hostkey-trust') as HTMLButtonElement).click();
+      await vi.waitFor(() => {
+        const err = document.querySelector('.remote-error') as HTMLElement;
+        expect(err.textContent).toContain('already pinned');
+        expect(err.classList.contains('remote-error-danger')).toBe(true);
+      });
+      expect(connectCalls).toBe(1);
+      expect(opened).toEqual([]);
     });
 
     it('a passphrase key without an agent explains ssh-add and links the docs', async () => {

@@ -68,6 +68,7 @@ export class WelcomeController {
     this.ctx.statusbar.setActiveFile(null, 'No file open');
     this.ctx.statusbar.updateModified(false);
     this.ctx.statusbar.updateCounts(0, 0, 0);
+    this.ctx.statusbar.updateCursor(1, 1);
     welcome.classList.remove('hidden');
     editorArea.classList.add('hidden');
     syncEditorInput(this.ctx.editor);

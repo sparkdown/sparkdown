@@ -128,6 +128,9 @@ export function isUrlOpenClick(
   return mac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
 }
 
+/** Most keys kept for a shell that is still starting (a runaway paste). */
+const MAX_PENDING_INPUT = 64 * 1024;
+
 /** Wheel pixels per scrolled line on a tmux pane (about one 12px row). */
 export const TMUX_WHEEL_ROW_PX = 16;
 
@@ -234,18 +237,31 @@ export class TerminalPane {
         e.preventDefault();
         void pasteOrCtrlV(
           () => api.readClipboardText(),
-          (data) => this.writeInput(data),
+          (data) => {
+            // '\x16' is the Ctrl+V (quoted-insert) fallback: a single
+            // control byte goes raw. Clipboard text goes through xterm's
+            // own paste pipeline so it is wrapped in ESC[200~ … ESC[201~
+            // when the pty enabled bracketed paste (DECSET 2004) and so
+            // \r\n / \n are normalised to \r. That stops a multi-line
+            // clipboard payload from being executed before the user can
+            // review it.
+            if (data === '\x16') this.writeInput(data);
+            else this.term.paste(data);
+          },
         );
         return false;
       }
       if (action === 'paste') {
         // Read through the core: WebKitGTK's navigator.clipboard can't read
         // without a user gesture (#130). preventDefault: no second, native paste.
+        // Route through xterm's Terminal.paste(): it emits ESC[200~ … ESC[201~
+        // when bracketed-paste is enabled and normalises CRLF, so a newline
+        // inside clipboard content no longer executes as Enter.
         e.preventDefault();
         void api
           .readClipboardText()
           .then((text) => {
-            if (text) this.writeInput(text);
+            if (text) this.term.paste(text);
           })
           .catch(() => {});
         return false;
@@ -338,6 +354,10 @@ export class TerminalPane {
 
   onMountSettled?: () => void;
 
+  /** Source of text typed before this pane existed (the drawer's type-ahead
+   *  box). Asked once, the moment the shell is up, for the focused pane. */
+  takeEarlyInput?: () => string;
+
   /** True when the shell failed to spawn (the tab stays, error readable). */
   isStartFailed(): boolean {
     return this.startFailed;
@@ -364,6 +384,9 @@ export class TerminalPane {
     this.session = session;
     if (this.disposed) return;
     this.term.open(container);
+    // Take keys from the first moment: until the shell is up they wait in
+    // pendingInput instead of being dropped (see writeInput).
+    this.term.onData((data) => this.writeInput(data));
     this.applyTheme();
     // xterm queues textarea focus behind DOM insertion. Let the pane owner
     // restore a still-intended Find focus after that native task completes.
@@ -409,8 +432,6 @@ export class TerminalPane {
     if (this.disposed) return void exitUn();
     this.unlisteners.push(exitUn);
 
-    this.term.onData((data) => this.writeInput(data));
-
     try {
       this.mode = await api.terminalStart(
         this.id,
@@ -435,6 +456,11 @@ export class TerminalPane {
       return;
     }
     this.started = true;
+    // Keys typed before this pane existed come first, then the ones typed
+    // while the shell was starting.
+    const queued = (this.takeEarlyInput?.() ?? '') + this.pendingInput;
+    this.pendingInput = '';
+    if (queued) this.sendInput(queued);
     this.refitSoon();
 
     this.resizeObserver = new ResizeObserver(() => this.refitDebounced());
@@ -504,22 +530,56 @@ export class TerminalPane {
    *  submitted without Enter. On a tmux-backed pane we go through tmux
    *  `send-keys` so the text is inserted into tmux's own serialized input/
    *  redraw cycle — writing raw pty bytes here races tmux's attach redraw and
-   *  the line renders twice. Plain shells take the direct pty write. */
+   *  the line renders twice. Plain shells take the direct pty write.
+   *
+   *  Strip CR/LF defensively: both the tmux `send-keys` path and the raw
+   *  write path would otherwise submit each line as Enter, which breaks the
+   *  "nothing is submitted without Enter" contract if a caller ever hands
+   *  this method text influenced by the clipboard or by agent/repo content.
+   */
   paste(text: string): void {
     if (!this.started) return;
+    const flat = text.replace(/[\r\n]+/g, ' ');
     const session = this.sessionName;
     if (session) {
       this.leaveTmuxScroll();
-      this.serialIo(() => api.tmuxSendKeys(session, text));
-    } else this.writeInput(text);
+      this.serialIo(() => api.tmuxSendKeys(session, flat));
+    } else this.writeInput(flat);
   }
 
   /** User input to the pty, after any pending tmux wheel step and after
    *  leaving tmux copy mode (so the keys reach the shell, not copy mode). */
   private writeInput(data: string): void {
-    if (!this.started) return;
+    if (this.disposed || this.exited) return;
+    if (!this.started) {
+      // The shell is still starting: keep the keys, in order, and send them
+      // when it is up.
+      if (this.pendingInput.length + data.length <= MAX_PENDING_INPUT) this.pendingInput += data;
+      return;
+    }
     this.leaveTmuxScroll();
-    this.serialIo(() => api.terminalWrite(this.id, data));
+    this.sendInput(data);
+  }
+
+  /** Bytes typed while an earlier pty write is still queued: they ride along
+   *  in that one write, so the pty receives them in the order they were typed. */
+  private inputBuf: string | null = null;
+  /** Keys typed before the shell started; sent in order once it has. */
+  private pendingInput = '';
+
+  /** Every pty write goes through the io chain, one at a time: the next one
+   *  starts only after the previous call has returned. */
+  private sendInput(data: string): void {
+    if (this.inputBuf !== null) {
+      this.inputBuf += data;
+      return;
+    }
+    this.inputBuf = data;
+    this.chainIo(() => {
+      const out = this.inputBuf ?? '';
+      this.inputBuf = null;
+      return out ? api.terminalWrite(this.id, out) : Promise.resolve();
+    });
   }
 
   private leaveTmuxScroll(): void {
@@ -723,7 +783,9 @@ export function agentLaunchCommand(bin: string, ctx: LaunchContext): string {
     switch (bin) {
       case 'claude':
         // --mcp-config ADDS servers (no --strict-mcp-config, which replaces).
-        return `claude --mcp-config '{"mcpServers":{"sparkdown":{"command":${prog},"args":${args}}}}'${extra}`;
+        // shq() around the JSON prevents an apostrophe in the command path from
+        // breaking out of the shell word when eval parses the launch line.
+        return `claude --mcp-config ${shq(JSON.stringify({ mcpServers: { sparkdown: { command: ctx.shim.program, args: ctx.shim.args } } }))}${extra}`;
       case 'codex':
         // Three -c overrides; the rest of ~/.codex/config.toml is untouched.
         // env_vars forwards $SPARKDOWN_MCP by name: without it Codex starts
@@ -980,6 +1042,7 @@ export class TerminalManager {
   private focusedId: string | null = null;
   /** Search input temporarily owns keyboard focus across a split. */
   private searchFocusId: string | null = null;
+  private earlyInput: (() => string) | null = null;
   /** Panes whose close confirmation is open (one dialog per pane). */
   private confirmingClose = new Set<string>();
   private seq = 0;
@@ -1213,6 +1276,17 @@ export class TerminalManager {
     this.sessionPrefix = `sd-${cwd ? hashKey(cwd) : 'none'}-`;
   }
 
+  /** Where text typed before the first shell was up comes from (the drawer's
+   *  type-ahead box). The focused pane asks for it once its shell is running. */
+  setEarlyInput(source: (() => string) | null): void {
+    this.earlyInput = source;
+  }
+
+  /** Whether the grid already has a terminal. */
+  hasPanes(): boolean {
+    return this.panes.size > 0;
+  }
+
   /** Toggle tmux backing for terminals opened from now on (user setting). */
   setUseTmux(enabled: boolean): void {
     this.useTmux = enabled;
@@ -1250,8 +1324,12 @@ export class TerminalManager {
     // shells in reading order so each fits into its final cell.
     const starts: Array<() => Promise<void>> = [];
     const idBySession = new Map<string, string>();
+    let first = true;
     for (const session of paneIds(sessionTree)) {
-      const { id, start } = this.createPane(this.metaForSession(session), session, null);
+      const { id, pane, start } = this.createPane(this.metaForSession(session), session, null);
+      // The first pane is the focused one: it gets the keys typed so far.
+      if (first && this.earlyInput) pane.takeEarlyInput = this.earlyInput;
+      first = false;
       idBySession.set(session, id);
       starts.push(start);
     }
@@ -1331,6 +1409,7 @@ export class TerminalManager {
       ? splitPane(this.tree, target, id, opts.split?.dir ?? 'row')
       : leaf(id);
     this.focusedId = preservingFind ? target : id;
+    if (this.focusedId === id && this.earlyInput) pane.takeEarlyInput = this.earlyInput;
     this.render();
     await start();
     // The shell exited while starting: closeTerminal already removed it.

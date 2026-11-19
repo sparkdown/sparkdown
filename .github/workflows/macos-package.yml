@@ -60,37 +60,38 @@ jobs:
         with:
           workspaces: src-tauri
       - name: Build macOS bundles with package-macos.sh
-        # The script runs `tauri build`, then creates and signs the updater
-        # tarball. The signing key is visible only to the script, which unsets
-        # it before the build step (so npm/vite and cargo never see it) and
-        # passes it only to `tauri signer sign`. Owner setup: add the repo
-        # secrets TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD.
-        # Without them the build still succeeds but produces no signed updater
-        # artifact, and that release has no macOS auto-update entry.
+        # The script runs `tauri build` only. The updater tarball is signed
+        # separately in the next step.
+        run: bash scripts/package-macos.sh
+      - name: Sign the macOS updater tarball
+        # sign-macos-updater.sh creates and signs the versioned updater tarball
+        # (SparkDown_<version>_aarch64.app.tar.gz). The signing key is visible
+        # only to the signer process, never on the command line where ps could
+        # see it. Owner setup: add the repo secrets TAURI_SIGNING_PRIVATE_KEY
+        # and TAURI_SIGNING_PRIVATE_KEY_PASSWORD. Without them the job fails
+        # here, and that release has no macOS auto-update entry.
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: bash scripts/package-macos.sh
-      - name: Verify signed updater artifacts
-        run: |
-          set -euo pipefail
-          if [ ! -f src-tauri/target/release/bundle/macos/SparkDown.app.tar.gz ]; then
-            echo "::error::Signed updater tarball is missing (required for macOS auto-update)"
-            exit 1
-          fi
-          if [ ! -f src-tauri/target/release/bundle/macos/SparkDown.app.tar.gz.sig ]; then
-            echo "::error::Updater signature is missing (required for macOS auto-update)"
-            exit 1
-          fi
-          python3 scripts/check-updater-sig.py src-tauri/target/release/bundle/macos/SparkDown.app.tar.gz.sig
-      - name: Rename updater artifacts
         run: |
           set -euo pipefail
           version=$(node -p 'require("./src-tauri/tauri.conf.json").version')
-          cd src-tauri/target/release/bundle/macos
-          mv SparkDown.app.tar.gz "SparkDown_${version}_aarch64.app.tar.gz"
-          mv SparkDown.app.tar.gz.sig "SparkDown_${version}_aarch64.app.tar.gz.sig"
-          ls -lh SparkDown_*
+          bash scripts/sign-macos-updater.sh "$version"
+      - name: Verify signed updater artifacts
+        run: |
+          set -euo pipefail
+          version=$(node -p 'require("./src-tauri/tauri.conf.json").version')
+          tgz="src-tauri/target/release/bundle/macos/SparkDown_${version}_aarch64.app.tar.gz"
+          if [ ! -f "$tgz" ]; then
+            echo "::error::Signed updater tarball is missing: $tgz"
+            exit 1
+          fi
+          if [ ! -f "$tgz.sig" ]; then
+            echo "::error::Updater signature is missing: $tgz.sig"
+            exit 1
+          fi
+          python3 scripts/check-updater-sig.py "$tgz.sig"
+          ls -lh "$(dirname "$tgz")/SparkDown_"*
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sparkdown-macos

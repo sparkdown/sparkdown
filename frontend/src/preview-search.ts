@@ -13,6 +13,17 @@ import { formatShortcut } from './shortcuts';
  * the active hit for prev/next and scroll-into-view. Marks are cleared on close
  * and before each re-search so they never persist into the rendered output.
  */
+// Bounds on the per-keystroke search work. These exist to keep a very large
+// document from freezing the single-threaded webview when the user types a
+// short query into preview find.
+//   - MIN_QUERY_LENGTH: don't search until the user has typed enough to make
+//     the match count tractable. A single common character on a megabyte-scale
+//     document can produce millions of hits.
+//   - MAX_HITS: hard cap on the number of <mark> elements created in one run.
+//     When reached, we stop walking and report "<cap>+ results".
+const MIN_QUERY_LENGTH = 2;
+const MAX_HITS = 2000;
+
 export class PreviewSearch {
   private host: HTMLElement;          // where the widget mounts (preview-container)
   private dom: HTMLElement | null = null;
@@ -22,6 +33,9 @@ export class PreviewSearch {
   private hits: HTMLElement[] = [];
   private active = -1;
   private caseSensitive = false;
+  // True when the last run() stopped because it hit MAX_HITS. Used only to
+  // render the count label as "<cap>+" so the user knows results are capped.
+  private truncated = false;
 
   constructor(
     host: HTMLElement,
@@ -120,19 +134,24 @@ export class PreviewSearch {
   private clearMarks(): void {
     const el = this.searchRootEl();
     if (!el) return;
+    // Collect affected parents first, then normalize each one exactly once.
+    // normalize() walks the parent's whole child list, so calling it per mark
+    // is O(k^2) when k marks share a parent (a single large paragraph).
+    const parents = new Set<Node>();
     for (const mark of Array.from(el.querySelectorAll('mark.sd-phit'))) {
       const parent = mark.parentNode;
       if (!parent) continue;
-      // Replace the <mark> with its text, then merge adjacent text nodes.
       parent.replaceChild(mark.ownerDocument.createTextNode(mark.textContent || ''), mark);
-      parent.normalize();
+      parents.add(parent);
     }
+    for (const parent of parents) (parent as Element | Document).normalize();
   }
 
   private run(): void {
     this.clearMarks();
     this.hits = [];
     this.active = -1;
+    this.opacityCache = new Map();
     const query = this.input.value;
     const el = this.searchRootEl();
     if (!query || !el) { this.updateCount(); return; }
@@ -162,11 +181,18 @@ export class PreviewSearch {
       },
     });
 
+    // Require a minimum query length. One character on a multi-megabyte
+    // document produces an unbounded number of marks and can freeze the
+    // webview. Empty state is reported by updateCount().
+    if (query.length < MIN_QUERY_LENGTH) { this.updateCount(); return; }
+
     const textNodes: Text[] = [];
     let n: Node | null;
     while ((n = walker.nextNode())) textNodes.push(n as Text);
 
-    for (const textNode of textNodes) {
+    // Walk nodes and create <mark>s, stopping as soon as we hit MAX_HITS.
+    this.truncated = false;
+    outer: for (const textNode of textNodes) {
       const text = textNode.nodeValue || '';
       const hay = this.caseSensitive ? text : text.toLowerCase();
       let idx = hay.indexOf(needle);
@@ -176,6 +202,7 @@ export class PreviewSearch {
       let current = textNode;
       let offsetBase = 0;
       while (idx !== -1) {
+        if (this.hits.length >= MAX_HITS) { this.truncated = true; break outer; }
         const matchStart = idx - offsetBase;
         const after = current.splitText(matchStart);
         const matchNode = after.splitText(needle.length);
@@ -200,35 +227,66 @@ export class PreviewSearch {
     // opacity:0) still lives in the DOM and passes the display/visibility
     // filter — but it has no painted geometry. Check each mark's real layout
     // box, which is what the browser's own "find in page" effectively does.
-    const visible = this.hits.filter((m) => this.isRendered(m));
+    //
+    // Two performance notes:
+    //  - Partition in a single pass: assign to `visible` or `rejected`
+    //    directly rather than filtering twice (previously the second pass
+    //    used `visible.includes(m)`, which is O(n^2)).
+    //  - Collect each rejected mark's parent in a Set and call normalize()
+    //    once per parent at the end instead of once per mark (also O(n^2)
+    //    when many marks share a parent).
+    const visible: HTMLElement[] = [];
+    const rejectedParents = new Set<Node>();
     for (const m of this.hits) {
-      if (!visible.includes(m)) {
-        // Unwrap the rejected mark so it doesn't linger as a stray <mark>.
+      if (this.isRendered(m)) {
+        visible.push(m);
+      } else {
         const parent = m.parentNode;
-        if (parent) { parent.replaceChild(m.ownerDocument.createTextNode(m.textContent || ''), m); parent.normalize(); }
+        if (parent) {
+          parent.replaceChild(m.ownerDocument.createTextNode(m.textContent || ''), m);
+          rejectedParents.add(parent);
+        }
       }
     }
+    for (const parent of rejectedParents) (parent as Element | Document).normalize();
     this.hits = visible;
 
     if (this.hits.length) this.setActive(0);
     this.updateCount();
   }
 
-  /** True if the element has a painted box and isn't hidden by opacity. */
+  /**
+   * True if the element has a painted box and isn't hidden by opacity.
+   *
+   * getBoundingClientRect() is cheaper than getClientRects() for the common
+   * case (we only need to know if the mark has any painted area) and we also
+   * cap the ancestor opacity walk via a per-run cache so a deeply nested
+   * document doesn't pay the same getComputedStyle() cost over and over.
+   * The hit cap in run() bounds how often this can be called in total.
+   */
   private isRendered(el: HTMLElement): boolean {
-    const rects = el.getClientRects();
-    if (rects.length === 0) return false;
-    let hasArea = false;
-    for (const r of rects) if (r.width > 0 && r.height > 0) { hasArea = true; break; }
-    if (!hasArea) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
     const win = el.ownerDocument.defaultView;
+    if (!win) return true;
     // Walk ancestors for opacity:0 (doesn't zero the box but hides content).
+    // Cache per ancestor across the current run so sibling marks under the
+    // same subtree don't re-read computed style for every shared ancestor.
+    const cache = this.opacityCache;
     for (let a: HTMLElement | null = el; a; a = a.parentElement) {
-      const cs = win?.getComputedStyle(a);
-      if (cs && parseFloat(cs.opacity) === 0) return false;
+      const cached = cache.get(a);
+      if (cached === true) return false; // ancestor already known-hidden
+      if (cached === false) continue;    // ancestor already known-visible
+      const cs = win.getComputedStyle(a);
+      const hidden = parseFloat(cs.opacity) === 0;
+      cache.set(a, hidden);
+      if (hidden) return false;
     }
     return true;
   }
+
+  // Per-run cache: ancestor -> isOpacityZero. Reset at the start of each run.
+  private opacityCache: Map<HTMLElement, boolean> = new Map();
 
   private step(dir: number): void {
     if (!this.hits.length) return;
@@ -253,9 +311,15 @@ export class PreviewSearch {
 
   private updateCount(): void {
     if (!this.input.value) { this.count.textContent = ''; this.count.classList.remove('sd-find-noresults'); return; }
+    if (this.input.value.length < MIN_QUERY_LENGTH) {
+      this.count.textContent = `Type ≥${MIN_QUERY_LENGTH} chars`;
+      this.count.classList.remove('sd-find-noresults');
+      return;
+    }
     if (!this.hits.length) { this.count.textContent = 'No results'; this.count.classList.add('sd-find-noresults'); return; }
     this.count.classList.remove('sd-find-noresults');
-    this.count.textContent = `${this.active + 1} of ${this.hits.length}`;
+    const total = this.truncated ? `${this.hits.length}+` : `${this.hits.length}`;
+    this.count.textContent = `${this.active + 1} of ${total}`;
   }
 }
 

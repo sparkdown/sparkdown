@@ -1,5 +1,5 @@
 import { api, type ChangeStat, type GitChange } from './api';
-import { escapeHtml } from './utils';
+import { escapeHtml, escapeReviewText, hasUnicodeControls } from './utils';
 import {
   partitionChanges,
   noiseReasonLabel,
@@ -598,11 +598,11 @@ export class ChangesView {
     const dir = c.path.slice(0, c.path.length - name.length).replace(/\/$/, '');
     const title = `${c.path}/ is a separate git repository (untracked here). Open it as its own folder to review its changes.`;
     return (
-      `<div class="change-row change-row-folder" aria-disabled="true" title="${escapeHtml(title)}">` +
+      `<div class="change-row change-row-folder" aria-disabled="true" title="${escapeReviewText(title)}">` +
       `<span class="change-check"></span>` +
       `<span class="change-badge change-${c.status}">${STATUS_LETTER[c.status]}</span>` +
-      `<span class="change-file"><b class="change-name">${escapeHtml(name)}/</b>` +
-      (dir ? `<em class="change-dir">${escapeHtml(dir)}</em>` : '') +
+      `<span class="change-file"><b class="change-name">${escapeReviewText(name)}/</b>` +
+      (dir ? `<em class="change-dir">${escapeReviewText(dir)}</em>` : '') +
       `</span>` +
       `<span class="change-counts"><span class="change-bin">repo</span></span>` +
       `</div>`
@@ -635,12 +635,18 @@ export class ChangesView {
       .filter(Boolean)
       .join(' ');
     const title = again ? `${c.path} — changed since you reviewed it` : c.path;
+    const bidi = hasUnicodeControls(c.path) ? ' change-row-bidi' : '';
+    const rowCls = [cls, bidi].filter(Boolean).join(' ');
     return (
-      `<div class="${cls}" role="option" aria-selected="false" data-path="${escapeHtml(c.path)}" data-status="${c.status}" title="${escapeHtml(title)}">` +
+      // `data-path` must stay the real path so the row acts on the file git
+      // actually tracks; the visible name/dir are rendered through
+      // `escapeReviewText` so a U+202E in the name cannot show one extension
+      // while the row opens / discards another.
+      `<div class="${rowCls}" role="option" aria-selected="false" data-path="${escapeHtml(c.path)}" data-status="${c.status}" title="${escapeReviewText(title)}">` +
       `<span class="change-check" role="checkbox" aria-checked="${reviewed}" aria-label="Reviewed" title="${reviewed ? 'Mark as pending' : 'Mark reviewed (Space)'}">${reviewed ? CHECK_SVG : ''}</span>` +
       `<span class="change-badge change-${c.status}">${STATUS_LETTER[c.status]}</span>` +
-      `<span class="change-file"><b class="change-name">${escapeHtml(name)}</b>` +
-      (dir ? `<em class="change-dir">${escapeHtml(dir)}</em>` : '') +
+      `<span class="change-file"><b class="change-name">${escapeReviewText(name)}</b>` +
+      (dir ? `<em class="change-dir">${escapeReviewText(dir)}</em>` : '') +
       `</span>` +
       `<span class="change-counts">${counts}</span>` +
       this.renderDiscardButton(c) +
@@ -654,7 +660,7 @@ export class ChangesView {
     const reason = this.opts.discardDisabledReason?.() ?? null;
     const title = reason ?? 'Discard Changes… (Shift+F10 on the selected file)';
     return (
-      `<button type="button" class="change-discard" tabindex="-1" title="${escapeHtml(title)}" aria-label="${escapeHtml(`Discard changes in ${c.path}`)}"${reason ? ' aria-disabled="true"' : ''}>` +
+      `<button type="button" class="change-discard" tabindex="-1" title="${escapeHtml(title)}" aria-label="${escapeReviewText(`Discard changes in ${c.path}`)}"${reason ? ' aria-disabled="true"' : ''}>` +
       DISCARD_SVG +
       `</button>`
     );
@@ -734,12 +740,17 @@ function renderDiffLine(line: string): string {
     mark = '−';
   } else if (line.startsWith('\\')) {
     // "\ No newline at end of file"
-    return `<div class="diff-line diff-meta">${escapeHtml(line)}</div>`;
+    return `<div class="diff-line diff-meta">${escapeReviewText(line)}</div>`;
   }
   const text = line.slice(1);
+  // Neutralise Unicode bidi overrides and invisible formatting characters in
+  // diff text so the reviewer sees exactly what git stored, not what the bidi
+  // algorithm redraws. A warning class on the line lets the stylesheet badge
+  // it for extra visibility.
+  const flagged = hasUnicodeControls(text) ? ' diff-line-bidi' : '';
   return (
-    `<div class="diff-line ${cls}"><span class="diff-mark" aria-hidden="true">${mark}</span>` +
-    `<span class="diff-text">${escapeHtml(text) || '&nbsp;'}</span></div>`
+    `<div class="diff-line ${cls}${flagged}"><span class="diff-mark" aria-hidden="true">${mark}</span>` +
+    `<span class="diff-text">${escapeReviewText(text) || '&nbsp;'}</span></div>`
   );
 }
 

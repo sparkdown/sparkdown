@@ -5,6 +5,37 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
+## [0.4.3] — 2026-11-13
+
+Fixes and reliability improvements on top of 0.4.2.
+
+### Improved
+
+- **Diff view** handles invisible and bidirectional characters better.
+- **Search** is faster and more reliable, including preview search and fuzzy file matching in large folders.
+- **Preview** stays in sync with the document: diagrams, code blocks, and reference-style links update when the text changes, and images load from the open folder.
+- **Git** diffs time out after 20 seconds and skip special file types, with the same behaviour locally and over SSH. Viewing changes no longer runs hooks from the repository or triggers extra fetches in a partial clone. Settings from included config and worktrees are picked up correctly, including names with unusual characters.
+- Changes to **editor context** and **background fetch** in Settings apply in every window right away.
+
+### Fixed
+
+- Pasting in the terminal is treated as text when the shell supports it, so a multi-line paste is not run as separate commands.
+- Saving a file writes the new contents completely before replacing the old one. Opening unusual or very large files is handled more reliably.
+- Creating and deleting files on a remote host stays inside the open folder. Remote connections check all of your known_hosts files when confirming the host, and the SSH key passphrase prompt is tied to that connection.
+- JavaScript in an HTML preview stays with that document. Starting Claude from the terminal handles unusual paths correctly.
+- The `sparkdown` command only talks to a window running as you, and waits for a clear reply. Agent tools talk only to the window they belong to; on Windows, external agents connect to the right running app, and SparkDown will not replace a path another process is already using.
+- SparkDown finds installed agents from your PATH without depending on the current folder, and will not run an agent from a relative path. Background fetch is skipped when a repository's git config customizes how fetch runs.
+- Update checks use a fresh folder for each run, and only install the official build that matches the release.
+- **Saving while you type** writes the text the editor holds when the write starts, and a save you made yourself no longer makes the next Save ask whether to overwrite. The explorer no longer flashes the row of a file you just saved.
+- The **status bar** shows the cursor position of the file you open or switch to, and of a new file.
+- A **folder in the explorer** stays open when you click it twice quickly or the list refreshes while it loads, and one failed refresh no longer closes the folders you have open.
+- **Terminal:** keys typed right after opening it go to the terminal, in order, instead of the editor or getting lost while the shell starts.
+
+### Changed
+
+- **Agent tools on Linux** without `XDG_RUNTIME_DIR` now use `~/.cache/sparkdown` instead of `/tmp/sparkdown`. macOS is unchanged (still the per-user `$TMPDIR/sparkdown`), and Linux with `XDG_RUNTIME_DIR` set is unchanged. Terminals started before the upgrade need to be restarted to reconnect.
+- **Agent tools on a remote (SSH) host** need Python 3 on that host. Terminals that were already open need to be reopened after this upgrade.
+
 ## [0.4.2] — 2026-11-09
 
 Terminal, Git and command-line improvements on top of 0.4.1. Not in this
@@ -182,6 +213,7 @@ The agent cockpit release.
 - **Linux `.deb`** as the preferred install; the AppImage is still built.
 - Hardening: the watcher ignores build and dependency folders, a stricter content policy, and dependency security updates.
 
+[0.4.3]: https://github.com/sparkdown/sparkdown/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/sparkdown/sparkdown/compare/v0.4.1...v0.4.2
 [0.3.1]: https://github.com/sparkdown/sparkdown/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/sparkdown/sparkdown/compare/v0.2.0...v0.3.0

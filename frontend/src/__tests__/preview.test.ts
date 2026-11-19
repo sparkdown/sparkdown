@@ -1,5 +1,18 @@
 // @vitest-environment jsdom
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+const mockSetHtmlPreview = vi.fn(async (_html: string): Promise<void> => {});
+const mockAllowPreviewAssets = vi.fn(async (_paths: string[], _baseDir: string | null): Promise<boolean[]> => [true]);
+vi.mock('../api', () => ({
+  api: {
+    setHtmlPreview: (html: string) => mockSetHtmlPreview(html),
+    allowPreviewAssets: (paths: string[], baseDir: string | null) => mockAllowPreviewAssets(paths, baseDir),
+  },
+}));
+vi.mock('@tauri-apps/api/core', () => ({
+  convertFileSrc: (p: string) => `asset://localhost/${encodeURIComponent(p)}`,
+}));
+
 import { marked } from 'marked';
 import { PreviewPane, sanitizeMarkdownHtml } from '../preview';
 import { EventBus } from '../events';
@@ -97,7 +110,7 @@ describe('markdown sanitizer', () => {
   });
 
   describe('code blocks', () => {
-    it('escapes the quote in a crafted fence language so it cannot break out of the class attribute', async () => {
+    it('escapes a quote in a fence language to keep it inside the class attribute', async () => {
       // token.lang is the fence info string. The escape that matters for
       // safety is the double-quote: with it escaped to &quot;, the class="..."
       // attribute cannot be terminated early, so nothing after it can become
@@ -238,6 +251,29 @@ describe('markdown sanitizer', () => {
       expect(container.innerHTML).toContain('href="https://example.com"');
     });
 
+    it('does not reuse chunk cache when reference-link definitions differ', async () => {
+      const { pane, container } = makeLivePane();
+      
+      // Two documents with identical body text but different reference definitions
+      // elsewhere. The definition lives in a different heading segment, so it's not
+      // part of the first chunk's raw tokens. Without the linksFingerprint in the
+      // cache key, the second document would reuse the first's cached href.
+      // Use 40+ paragraph tokens between the def and link to ensure they're in different chunks
+      const filler = Array(45).fill(0).map((_, i) => `Para ${i}.`).join('\n\n');
+      const doc1 = `[ref]: /first\n\n# Section\n\n${filler}\n\n[Link][ref]`;
+      await pane.renderImmediateForExport(doc1);
+      const html1 = container.innerHTML;
+      expect(html1).toContain('href="/first"');
+      expect(html1).not.toContain('/second');
+      
+      // Second document: same filler, different definition
+      const doc2 = `[ref]: /second\n\n# Section\n\n${filler}\n\n[Link][ref]`;
+      await pane.renderImmediateForExport(doc2);
+      const html2 = container.innerHTML;
+      expect(html2).toContain('href="/second"');
+      expect(html2).not.toContain('/first');
+    });
+
     it('segmented lexing matches whole-document parsing exactly', async () => {
       // Exercises the heading-segmented lexer against marked's own
       // whole-document output on a doc with fences containing #-lines,
@@ -267,6 +303,76 @@ describe('markdown sanitizer', () => {
       expect(norm(container.innerHTML)).toBe(norm(String(expected)));
     });
 
+    it('falls back to single-lex when defs prefix and segments exceed budget', async () => {
+      // When reference-link definitions are large and there are many
+      // headings, the fallback keeps lexer input linear in |content|
+      // instead of quadratic in segments × defsPrefix. Build a document
+      // that exceeds the PREFIX_BUDGET_BYTES cap (4 MiB).
+      // With 5000 defs (~88 KB) and 50 headings, segments × |defsPrefix| = ~4.4 MB
+      const largeDefs = Array.from({ length: 5000 }, (_, i) => `[ref${i}]: /url${i}`).join('\n');
+      const manyHeadings = Array.from({ length: 50 }, (_, i) => `# Heading ${i}\n\npara\n\n`).join('');
+      const md = largeDefs + '\n\n' + manyHeadings;
+
+      const { pane, container } = makeLivePane();
+      // Spy on marked.lexer to verify fallback uses single whole-document lex
+      let lexCalls = 0;
+      const originalLex = marked.lexer;
+      marked.lexer = ((src: string) => {
+        lexCalls++;
+        return originalLex(src);
+      }) as typeof marked.lexer;
+
+      await pane.renderImmediateForExport(md);
+
+      // Restore original
+      marked.lexer = originalLex;
+
+      // Fallback should call lexer once (whole document), not once per segment
+      expect(lexCalls).toBe(1);
+      expect(container.querySelectorAll('h1').length).toBe(50);
+    });
+
+    it('fence tracking ignores shorter fences and info-string pseudo-fences inside blocks', async () => {
+      // Test 1: four-backtick block containing a shorter fence, a heading, and raw markup
+      const md1 = [
+        '# Start',
+        '',
+        '````',
+        '```',
+        '# not a heading',
+        '<img src=x>',
+        '````',
+        '',
+        'text',
+      ].join('\n');
+      const { pane: pane1, container: container1 } = makeLivePane();
+      await pane1.renderImmediateForExport(md1);
+      const expected1 = await marked.parse(md1);
+      const norm = (s: string) => s.replace(/\s+/g, ' ').replace(/user-content-/g, '');
+      expect(norm(container1.innerHTML)).toBe(norm(String(expected1)));
+      expect(container1.querySelectorAll('h1').length).toBe(1);
+      expect(container1.innerHTML).not.toContain('<img');
+
+      // Test 2: three-backtick block containing an info-string fence line, a heading, and a link
+      const md2 = [
+        '# Heading',
+        '',
+        '```',
+        '```bash',
+        '# not a heading',
+        '[link](url)',
+        '```',
+        '',
+        'para',
+      ].join('\n');
+      const { pane: pane2, container: container2 } = makeLivePane();
+      await pane2.renderImmediateForExport(md2);
+      const expected2 = await marked.parse(md2);
+      expect(norm(container2.innerHTML)).toBe(norm(String(expected2)));
+      expect(container2.querySelectorAll('h1').length).toBe(1);
+      expect(container2.querySelectorAll('a').length).toBe(0);
+    });
+
     it('re-renders mermaid when a diagram is added by a later edit', async () => {
       const { pane, container } = makeLivePane();
       await pane.renderImmediateForExport('# Doc\n\ntext\n');
@@ -275,6 +381,28 @@ describe('markdown sanitizer', () => {
       );
       expect(container.querySelector('.mermaid')).not.toBeNull();
     });
+
+    it('mermaid cache keys by full source, not hash', async () => {
+      const { pane, container } = makeLivePane();
+      const md = [
+        '```mermaid',
+        'graph TD; X-->Y;',
+        '```',
+        '',
+        '```mermaid',
+        'graph TD; A-->B;',
+        '```',
+      ].join('\n');
+      await pane.renderImmediateForExport(md);
+      const diagrams = container.querySelectorAll('.mermaid');
+      expect(diagrams.length).toBe(2);
+      const html0 = diagrams[0].innerHTML;
+      const html1 = diagrams[1].innerHTML;
+      expect(html0).not.toBe('');
+      expect(html1).not.toBe('');
+      expect(html0).not.toBe(html1);
+    });
+
 
     it('rerenderForTheme rebuilds unchanged content so diagrams pick up the theme', async () => {
       const { pane, container } = makeLivePane();
@@ -292,5 +420,200 @@ describe('markdown sanitizer', () => {
       expect(after).not.toBeNull();
       expect(after).not.toBe(first);
     }, 15_000);
+  });
+
+  describe('HTML scripts policy', () => {
+    it('only re-renders when path matches', () => {
+      const pane = new PreviewPane(new EventBus());
+      const container = document.createElement('div');
+      pane.init(container);
+
+      let renderCount = 0;
+      const originalRender = pane['renderImmediate'].bind(pane);
+      pane['renderImmediate'] = async function (content: string) {
+        renderCount++;
+        return originalRender(content);
+      };
+
+      pane.setRenderMode('/tmp/docs/test.html');
+      pane.setPathResolver(() => '/tmp/docs/test.html');
+      pane.setOriginResolver(() => null);
+      pane['framedMode'] = true;
+      pane['allowScripts'] = false;
+      pane['lastRendered'] = '<html><body>A</body></html>';
+      pane['currentPath'] = '/tmp/docs/test.html';
+
+      pane['allowScripts'] = false;
+      pane.setAllowScripts(true, '/tmp/other/file.html');
+      expect(renderCount).toBe(0);
+      expect(pane['lastRendered']).toBe('<html><body>A</body></html>');
+
+      pane['allowScripts'] = false;
+      pane['lastRendered'] = '<html><body>A</body></html>';
+      pane.setAllowScripts(true, '/tmp/docs/test.html');
+      expect(renderCount).toBe(1);
+    });
+
+    it('clears lastRendered when path changes', () => {
+      const pane = new PreviewPane(new EventBus());
+      const container = document.createElement('div');
+      pane.init(container);
+
+      pane.setRenderMode('/tmp/test.html');
+      pane['lastRendered'] = '<html><body>content</body></html>';
+      pane['currentPath'] = '/tmp/test.html';
+      expect(pane['currentPath']).toBe('/tmp/test.html');
+
+      pane.setRenderMode('/tmp/test.md');
+      expect(pane['lastRendered']).toBeNull();
+      expect(pane['currentPath']).toBe('/tmp/test.md');
+    });
+
+    it('drops render result if document switched during async rewrite', async () => {
+      const pane = new PreviewPane(new EventBus());
+      const container = document.createElement('div');
+      pane.init(container);
+      pane.setRenderMode('/tmp/doc-a.html');
+      pane.setPathResolver(() => '/tmp/doc-a.html');
+      pane.setOriginResolver(() => null);
+
+      let resolveRewrite: ((html: string) => void) | null = null;
+      const rewritePromise = new Promise<string>((resolve) => {
+        resolveRewrite = resolve;
+      });
+      pane['rewriteHtmlAssets'] = vi.fn(() => rewritePromise);
+
+      const renderPromise = pane['renderHtmlPreview']('<html><body>Doc A</body></html>');
+
+      pane.setRenderMode('/tmp/doc-b.html');
+      pane.setPathResolver(() => '/tmp/doc-b.html');
+
+      resolveRewrite!('<html><body>Doc A rewritten</body></html>');
+      await renderPromise;
+
+      expect(pane['currentPath']).toBe('/tmp/doc-b.html');
+      expect(container.querySelector('iframe')).toBeNull();
+    });
+
+    it('revoking scripts during async rewrite falls back to srcdoc frame', async () => {
+      const pane = new PreviewPane(new EventBus());
+      const container = document.createElement('div');
+      pane.init(container);
+      pane.setRenderMode('test.html');
+      pane.setPathResolver(() => '/tmp/doc.html');
+      pane.setOriginResolver(() => null);
+      pane.setAllowScripts(true, '\0/tmp/doc.html');
+
+      let resolveRewrite: ((html: string) => void) | null = null;
+      const rewritePromise = new Promise<string>((resolve) => {
+        resolveRewrite = resolve;
+      });
+      pane['rewriteHtmlAssets'] = vi.fn(() => rewritePromise);
+
+      const renderPromise = pane['renderHtmlPreview']('<html><body>content</body></html>');
+
+      pane.setAllowScripts(false, '\0/tmp/doc.html');
+
+      resolveRewrite!('<html><body>rewritten</body></html>');
+      await renderPromise;
+
+      const frame = container.querySelector('iframe');
+      expect(frame).not.toBeNull();
+      expect(frame!.dataset.mode).toBe('srcdoc');
+      expect(frame!.hasAttribute('src')).toBe(false);
+    });
+
+    it('does not inline remote images when scripts are enabled for HTML', async () => {
+      const pane = new PreviewPane(new EventBus());
+      const container = document.createElement('div');
+      pane.init(container);
+      pane.setRenderMode('test.html');
+      pane.setBaseDir('/home/u');
+      pane.setPathResolver(() => '/home/u/test.html');
+      pane.setOriginResolver(() => 'devbox');
+      pane['allowScripts'] = true;
+
+      const remoteUrlSpy = vi.spyOn(pane['images'], 'remoteUrl');
+      const html = '<html><body><img src="logo.png"></body></html>';
+      const result = await pane['rewriteHtmlAssets'](html);
+
+      expect(remoteUrlSpy).not.toHaveBeenCalled();
+      const doc = new DOMParser().parseFromString(result, 'text/html');
+      const img = doc.querySelector('img');
+      expect(img).not.toBeNull();
+      expect(img!.hasAttribute('src')).toBe(false);
+    });
+
+    it('does not enable scripts for a new document when setHtmlPreview is still pending for the previous one', async () => {
+      const pane = new PreviewPane(new EventBus());
+      const container = document.createElement('div');
+      pane.init(container);
+
+      const resolvers: Array<() => void> = [];
+      const delayedSetHtml = vi.fn(() => new Promise<void>((resolve) => {
+        resolvers.push(resolve);
+      }));
+      mockSetHtmlPreview.mockImplementation(delayedSetHtml);
+
+      pane.setRenderMode('doc1.html');
+      pane.setPathResolver(() => '/tmp/doc1.html');
+      pane.setOriginResolver(() => null);
+      pane.setAllowScripts(true, '/tmp/doc1.html');
+      const renderPromise = pane['renderHtmlPreview']('<html><body>doc1</body></html>');
+
+      // Wait for the setHtmlPreview call to actually happen
+      while (resolvers.length === 0) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+
+      // Switch document while setHtmlPreview is pending
+      pane.setRenderMode('doc2.md');
+      pane.setPathResolver(() => '/tmp/doc2.md');
+      pane.setAllowScripts(false, '/tmp/doc2.md');
+
+      // Resolve the pending setHtmlPreview from the first render
+      resolvers[0]();
+      await renderPromise;
+
+      // The stale render should not have created a frame for doc1
+      const frame = container.querySelector('iframe[src^="htmlpreview://"]');
+      expect(frame).toBeNull();
+    });
+
+    it('does not run scripts for a render that started while scripts were off', async () => {
+      // The decision is captured before the async asset rewrite. Turning scripts
+      // on while the rewrite is pending must not send that older render (built
+      // under the "scripts off" rules) to the script-enabled frame.
+      const pane = new PreviewPane(new EventBus()) as any;
+      const container = document.createElement('div');
+      pane.init(container);
+
+      const resolvers: Array<() => void> = [];
+      mockAllowPreviewAssets.mockImplementation(() => {
+        return new Promise<boolean[]>((resolve) => {
+          resolvers.push(() => resolve([true]));
+        });
+      });
+      mockSetHtmlPreview.mockClear();
+      mockSetHtmlPreview.mockResolvedValue(undefined);
+
+      pane.setRenderMode('test.html');
+      pane.setPathResolver(() => '/tmp/test.html');
+      pane.setOriginResolver(() => null);
+      pane.setBaseDir('/tmp');
+      pane.setAllowScripts(false, '/tmp/test.html');
+
+      const renderPromise = pane.renderImmediate('<html><img src="img.png"/></html>');
+      while (resolvers.length === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      pane.setAllowScripts(true, '/tmp/test.html');
+      resolvers[0]();
+      await renderPromise;
+
+      expect(mockSetHtmlPreview).not.toHaveBeenCalled();
+      expect(container.querySelector('iframe[srcdoc]')).not.toBeNull();
+    });
   });
 });
