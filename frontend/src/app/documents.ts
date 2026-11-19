@@ -48,9 +48,24 @@ export class DocumentController {
     private readonly deps: DocumentDeps,
   ) {}
 
+  /** When we last wrote each path ourselves (ms since epoch). */
+  private ownWrites = new Map<string, number>();
+
   /** True while save() is writing this tab (see syncTabWithDisk). */
   isSaving(tabId: string): boolean {
     return this.savesInFlight.has(tabId);
+  }
+
+  /** True when this app wrote `path` within the last `withinMs`: the watcher
+   *  event for that write is our own save, not someone else's edit. */
+  wroteRecently(path: string, withinMs = 3000): boolean {
+    const at = this.ownWrites.get(path);
+    return at !== undefined && Date.now() - at < withinMs;
+  }
+
+  private async writeOwn(path: string, content: string): Promise<void> {
+    await api.writeFile(path, content);
+    this.ownWrites.set(path, Date.now());
   }
 
   async openFile(path: string): Promise<void> {
@@ -171,7 +186,7 @@ export class DocumentController {
     const tab = id ? this.ctx.tabs.getTab(id) : null;
     if (!tab) return false;
     if (!id) return false;
-    const content = id === this.ctx.tabs.activeTab()?.id ? this.ctx.editor.getContent() : tab.content;
+    let content = id === this.ctx.tabs.activeTab()?.id ? this.ctx.editor.getContent() : tab.content;
     const originalPath = tab.path;
     if (originalPath && tab.origin !== this.ctx.tabs.getOrigin()) {
       // Defence in depth: never write a tab to another machine's disk.
@@ -189,8 +204,18 @@ export class DocumentController {
         const verdict = await this.checkDiskBeforeSave(id, originalPath);
         if (verdict === 'cancel') return false;
         if (verdict === 'reloaded') return true; // tab now matches disk
-        await api.writeFile(originalPath, content);
-        if (this.ctx.tabs.getTab(id)?.content !== content) return false;
+        // The disk check awaits I/O (and a dialog on a conflict), so keys typed
+        // meanwhile are not in the text taken above. Take it again right
+        // before the write so the file gets what the editor holds now.
+        if (id === this.ctx.tabs.activeTab()?.id) content = this.ctx.editor.getContent();
+        await this.writeOwn(originalPath, content);
+        if (this.ctx.tabs.getTab(id)?.content !== content) {
+          // Typing landed during the write. The file now holds `content`, so
+          // that is the baseline: the tab stays dirty and our own write is
+          // not mistaken for a foreign change by the watcher or the next save.
+          this.ctx.tabs.recordWritten(id, content);
+          return false;
+        }
         return this.ctx.tabs.markSaved(id, content);
       } catch (err) {
         if (this.ctx.tabs.getTab(id)?.content === content) await this.reportSaveError(originalPath, err);
@@ -256,7 +281,7 @@ export class DocumentController {
     const tab = id ? this.ctx.tabs.getTab(id) : null;
     if (!id) return false;
     if (!tab) return false;
-    const content = id === this.ctx.tabs.activeTab()?.id ? this.ctx.editor.getContent() : tab.content;
+    let content = id === this.ctx.tabs.activeTab()?.id ? this.ctx.editor.getContent() : tab.content;
     const sameOrigin = tab.origin === this.ctx.tabs.getOrigin();
     const defaultPath = defaultSavePath(sameOrigin ? tab.path : null, this.ctx.fileTree.getSaveDir(), 'untitled.md');
     const filters = [{ name: 'Markdown', extensions: ['md', 'markdown', 'mkd'] }];
@@ -273,8 +298,15 @@ export class DocumentController {
         : await save({ filters, defaultPath });
     if (!path) return false;
     try {
-      await api.writeFile(path, content);
-      if (this.ctx.tabs.getTab(id)?.content !== content) return false;
+      // The picker is async: take the text again so keys typed meanwhile count.
+      if (id === this.ctx.tabs.activeTab()?.id) content = this.ctx.editor.getContent();
+      await this.writeOwn(path, content);
+      if (this.ctx.tabs.getTab(id)?.content !== content) {
+        // Typing landed during the write: the file exists with `content`, so
+        // bind the tab to it and keep the tab dirty for the newer text.
+        if (this.ctx.tabs.setPathFor(id, path)) this.ctx.tabs.recordWritten(id, content);
+        return false;
+      }
       if (!this.ctx.tabs.setPathFor(id, path)) return false;
       return this.ctx.tabs.markSaved(id, content);
     } catch (err) {

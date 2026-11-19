@@ -313,17 +313,7 @@ export class EditorManager {
             content: update.state.doc.toString(),
           });
         }
-        if (update.selectionSet || update.docChanged) {
-          const pos = update.state.selection.main.head;
-          const line = update.state.doc.lineAt(pos);
-          const { from, to } = update.state.selection.main;
-          this.bus.emit(EVENTS.CURSOR_CHANGED, {
-            line: line.number,
-            column: pos - line.from + 1,
-            chars: update.state.doc.length,
-            selectedChars: from === to ? 0 : to - from,
-          });
-        }
+        if (update.selectionSet || update.docChanged) this.emitCursor(update.state);
       }),
     ];
   }
@@ -358,6 +348,19 @@ export class EditorManager {
 
   scrollToTop(top: number): void {
     scrollElementToTop(this.view.scrollDOM, top, this.scrollState);
+  }
+
+  /** Tell the status bar where the caret is in `state`. */
+  private emitCursor(state: EditorState): void {
+    const pos = state.selection.main.head;
+    const line = state.doc.lineAt(pos);
+    const { from, to } = state.selection.main;
+    this.bus.emit(EVENTS.CURSOR_CHANGED, {
+      line: line.number,
+      column: pos - line.from + 1,
+      chars: state.doc.length,
+      selectedChars: from === to ? 0 : to - from,
+    });
   }
 
   getContent(): string {
@@ -398,6 +401,8 @@ export class EditorManager {
       extensions: this.buildExtensions(path),
     });
     this.view.setState(state);
+    // setState fires no update listener: report the new caret ourselves.
+    this.emitCursor(this.view.state);
   }
 
   // Word counting and heading-line scanning are O(document): expensive to run
@@ -580,6 +585,8 @@ export class EditorManager {
     this.view.setState(state);
     // A cached state carries the input setting of when it was saved.
     this.syncInputFacet();
+    // setState fires no update listener: report the restored caret ourselves.
+    this.emitCursor(this.view.state);
     return true;
   }
 

@@ -240,9 +240,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn new_file_matches_umask_default() {
-        // A brand-new target gets the same final mode `fs::write` would
-        // produce (0o666 with kernel-applied umask), so callers that rely
-        // on the usual default are unaffected by the owner-only staging.
+        // A brand-new file ends up with the same mode `fs::write` gives it
+        // (0o666 with the umask applied).
         use std::os::unix::fs::PermissionsExt;
         let dir = temp_dir("newperms");
         let file = dir.join("fresh.md");
@@ -257,25 +256,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn staging_file_is_owner_only_during_write() {
-        // Regression test: previously the staging file was created with
-        // the process umask (typically 0o644), exposing the plaintext of
-        // 0o600 targets to other local users during the write window.
-        // Here we drive write_atomic with a large payload so we can
-        // observe the temp file mid-write from another thread.
+    fn file_keeps_its_mode_across_saves() {
+        // A file with mode 0o600 keeps that mode through repeated saves, and
+        // the temporary file written next to it never has a wider mode.
+        // A large payload makes the temporary file observable mid-write from
+        // another thread.
         use std::os::unix::fs::PermissionsExt;
         use std::sync::atomic::{AtomicBool, Ordering as AO};
         use std::sync::Arc;
         use std::thread;
         use std::time::{Duration, Instant};
 
-        let dir = temp_dir("stagingmode");
-        let file = dir.join("secret.md");
+        let dir = temp_dir("keepmode");
+        let file = dir.join("notes.md");
         fs::write(&file, "old").unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
 
         // Prefix of the temp names create_temp produces.
-        let prefix = format!(".secret.md.sparkdown-tmp-{}-", std::process::id());
+        let prefix = format!(".notes.md.sparkdown-tmp-{}-", std::process::id());
         let dir_watch = dir.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_w = stop.clone();
@@ -312,10 +310,10 @@ mod tests {
             assert_eq!(
                 *mode & 0o077,
                 0,
-                "staging file was observable to group/other: mode={mode:o}"
+                "temporary file had a wider mode than the target: mode={mode:o}"
             );
         }
-        // Final target still restrictive.
+        // The saved file still has its original mode.
         let final_mode = fs::metadata(&file).unwrap().permissions().mode() & 0o7777;
         assert_eq!(final_mode, 0o600);
         let _ = fs::remove_dir_all(&dir);
