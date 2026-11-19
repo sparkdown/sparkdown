@@ -490,18 +490,22 @@ fn upstream(root: &Path, extra: ExtraEnv) -> Result<Upstream, GitActionError> {
 /// among them (so the rename's deletion side is committed too).
 fn with_rename_sources(root: &Path, extra: ExtraEnv, paths: &[String]) -> Vec<String> {
     let mut out: Vec<String> = paths.to_vec();
-    if let Some(raw) = query(
+    // Read the porcelain stream raw (status codes can start with a space and
+    // paths can start or end with one) and slice it with `get(..)` so a
+    // multibyte path never panics. Same pattern as `status_records` and
+    // `parse_porcelain`.
+    if let Ok(raw) = run_stdout_raw(
         root,
         extra,
         &["-c", "core.quotepath=false", "status", "--porcelain", "-z"],
+        Duration::from_secs(20),
+        Action::Commit,
     ) {
         let mut fields = raw.split('\0');
         while let Some(rec) = fields.next() {
-            if rec.len() < 4 {
+            let (Some(code), Some(path)) = (rec.get(..2), rec.get(3..)) else {
                 continue;
-            }
-            let code = &rec[..2];
-            let path = &rec[3..];
+            };
             if code.contains('R') || code.contains('C') {
                 let orig = fields.next().unwrap_or("");
                 if code.contains('R')
@@ -2050,6 +2054,27 @@ mod tests {
         assert_eq!(sb.git(&sb.work, &["status", "--porcelain"]), "");
         let files = sb.git(&sb.work, &["show", "--name-status", "--format=", "HEAD"]);
         assert!(files.starts_with('R'), "{files}");
+    }
+
+    #[test]
+    fn commit_selected_rename_next_to_a_modified_non_ascii_name() {
+        // The first porcelain record starts with a space (" M") and its
+        // name starts with a two-byte character: reading it must neither
+        // shift nor split the name.
+        let sb = sandbox();
+        let env = sb.env();
+        sb.commit_in(&sb.work, "\u{e9}.md", "a\n", "a");
+        sb.commit_in(&sb.work, "\u{f6}.md", "b\n", "b");
+        fs::write(sb.work.join("\u{e9}.md"), "a2\n").unwrap();
+        sb.git(&sb.work, &["mv", "\u{f6}.md", "\u{fc}.md"]);
+        commit_impl(&root(&sb), "Rename", Some(vec!["\u{fc}.md".into()]), &env).unwrap();
+        let files = sb.git(
+            &sb.work,
+            &["-c", "core.quotepath=false", "show", "--name-status", "--format=", "HEAD"],
+        );
+        assert!(files.starts_with('R'), "{files}");
+        let status = sb.git(&sb.work, &["-c", "core.quotepath=false", "status", "--porcelain"]);
+        assert_eq!(status, "M \u{e9}.md");
     }
 
     #[test]
