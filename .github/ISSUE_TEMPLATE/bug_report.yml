@@ -1,0 +1,49 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill out the details below.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: What did you expect instead?
+      placeholder: Tell us what you see
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. 
+        2. 
+        3. 
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: For example, macOS 13.5 or Ubuntu 23.04
+      placeholder: e.g., macOS 13.5
+
+  - type: input
+    id: version
+    attributes:
+      label: SparkDown version
+      description: Check Help → About or the welcome screen
+      placeholder: e.g., 0.4.3
+
+  - type: textarea
+    id: sample
+    attributes:
+      label: Sample content
+      description: If the bug involves rendering/preview, paste the smallest markdown snippet that reproduces it
+      render: markdown

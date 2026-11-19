@@ -2599,3 +2599,11 @@ mod create_entry_tests {
         );
     }
 }
+
+/// Returns the app version and OS for the Send Feedback URL.
+#[tauri::command]
+pub fn get_app_info(app: AppHandle) -> (String, String) {
+    let version = app.package_info().version.to_string();
+    let os = std::env::consts::OS;
+    (version, os.to_string())
+}

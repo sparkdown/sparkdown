@@ -143,6 +143,8 @@ export const api = {
     invoke<void>("show_app_menu", { x, y }),
   /** Open an http(s)/mailto URL in the system default handler (browser). */
   openExternal: (url: string) => invoke<void>("open_external", { url }),
+  /** Get app version and OS for Send Feedback URL prefilling. */
+  getAppInfo: () => invoke<[string, string]>("get_app_info"),
   /** Grant the asset protocol each local preview image (one flag per path).
    *  `baseDir` is the previewed document's directory. */
   allowPreviewAssets: (paths: string[], baseDir: string | null) =>

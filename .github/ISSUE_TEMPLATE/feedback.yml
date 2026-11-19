@@ -1,0 +1,39 @@
+name: Feedback / idea
+description: Share your thoughts or suggest an improvement
+labels: ["feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        We'd love to hear from you! Share what you were doing or what would make SparkDown better.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: What were you doing?
+      description: Tell us about your workflow or what you were trying to accomplish
+      placeholder: Describe the context or situation
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: What would make SparkDown better?
+      description: Your idea, feature request, or general feedback
+      placeholder: Tell us what you'd like to see
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system (optional)
+      placeholder: e.g., macOS 13.5 or Windows 11
+
+  - type: input
+    id: version
+    attributes:
+      label: SparkDown version (optional)
+      description: Check Help → About or the welcome screen
+      placeholder: e.g., 0.4.3

@@ -793,6 +793,7 @@ fn main() {
             commands::set_html_js_checked,
             commands::show_app_menu,
             commands::open_external,
+            commands::get_app_info,
             commands::allow_preview_assets,
             commands::remote_read_image,
             commands::window_ready,
