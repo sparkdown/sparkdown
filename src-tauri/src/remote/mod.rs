@@ -1072,9 +1072,14 @@ pub fn search_in_files(root: &str, script: &str) -> Result<String, String> {
 
 /// One `find` for Quick open: every file under `root`, pruning the watcher's
 /// ignored names (and dot-entries unless `include_hidden`), at most `cap + 1`
-/// lines so the caller can tell a truncated list. POSIX only (`-H`, `-prune`,
-/// `-path`). `! -path root` keeps the root itself from being pruned when its
-/// own name is hidden or ignored (e.g. a workspace at `~/.config`).
+/// records so the caller can tell a truncated list. POSIX only (`-H`,
+/// `-prune`, `-path`). `! -path root` keeps the root itself from being
+/// pruned when its own name is hidden or ignored (e.g. a workspace at
+/// `~/.config`). `-print0` ends each path with a NUL, so a newline inside a
+/// folder name cannot split one path into two entries. `tr` then swaps NUL
+/// and newline so `head -n` can still cap the record count; a newline that
+/// was inside a name shows up as a NUL byte in that path, and
+/// `parse_workspace_files` drops it.
 pub(crate) fn workspace_files_script(root: &str, include_hidden: bool, cap: usize) -> String {
     let r = shell_quote(root);
     let mut names: Vec<String> = crate::watcher::IGNORED_DIR_NAMES
@@ -1085,17 +1090,23 @@ pub(crate) fn workspace_files_script(root: &str, include_hidden: bool, cap: usiz
         names.push("-name '.*'".to_string());
     }
     format!(
-        "find -H {r} ! -path {r} \\( {names} \\) -prune -o -type f -print 2>/dev/null | head -n {limit}",
+        "find -H {r} ! -path {r} \\( {names} \\) -prune -o -type f -print0 2>/dev/null \
+         | tr '\\0\\n' '\\n\\0' | head -n {limit}",
         names = names.join(" -o "),
-        limit = cap + 1
+        limit = cap + 1,
     )
 }
 
-/// Parse [`workspace_files_script`] output into root-relative paths.
+/// Parse [`workspace_files_script`] output into root-relative paths. The
+/// script swaps NUL and newline after `find -print0`, so every record ends
+/// with a newline, and a newline that was inside a name appears as a NUL
+/// byte in that path. Paths with ASCII control characters are dropped.
 pub(crate) fn parse_workspace_files(raw: &str, root: &str, cap: usize) -> FileListing {
     let prefix = format!("{}/", root.trim_end_matches('/'));
     let mut files: Vec<String> = raw
         .lines()
+        .filter(|l| !l.is_empty())
+        .filter(|l| !l.bytes().any(|b| b < 0x20 || b == 0x7f))
         .filter_map(|l| l.strip_prefix(&prefix))
         .filter(|l| !l.is_empty())
         .map(str::to_string)
@@ -4684,8 +4695,8 @@ mod workspace_files_tests {
         for name in crate::watcher::IGNORED_DIR_NAMES {
             assert!(s.contains(&format!("-name '{name}'")), "{name} not pruned");
         }
-        assert!(s.contains("-name '.*' \\) -prune -o -type f -print"));
-        assert!(s.ends_with("| head -n 11"));
+        assert!(s.contains("-name '.*' \\) -prune -o -type f -print0"));
+        assert!(s.contains("| tr '\\0\\n' '\\n\\0' | head -n 11"));
         assert!(!workspace_files_script("/r", true, 10).contains("-name '.*'"));
     }
 
@@ -4698,6 +4709,16 @@ mod workspace_files_tests {
         let l = parse_workspace_files(raw, "/r/", 2);
         assert_eq!(l.files, vec!["a/c.md", "b.md"]);
         assert!(l.truncated);
+    }
+
+    #[test]
+    fn parse_drops_a_path_with_a_newline_in_a_folder_name() {
+        // After `tr '\0\n' '\n\0'`, a name that contained `\n` shows up
+        // with a NUL byte in it. That record is dropped as a whole.
+        let raw = "/r/dir\0/r/notes.md\n/r/ok.md\n";
+        let l = parse_workspace_files(raw, "/r", 10);
+        assert_eq!(l.files, vec!["ok.md"]);
+        assert!(!l.truncated);
     }
 
     #[test]

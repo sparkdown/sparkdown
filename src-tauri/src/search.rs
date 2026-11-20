@@ -229,9 +229,12 @@ pub(crate) fn search_local(
 }
 
 /// The remote search script: POSIX `find` prunes the same directories as the
-/// local walk, then `grep -In -F` (literal, skip binaries, line numbers) runs
-/// in batches. `/dev/null` as an extra file makes grep always print the file
-/// name. `head` caps the output (one extra line tells us it was truncated).
+/// local walk, then `grep -In --null -F` (literal, skip binaries, line
+/// numbers, NUL between file name and `line:text`) runs in batches.
+/// `/dev/null` as an extra file makes grep always print the file name.
+/// `head` caps the output (one extra line tells us it was truncated).
+/// `--null` (GNU and BSD grep) ends the file name with a NUL, so a newline
+/// in a folder name cannot start a new record.
 pub(crate) fn remote_search_script(
     root: &str,
     query: &str,
@@ -251,16 +254,19 @@ pub(crate) fn remote_search_script(
     // 2048 blocks of 512 bytes = MAX_FILE_BYTES (POSIX `-size` units).
     format!(
         "find -H {r} -mindepth 1 \\( {prune} \\) -prune -o -type f -size -{blocks} \
-         -exec grep -In{case} -F -e {q} -- /dev/null {{}} + 2>/dev/null | head -n {limit}",
+         -exec grep -In{case} --null -F -e {q} -- /dev/null {{}} + 2>/dev/null | head -n {limit}",
         prune = prune.join(" -o "),
         blocks = MAX_FILE_BYTES / 512 + 1,
         limit = MAX_RESULTS + 1,
     )
 }
 
-/// Parse `path:line:text` lines from [`remote_search_script`]. Paths start
-/// with `root/`, so the line number is the first `:<digits>:` after it — a
-/// colon inside a file name before that point still parses.
+/// Parse `path\0line:text` records from [`remote_search_script`]. The script
+/// uses `grep --null`, which separates the file name from `line:text` with
+/// a NUL byte; records end with a newline. The path is read up to the NUL
+/// first, so a newline inside a file name stays in that path, and paths
+/// with control characters are dropped. Every kept path must start with
+/// the workspace root.
 pub(crate) fn parse_remote_output(
     raw: &str,
     root: &str,
@@ -268,47 +274,68 @@ pub(crate) fn parse_remote_output(
     case_sensitive: bool,
 ) -> SearchResults {
     let mut matches = Vec::new();
-    let mut lines = 0usize;
     let prefix = format!("{}/", root.trim_end_matches('/'));
-    for raw_line in raw.lines() {
-        lines += 1;
-        if lines > MAX_RESULTS {
+    // Each record is `path NUL line:text \n`: find the NUL, then the
+    // newline after it.
+    let bytes = raw.as_bytes();
+    let mut path_start = 0usize;
+    let mut records = 0usize;
+    let mut truncated = false;
+    while path_start < bytes.len() {
+        // End of the path = next NUL. No NUL => trailing garbage; stop.
+        let Some(nul_rel) = bytes[path_start..].iter().position(|&b| b == 0) else {
+            break;
+        };
+        let nul = path_start + nul_rel;
+        // End of the record = next newline after the NUL (or end of input).
+        let nl = bytes[nul + 1..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|r| nul + 1 + r)
+            .unwrap_or(bytes.len());
+        let path = &raw[path_start..nul];
+        let tail = &raw[nul + 1..nl];
+        // Advance past the newline for the next iteration.
+        path_start = (nl + 1).min(bytes.len());
+        records += 1;
+        if records > MAX_RESULTS {
+            truncated = true;
             break;
         }
-        if !raw_line.starts_with(&prefix) {
+        if !path.starts_with(&prefix) {
             continue;
         }
-        let Some((path, line_no, text)) = split_grep_line(raw_line, prefix.len()) else {
+        if path_has_forbidden_char(path) {
+            continue;
+        }
+        let Some((line_no, text)) = split_line_text(tail) else {
             continue;
         };
         if let Some(m) = match_line(path, line_no, text, query, case_sensitive) {
             matches.push(m);
         }
     }
-    SearchResults {
-        matches,
-        truncated: lines > MAX_RESULTS,
-    }
+    SearchResults { matches, truncated }
 }
 
-fn split_grep_line(line: &str, skip: usize) -> Option<(&str, u32, &str)> {
-    let bytes = line.as_bytes();
-    let mut i = skip;
-    while i < bytes.len() {
-        if bytes[i] == b':' {
-            let digits_start = i + 1;
-            let mut j = digits_start;
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j > digits_start && j < bytes.len() && bytes[j] == b':' {
-                let n: u32 = line[digits_start..j].parse().ok()?;
-                return Some((&line[..i], n, &line[j + 1..]));
-            }
-        }
-        i += 1;
+/// True when a path holds an ASCII control character (including newlines
+/// and NULs). Such results are left out of the list.
+fn path_has_forbidden_char(path: &str) -> bool {
+    path.bytes().any(|b| b < 0x20 || b == 0x7f)
+}
+
+/// Split the `line:text` tail of a `grep --null` record into (line, text).
+fn split_line_text(rest: &str) -> Option<(u32, &str)> {
+    let bytes = rest.as_bytes();
+    let mut j = 0;
+    while j < bytes.len() && bytes[j].is_ascii_digit() {
+        j += 1;
     }
-    None
+    if j == 0 || j >= bytes.len() || bytes[j] != b':' {
+        return None;
+    }
+    let n: u32 = rest[..j].parse().ok()?;
+    Some((n, &rest[j + 1..]))
 }
 
 /// Search the open folder for `query` (literal text). Case-insensitive unless
@@ -493,33 +520,81 @@ mod tests {
         let s = remote_search_script("/home/u/it's", "a'b; rm -rf /", false, false);
         assert!(s.contains("find -H '/home/u/it'\\''s' -mindepth 1"));
         assert!(s.contains("-e 'a'\\''b; rm -rf /' -- /dev/null {} +"));
-        assert!(s.contains("grep -In -i -F"));
+        assert!(s.contains("grep -In -i --null -F"));
         assert!(s.contains("-name 'node_modules'"));
         assert!(s.contains("-name '.*'"));
         assert!(s.contains(&format!("head -n {}", MAX_RESULTS + 1)));
         let s = remote_search_script("/r", "q", true, true);
-        assert!(s.contains("grep -In -F"));
+        assert!(s.contains("grep -In --null -F"));
         assert!(!s.contains("-name '.*'"));
     }
 
     #[test]
     fn parse_remote_output_handles_colons_and_truncation() {
-        let raw = "/r/a.md:12:  Find me here\n/r/we:ird:3:name.md:4:find ME\n/r/x.md:notanumber\n";
+        // `grep --null` separates the file name and line:text with a NUL.
+        let raw = "/r/a.md\x0012:  Find me here\n/r/we:ird:name.md\x003:find ME\n/r/x.md\x00notanumber\n";
         let res = parse_remote_output(raw, "/r", "find me", false);
         assert_eq!(res.matches.len(), 2);
         assert_eq!(res.matches[0].path, "/r/a.md");
         assert_eq!(res.matches[0].line, 12);
         assert_eq!(res.matches[0].column, 3);
-        // First `:<digits>:` after the root: the name really is `we:ird`.
-        assert_eq!(res.matches[1].path, "/r/we:ird");
+        // Colons in the file name are kept: the NUL ends the path.
+        assert_eq!(res.matches[1].path, "/r/we:ird:name.md");
         assert_eq!(res.matches[1].line, 3);
         assert!(!res.truncated);
 
         let many: String = (0..MAX_RESULTS + 1)
-            .map(|i| format!("/r/a.md:{}:hit\n", i + 1))
+            .map(|i| format!("/r/a.md\x00{}:hit\n", i + 1))
             .collect();
         let res = parse_remote_output(&many, "/r", "hit", true);
         assert_eq!(res.matches.len(), MAX_RESULTS);
         assert!(res.truncated);
+    }
+
+    #[test]
+    fn parse_remote_output_keeps_a_newline_inside_the_path() {
+        // A folder name ending in a newline: the second line is part of the
+        // same path, which is dropped, not a separate hit.
+        let raw = "/r/dir\n/r/notes.md/f.md\x001:FAKE note\n";
+        let res = parse_remote_output(raw, "/r", "FAKE", true);
+        assert!(res.matches.is_empty());
+
+        // After a normal match: that one is kept, the other is dropped.
+        let raw = "/r/a.md\x001:FAKE here\n/r/dir\n/r/notes.md/f.md\x002:FAKE note\n";
+        let res = parse_remote_output(raw, "/r", "FAKE", true);
+        assert_eq!(res.matches.len(), 1);
+        assert_eq!(res.matches[0].path, "/r/a.md");
+        assert_eq!(res.matches[0].line, 1);
+    }
+
+    #[test]
+    fn parse_remote_output_rejects_control_chars_in_path() {
+        // A path with a bell character is dropped.
+        let raw = "/r/a\x07.md\x001:hit here\n";
+        let res = parse_remote_output(raw, "/r", "hit", true);
+        assert!(res.matches.is_empty());
+    }
+
+    /// The real script on this machine's find and grep: a folder whose name
+    /// holds a newline yields no extra hit, and normal files still match.
+    #[cfg(unix)]
+    #[test]
+    fn remote_search_script_runs_with_a_newline_in_a_folder_name() {
+        let root = std::env::temp_dir().join(format!("sd-rsearch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("dir\nnotes.md")).unwrap();
+        std::fs::write(root.join("dir\nnotes.md").join("f.md"), "hit one\n").unwrap();
+        std::fs::write(root.join("a.md"), "hit two\n").unwrap();
+        let root_s = root.to_str().unwrap();
+        let out = crate::proc::command("/bin/sh")
+            .arg("-c")
+            .arg(remote_search_script(root_s, "hit", true, false))
+            .output()
+            .unwrap();
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let res = parse_remote_output(&raw, root_s, "hit", true);
+        let paths: Vec<&str> = res.matches.iter().map(|m| m.path.as_str()).collect();
+        assert_eq!(paths, vec![format!("{root_s}/a.md").as_str()]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
