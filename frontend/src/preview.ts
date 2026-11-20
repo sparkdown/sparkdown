@@ -105,6 +105,9 @@ async function loadLanguage(lang: string): Promise<void> {
       if (canonical !== lang.toLowerCase()) {
         hljs.registerLanguage(lang.toLowerCase(), langDef);
       }
+    } catch (err) {
+      // Failed load: log but don't crash. The code block will render unhighlighted.
+      console.warn(`Failed to load highlight.js language: ${canonical}`, err);
     } finally {
       loadingLanguages.delete(canonical);
     }
@@ -112,6 +115,24 @@ async function loadLanguage(lang: string): Promise<void> {
   
   loadingLanguages.set(canonical, loadPromise);
   return loadPromise;
+}
+
+/**
+ * Scan markdown content for fenced code block languages. Returns the set of
+ * language names found (not including 'mermaid', which is handled separately).
+ */
+function scanFenceLanguages(content: string): Set<string> {
+  const languages = new Set<string>();
+  // Match ``` or ~~~ followed by optional language name
+  const fencePattern = /^(?:```|~~~)(\w+)?/gm;
+  let match;
+  while ((match = fencePattern.exec(content)) !== null) {
+    const lang = match[1];
+    if (lang && lang !== 'mermaid') {
+      languages.add(lang);
+    }
+  }
+  return languages;
 }
 
 /**
@@ -329,7 +350,6 @@ export class PreviewPane {
   private onFrameFind: (() => void) | null = null;
   // Opens a local file clicked in the preview (wired to App.openFile).
   private onOpenFile: ((path: string) => void) | null = null;
-  private lastContent: string | null = null;
 
   constructor(bus: EventBus) {
     this.bus = bus;
@@ -390,8 +410,6 @@ export class PreviewPane {
     }
   }
 
-  private pendingLanguages = new Set<string>();
-  
   private configureMarked(): void {
     const hlCache = new Map<string, string>();
     const HL_CACHE_MAX = 256;
@@ -407,8 +425,6 @@ export class PreviewPane {
       hlCache.set(key, value);
       return value;
     };
-    const pendingLanguages = this.pendingLanguages;
-    const triggerRerender = () => this.rerenderIfNeeded();
     const renderer: RendererObject = {
       heading(token: Tokens.Heading): string {
         const id = slugifyHeading(token.text);
@@ -426,14 +442,6 @@ export class PreviewPane {
           lang && hljs.getLanguage(lang)
             ? highlightCached(lang, code)
             : escapeHtml(code);
-        // If the language isn't loaded yet, trigger async load.
-        if (lang && !hljs.getLanguage(lang) && !pendingLanguages.has(lang)) {
-          pendingLanguages.add(lang);
-          void loadLanguage(lang).then(() => {
-            pendingLanguages.delete(lang);
-            triggerRerender();
-          });
-        }
         // Escape lang — it comes straight from the fence info string.
         return `<pre><code class="hljs language-${escapeHtml(lang)}">${highlighted}</code></pre>`;
       },
@@ -441,14 +449,22 @@ export class PreviewPane {
     marked.use({ renderer, gfm: true, breaks: false });
   }
   
-  private rerenderIfNeeded(): void {
-    if (this.pendingLanguages.size === 0 && this.lastContent) {
-      const savedScroll = this.container.scrollTop / 
-        Math.max(1, this.container.scrollHeight - this.container.clientHeight);
-      this.renderDebounced(this.lastContent);
-      requestAnimationFrame(() => {
-        scrollElementToRatio(this.container, savedScroll, this.scrollState);
-      });
+  /**
+   * Load highlight.js languages that the content uses but aren't registered yet.
+   * Must be called before rendering to ensure code blocks highlight correctly.
+   */
+  private async loadLanguagesFor(content: string): Promise<void> {
+    const languages = scanFenceLanguages(content);
+    const toLoad: Promise<void>[] = [];
+    for (const lang of languages) {
+      if (!hljs.getLanguage(lang)) {
+        toLoad.push(loadLanguage(lang));
+      }
+    }
+    if (toLoad.length > 0) {
+      await Promise.all(toLoad);
+      // Clear chunkCache so the newly highlighted code renders
+      this.chunkCache.clear();
     }
   }
 
@@ -463,15 +479,6 @@ export class PreviewPane {
     this.visible = true;
     try {
       await this.renderImmediate(markdownContent);
-      // Wait for any pending language loads to complete and re-render
-      if (this.pendingLanguages.size > 0) {
-        const languagesToLoad = Array.from(this.pendingLanguages);
-        await Promise.all(languagesToLoad.map(lang => loadLanguage(lang)));
-        // Clear pending languages and force a re-render
-        this.pendingLanguages.clear();
-        this.lastRendered = null;
-        await this.renderImmediate(markdownContent);
-      }
     } finally {
       this.visible = wasVisible;
     }
@@ -539,9 +546,12 @@ export class PreviewPane {
 
   private async renderImmediate(content: string): Promise<void> {
     if (!this.visible) return;
-    this.lastContent = content;
     const origin = this.originResolver();
     if (content === this.lastRendered && origin === this.renderedOrigin) return;
+    
+    // Load any highlight.js languages the content uses before rendering
+    await this.loadLanguagesFor(content);
+    
     if (origin !== this.renderedOrigin) {
       // Same text on another machine: reused DOM nodes hold images resolved
       // against the old machine. Force a full rebuild.

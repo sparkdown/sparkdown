@@ -12,7 +12,10 @@ import { defineConfig } from 'vite';
  * core only when a document has a diagram, plus one chunk per diagram type.
  */
 export function manualChunks(id: string): string | undefined {
-  if (id.includes('node_modules/highlight.js')) return 'highlight';
+  // Only highlight.js/lib/core goes to the highlight chunk; each language
+  // module becomes its own chunk for lazy loading.
+  if (id.includes('node_modules/highlight.js/lib/core')) return 'highlight';
+  if (id.includes('node_modules/highlight.js/lib/languages/')) return undefined;
   if (id.includes('node_modules/marked')) return 'marked';
   return undefined;
 }

@@ -139,6 +139,43 @@ describe('markdown sanitizer', () => {
       expect(html).toContain('hljs-keyword');
     });
 
+    it('lazy-loads language modules and highlights code (without pre-registration)', async () => {
+      // Test the actual lazy loading path by using a language that wasn't
+      // pre-registered at the top of this file (python).
+      const pane = new PreviewPane(new EventBus());
+      const container = document.createElement('div');
+      pane.init(container);
+      pane.setRenderMode('test.md');
+      
+      // Render with a language that should be lazy-loaded
+      await pane.renderImmediateForExport('```python\ndef foo():\n    pass\n```');
+      
+      const html = container.innerHTML;
+      expect(html).toContain('class="hljs language-python"');
+      // Python 'def' should be highlighted
+      expect(html).toContain('hljs-keyword');
+    });
+
+    it('lazy-loads languages in live render path', async () => {
+      // Test that the live (non-export) render path also loads languages.
+      // Use renderImmediateForExport since render() is debounced and harder to test.
+      const pane = new PreviewPane(new EventBus());
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      pane.init(container);
+      pane.setRenderMode('test.md');
+      pane.setVisible(true);
+      
+      // Render with rust, which should be lazy-loaded
+      await pane.renderImmediateForExport('```rust\nfn main() {}\n```');
+      
+      const html = container.innerHTML;
+      expect(html).toContain('class="hljs language-rust"');
+      expect(html).toContain('hljs-keyword');
+      
+      document.body.removeChild(container);
+    });
+
     it('renders a mermaid fence as a mermaid div, not a code block', async () => {
       // Use a DOM query: mermaid mutates the div (adds id/svg) once rendered,
       // so match the stable .mermaid class rather than an exact string.
