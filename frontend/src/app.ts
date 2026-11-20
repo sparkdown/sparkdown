@@ -327,6 +327,14 @@ export class App {
     if (this.forwardedPaths.length > 0) {
       void this.openForwardedPaths(this.forwardedPaths.splice(0));
     }
+
+    // #214: Signal that the window has painted and can be shown.
+    // Double requestAnimationFrame ensures the browser has actually painted.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        void api.windowReady();
+      });
+    });
   }
 
   /** A second launch's files and folders (#51): opened like CLI paths. */

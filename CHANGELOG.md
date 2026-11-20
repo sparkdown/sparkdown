@@ -7,6 +7,10 @@ requests.
 
 ## [Unreleased]
 
+### Improved
+
+- **Window startup** now shows the window only after the frontend has painted, eliminating blank/white frames at launch. A safety timeout ensures the window appears even if the frontend signal is missed. (#214)
+
 ### Fixed
 
 - Build no longer warns about mixed static/dynamic imports of `@tauri-apps/api/webviewWindow`.

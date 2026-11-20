@@ -1269,6 +1269,13 @@ pub async fn remote_read_image(
     .map_err(|e| AppError::Other(format!("read task failed: {e}")))?
 }
 
+/// Signal that the frontend has painted and the window can be shown (#214).
+/// Called once during app initialization, after the first render completes.
+#[tauri::command]
+pub fn window_ready(webview_window: tauri::WebviewWindow) {
+    let _ = webview_window.show();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

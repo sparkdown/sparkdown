@@ -51,6 +51,8 @@ export interface QuitStatus {
 }
 
 export const api = {
+  /** Signal that the window has painted and can be shown (#214). */
+  windowReady: () => invoke<void>("window_ready"),
   /** Multi-window registry (#61): this window's folder and unsaved state. */
   windowSetFolder: (folder: WindowFolder | null, display: string | null) =>
     invoke<void>("window_set_folder", { folder, display }),

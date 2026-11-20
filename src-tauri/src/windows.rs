@@ -775,7 +775,8 @@ pub fn create_window(
         }
     }
     registry().register(label);
-    let _ = window.show();
+    // #214: Window stays hidden until the frontend signals it has painted.
+    // A safety timeout in main.rs shows it anyway if the signal never arrives.
     if focus {
         let _ = window.set_focus();
     }
