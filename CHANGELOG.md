@@ -54,6 +54,7 @@ requests.
 - **Git**: Pull and Push stop with a message, instead of running, when the repository's own `.git/config` sets keys that run commands or choose how git connects (such as `core.sshCommand`, `credential.helper`, `url.*.insteadOf`, `include.path`, or a remote, push or branch URL using `ext::`, `fd::` or `file://`). These are the settings that already turn off the background fetch; the same settings in your global git config are not affected.
 - **Settings**: one preference SparkDown cannot read (for example a theme from a newer version) now falls back to its default on its own instead of resetting every preference. If the preferences file cannot be read as a whole, the other settings are kept, "Share editor context with agents" stays off until you turn it on again, and a copy of the file is saved next to it as `config.json.corrupt-<time>`.
 - **Agents**: switching off "Share editor context with agents" now takes effect for every window at once: agents get the "switched off" answer right away, and the unsaved-text copies of every window are removed, not only those of the window where you changed the setting. These copies are also removed when their window closes, when SparkDown quits, and at the next launch if SparkDown was stopped before it could remove them.
+- **Remote**: a program that connects to SparkDown's key passphrase helper and then stops talking no longer delays the next passphrase request.
 
 ### Fixed
 

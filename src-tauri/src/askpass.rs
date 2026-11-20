@@ -44,7 +44,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
@@ -300,7 +300,11 @@ fn peer_uid(s: &std::os::unix::net::UnixStream) -> Option<u32> {
 ///
 /// Callers must have already verified the peer with [`verify_peer`] (on
 /// the raw socket type) before entering this generic function.
-fn serve_request<S: Read + Write>(stream: &mut S, broker: &Broker) {
+///
+/// Holds the broker only while it asks it something, so a connection that
+/// stops talking does not keep a dropped broker (its cached passphrases and
+/// its endpoint) around.
+fn serve_request<S: Read + Write>(stream: &mut S, broker: &Weak<Broker>) {
     let reply_no = |s: &mut S| {
         let _ = s.write_all(b"NO\n");
         let _ = s.flush();
@@ -318,15 +322,17 @@ fn serve_request<S: Read + Write>(stream: &mut S, broker: &Broker) {
             else {
                 return None;
             };
+            let b = broker.upgrade()?;
             // Answer only while an ssh call that SparkDown started is running.
-            if !broker.is_pending() {
+            if !b.is_pending() {
                 return None;
             }
             // A ticket is valid for one session. `take_ticket` validates the
             // ticket and enforces the attempt cap.
-            if !broker.take_ticket(token) {
+            if !b.take_ticket(token) {
                 return None;
             }
+            drop(b);
             let len = len.parse::<usize>().ok()?;
             read_exact_vec(&mut incoming, len)
         })()
@@ -338,13 +344,21 @@ fn serve_request<S: Read + Write>(stream: &mut S, broker: &Broker) {
         return reply_no(stream);
     };
     // Verify the prompt classification on the broker side.
-    let Some(key) = classify_prompt(prompt) else {
-        broker
-            .refused
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    let Some(b) = broker.upgrade() else {
         return reply_no(stream);
     };
-    match broker.passphrase_for(&key) {
+    let Some(key) = classify_prompt(prompt) else {
+        b.refused.store(true, std::sync::atomic::Ordering::SeqCst);
+        return reply_no(stream);
+    };
+    // Connections are served side by side; the passphrase prompt is shown
+    // for one at a time.
+    let answer = {
+        let _one = b.answering.lock().unwrap_or_else(|e| e.into_inner());
+        b.passphrase_for(&key)
+    };
+    drop(b);
+    match answer {
         Some(pass) => {
             let mut msg = Zeroizing::new(format!("OK {}\n", pass.len()).into_bytes());
             msg.extend_from_slice(pass.as_bytes());
@@ -475,6 +489,9 @@ pub struct Broker {
     /// every helper request while this is zero. A counter lets overlapping
     /// calls open and close their windows independently.
     pending: std::sync::atomic::AtomicUsize,
+    /// Held while the passphrase is looked up or asked for, so two
+    /// connections never prompt at once.
+    answering: Mutex<()>,
     /// Tests: make the peer check refuse every connection.
     #[cfg(test)]
     refuse_peers: std::sync::atomic::AtomicBool,
@@ -523,6 +540,7 @@ impl Broker {
             cache: Mutex::new(HashMap::new()),
             tickets: Mutex::new(HashMap::new()),
             pending: std::sync::atomic::AtomicUsize::new(0),
+            answering: Mutex::new(()),
             #[cfg(test)]
             refuse_peers: std::sync::atomic::AtomicBool::new(false),
             cancelled: std::sync::atomic::AtomicBool::new(false),
@@ -543,25 +561,35 @@ impl Broker {
                         break;
                     }
                     let Ok(mut stream) = stream else { continue };
-                    let Some(b) = weak.upgrade() else { break };
-                    // Peer verification before anything else: the socket
-                    // perms already restrict callers to the same uid, and
-                    // the kernel-signed check verifies that the peer uid
-                    // matches the running app.
-                    if !verify_peer(&stream, &b) {
-                        let _ = stream.write_all(b"NO\n");
-                        let _ = stream.flush();
-                        continue;
+                    if weak.strong_count() == 0 {
+                        break;
                     }
-                    // A peer that stops talking is dropped after SERVE_TIMEOUT
-                    // instead of holding up the next request.
-                    #[cfg(unix)]
-                    {
-                        let _ = stream.set_read_timeout(Some(SERVE_TIMEOUT));
-                        let _ = stream.set_write_timeout(Some(SERVE_TIMEOUT));
-                    }
-                    // One request at a time: prompts are rare and sequential.
-                    serve_request(&mut stream, &b);
+                    // Each connection on its own thread, so one that stops
+                    // talking does not hold up the next request.
+                    let weak = weak.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("sparkdown-askpass-conn".into())
+                        .spawn(move || {
+                            // Peer verification before anything else: the
+                            // socket perms already restrict callers to the
+                            // same uid, and the kernel-signed check verifies
+                            // that the peer uid matches the running app.
+                            let Some(b) = weak.upgrade() else { return };
+                            if !verify_peer(&stream, &b) {
+                                let _ = stream.write_all(b"NO\n");
+                                let _ = stream.flush();
+                                return;
+                            }
+                            drop(b);
+                            // A peer that stops talking is dropped after
+                            // SERVE_TIMEOUT.
+                            #[cfg(unix)]
+                            {
+                                let _ = stream.set_read_timeout(Some(SERVE_TIMEOUT));
+                                let _ = stream.set_write_timeout(Some(SERVE_TIMEOUT));
+                            }
+                            serve_request(&mut stream, &weak);
+                        });
                 }
             })?;
         Ok(broker)
@@ -1314,9 +1342,31 @@ mod tests {
         let got = request(&mut connect(&b), &b.mint_ticket(), prompt);
         assert!(got.is_some(), "the next request is served");
         assert!(
-            start.elapsed() < SERVE_TIMEOUT + Duration::from_secs(5),
-            "served within the read limit"
+            start.elapsed() < SERVE_TIMEOUT / 2,
+            "served while the quiet peer is still connected"
         );
+        drop(idle);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_quiet_peer_does_not_keep_a_dropped_broker() {
+        let (b, _) = test_broker_closed(Some("pw"));
+        let mut idle = connect(&b);
+        idle.write_all(b"SDASK1 ").unwrap();
+        // Let the connection thread start reading.
+        std::thread::sleep(Duration::from_millis(100));
+        let dir = b.dir.clone();
+        let start = Instant::now();
+        drop(b);
+        while dir.exists() && start.elapsed() < SERVE_TIMEOUT {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !dir.exists(),
+            "endpoint removed while the peer is still connected"
+        );
+        assert!(start.elapsed() < SERVE_TIMEOUT / 2);
         drop(idle);
     }
 }
