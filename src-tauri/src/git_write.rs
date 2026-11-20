@@ -125,6 +125,33 @@ type ActionResult = Result<GitActionResult, GitActionError>;
 /// real config, and must not set process-wide env from parallel tests).
 pub(crate) type ExtraEnv<'a> = &'a [(&'a str, &'a str)];
 
+/// Fixed `-c` overrides for read-only git calls that go through
+/// [`query`] / [`run_stdout_raw`] (status, ls-files, rev-parse, and the
+/// like). Commit, Pull, Push and Discard keep [`user_git`] as-is, so hooks,
+/// `core.sshCommand` and credential helpers stay those of the user. Pull
+/// and Push still refuse to run when the repository itself sets command
+/// keys (see [`repo_config_has_exec_keys`]).
+const READ_GIT_OVERRIDES: &[&str] = &[
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.pager=cat",
+    "-c",
+    "diff.external=",
+    "-c",
+    "diff.tool=",
+    "--no-optional-locks",
+];
+
+fn with_read_git_overrides<'a>(args: &[&'a str], buf: &'a mut Vec<&'a str>) -> &'a [&'a str] {
+    buf.clear();
+    buf.extend_from_slice(READ_GIT_OVERRIDES);
+    buf.extend_from_slice(args);
+    buf
+}
+
 /// The user's own `git`, as in their terminal: their config, credentials,
 /// SSH agent, signing and hooks, never an interactive prompt.
 fn user_git(
@@ -243,7 +270,13 @@ fn run_stdout_raw(
     timeout: Duration,
     action: Action,
 ) -> Result<String, GitActionError> {
-    let o = user_git(root, extra, args, timeout)?;
+    let mut buf = Vec::new();
+    let o = user_git(
+        root,
+        extra,
+        with_read_git_overrides(args, &mut buf),
+        timeout,
+    )?;
     if o.status.success() {
         Ok(String::from_utf8_lossy(&o.stdout).into_owned())
     } else {
@@ -253,7 +286,14 @@ fn run_stdout_raw(
 
 /// Run a quiet query; `None` on failure.
 fn query(root: &Path, extra: ExtraEnv, args: &[&str]) -> Option<String> {
-    let o = user_git(root, extra, args, Duration::from_secs(20)).ok()?;
+    let mut buf = Vec::new();
+    let o = user_git(
+        root,
+        extra,
+        with_read_git_overrides(args, &mut buf),
+        Duration::from_secs(20),
+    )
+    .ok()?;
     o.status
         .success()
         .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -879,20 +919,7 @@ fn repo_config_has_exec_keys(root: &Path, extra: ExtraEnv) -> bool {
         if !matches!(scope, "local" | "worktree") {
             continue;
         }
-        let key_lower = key.to_lowercase();
-        if key_lower.starts_with("remote.") && key_lower.contains(".uploadpack")
-            || key_lower.starts_with("remote.") && key_lower.contains(".receivepack")
-            || key_lower.starts_with("remote.") && key_lower.contains(".vcs")
-            || key_lower == "protocol.allow"
-            || key_lower.starts_with("protocol.") && key_lower.ends_with(".allow")
-            || key_lower.starts_with("url.") && key_lower.contains(".insteadof")
-            || key_lower == "core.sshcommand"
-            || key_lower == "core.gitproxy"
-            || key_lower == "core.askpass"
-            || key_lower == "core.alternaterefscommand"
-            || key_lower.starts_with("credential.") && key_lower.contains("helper")
-            || key_lower.starts_with("include.")
-        {
+        if crate::git::repo_config_key_runs_commands(key) {
             return true;
         }
     }
@@ -975,9 +1002,10 @@ fn check_repo_config(root: &Path, extra: ExtraEnv, action: Action) -> Result<(),
         GitErrorKind::RepoConfig,
         format!(
             "{verb} stopped: this repository's own .git/config has settings that run \
-             commands or choose how git connects (for example core.sshCommand, \
-             credential.helper, url.*.insteadOf, include.path, or a remote URL using \
-             ext::, fd:: or file://). Check .git/config in a terminal, then try again."
+             commands or choose how git connects (for example core.fsmonitor, \
+             core.sshCommand, credential.helper, url.*.insteadOf, include.path, or a \
+             remote URL using ext::, fd:: or file://). Check .git/config in a terminal, \
+             then try again."
         ),
         "repository config (local or worktree scope)",
     ))
@@ -2535,6 +2563,14 @@ mod tests {
     }
 
     #[test]
+    fn fetch_skips_repo_with_fsmonitor() {
+        let sb = sandbox();
+        let env = sb.env();
+        set_local(&sb, "core.fsmonitor", "true");
+        assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Skipped);
+    }
+
+    #[test]
     fn fetch_skips_repo_with_ssh_command() {
         let sb = sandbox();
         let env = sb.env();
@@ -2629,6 +2665,45 @@ mod tests {
         let e = push_impl(&root(&sb), &env).unwrap_err();
         assert_eq!(e.kind, GitErrorKind::RepoConfig, "{e:?}");
         assert!(e.message.starts_with("Push stopped"), "{e:?}");
+    }
+
+    #[test]
+    fn pull_and_push_stop_on_repo_fsmonitor() {
+        let sb = sandbox();
+        let env = sb.env();
+        set_local(&sb, "core.fsmonitor", "true");
+        let e = pull_impl(&root(&sb), &env).unwrap_err();
+        assert_eq!(e.kind, GitErrorKind::RepoConfig, "{e:?}");
+        assert!(e.message.starts_with("Pull stopped"), "{e:?}");
+        let e = push_impl(&root(&sb), &env).unwrap_err();
+        assert_eq!(e.kind, GitErrorKind::RepoConfig, "{e:?}");
+        assert!(e.message.starts_with("Push stopped"), "{e:?}");
+    }
+
+    #[test]
+    fn pull_and_push_stop_on_repo_filter_or_diff_command() {
+        for (key, value) in [
+            ("filter.demo.clean", "cat"),
+            ("filter.demo.smudge", "cat"),
+            ("filter.demo.process", "cat"),
+            ("diff.external", "true"),
+            ("diff.demo.textconv", "cat"),
+            ("diff.demo.command", "true"),
+        ] {
+            let sb = sandbox();
+            let env = sb.env();
+            set_local(&sb, key, value);
+            assert_eq!(
+                pull_impl(&root(&sb), &env).unwrap_err().kind,
+                GitErrorKind::RepoConfig,
+                "{key}"
+            );
+            assert_eq!(
+                push_impl(&root(&sb), &env).unwrap_err().kind,
+                GitErrorKind::RepoConfig,
+                "{key}"
+            );
+        }
     }
 
     #[test]

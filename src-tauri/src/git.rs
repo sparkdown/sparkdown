@@ -101,6 +101,8 @@ fn git_command_with(root: &Path, safe_dirs: &[String]) -> Result<Command, String
         .arg("-c")
         .arg("core.hooksPath=/dev/null")
         .arg("-c")
+        .arg("core.pager=cat")
+        .arg("-c")
         .arg("diff.external=")
         .arg("-c")
         .arg("diff.tool=")
@@ -238,6 +240,58 @@ pub(crate) fn local_exec_neutralisers(root: &Path) -> Result<Vec<(String, String
         pairs.push((format!("diff.{d}.textconv"), String::new()));
     }
     Ok(pairs)
+}
+
+/// Whether a repository-local (or worktree, or included) config key names a
+/// command or a transport that SparkDown will not run for Pull, Push or the
+/// background fetch. Compared in lowercase. `core.hooksPath` is not included:
+/// Pull and Push still run the user's hooks, as they do in a terminal.
+pub(crate) fn repo_config_key_runs_commands(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    if k.starts_with("remote.")
+        && (k.contains(".uploadpack") || k.contains(".receivepack") || k.contains(".vcs"))
+    {
+        return true;
+    }
+    if k == "protocol.allow" || (k.starts_with("protocol.") && k.ends_with(".allow")) {
+        return true;
+    }
+    if k.starts_with("url.") && k.contains(".insteadof") {
+        return true;
+    }
+    if matches!(
+        k.as_str(),
+        "core.sshcommand"
+            | "core.gitproxy"
+            | "core.askpass"
+            | "core.alternaterefscommand"
+            | "core.fsmonitor"
+            | "diff.external"
+            | "diff.tool"
+    ) {
+        return true;
+    }
+    if k.starts_with("credential.") && k.contains("helper") {
+        return true;
+    }
+    if k.starts_with("include.") || k.starts_with("includeif.") {
+        return true;
+    }
+    if let Some(rest) = k.strip_prefix("filter.") {
+        if let Some((_, sub)) = rest.rsplit_once('.') {
+            if matches!(sub, "clean" | "smudge" | "process") {
+                return true;
+            }
+        }
+    }
+    if let Some(rest) = k.strip_prefix("diff.") {
+        if let Some((_, sub)) = rest.rsplit_once('.') {
+            if matches!(sub, "command" | "textconv") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Apply config overrides via GIT_CONFIG_COUNT/KEY/VALUE env vars. Key and
@@ -1916,6 +1970,148 @@ mod tests {
         assert!(marker.exists(), "control: plain update-index runs the hook");
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn repo_config_key_runs_commands_covers_the_listed_keys() {
+        for key in [
+            "core.fsmonitor",
+            "core.sshCommand",
+            "core.gitProxy",
+            "core.askPass",
+            "core.alternateRefsCommand",
+            "diff.external",
+            "diff.tool",
+            "filter.demo.clean",
+            "filter.demo.smudge",
+            "filter.demo.process",
+            "diff.demo.textconv",
+            "diff.demo.command",
+            "include.path",
+            "includeIf.gitdir:/tmp.path",
+            "credential.helper",
+            "credential.https://example.com.helper",
+            "remote.origin.uploadpack",
+            "protocol.allow",
+            "protocol.ssh.allow",
+            "url.https://example.com/.insteadOf",
+        ] {
+            assert!(
+                repo_config_key_runs_commands(key),
+                "{key} should be treated as a command-running setting"
+            );
+        }
+        for key in [
+            "user.name",
+            "core.hooksPath",
+            "core.pager",
+            "core.editor",
+            "filter.demo.required",
+            "diff.demo.cachetextconv",
+            "remote.origin.url",
+            "branch.main.merge",
+        ] {
+            assert!(
+                !repo_config_key_runs_commands(key),
+                "{key} should not stop Pull or Push"
+            );
+        }
+    }
+
+    /// Status and diff must not run commands that a repository sets in its
+    /// own config (`core.fsmonitor`, clean/smudge filters, `diff.external`,
+    /// textconv). The control run uses a plain `git` so the test is only
+    /// counted when those settings would have run.
+    #[cfg(unix)]
+    #[test]
+    fn git_status_and_diff_ignore_repo_local_commands() {
+        use std::fs;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        if !git_available() {
+            return;
+        }
+        let _guard = crate::remote::TEST_SESSION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        static N: AtomicU32 = AtomicU32::new(0);
+        let id = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "sparkdown_git_ignore_cmds_{}_{}",
+            std::process::id(),
+            id
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        git_in(&dir, &["init", "-q"]);
+        git_in(&dir, &["config", "user.email", "t@example.com"]);
+        git_in(&dir, &["config", "user.name", "Test"]);
+        fs::write(dir.join("data.txt"), "one\n").unwrap();
+        git_in(&dir, &["add", "data.txt"]);
+        git_in(&dir, &["commit", "-q", "-m", "init"]);
+
+        let marker = dir.join("CMD_RAN");
+        let touch = format!("touch {} && cat", marker.display());
+        let touch_only = format!("touch {}", marker.display());
+        git_in(&dir, &["config", "--local", "core.fsmonitor", &touch_only]);
+        git_in(&dir, &["config", "--local", "filter.demo.clean", &touch]);
+        git_in(&dir, &["config", "--local", "filter.demo.smudge", &touch]);
+        git_in(&dir, &["config", "--local", "diff.external", &touch_only]);
+        git_in(&dir, &["config", "--local", "diff.demo.textconv", &touch]);
+        fs::write(
+            dir.join(".gitattributes"),
+            "data.txt filter=demo diff=demo\n",
+        )
+        .unwrap();
+        fs::write(dir.join("data.txt"), "changed contents\n").unwrap();
+
+        // Control: a plain `git status` and `git diff` run at least one of
+        // the configured commands.
+        let _ = fs::remove_file(&marker);
+        let _ = crate::proc::command(git_bin())
+            .current_dir(&dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["status", "--porcelain"])
+            .output();
+        let status_control = marker.exists();
+        let _ = fs::remove_file(&marker);
+        let _ = crate::proc::command(git_bin())
+            .current_dir(&dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["diff", "--no-color", "HEAD", "--", "data.txt"])
+            .output();
+        let diff_control = marker.exists();
+        assert!(
+            status_control || diff_control,
+            "plain git did not run any configured command; test is inconclusive"
+        );
+
+        let _ = fs::remove_file(&marker);
+        let status = git_status_impl(dir.to_string_lossy().into_owned());
+        let after_status = marker.exists();
+        let _ = fs::remove_file(&marker);
+        let diff = git_diff_file_impl(
+            dir.to_string_lossy().into_owned(),
+            "data.txt".to_string(),
+            false,
+        );
+        let after_diff = marker.exists();
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(status.is_ok(), "status errored: {:?}", status.err());
+        assert!(
+            !after_status,
+            "git status ran a command from the repository's local config"
+        );
+        assert!(diff.is_ok(), "diff errored: {:?}", diff.err());
+        assert!(
+            !after_diff,
+            "git diff ran a command from the repository's local config"
+        );
     }
 
     #[test]
