@@ -25,6 +25,7 @@ mod routing;
 mod search;
 mod session;
 mod terminal;
+mod terminal_stream;
 mod updates;
 mod watcher;
 #[cfg(all(test, windows))]
@@ -792,6 +793,7 @@ fn main() {
             commands::remote_read_image,
             terminal::terminal_start,
             terminal::terminal_write,
+            terminal::terminal_ack,
             terminal::terminal_resize,
             terminal::terminal_close,
             terminal::terminal_busy,

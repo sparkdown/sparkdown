@@ -110,7 +110,8 @@ describe('TerminalPane lifecycle', () => {
 
     // Let init progress past its awaits up to the pending terminalStart.
     await flush();
-    expect(listeners.active).toBe(2); // data + exit listeners registered
+    // Only exit listener is registered; data comes via the Channel callback.
+    expect(listeners.active).toBe(1);
 
     // Tear down mid-init, then let the shell finish starting.
     pane.destroy();
@@ -128,7 +129,7 @@ describe('TerminalPane lifecycle', () => {
   it('destroy() is idempotent', async () => {
     const pane = new TerminalPane('t2', () => {});
     await pane.init(document.createElement('div'), '/cwd', null, null);
-    expect(listeners.active).toBe(2);
+    expect(listeners.active).toBe(1); // Only exit; data uses Channel callback
 
     pane.destroy();
     pane.destroy();

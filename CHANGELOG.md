@@ -7,6 +7,11 @@ requests.
 
 ## [Unreleased]
 
+### Improved
+
+- **Terminal rendering** uses the WebGL renderer when the system GPU supports WebGL2, with automatic fallback to the DOM renderer on context loss or when WebGL is unavailable. Large terminal output is drawn more efficiently.
+- **Terminal output streaming** sends PTY bytes as binary over a dedicated channel per terminal with flow control, reducing overhead and preventing unbounded buffering during floods of output.
+
 ### Fixed
 
 - Build no longer warns about mixed static/dynamic imports of `@tauri-apps/api/webviewWindow`.
