@@ -54,6 +54,10 @@ requests.
 
 - **Window startup** now shows the window only after the frontend has painted, eliminating blank/white frames at launch. A safety timeout ensures the window appears even if the frontend signal is missed. (#214)
 
+### New
+
+- **Regex search in files**: a regex toggle (.*) in the Search sidebar enables regular expression matching. Local folders use Rust regex syntax (supports `\d`, `\w`, `(?i)`, etc.). Remote (SSH) folders use POSIX Extended Regular Expression (ERE) via `grep -E` (character classes `[0-9]`, quantifiers `+*?{n,m}`, alternation `|`, groups `()`, anchors `^$`; no `\d`, `\w`, or Perl features). For portability across both, use ERE syntax. Invalid patterns show an error (first line only). Remote search compiles the regex before running grep to catch invalid patterns early.
+
 ### Fixed
 
 - **Git** status and diff no longer run commands set in a repository's local config.

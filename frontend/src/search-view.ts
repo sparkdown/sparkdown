@@ -25,6 +25,7 @@ export class SearchView {
   /** Bumped for every search and root change; stale replies are dropped. */
   private generation = 0;
   private lastQuery = '';
+  private useRegex = false;
   private debouncedRun = debounce(() => void this.run(), SEARCH_DEBOUNCE_MS);
 
   constructor(private readonly deps: SearchViewDeps) {}
@@ -51,6 +52,16 @@ export class SearchView {
       row.classList.add('selected');
       this.deps.openAt(row.dataset.path, Number(row.dataset.line), Number(row.dataset.column));
     });
+
+    // Regex toggle button
+    const regexBtn = document.getElementById('search-regex-btn');
+    regexBtn?.addEventListener('click', () => {
+      this.useRegex = !this.useRegex;
+      regexBtn.classList.toggle('active', this.useRegex);
+      regexBtn.setAttribute('aria-pressed', String(this.useRegex));
+      void this.run(true);
+    });
+
     this.renderStatus(this.root ? '' : 'Open a folder to search its files.');
   }
 
@@ -98,11 +109,17 @@ export class SearchView {
     this.renderStatus('Searching…');
     let results: SearchResults;
     try {
-      results = await api.searchInFiles(root, query, false, this.deps.includeHidden());
+      results = await api.searchInFiles(root, query, false, this.deps.includeHidden(), this.useRegex);
     } catch (err) {
       if (gen !== this.generation) return;
       this.resultsEl?.replaceChildren();
-      this.renderStatus(`Search failed: ${String(err)}`);
+      // Show friendly error for invalid regex patterns
+      const errMsg = String(err);
+      if (errMsg.includes('Invalid regex pattern')) {
+        this.renderStatus(errMsg.replace('Search failed: ', ''));
+      } else {
+        this.renderStatus(`Search failed: ${errMsg}`);
+      }
       return;
     }
     if (gen !== this.generation) return; // a newer search or another folder
