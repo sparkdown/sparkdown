@@ -60,10 +60,17 @@ use_tmux: boolean,
  */
 terminal_scrollback: number, 
 /**
- * Show an OS notification when a terminal needs attention (BEL, OSC 9,
- * OSC 777 notify), but only when the window is not focused. On by default.
+ * Show an OS notification when a terminal emits OSC 9 or OSC 777 notify
+ * (agent CLIs waiting for input), but only when the window is not focused.
+ * On by default.
  */
 terminal_notify: boolean,
+/**
+ * Show an OS notification when a terminal emits BEL (bell character), but
+ * only when the window is not focused. Off by default (shell tab completion
+ * rings the bell, which would spam notifications).
+ */
+terminal_notify_bell: boolean,
 /**
  * Agent context bridge: mirror what the user is viewing (and the live
  * text of unsaved buffers) into a per-workspace temp dir that agents in

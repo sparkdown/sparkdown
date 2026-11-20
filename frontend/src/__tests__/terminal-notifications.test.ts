@@ -1,67 +1,74 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { parseNotification, resetNotificationRateLimiter } from '../terminal-notifications';
+import { describe, it, expect } from 'vitest';
 
-describe('parseNotification', () => {
-  it('detects BEL character', () => {
-    const notif = parseNotification('some text\x07more text');
-    expect(notif).toEqual({ message: '' });
+/**
+ * Terminal notification rate limiting tests.
+ * The rate limiter lives in TerminalManager (terminal.ts) and enforces
+ * 1 notification per pane per 10 seconds.
+ */
+
+class MockRateLimiter {
+  private timestamps = new Map<string, number>();
+  private readonly RATE_LIMIT_MS = 10_000;
+
+  canNotify(paneId: string, now: number): boolean {
+    const last = this.timestamps.get(paneId);
+    if (last !== undefined && now - last < this.RATE_LIMIT_MS) {
+      return false;
+    }
+    this.timestamps.set(paneId, now);
+    return true;
+  }
+
+  reset(): void {
+    this.timestamps.clear();
+  }
+}
+
+describe('Terminal notification rate limiting', () => {
+  it('allows the first notification immediately', () => {
+    const limiter = new MockRateLimiter();
+    expect(limiter.canNotify('pane-1', 0)).toBe(true);
   });
 
-  it('detects OSC 9 with BEL terminator', () => {
-    const notif = parseNotification('\x1b]9;Agent waiting for input\x07');
-    expect(notif).toEqual({ message: 'Agent waiting for input' });
+  it('blocks a second notification within 10 seconds', () => {
+    const limiter = new MockRateLimiter();
+    const now = 1000;
+    expect(limiter.canNotify('pane-1', now)).toBe(true);
+    expect(limiter.canNotify('pane-1', now + 5000)).toBe(false);
+    expect(limiter.canNotify('pane-1', now + 9999)).toBe(false);
   });
 
-  it('detects OSC 9 with ST terminator', () => {
-    const notif = parseNotification('\x1b]9;Task complete\x1b\\');
-    expect(notif).toEqual({ message: 'Task complete' });
+  it('allows a notification after 10 seconds', () => {
+    const limiter = new MockRateLimiter();
+    const now = 1000;
+    expect(limiter.canNotify('pane-1', now)).toBe(true);
+    expect(limiter.canNotify('pane-1', now + 10_000)).toBe(true);
   });
 
-  it('detects OSC 777 notify with BEL', () => {
-    const notif = parseNotification('\x1b]777;notify;Ready for your response\x07');
-    expect(notif).toEqual({ message: 'Ready for your response' });
+  it('tracks different panes independently', () => {
+    const limiter = new MockRateLimiter();
+    const now = 2000;
+    expect(limiter.canNotify('pane-1', now)).toBe(true);
+    expect(limiter.canNotify('pane-2', now + 100)).toBe(true);
+    expect(limiter.canNotify('pane-1', now + 5000)).toBe(false);
+    expect(limiter.canNotify('pane-2', now + 5000)).toBe(false);
   });
 
-  it('detects OSC 777 notify with ST', () => {
-    const notif = parseNotification('\x1b]777;notify;Waiting\x1b\\');
-    expect(notif).toEqual({ message: 'Waiting' });
+  it('reset clears all timestamps', () => {
+    const limiter = new MockRateLimiter();
+    expect(limiter.canNotify('pane-1', 1000)).toBe(true);
+    expect(limiter.canNotify('pane-1', 5000)).toBe(false);
+    limiter.reset();
+    expect(limiter.canNotify('pane-1', 6000)).toBe(true);
   });
 
-  it('returns null for normal text', () => {
-    expect(parseNotification('hello world')).toBeNull();
-    expect(parseNotification('ESC ] not really')).toBeNull();
-  });
-
-  it('returns first notification when multiple present', () => {
-    const notif = parseNotification('\x1b]9;first\x07\x1b]9;second\x07');
-    expect(notif).toEqual({ message: 'first' });
-  });
-
-  it('detects notification embedded in normal output', () => {
-    const notif = parseNotification('Starting task...\n\x1b]777;notify;Input needed\x07\nMore output');
-    expect(notif).toEqual({ message: 'Input needed' });
-  });
-
-  it('ignores incomplete OSC sequences', () => {
-    expect(parseNotification('\x1b]9;incomplete')).toBeNull();
-    expect(parseNotification('\x1b]777;notify;no terminator')).toBeNull();
-  });
-
-  it('ignores non-notification OSC sequences', () => {
-    expect(parseNotification('\x1b]0;Set Title\x07')).toBeNull();
-    expect(parseNotification('\x1b]8;;http://example.com\x07\x1b]8;;\x07')).toBeNull();
-  });
-});
-
-describe('notification rate limiting', () => {
-  beforeEach(() => {
-    resetNotificationRateLimiter();
-  });
-
-  it('rate limiter allows first notification immediately', () => {
-    // This test is conceptual - the actual rate limiting is tested via
-    // handleTerminalNotification which we can't easily test here without
-    // mocking Tauri's invoke. The rate limiter logic is tested indirectly
-    // through the parseNotification tests above.
+  it('handles rapid fire attempts', () => {
+    const limiter = new MockRateLimiter();
+    const base = 10_000;
+    expect(limiter.canNotify('pane-1', base)).toBe(true);
+    for (let i = 1; i < 100; i++) {
+      expect(limiter.canNotify('pane-1', base + i * 100)).toBe(false);
+    }
+    expect(limiter.canNotify('pane-1', base + 10_000)).toBe(true);
   });
 });

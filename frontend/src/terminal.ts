@@ -30,7 +30,6 @@ import type { TerminalLayout } from './types/TerminalLayout';
 import { isSafeHttpUrl, linksForBufferRow } from './terminal-links';
 import { TerminalSearch, type TerminalSearchTarget } from './terminal-search';
 import { TERMINAL_SCROLLBACK_DEFAULT, clampScrollback } from './terminal-scrollback';
-import { handleTerminalNotification } from './terminal-notifications';
 
 // Keep in sync with --font-mono in themes.css. xterm measures cells in
 // JS/canvas and needs a LITERAL font stack (a `var(--…)` never resolves).
@@ -172,8 +171,8 @@ export class TerminalPane {
   private onOpenPath: (path: string) => void;
   /** Split-grid keys pressed while this terminal has focus (⌘D, ⌘] …). */
   private onAction: ((action: TerminalPaneAction) => void) | null;
-  /** Called when terminal output may contain a notification sequence. */
-  private onNotificationRequest: ((output: string) => void) | null;
+  /** Called when a notification sequence (BEL, OSC 9, OSC 777) is detected. */
+  private onNotify: ((message: string) => void) | null;
   /** Timestamp of the last pty output — used to wait for the shell prompt
    *  to settle before typing into a fresh terminal. */
   private lastOutputAt = 0;
@@ -195,13 +194,13 @@ export class TerminalPane {
     id: string,
     onOpenPath: (path: string) => void,
     onAction: ((action: TerminalPaneAction) => void) | null = null,
-    onNotificationRequest: ((output: string) => void) | null = null,
+    onNotify: ((message: string) => void) | null = null,
     scrollback = TERMINAL_SCROLLBACK_DEFAULT,
   ) {
     this.id = id;
     this.onOpenPath = onOpenPath;
     this.onAction = onAction;
-    this.onNotificationRequest = onNotificationRequest;
+    this.onNotify = onNotify;
     this.term = new XTerm({
       cursorBlink: true,
       fontFamily: TERM_FONT,
@@ -227,6 +226,23 @@ export class TerminalPane {
     this.term.loadAddon(this.fit);
     this.term.loadAddon(this.search);
     this.search.onDidChangeResults((r) => this.onSearchResults?.(r.resultIndex, r.resultCount));
+
+    // Terminal notification sequences: BEL, OSC 9, OSC 777 notify.
+    this.term.onBell(() => this.onNotify?.(''));
+    // OSC 9: iTerm2 notifications. Ignore 9;4;... progress and 9;<digit>; forms.
+    this.term.parser.registerOscHandler(9, (data) => {
+      if (data && !data.match(/^\d+;/)) {
+        this.onNotify?.(data);
+      }
+      return false; // Let xterm handle other OSC 9 sequences
+    });
+    // OSC 777: tmux/terminal-notifier notify;message format.
+    this.term.parser.registerOscHandler(777, (data) => {
+      if (data.startsWith('notify;')) {
+        this.onNotify?.(data.slice(7));
+      }
+      return false; // Let xterm handle other OSC 777 sequences
+    });
 
     // Clipboard: xterm has no built-in copy/paste keys, and the Tauri webview
     // does not route ⌘C/⌘V to the terminal on its own. Copy goes through the
@@ -419,11 +435,8 @@ export class TerminalPane {
     // destroy already drained unlisteners, so a late push would leak.
     const dataUn = await listen<{ id: string; chunk: string }>('terminal://data', (e) => {
       if (e.payload.id === this.id) {
-        const chunk = e.payload.chunk;
-        this.term.write(chunk);
+        this.term.write(e.payload.chunk);
         this.lastOutputAt = performance.now();
-        // Check for notification sequences (BEL, OSC 9, OSC 777)
-        this.onNotificationRequest?.(chunk);
       }
     });
     if (this.disposed) return void dataUn();
@@ -1080,10 +1093,10 @@ export class TerminalManager {
   private scrollback = TERMINAL_SCROLLBACK_DEFAULT;
   /** Each pane's find bar, built on first use and mounted in its card. */
   private searches = new Map<string, TerminalSearch>();
-  /** App config (for terminal_notify setting). */
+  /** App config (for terminal_notify settings). */
   private config: import('./api').AppConfig | null = null;
   /** Whether the SparkDown window currently has focus. */
-  private windowFocused = true;
+  private windowFocused = false; // Seeded from document.hasFocus() in constructor
   /** Login shell name ("zsh"/"bash"), resolved once for pane names. */
   private shellName = '';
   private store: LayoutStore | null = null;
@@ -1123,6 +1136,9 @@ export class TerminalManager {
   constructor(host: HTMLElement, onOpenPath: (path: string) => void) {
     this.host = host;
     this.onOpenPath = onOpenPath;
+    // Seed window focus state from document.hasFocus() so a window starting
+    // in the background isn't treated as focused.
+    this.windowFocused = document.hasFocus();
     this.host.addEventListener('click', (e) => this.onHostClick(e));
     this.host.addEventListener('mousedown', (e) => {
       const b = e.target instanceof Element ? e.target.closest<HTMLElement>('[data-act]') : null;
@@ -1459,7 +1475,7 @@ export class TerminalManager {
       id,
       this.onOpenPath,
       (action) => this.onPaneAction(id, action),
-      (output) => this.onPaneNotificationRequest(id, output),
+      (message) => this.onPaneNotify(id, message),
       this.scrollback,
     );
     this.panes.set(id, pane);
@@ -1493,20 +1509,40 @@ export class TerminalManager {
     return { id, pane, start };
   }
 
-  /** Handle terminal output that may contain notification sequences. */
-  private onPaneNotificationRequest(id: string, output: string): void {
+  /** Rate limiter for notifications: last notification time per pane. */
+  private notificationTimestamps = new Map<string, number>();
+
+  /** Handle notification sequences from a terminal (BEL, OSC 9, OSC 777 notify). */
+  private onPaneNotify(id: string, message: string): void {
     if (!this.config) return;
+    
+    // Check settings: empty message = BEL (bell), non-empty = OSC 9/777
+    const isBell = message === '';
+    if (isBell && !this.config.terminal_notify_bell) return;
+    if (!isBell && !this.config.terminal_notify) return;
+
+    // Only notify when window is not focused
+    if (this.windowFocused) return;
+
+    // Rate limit: 1 notification per pane per 10 seconds
+    const now = Date.now();
+    const last = this.notificationTimestamps.get(id);
+    if (last !== undefined && now - last < 10_000) return;
+    this.notificationTimestamps.set(id, now);
+
+    // Get pane title and clamp/strip message
     const meta = this.meta.get(id);
     if (!meta) return;
     const process = meta.agentId ?? meta.shell;
-    const paneName = meta.customName ?? process;
-    void handleTerminalNotification(
-      output,
-      id,
-      paneName,
-      this.config,
-      this.windowFocused,
-    );
+    const paneTitle = meta.customName ?? process;
+    
+    // Clamp to 200 chars and strip control characters
+    const cleanMessage = message
+      .slice(0, 200)
+      .replace(/[\x00-\x1f\x7f-\x9f]/g, '');
+
+    // Send notification via backend
+    void api.terminalNotify(id, paneTitle, cleanMessage);
   }
 
   /** Close a terminal by id (kills its shell); its split collapses. Empties

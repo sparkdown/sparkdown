@@ -163,6 +163,8 @@ export const api = {
   terminalResize: (id: string, cols: number, rows: number) =>
     invoke<void>("terminal_resize", { id, cols, rows }),
   terminalClose: (id: string) => invoke<void>("terminal_close", { id }),
+  terminalNotify: (paneId: string, title: string, message: string) =>
+    invoke<void>("terminal_notify", { paneId, title, message }),
   /** tmux sessions this window started, from the core (#108). */
   tmuxWindowSessions: () => invoke<string[]>("tmux_window_sessions"),
   /** #43: what runs in the pane besides its idle shell (null = idle / unknown). */

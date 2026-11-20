@@ -25,7 +25,6 @@ mod routing;
 mod search;
 mod session;
 mod terminal;
-mod terminal_notify;
 mod updates;
 mod watcher;
 #[cfg(all(test, windows))]

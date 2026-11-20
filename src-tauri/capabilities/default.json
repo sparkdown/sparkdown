@@ -19,10 +19,6 @@
     "dialog:default",
     "dialog:allow-confirm",
     "dialog:allow-ask",
-    "drag:default",
-    "notification:default",
-    "notification:allow-is-permission-granted",
-    "notification:allow-request-permission",
-    "notification:allow-show"
+    "drag:default"
   ]
 }
