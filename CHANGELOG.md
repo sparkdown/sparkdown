@@ -52,6 +52,7 @@ requests.
 - **Preview**: for a file opened from outside the open folder (or with no folder open), images load only from that file's own folder, not from folders below it. Images inside the open folder load as before.
 - **Explorer**: deleting a symbolic link moves the link to the Trash (or deletes it on a remote folder) and leaves the file or folder it points to alone. The confirmation names what the link points to, and links show their target on hover.
 - **Git**: Pull and Push stop with a message, instead of running, when the repository's own `.git/config` sets keys that run commands or choose how git connects (such as `core.sshCommand`, `credential.helper`, `url.*.insteadOf`, `include.path`, or a remote, push or branch URL using `ext::`, `fd::` or `file://`). These are the settings that already turn off the background fetch; the same settings in your global git config are not affected.
+- **Settings**: one preference SparkDown cannot read (for example a theme from a newer version) now falls back to its default on its own instead of resetting every preference. If the preferences file cannot be read as a whole, the other settings are kept, "Share editor context with agents" stays off until you turn it on again, and a copy of the file is saved next to it as `config.json.corrupt-<time>`.
 
 ### Fixed
 
