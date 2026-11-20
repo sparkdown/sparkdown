@@ -1364,6 +1364,67 @@ pub(crate) fn map_stored_types_to_algorithms(stored: &[String]) -> Vec<String> {
     algorithms
 }
 
+/// Paths of this window's token files in the per-client remote cache
+/// folder. A `None` field means that token is not available (or the files
+/// could not be written), and the caller leaves that export out, the same
+/// as when there is no token.
+struct RemoteTokenPaths {
+    /// Window-socket token (`SPARKDOWN_MCP_WINDOW_TOKEN`), one per window.
+    window_token: Option<String>,
+    /// Folder/routing token (`SPARKDOWN_MCP_TOKEN`), one per window.
+    folder_token: Option<String>,
+}
+
+/// POSIX sh that checks the cache folders (see [`owned_dirs_prelude`]) and
+/// writes the two token lines it reads from stdin to `wpath` and `fpath`
+/// as new 0600 files.
+fn token_files_script(levels: &[String], wpath: &str, fpath: &str) -> String {
+    format!(
+        "{prelude}IFS= read -r sd_w; IFS= read -r sd_f\n\
+         rm -f -- {wp} {fp}\n\
+         (set -C; printf %s \"$sd_w\" > {wp}) && (set -C; printf %s \"$sd_f\" > {fp})",
+        prelude = owned_dirs_prelude(levels),
+        wp = shell_quote(wpath),
+        fp = shell_quote(fpath),
+    )
+}
+
+/// Write the current window and folder tokens to owner-only files in the
+/// per-client remote cache folder and return their paths, so
+/// [`terminal_command`] puts only the paths on the ssh and tmux command
+/// lines. The tokens travel on stdin; the remote shell reads them back with
+/// `$(cat <path>)` when it starts.
+fn stage_remote_tokens(session: &RemoteSession) -> Option<RemoteTokenPaths> {
+    let label = crate::windows::current_label();
+    let wtok = crate::mcp::window_socket_token(&label);
+    let ftok = crate::windows::token_for_current_window(None);
+    if wtok.is_none() && ftok.is_none() {
+        return None;
+    }
+    let (sd_root, cache) = cache_levels(session);
+    // One file pair per window, so windows on the same host keep their own.
+    let suffix = if label == crate::windows::DEFAULT_LABEL {
+        String::new()
+    } else {
+        format!("-{}", crate::windows::label_tag(&label))
+    };
+    let wpath = format!("{cache}/mcp{suffix}.wtok");
+    let fpath = format!("{cache}/mcp{suffix}.ftok");
+    // Unit tests check the command line without a real host.
+    if !cfg!(test) {
+        let one_line = |t: &Option<String>| t.as_deref().unwrap_or("").replace(['\n', '\r'], "");
+        let stdin = format!("{}\n{}\n", one_line(&wtok), one_line(&ftok));
+        let script = token_files_script(&[sd_root, cache], &wpath, &fpath);
+        if ssh_run_stdin(&session.host, &script, Some(stdin.as_bytes())).is_err() {
+            return None;
+        }
+    }
+    Some(RemoteTokenPaths {
+        window_token: wtok.map(|_| wpath),
+        folder_token: ftok.map(|_| fpath),
+    })
+}
+
 /// When a remote session is active, the embedded PTY runs `ssh -tt host`
 /// (reattach tmux on the remote if a session name is provided).
 pub fn terminal_command(
@@ -1429,6 +1490,10 @@ pub fn terminal_command(
     // `tmux -e` this works below tmux 3.2. The outer exports still cover the
     // non-tmux fallback shell. `=name` (below) forces exact target matching so
     // set-option can't hit a same-prefixed session.
+    // Write the window and folder tokens to owner-only files once, up
+    // front. The command lines below carry only the file paths; the remote
+    // shell reads each token back with `$(cat <path>)`.
+    let staged_tokens = stage_remote_tokens(&sess);
     let pane_env = {
         let mut f = String::new();
         if let Some(ctx) = context_dir_for(dir) {
@@ -1437,21 +1502,25 @@ pub fn terminal_command(
         if let Some(sock) = remote_mcp_socket() {
             f.push_str(&format!("export SPARKDOWN_MCP={}; ", shell_quote(&sock)));
             // Per-session secret for the window socket's sparkdown_hello.
-            // Exported alongside SPARKDOWN_MCP so the shim can send it.
-            if let Some(wtok) = crate::mcp::window_socket_token(&crate::windows::current_label()) {
-                f.push_str(&format!(
-                    "export {}={}; ",
-                    crate::mcp::WINDOW_TOKEN_ENV,
-                    shell_quote(&wtok)
-                ));
+            // Read from its owner-only file when the shell starts.
+            if let Some(ref paths) = staged_tokens {
+                if let Some(ref wpath) = paths.window_token {
+                    f.push_str(&format!(
+                        "export {}=\"$(cat {} 2>/dev/null)\"; ",
+                        crate::mcp::WINDOW_TOKEN_ENV,
+                        shell_quote(wpath)
+                    ));
+                }
             }
         }
-        if let Some(t) = crate::windows::token_for_current_window(None) {
-            f.push_str(&format!(
-                "export {}={}; ",
-                crate::mcp::TOKEN_ENV,
-                shell_quote(&t)
-            ));
+        if let Some(ref paths) = staged_tokens {
+            if let Some(ref tpath) = paths.folder_token {
+                f.push_str(&format!(
+                    "export {}=\"$(cat {} 2>/dev/null)\"; ",
+                    crate::mcp::TOKEN_ENV,
+                    shell_quote(tpath)
+                ));
+            }
         }
         f
     };
@@ -1525,14 +1594,16 @@ pub fn terminal_command(
         Some(sock) => {
             // Also export the per-session window token (used by the shim to
             // send to the forwarded socket) in the non-tmux fallback
-            // shell.
+            // shell, read from its owner-only file.
             let mut head = format!("export SPARKDOWN_MCP={}; ", shell_quote(&sock));
-            if let Some(wtok) = crate::mcp::window_socket_token(&crate::windows::current_label()) {
-                head.push_str(&format!(
-                    "export {}={}; ",
-                    crate::mcp::WINDOW_TOKEN_ENV,
-                    shell_quote(&wtok)
-                ));
+            if let Some(ref paths) = staged_tokens {
+                if let Some(ref wpath) = paths.window_token {
+                    head.push_str(&format!(
+                        "export {}=\"$(cat {} 2>/dev/null)\"; ",
+                        crate::mcp::WINDOW_TOKEN_ENV,
+                        shell_quote(wpath)
+                    ));
+                }
             }
             format!("{head}{remote}")
         }
@@ -3232,6 +3303,54 @@ Host *.example.com
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The token script writes each stdin line to its own owner-only file,
+    /// and writes nothing when the cache folder is a link.
+    #[cfg(unix)]
+    #[test]
+    fn token_files_script_writes_owner_only_files_in_checked_folders() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = fresh_test_dir("remote-tokens");
+        let root = dir.join("sparkdown");
+        let cache = root.join("client");
+        let levels = [root.display().to_string(), cache.display().to_string()];
+        let w = cache.join("mcp.wtok");
+        let f = cache.join("mcp.ftok");
+        let run = |levels: &[String]| {
+            let last = Path::new(levels.last().unwrap());
+            let (w, f) = (last.join("mcp.wtok"), last.join("mcp.ftok"));
+            let mut child = crate::proc::command("/bin/sh")
+                .arg("-c")
+                .arg(token_files_script(levels, w.to_str().unwrap(), f.to_str().unwrap()))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let _ = child.stdin.take().unwrap().write_all(b"wtok-1\nftok-1\n");
+            child.wait_with_output().unwrap()
+        };
+        assert!(run(&levels).status.success());
+        assert_eq!(std::fs::read_to_string(&w).unwrap(), "wtok-1");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "ftok-1");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&w), 0o600);
+        assert_eq!(mode(&f), 0o600);
+        // A second run replaces the files.
+        assert!(run(&levels).status.success());
+        assert_eq!(std::fs::read_to_string(&w).unwrap(), "wtok-1");
+
+        // A link in place of the client folder: refused, nothing written.
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let linked = root.join("linked");
+        std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
+        let levels = [root.display().to_string(), linked.display().to_string()];
+        let out = run(&levels);
+        assert_eq!(out.status.code(), Some(4));
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The read-for-edit script tells "missing" from "present" (and from a
     /// directory), so a merge never overwrites an unreadable file.
     #[cfg(unix)]
@@ -3978,14 +4097,27 @@ Host *.example.com
                 "{session:?}: {argv}"
             );
             // Exported for the plain login shell, and (tmux) inside the pane.
+            // The token value is not on the command line: only the path of
+            // the file that holds it, read by the remote shell with
+            // `$(cat …)`. The debug
+            // format of the CommandBuilder escapes `"` as `\"`, so the
+            // needles below check for that escaped form.
             assert!(
-                argv.contains("export SPARKDOWN_MCP_WINDOW_TOKEN='wtok-1'"),
-                "{session:?}: {argv}"
+                !argv.contains("wtok-1"),
+                "token value on the command line: {session:?}: {argv}"
+            );
+            assert!(
+                argv.contains("export SPARKDOWN_MCP_WINDOW_TOKEN=")
+                    && argv.contains("$(cat '/local/home/u/.cache/sparkdown/")
+                    && argv.contains(".wtok' 2>/dev/null)"),
+                "window token must be read from a per-client cache file: {session:?}: {argv}"
             );
             if session.is_some() {
+                // In the tmux branch the pane command re-exports the same
+                // file-based read, single-quoted inside tmux's `sh -c`.
                 assert!(
-                    argv.contains(r"export SPARKDOWN_MCP_WINDOW_TOKEN='\\''wtok-1'\\''"),
-                    "pane command lacks the token: {argv}"
+                    argv.matches("export SPARKDOWN_MCP_WINDOW_TOKEN=").count() >= 2,
+                    "pane command lacks the file-based token read: {argv}"
                 );
             }
         }
