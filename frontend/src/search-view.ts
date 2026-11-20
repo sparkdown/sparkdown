@@ -113,12 +113,13 @@ export class SearchView {
     } catch (err) {
       if (gen !== this.generation) return;
       this.resultsEl?.replaceChildren();
-      // Show friendly error for invalid regex patterns
+      // Show friendly error for invalid regex patterns (first line only)
       const errMsg = String(err);
-      if (errMsg.includes('Invalid regex pattern')) {
-        this.renderStatus(errMsg.replace('Search failed: ', ''));
+      const firstLine = errMsg.split('\n')[0];
+      if (firstLine.includes('Invalid regex pattern')) {
+        this.renderStatus(firstLine.replace('Search failed: ', ''));
       } else {
-        this.renderStatus(`Search failed: ${errMsg}`);
+        this.renderStatus(`Search failed: ${firstLine}`);
       }
       return;
     }

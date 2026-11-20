@@ -57,26 +57,27 @@ pub struct SearchResults {
 }
 
 /// Reject queries that can't match a single line or are unreasonably long.
-fn validate_query(query: &str, use_regex: bool) -> Result<(), AppError> {
+fn validate_query(query: &str, _use_regex: bool) -> Result<(), AppError> {
     if query.is_empty() {
         return Err(AppError::Other("Empty search query".into()));
     }
     if query.chars().count() > MAX_QUERY_CHARS {
         return Err(AppError::Other("Search query is too long".into()));
     }
-    if !use_regex && (query.contains('\n') || query.contains('\r') || query.contains('\0')) {
+    // Single-line rule applies to both modes: local search is per-line, and
+    // remote `grep -e` treats a newline as alternation.
+    if query.contains('\n') || query.contains('\r') || query.contains('\0') {
         return Err(AppError::Other("Search query must be a single line".into()));
     }
     Ok(())
 }
 
 /// Compile a regex pattern with safety limits. Returns an error for invalid patterns.
+/// Only supports POSIX ERE syntax that works in both Rust regex and `grep -E`.
 fn compile_regex(pattern: &str, case_sensitive: bool) -> Result<Regex, AppError> {
     let mut builder = regex::RegexBuilder::new(pattern);
     builder.case_insensitive(!case_sensitive);
-    // Limit regex execution to prevent pathological patterns from hanging.
-    // Size limit of 10MB prevents large DFA states.
-    builder.size_limit(10 * 1024 * 1024);
+    // The default 10 MiB size_limit is already set; no need to override.
     builder
         .build()
         .map_err(|e| AppError::Other(format!("Invalid regex pattern: {}", e)))
@@ -191,13 +192,8 @@ pub(crate) fn search_local(
     query: &str,
     case_sensitive: bool,
     include_hidden: bool,
-    use_regex: bool,
+    regex: Option<&Regex>,
 ) -> Result<SearchResults, AppError> {
-    let regex = if use_regex {
-        Some(compile_regex(query, case_sensitive)?)
-    } else {
-        None
-    };
     let mut matches = Vec::new();
     let mut truncated = false;
     let mut scanned = 0usize;
@@ -306,13 +302,8 @@ pub(crate) fn parse_remote_output(
     root: &str,
     query: &str,
     case_sensitive: bool,
-    use_regex: bool,
+    regex: Option<&Regex>,
 ) -> Result<SearchResults, AppError> {
-    let regex = if use_regex {
-        Some(compile_regex(query, case_sensitive)?)
-    } else {
-        None
-    };
     let mut matches = Vec::new();
     let prefix = format!("{}/", root.trim_end_matches('/'));
     // Each record is `path NUL line:text \n`: find the NUL, then the
@@ -394,6 +385,13 @@ pub async fn search_in_files(
     validate_query(&query, use_regex)?;
     let case_sensitive = case_sensitive.unwrap_or(false);
     let include_hidden = include_hidden.unwrap_or(false);
+    // Compile the regex before branching, so an invalid pattern never runs grep.
+    // Both local and remote use the same compiled regex for consistency.
+    let regex = if use_regex {
+        Some(compile_regex(&query, case_sensitive)?)
+    } else {
+        None
+    };
     crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
         if crate::remote::is_active() {
             let raw = crate::remote::search_in_files(
@@ -401,7 +399,7 @@ pub async fn search_in_files(
                 &remote_search_script(&root, &query, case_sensitive, include_hidden, use_regex),
             )
             .map_err(AppError::Other)?;
-            return parse_remote_output(&raw, &root, &query, case_sensitive, use_regex);
+            return parse_remote_output(&raw, &root, &query, case_sensitive, regex.as_ref());
         }
         let safe_root = crate::commands::validate_path(&root)?;
         if !safe_root.is_dir() {
@@ -415,7 +413,7 @@ pub async fn search_in_files(
             &query,
             case_sensitive,
             include_hidden,
-            use_regex,
+            regex.as_ref(),
         )
     })
     .await
@@ -505,7 +503,7 @@ mod tests {
         let big = format!("find me\n{}", "z".repeat(MAX_FILE_BYTES as usize + 10));
         fs::write(root.join("big.txt"), big).unwrap();
 
-        let res = search_local(&root, "find me", false, false, false).unwrap();
+        let res = search_local(&root, "find me", false, false, None).unwrap();
         let hits: Vec<(String, u32)> = res
             .matches
             .iter()
@@ -527,7 +525,7 @@ mod tests {
         assert!(!res.truncated);
 
         // Hidden files are searched when asked for (ignored dirs never are).
-        let res = search_local(&root, "find me", false, true, false).unwrap();
+        let res = search_local(&root, "find me", false, true, None).unwrap();
         let names: Vec<String> = res
             .matches
             .iter()
@@ -552,7 +550,7 @@ mod tests {
         fs::write(outside.join("secret.md"), "find me").unwrap();
         std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
         std::os::unix::fs::symlink(outside.join("secret.md"), root.join("s.md")).unwrap();
-        let res = search_local(&root, "find me", false, false, false).unwrap();
+        let res = search_local(&root, "find me", false, false, None).unwrap();
         assert!(res.matches.is_empty());
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
@@ -563,7 +561,7 @@ mod tests {
         let root = temp_dir("cap");
         let text = "hit\n".repeat(MAX_RESULTS + 50);
         fs::write(root.join("many.md"), text).unwrap();
-        let res = search_local(&root, "hit", true, false, false).unwrap();
+        let res = search_local(&root, "hit", true, false, None).unwrap();
         assert_eq!(res.matches.len(), MAX_RESULTS);
         assert!(res.truncated);
         let _ = fs::remove_dir_all(&root);
@@ -573,7 +571,9 @@ mod tests {
     fn local_search_supports_regex() {
         let root = temp_dir("regex");
         fs::write(root.join("test.md"), "hello world\nfoo123bar\ntest").unwrap();
-        let res = search_local(&root, r"foo\d+bar", true, false, true).unwrap();
+        // Use ERE syntax ([0-9]+) instead of Rust-specific \d+
+        let re = compile_regex(r"foo[0-9]+bar", true).unwrap();
+        let res = search_local(&root, r"foo[0-9]+bar", true, false, Some(&re)).unwrap();
         assert_eq!(res.matches.len(), 1);
         assert_eq!(res.matches[0].line, 2);
         let _ = fs::remove_dir_all(&root);
@@ -585,8 +585,8 @@ mod tests {
         assert!(validate_query("a\nb", false).is_err());
         assert!(validate_query(&"x".repeat(MAX_QUERY_CHARS + 1), false).is_err());
         assert!(validate_query("ok", false).is_ok());
-        // Regex mode allows newlines in pattern (multiline regex)
-        assert!(validate_query("a\nb", true).is_ok());
+        // Newlines rejected in both modes now (single-line rule)
+        assert!(validate_query("a\nb", true).is_err());
     }
 
     #[test]
@@ -620,7 +620,7 @@ mod tests {
         // `grep --null` separates the file name and line:text with a NUL.
         let raw =
             "/r/a.md\x0012:  Find me here\n/r/we:ird:name.md\x003:find ME\n/r/x.md\x00notanumber\n";
-        let res = parse_remote_output(raw, "/r", "find me", false, false).unwrap();
+        let res = parse_remote_output(raw, "/r", "find me", false, None).unwrap();
         assert_eq!(res.matches.len(), 2);
         assert_eq!(res.matches[0].path, "/r/a.md");
         assert_eq!(res.matches[0].line, 12);
@@ -633,7 +633,7 @@ mod tests {
         let many: String = (0..MAX_RESULTS + 1)
             .map(|i| format!("/r/a.md\x00{}:hit\n", i + 1))
             .collect();
-        let res = parse_remote_output(&many, "/r", "hit", true, false).unwrap();
+        let res = parse_remote_output(&many, "/r", "hit", true, None).unwrap();
         assert_eq!(res.matches.len(), MAX_RESULTS);
         assert!(res.truncated);
     }
@@ -643,12 +643,12 @@ mod tests {
         // A folder name ending in a newline: the second line is part of the
         // same path, which is dropped, not a separate hit.
         let raw = "/r/dir\n/r/notes.md/f.md\x001:FAKE note\n";
-        let res = parse_remote_output(raw, "/r", "FAKE", true, false).unwrap();
+        let res = parse_remote_output(raw, "/r", "FAKE", true, None).unwrap();
         assert!(res.matches.is_empty());
 
         // After a normal match: that one is kept, the other is dropped.
         let raw = "/r/a.md\x001:FAKE here\n/r/dir\n/r/notes.md/f.md\x002:FAKE note\n";
-        let res = parse_remote_output(raw, "/r", "FAKE", true, false).unwrap();
+        let res = parse_remote_output(raw, "/r", "FAKE", true, None).unwrap();
         assert_eq!(res.matches.len(), 1);
         assert_eq!(res.matches[0].path, "/r/a.md");
         assert_eq!(res.matches[0].line, 1);
@@ -658,7 +658,7 @@ mod tests {
     fn parse_remote_output_rejects_control_chars_in_path() {
         // A path with a bell character is dropped.
         let raw = "/r/a\x07.md\x001:hit here\n";
-        let res = parse_remote_output(raw, "/r", "hit", true, false).unwrap();
+        let res = parse_remote_output(raw, "/r", "hit", true, None).unwrap();
         assert!(res.matches.is_empty());
     }
 
@@ -679,7 +679,7 @@ mod tests {
             .output()
             .unwrap();
         let raw = String::from_utf8_lossy(&out.stdout);
-        let res = parse_remote_output(&raw, root_s, "hit", true, false).unwrap();
+        let res = parse_remote_output(&raw, root_s, "hit", true, None).unwrap();
         let paths: Vec<&str> = res.matches.iter().map(|m| m.path.as_str()).collect();
         assert_eq!(paths, vec![format!("{root_s}/a.md").as_str()]);
         let _ = std::fs::remove_dir_all(&root);
