@@ -2044,8 +2044,7 @@ pub fn terminal_notify(
         message
     };
 
-    let notif = app
-        .notification()
+    app.notification()
         .builder()
         .title(title)
         .body(body)
