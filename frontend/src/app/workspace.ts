@@ -20,7 +20,7 @@ export interface WorkspaceDeps {
     DocumentController,
     'openFilesInOrder' | 'blockLocalPathWhileRemote' | 'closePristineUntitled' | 'isSaving' | 'wroteRecently'
   >;
-  panes: Pick<PaneController, 'renderPreview' | 'setBaseDir'>;
+  panes: Pick<PaneController, 'renderPreview' | 'setBaseDir' | 'setWorkspaceRoot'>;
   diff: Pick<
     DiffController,
     'setRoot' | 'followRoot' | 'refreshNow' | 'refreshSoon' | 'showDiffForTab'
@@ -140,6 +140,8 @@ export class WorkspaceController {
     await this.ctx.fileTree.setRoot(dir, true);
     this.ctx.baseDir = dir;
     this.deps.panes.setBaseDir(dir);
+    // Preview links open only files inside the open folder.
+    this.deps.panes.setWorkspaceRoot(dir);
     this.deps.cockpit.setCwd(dir);
     this.deps.diff.setRoot(dir);
     this.deps.diff.refreshNow();
@@ -164,6 +166,7 @@ export class WorkspaceController {
     this.ctx.workspaceRoot = null;
     this.reportFolder(null);
     this.ctx.baseDir = null;
+    this.deps.panes.setWorkspaceRoot(null);
     this.ctx.fileTree.clear();
     this.deps.diff.setRoot(null);
     this.deps.diff.refreshNow();

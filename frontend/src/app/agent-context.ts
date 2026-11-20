@@ -1,6 +1,7 @@
 import { api } from '../api';
 import { debounce } from '../utils';
 import type { AppContext } from './context';
+import type { OpenFileOptions } from './documents';
 
 /** FNV-1a hash of a buffer, as a short hex string. Used only to detect
  *  "did this tab's text change since the last publish?" — not for security. */
@@ -17,7 +18,7 @@ function hashContent(text: string): string {
 /** What the bridge needs from the App. */
 export interface AgentContextDeps {
   /** Open a file as a tab (mcp://open). */
-  openFile(path: string): Promise<void>;
+  openFile(path: string, options?: OpenFileOptions): Promise<void>;
 }
 
 /**
@@ -92,7 +93,7 @@ export class AgentContextBridge {
 
     this.ctx.listenTauri<{ id: number; path: string; line: number | null }>('mcp://open', (e) => {
       const { id, path, line } = e.payload;
-      void this.deps.openFile(path)
+      void this.deps.openFile(path, { folderOnly: true })
         .then(() => {
           if (line && this.ctx.tabs.activeTab()?.path === path) this.ctx.editor.gotoLine(line);
           return api.mcpReply({ id, ok: true, message: '' });

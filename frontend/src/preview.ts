@@ -25,6 +25,7 @@ import {
   escapeHtml,
   isFramedFile,
   isSvgFile,
+  isUnderRoot,
 } from './utils';
 import { TIMING } from './constants';
 import { EVENTS } from './event-names';
@@ -120,11 +121,19 @@ function safeDecode(s: string): string {
  * - `#id` scrolls within the preview;
  * - relative / absolute / `file:` paths to openable text files open in a tab
  *   (relative ones resolve against `baseDir`, the current file's directory);
+ *   when `workspaceRoot` is set, the resolved path must be inside it;
  * - `http:` / `https:` / `mailto:` open in the system browser;
- * - anything else (javascript:, asset:, data:, `//host`, non-text files) is
- *   ignored.
+ * - anything else (javascript:, asset:, data:, `//host`, non-text files,
+ *   paths outside `workspaceRoot`) is ignored.
+ *
+ * `workspaceRoot` null keeps the folder-free rules (used by the standalone
+ * HTML export and the plain classifier tests).
  */
-export function classifyPreviewLink(rawHref: string | null, baseDir: string | null): PreviewLinkAction {
+export function classifyPreviewLink(
+  rawHref: string | null,
+  baseDir: string | null,
+  workspaceRoot: string | null = null,
+): PreviewLinkAction {
   const href = (rawHref ?? '').trim();
   if (href === '') return { kind: 'ignore' };
   if (href.startsWith('#')) {
@@ -153,7 +162,11 @@ export function classifyPreviewLink(rawHref: string | null, baseDir: string | nu
       path = resolveAgainst(baseDir, path);
     }
   }
-  return isTextFile(path) ? { kind: 'file', path } : { kind: 'ignore' };
+  if (!isTextFile(path)) return { kind: 'ignore' };
+  // `resolveAgainst` only stops `..` at the filesystem root, so check the
+  // final path against the open folder.
+  if (workspaceRoot && !isUnderRoot(path, workspaceRoot)) return { kind: 'ignore' };
+  return { kind: 'file', path };
 }
 
 /**
@@ -232,6 +245,12 @@ export class PreviewPane {
   private diagramsEnabled = true;
   private visible = true;
   private currentBaseDir: string | null = null;
+  /**
+   * The open folder (null when none). A clicked link opens a file only when
+   * it resolves inside this folder; with no folder open, only inside the
+   * previewed file's directory.
+   */
+  private currentWorkspaceRoot: string | null = null;
   private lastRendered: string | null = null;
   /**
    * Path of the document whose markup `lastRendered` holds. Tracked so
@@ -302,7 +321,9 @@ export class PreviewPane {
       if (!link) return;
       e.preventDefault();
       const href = link.getAttribute('href') ?? link.getAttribute('xlink:href');
-      this.handleLink(classifyPreviewLink(href, this.currentBaseDir));
+      this.handleLink(
+        classifyPreviewLink(href, this.currentBaseDir, this.currentWorkspaceRoot ?? this.currentBaseDir),
+      );
     }, true);
     // Middle-click / other buttons: WebKit may open or navigate; just block.
     this.container.addEventListener('auxclick', (e) => {
@@ -936,6 +957,15 @@ export class PreviewPane {
     this.lastRendered = null;
     this.prevBlocks = [];
     this.prevNodeCounts = [];
+  }
+
+  /**
+   * Set the open folder that clicked links must resolve inside. Pass null
+   * when no folder is open; links then stay inside the previewed file's
+   * directory.
+   */
+  setWorkspaceRoot(root: string | null): void {
+    this.currentWorkspaceRoot = root;
   }
 
   scrollToRatio(ratio: number): void {

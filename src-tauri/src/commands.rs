@@ -179,11 +179,21 @@ pub async fn read_file(
     webview_window: tauri::WebviewWindow,
     app: AppHandle,
     path: String,
+    folder_only: Option<bool>,
 ) -> Result<String, AppError> {
     let label = webview_window.label().to_string();
     crate::windows::spawn_scoped(label.clone(), move || {
         if crate::remote::is_active() {
             return crate::remote::read_file(&path);
+        }
+        // Paths from a document link, terminal output or an agent must be
+        // inside this window's folder; paths the user picked are not checked.
+        if folder_only.unwrap_or(false) {
+            let canon = validate_path(&path)?;
+            let folder = crate::windows::registry()
+                .get(&label)
+                .and_then(|e| e.folder.clone());
+            check_in_folder(folder.as_ref(), &canon, &path)?;
         }
         let (contents, safe_path) = read_local_file(&path)?;
         // Grant only the opened file, not the parent directory recursively
@@ -204,6 +214,22 @@ pub async fn read_file(
     })
     .await
     .map_err(|e| AppError::Other(format!("read task failed: {e}")))?
+}
+
+/// Refuse `canon` (a canonical local path) unless it is `folder` or inside
+/// it. A window without a folder refuses every path.
+fn check_in_folder(
+    folder: Option<&crate::windows::FolderId>,
+    canon: &Path,
+    path: &str,
+) -> Result<(), AppError> {
+    if folder.is_some_and(|f| f.contains_local(&canon.to_string_lossy())) {
+        Ok(())
+    } else {
+        Err(AppError::InvalidPath(format!(
+            "{path} is not inside this window's folder"
+        )))
+    }
 }
 
 /// Validate, size-check and read a local file, returning its text and the
@@ -1518,6 +1544,28 @@ mod tests {
         assert!(read.contains("is a directory"), "{read}");
         assert!(write.contains("is a directory"), "{write}");
         assert!(still_dir);
+    }
+
+    #[test]
+    fn folder_check_accepts_only_paths_inside_the_folder() {
+        use crate::windows::FolderId;
+        let dir = std::env::temp_dir().join(format!("sd-infolder-{}", std::process::id()));
+        fs::create_dir_all(dir.join("ws/sub")).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let ws = dir.join("ws");
+        let folder = FolderId::Local {
+            path: ws.to_string_lossy().into_owned(),
+        };
+        let inside = ws.join("sub/a.md");
+        let outside = dir.join("b.md");
+        assert!(check_in_folder(Some(&folder), &inside, "a.md").is_ok());
+        assert!(check_in_folder(Some(&folder), &ws, "ws").is_ok());
+        assert!(check_in_folder(Some(&folder), &outside, "b.md").is_err());
+        // A sibling whose name starts with the folder's name is outside.
+        assert!(check_in_folder(Some(&folder), &dir.join("ws2/a.md"), "x").is_err());
+        // No folder open: nothing passes.
+        assert!(check_in_folder(None, &inside, "a.md").is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
