@@ -2,6 +2,7 @@ import type { TerminalManager } from '../terminal';
 import { api } from '../api';
 import { LAYOUT } from '../constants';
 import { attachResizeDrag } from '../resize-drag';
+import { TypeAhead } from '../type-ahead';
 import { isAbsolutePath, joinPath } from '../utils';
 import { applyWorkspaceLayout, workspaceLayoutFromConfig } from '../workspace-layout';
 import type { AppContext } from './context';
@@ -29,6 +30,8 @@ export class CockpitController {
    *  each pass the null check across the dynamic-import await and build two
    *  TerminalManagers (and two shells). */
   private terminalOpenInFlight: Promise<void> | null = null;
+  /** Takes the keys typed while the first shell is still starting. */
+  private typeAhead = new TypeAhead(() => document.getElementById('terminal-panel'));
   private terminalVisible = false;
   /** Terminals Only: terminal fills the center column; editor/preview hidden. */
   private terminalsOnly = false;
@@ -181,7 +184,10 @@ export class CockpitController {
     }
 
     this.setDrawerVisible(!this.terminalVisible);
-    if (!this.terminalVisible) return;
+    if (!this.terminalVisible) {
+      this.typeAhead.discard();
+      return;
+    }
     // ⌃` (or the toolbar) always reveals the terminals, never the Git log.
     this.selectBottomTab('terminals');
 
@@ -189,7 +195,14 @@ export class CockpitController {
     // and publishes right away so an agent started now sees current state.
     this.deps.armAgentContext();
 
-    await this.openTerminals();
+    // No terminal yet: keys typed from now on wait here, not in the editor,
+    // until the new shell can take them.
+    if (!this.terminals?.hasPanes()) this.typeAhead.start();
+    try {
+      await this.openTerminals();
+    } finally {
+      this.typeAhead.discard();
+    }
   }
 
   /**
@@ -212,6 +225,7 @@ export class CockpitController {
             // Split layout per workspace, persisted in AppConfig and
             // restored (tmux reattach) by restoreOrCreate.
             mgr.setOnTerminalsOnly(() => void this.toggleTerminalsOnly());
+            mgr.setEarlyInput(() => this.typeAhead.take());
             mgr.setLayoutStore({
               load: (key) => this.ctx.config.terminal_layouts?.[key],
               save: (key, layout) => this.saveLayout(key, layout),

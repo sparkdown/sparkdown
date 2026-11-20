@@ -30,6 +30,11 @@ const terminalStub = vi.hoisted(() => ({
     isDismissed(bin: string): boolean;
     dismiss(bin: string): void;
   },
+  /** restoreOrCreate waits on this, so a test can hold the first shell back. */
+  gate: Promise.resolve() as Promise<void>,
+  earlySource: null as null | (() => string),
+  /** What the new shell took from the type-ahead box. */
+  taken: null as null | string,
 }));
 
 vi.mock('../terminal', () => ({
@@ -40,6 +45,12 @@ vi.mock('../terminal', () => ({
     setAgentArgs() {}
     setOnEmpty() {}
     setOnTerminalsOnly() {}
+    setEarlyInput(source: (() => string) | null) {
+      terminalStub.earlySource = source;
+    }
+    hasPanes() {
+      return false;
+    }
     refitAll() {}
     setLayoutStore(store: typeof terminalStub.store) {
       terminalStub.store = store;
@@ -50,7 +61,10 @@ vi.mock('../terminal', () => ({
     hasFocus() {
       return false;
     }
-    async restoreOrCreate() {}
+    async restoreOrCreate() {
+      await terminalStub.gate;
+      terminalStub.taken = terminalStub.earlySource?.() ?? null;
+    }
   },
 }));
 
@@ -774,6 +788,61 @@ describe('App integration', () => {
     });
   });
 
+  describe('status bar caret position', () => {
+    const cursorText = () => document.getElementById('status-cursor')!.textContent;
+    const openDoc = async (path: string) => {
+      emitTauriEvent(MENU.OPEN_FILE_PATH, { path });
+      await flush();
+    };
+    const clickTab = async (title: string) => {
+      Array.from(document.querySelectorAll<HTMLElement>('.tab'))
+        .find((el) => el.querySelector('.tab-title')?.textContent === title)!
+        .querySelector<HTMLElement>('.tab-title')!
+        .click();
+      await flush();
+    };
+
+    it('shows the caret of the tab that is loaded, switched to, or newly created', async () => {
+      vfs.set('/docs/a.md', 'line one\nline two is longer\nline three');
+      vfs.set('/docs/b.md', 'short');
+      await startApp();
+      await openDoc('/docs/a.md');
+      const view = await editorView();
+      view.dispatch({ selection: { anchor: view.state.doc.length } });
+      await flush();
+      expect(cursorText()).toBe('Ln 3, Col 11');
+
+      // A freshly loaded file starts at its top, not at the previous caret.
+      await openDoc('/docs/b.md');
+      expect(activeTitle()).toBe('b.md');
+      expect(cursorText()).toBe('Ln 1, Col 1');
+
+      // Switching back restores the caret that tab had.
+      await clickTab('a.md');
+      expect(cursorText()).toBe('Ln 3, Col 11');
+
+      // A new empty buffer starts at Ln 1, Col 1.
+      emitTauriEvent(MENU.NEW_FILE);
+      await flush();
+      expect(activeTitle()).toBe('Untitled');
+      expect(cursorText()).toBe('Ln 1, Col 1');
+    });
+
+    it('shows Ln 1, Col 1 again on the welcome screen', async () => {
+      vfs.set('/docs/a.md', 'one\ntwo');
+      await startApp();
+      await openDoc('/docs/a.md');
+      const view = await editorView();
+      view.dispatch({ selection: { anchor: view.state.doc.length } });
+      await flush();
+      expect(cursorText()).toBe('Ln 2, Col 4');
+      document.querySelectorAll<HTMLElement>('.tab .tab-close').forEach((el) => el.click());
+      await flush();
+      expect(document.querySelectorAll('.tab').length).toBe(0);
+      expect(cursorText()).toBe('Ln 1, Col 1');
+    });
+  });
+
   describe('files changed on disk (agent writes)', () => {
     const fsChange = async (path: string, kind = 'modify') => {
       emitTauriEvent('watcher://changes', [{ path, kind }]);
@@ -816,6 +885,34 @@ describe('App integration', () => {
       await flush();
       expect(messageCalls).toEqual([]);
       expect(vfs.get('/docs/b.md')).toBe('B from agent!');
+    });
+
+    it('does not flash the explorer row for our own save, but still flashes an outside edit', async () => {
+      await openTwo();
+      const flashed = vi.spyOn(FileTree.prototype, 'markChanged');
+      const view = await editorView();
+      view.dispatch({ changes: { from: view.state.doc.length, insert: '!' } });
+      await flush();
+      expect(activeTabDot().style.display).not.toBe('none');
+      emitTauriEvent(MENU.SAVE);
+      await flush();
+      await flush();
+      expect(vfs.get('/docs/b.md')).toBe('B original!');
+      expect(activeTabDot().style.display).toBe('none');
+
+      // The watcher reports our own write: no flash, no conflict, still clean.
+      await fsChange('/docs/b.md');
+      const flashedPaths = flashed.mock.calls.flatMap(([paths]) => paths);
+      expect(flashedPaths).not.toContain('/docs/b.md');
+      expect(document.querySelectorAll('.tree-flash').length).toBe(0);
+      expect(activeTabDot().style.display).toBe('none');
+      expect(tabEl('b.md').classList.contains('tab-conflict')).toBe(false);
+
+      // Someone else's edit still flashes.
+      vfs.set('/docs/a.md', 'A from agent');
+      await fsChange('/docs/a.md');
+      expect(flashed.mock.calls.flatMap(([paths]) => paths)).toContain('/docs/a.md');
+      flashed.mockRestore();
     });
 
     it('refreshes background tabs on a remote (root-only) change event', async () => {
@@ -1761,6 +1858,38 @@ describe('App integration', () => {
 
       dragDropHandler!({ payload: { type: 'leave' } });
       expect(appEl.classList.contains('drag-over')).toBe(false);
+    });
+  });
+
+  describe('opening the terminal while typing', () => {
+    it('moves focus off the editor at once and hands the typed keys to the new shell', async () => {
+      vfs.set('/docs/doc.md', 'hello');
+      await startApp();
+      emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/docs/doc.md' });
+      await flush();
+      const view = await editorView();
+      view.focus();
+      let release!: () => void;
+      terminalStub.gate = new Promise<void>((r) => (release = r));
+      terminalStub.taken = null;
+
+      emitTauriEvent(MENU.TOGGLE_TERMINAL);
+      await flush();
+      await flush();
+      // The shell is not up yet; keys must not reach the document.
+      const box = document.activeElement as HTMLTextAreaElement;
+      expect(box.classList.contains('terminal-type-ahead')).toBe(true);
+      box.value = 'echo e\nls';
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      expect(view.state.doc.toString()).toBe('hello');
+
+      release();
+      await flush();
+      await flush();
+      expect(terminalStub.taken).toBe('echo e\rls');
+      expect(document.querySelector('.terminal-type-ahead')).toBeNull();
+      expect(view.state.doc.toString()).toBe('hello');
+      terminalStub.gate = Promise.resolve();
     });
   });
 

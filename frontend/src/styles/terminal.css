@@ -284,3 +284,17 @@
      .hidden cannot collapse the center column to empty. */
   display: flex;
 }
+
+/* Hidden box that collects keys typed while the first shell is starting. */
+.terminal-type-ahead {
+  position: fixed;
+  left: -9999px;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  border: 0;
+  padding: 0;
+  resize: none;
+  pointer-events: none;
+}

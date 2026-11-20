@@ -199,6 +199,21 @@ export class TabManager {
   }
 
   /**
+   * The file now holds `content` (we just wrote it) but the tab has moved on
+   * since the text was taken. Make `content` the baseline without clearing the
+   * dirty state: the tab stays modified while its text differs from the file.
+   * Emits no TAB_SAVED: the latest text is not saved yet.
+   */
+  recordWritten(tabId: string, content: string): void {
+    const tab = this.getTab(tabId);
+    if (!tab) return;
+    tab.savedContent = content;
+    tab.diskConflict = false;
+    tab.modified = tab.content !== content;
+    this.updateModifiedState(tab);
+  }
+
+  /**
    * Replace a tab's text with what is now on disk and make that the clean
    * baseline. Unlike markSaved this emits no TAB_SAVED: the user did not
    * save, and a background tab must not take over the status bar.
