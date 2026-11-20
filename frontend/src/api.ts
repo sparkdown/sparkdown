@@ -398,6 +398,7 @@ type GitErrorKind =
   | "hook"
   | "unsupported"
   | "timeout"
+  | "repo_config"
   | "other";
 
 /** A failed commit / pull / push (git_write.rs `GitActionError`). */

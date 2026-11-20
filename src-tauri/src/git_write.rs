@@ -75,6 +75,10 @@ pub enum GitErrorKind {
     Unsupported,
     /// The action took longer than its timeout and was stopped.
     Timeout,
+    /// Pull or Push stopped because the repository's own config (local or
+    /// worktree scope) sets keys that run commands or pick the transport,
+    /// the same keys that turn the background fetch off.
+    RepoConfig,
     /// Anything else; `detail` has git's output.
     Other,
 }
@@ -771,6 +775,7 @@ fn conflict_error(root: &Path, extra: ExtraEnv, output: &str) -> GitActionError 
 /// mid-rebase for the user to finish.
 pub(crate) fn pull_impl(root: &str, extra: ExtraEnv) -> ActionResult {
     let root = check_local(root, SYNC_UNSUPPORTED)?;
+    check_repo_config(&root, extra, Action::Pull)?;
     let up = upstream(&root, extra)?;
     let cfg = PullConfig::read(&root, extra, &up.branch);
     let before = query(&root, extra, &["rev-parse", "--verify", "-q", "HEAD"]);
@@ -810,6 +815,7 @@ pub(crate) fn pull_impl(root: &str, extra: ExtraEnv) -> ActionResult {
 /// `HEAD:<merge ref>` refspec without `+`, so a non-fast-forward is rejected.
 pub(crate) fn push_impl(root: &str, extra: ExtraEnv) -> ActionResult {
     let root = check_local(root, SYNC_UNSUPPORTED)?;
+    check_repo_config(&root, extra, Action::Push)?;
     let up = upstream(&root, extra)?;
     let refspec = format!("HEAD:{}", up.merge);
     debug_assert!(!refspec.starts_with('+'));
@@ -909,7 +915,9 @@ fn repo_config_has_exec_keys(root: &Path, extra: ExtraEnv) -> bool {
                 "--includes",
                 "--null",
                 "--get-regexp",
-                r"^remote\..*\.url$",
+                // A branch's `remote` may hold a URL instead of a name, and
+                // `pushurl` is the URL Push uses.
+                r"^(remote\..*\.(url|pushurl)|branch\..*\.remote)$",
             ]);
         for (k, v) in extra {
             url_cmd.env(k, v);
@@ -948,6 +956,27 @@ fn repo_config_has_exec_keys(root: &Path, extra: ExtraEnv) -> bool {
     }
 
     false
+}
+
+/// Stop Pull or Push before any network call when the repository's own config
+/// has keys that run commands or pick the transport (see
+/// [`repo_config_has_exec_keys`]). Settings in the user's global config are
+/// not affected.
+fn check_repo_config(root: &Path, extra: ExtraEnv, action: Action) -> Result<(), GitActionError> {
+    if !repo_config_has_exec_keys(root, extra) {
+        return Ok(());
+    }
+    let verb = if action == Action::Push { "Push" } else { "Pull" };
+    Err(GitActionError::new(
+        GitErrorKind::RepoConfig,
+        format!(
+            "{verb} stopped: this repository's own .git/config has settings that run \
+             commands or choose how git connects (for example core.sshCommand, \
+             credential.helper, url.*.insteadOf, include.path, or a remote URL using \
+             ext::, fd:: or file://). Check .git/config in a terminal, then try again."
+        ),
+        "repository config (local or worktree scope)",
+    ))
 }
 
 /// Should a configured fetch URL (or a branch's `remote` value, which git
@@ -2567,6 +2596,68 @@ mod tests {
         sb.commit_in(&other, "up.md", "up\n", "upstream");
         sb.git(&other, &["push", "-q"]);
         assert_eq!(fetch_impl(&root(&sb), &env).unwrap(), FetchOutcome::Fetched);
+    }
+
+    // --- Pull / Push and the repository's own config ---
+
+    fn set_local(sb: &Sandbox, key: &str, value: &str) {
+        sb.git(&sb.work, &["config", "--local", key, value]);
+    }
+
+    #[test]
+    fn pull_and_push_stop_on_a_repo_ssh_command() {
+        let sb = sandbox();
+        let env = sb.env();
+        set_local(&sb, "core.sshCommand", "ssh -o BatchMode=yes");
+        let e = pull_impl(&root(&sb), &env).unwrap_err();
+        assert_eq!(e.kind, GitErrorKind::RepoConfig, "{e:?}");
+        assert!(e.message.starts_with("Pull stopped"), "{e:?}");
+        let e = push_impl(&root(&sb), &env).unwrap_err();
+        assert_eq!(e.kind, GitErrorKind::RepoConfig, "{e:?}");
+        assert!(e.message.starts_with("Push stopped"), "{e:?}");
+    }
+
+    #[test]
+    fn pull_and_push_stop_on_repo_helper_or_url_rewrite() {
+        for (key, value) in [
+            ("credential.helper", "store"),
+            ("url.https://example.invalid/.insteadOf", "https://github.com/"),
+        ] {
+            let sb = sandbox();
+            let env = sb.env();
+            set_local(&sb, key, value);
+            assert_eq!(pull_impl(&root(&sb), &env).unwrap_err().kind, GitErrorKind::RepoConfig, "{key}");
+            assert_eq!(push_impl(&root(&sb), &env).unwrap_err().kind, GitErrorKind::RepoConfig, "{key}");
+        }
+    }
+
+    #[test]
+    fn push_stops_on_a_command_transport_push_url() {
+        let sb = sandbox();
+        let env = sb.env();
+        set_local(&sb, "remote.origin.pushurl", "ext::git %s /dev/null");
+        assert_eq!(push_impl(&root(&sb), &env).unwrap_err().kind, GitErrorKind::RepoConfig);
+    }
+
+    #[test]
+    fn pull_stops_on_a_branch_remote_given_as_a_file_url() {
+        let sb = sandbox();
+        let env = sb.env();
+        let url = format!("file://{}", sb.bare.display());
+        set_local(&sb, "branch.main.remote", &url);
+        assert_eq!(pull_impl(&root(&sb), &env).unwrap_err().kind, GitErrorKind::RepoConfig);
+    }
+
+    #[test]
+    fn push_and_pull_still_run_with_plain_repo_config() {
+        // Ordinary local settings (hooks path, a user name) do not stop them.
+        let sb = sandbox();
+        let env = sb.env();
+        set_local(&sb, "core.hooksPath", ".githooks");
+        set_local(&sb, "user.name", "Someone");
+        sb.commit_in(&sb.work, "n.md", "n\n", "n");
+        assert!(push_impl(&root(&sb), &env).is_ok());
+        assert!(pull_impl(&root(&sb), &env).is_ok());
     }
 
     // --- Discard (#172) ---
