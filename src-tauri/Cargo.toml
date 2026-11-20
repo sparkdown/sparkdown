@@ -105,3 +105,7 @@ path = "src/bin/sparkdown_shim.rs"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[[bench]]
+name = "terminal_throughput"
+harness = false
