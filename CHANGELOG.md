@@ -37,6 +37,7 @@ requests.
 - **macOS**: the `sparkdown` command opens the app it came with instead of any app named SparkDown.
 - **Updates**: a downloaded update stays in place until you install it, and is checked once more right before it is installed.
 - SparkDown's own preferences, session, review state and log files are readable only by you. Files you save keep your usual permissions.
+- **Updates** download only from a release URL of the exact expected shape on github.com, and the app downloads the URL exactly as it was checked.
 
 ### Changed
 

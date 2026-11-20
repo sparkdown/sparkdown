@@ -292,14 +292,145 @@ pub fn url_basename(url: &str) -> Option<&str> {
 /// manifest is unsigned, so the only invariant on `url` otherwise is the
 /// `https://` scheme). `RELEASE_URL_PREFIX` is a prefix of the exact form
 /// scripts/release.sh writes into `latest.json`.
-pub fn check_release_url(url: &str) -> Result<(), String> {
-    if url.starts_with(RELEASE_URL_PREFIX) {
-        Ok(())
-    } else {
-        Err(format!(
-            "refusing an update URL that is not on the release host: {url}"
-        ))
+///
+/// A plain prefix test is not enough: curl removes `.` and `..` path
+/// segments (RFC 3986) before sending, so the path it requests can differ
+/// from the string that matched the prefix. So parse the URL, require
+/// scheme `https`, host exactly
+/// `github.com` (no userinfo, no port), and a path whose percent-decoded
+/// segments match `["sparkdown", "sparkdown", "releases", "download",
+/// <tag>, <asset>]` with `<tag>` and `<asset>` free of `/`, `.`, `..`,
+/// and control characters. On success return the normalized URL (built
+/// from the validated components) so the bytes passed to curl are the
+/// bytes that were validated.
+pub fn check_release_url(url: &str) -> Result<String, String> {
+    let reject = |why: &str| -> Result<String, String> {
+        Err(format!("refusing update URL ({why}): {url}"))
+    };
+
+    // Scheme: exactly `https://` in lower case, to match what
+    // scripts/release.sh writes and what the rest of the path assumes.
+    let after_scheme = match url.strip_prefix("https://") {
+        Some(rest) => rest,
+        None => return reject("scheme must be https"),
+    };
+
+    // Authority ends at the first `/`, `?`, or `#`. We require a path, so
+    // `?`/`#` before any `/` is a reject.
+    let (authority, path_and_rest) = match after_scheme.find('/') {
+        Some(i) => (&after_scheme[..i], &after_scheme[i..]),
+        None => return reject("URL has no path"),
+    };
+    if authority.is_empty() {
+        return reject("empty host");
     }
+    // No userinfo, no port, no IDN/uppercase host surprises.
+    if authority.contains('@') {
+        return reject("userinfo not allowed");
+    }
+    if authority.contains(':') {
+        return reject("explicit port not allowed");
+    }
+    if authority != "github.com" {
+        return reject("host must be github.com");
+    }
+
+    // Release asset URLs never carry a query or a fragment.
+    let path = path_and_rest;
+    if path.contains(['?', '#']) {
+        return reject("query or fragment not allowed");
+    }
+
+    // Split on `/` and percent-decode each segment, then enforce that no
+    // segment is empty (no `//`), `.`, or `..`. The expected shape is
+    // exactly six non-empty segments:
+    //   /sparkdown/sparkdown/releases/download/<tag>/<asset>
+    let raw_segments: Vec<&str> = path.split('/').collect();
+    // path starts with `/`, so raw_segments[0] is always "".
+    if raw_segments.first() != Some(&"") {
+        return reject("path must start with /");
+    }
+    let mut segments: Vec<String> = Vec::with_capacity(raw_segments.len() - 1);
+    for seg in &raw_segments[1..] {
+        if seg.is_empty() {
+            return reject("empty path segment");
+        }
+        if *seg == "." || *seg == ".." {
+            return reject("dot-segment in path");
+        }
+        let decoded = percent_decode(seg)
+            .ok_or_else(|| format!("refusing update URL (bad percent-encoding): {url}"))?;
+        // After decoding, check again for dot segments, slashes and
+        // control bytes.
+        if decoded == "." || decoded == ".." {
+            return reject("dot-segment after percent-decoding");
+        }
+        if decoded.as_bytes().iter().any(|b| *b == b'/' || *b < 0x20 || *b == 0x7f) {
+            return reject("control or slash in decoded segment");
+        }
+        segments.push(decoded);
+    }
+
+    let expected_prefix = ["sparkdown", "sparkdown", "releases", "download"];
+    if segments.len() != expected_prefix.len() + 2 {
+        return reject("path shape must be /sparkdown/sparkdown/releases/download/<tag>/<asset>");
+    }
+    for (got, want) in segments.iter().zip(expected_prefix.iter()) {
+        if got.as_str() != *want {
+            return reject("path is not under sparkdown/sparkdown/releases/download");
+        }
+    }
+    let tag = &segments[4];
+    let asset = &segments[5];
+    if !is_plain_url_component(tag) {
+        return reject("tag contains disallowed characters");
+    }
+    if !is_plain_url_component(asset) {
+        return reject("asset contains disallowed characters");
+    }
+
+    // Normalized URL: built from the checked, decoded components so the
+    // string handed to curl is exactly what was checked. The components
+    // only hold the characters `is_plain_url_component` allows, so no
+    // re-encoding is needed.
+    Ok(format!("{RELEASE_URL_PREFIX}{tag}/{asset}"))
+}
+
+/// Allowed characters for a release `<tag>` or `<asset>` segment after
+/// percent-decoding: ASCII alphanumerics plus `.`, `_`, `-`, `+`, `~`. A
+/// bare `.` or `..` segment is already rejected before this runs, so `.`
+/// here is only ever a separator inside a longer segment (e.g. `v1.2.3`,
+/// `SparkDown_1.0.0_amd64.AppImage`).
+fn is_plain_url_component(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b'~')
+        })
+}
+
+/// Percent-decode a single URL path segment. Returns `None` on malformed
+/// `%` escapes. Does not interpret `+` as space (that is a query-string
+/// convention, not an RFC 3986 path rule).
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = (bytes[i + 1] as char).to_digit(16)?;
+            let lo = (bytes[i + 2] as char).to_digit(16)?;
+            out.push(((hi << 4) | lo) as u8);
+            i += 3;
+        } else {
+            out.push(b);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// Verify `path` against a Tauri-format `.sig` (base64 of the minisign
@@ -602,8 +733,12 @@ pub fn stage_update(
 ) -> Result<(PathBuf, PathBuf), String> {
     // The manifest is unsigned: constrain the URL and derive the
     // expected signed filename from it before touching the network.
-    check_release_url(&entry.url)?;
-    let expected_name = url_basename(&entry.url)
+    // `check_release_url` returns the parsed, normalized URL. That URL
+    // (not the manifest string) goes to curl, and `expected_name` comes
+    // from its last segment, so the download and the signed-filename
+    // check both use exactly the URL that was checked.
+    let normalized_url = check_release_url(&entry.url)?;
+    let expected_name = url_basename(&normalized_url)
         .ok_or_else(|| format!("update URL has no filename: {}", entry.url))?
         .to_owned();
     let limit = artifact_limit(entry.size)?;
@@ -613,7 +748,7 @@ pub fn stage_update(
     let staging = create_staging(target).map_err(|e| e.to_string())?;
     let file = staging.join("download");
     let total = entry.size;
-    let res = fetch(&entry.url, &file, limit, &mut |received| {
+    let res = fetch(&normalized_url, &file, limit, &mut |received| {
         on_progress(DownloadProgress { received, total })
     })
     .and_then(|()| check_size(&file, entry.size))
@@ -1549,10 +1684,14 @@ mod tests {
 
     #[test]
     fn release_url_prefix_rejects_foreign_hosts() {
-        assert!(check_release_url(
-            "https://github.com/sparkdown/sparkdown/releases/download/v1.0.0/x"
+        let ok = check_release_url(
+            "https://github.com/sparkdown/sparkdown/releases/download/v1.0.0/x",
         )
-        .is_ok());
+        .expect("prefix-match URL should parse");
+        assert_eq!(
+            ok,
+            "https://github.com/sparkdown/sparkdown/releases/download/v1.0.0/x"
+        );
         for bad in [
             "http://github.com/sparkdown/sparkdown/releases/download/v1/x",
             "https://example.invalid/sparkdown/sparkdown/releases/download/v1/x",
@@ -1560,6 +1699,51 @@ mod tests {
             "https://github.com.not-github.example/sparkdown/sparkdown/releases/download/v1/x",
         ] {
             assert!(check_release_url(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn release_url_rejects_dot_segments_and_odd_authorities() {
+        // curl removes dot segments, so these would request another path.
+        for bad in [
+            "https://github.com/sparkdown/sparkdown/releases/download/../../../../other/repo/releases/download/v1/x",
+            "https://github.com/sparkdown/sparkdown/releases/download/./v1/x",
+            "https://github.com/sparkdown/sparkdown/releases/download/v1/./x",
+            "https://github.com/sparkdown/sparkdown/releases/download/v1/x/../y",
+            // Percent-encoded dot segments must also be rejected.
+            "https://github.com/sparkdown/sparkdown/releases/download/%2E%2E/v1/x",
+            "https://github.com/sparkdown/sparkdown/releases/download/v1/%2E",
+            // Extra or missing segments: path shape must be exact.
+            "https://github.com/sparkdown/sparkdown/releases/download/v1",
+            "https://github.com/sparkdown/sparkdown/releases/download/v1/x/y",
+            "https://github.com/sparkdown/sparkdown/releases/download//v1/x",
+            // Userinfo or port.
+            "https://user@github.com/sparkdown/sparkdown/releases/download/v1/x",
+            "https://github.com:443/sparkdown/sparkdown/releases/download/v1/x",
+            // Query or fragment.
+            "https://github.com/sparkdown/sparkdown/releases/download/v1/x?a=1",
+            "https://github.com/sparkdown/sparkdown/releases/download/v1/x#frag",
+            // Encoded slash in the asset adds a segment.
+            "https://github.com/sparkdown/sparkdown/releases/download/v1/a%2Fb",
+            // Disallowed character in asset / tag.
+            "https://github.com/sparkdown/sparkdown/releases/download/v1/x y",
+            "https://github.com/sparkdown/sparkdown/releases/download/v 1/x",
+            // No path at all.
+            "https://github.com",
+        ] {
+            assert!(check_release_url(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn release_url_accepts_realistic_release_assets() {
+        for ok in [
+            "https://github.com/sparkdown/sparkdown/releases/download/v1.0.0/SparkDown_1.0.0_amd64.AppImage",
+            "https://github.com/sparkdown/sparkdown/releases/download/v0.4.3/SparkDown_0.4.3_aarch64.app.tar.gz",
+            "https://github.com/sparkdown/sparkdown/releases/download/v1.0.0-rc.1/SparkDown.AppImage.sig",
+        ] {
+            let got = check_release_url(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
+            assert_eq!(got, ok);
         }
     }
 
