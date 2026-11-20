@@ -207,9 +207,19 @@ fi
 # Unset the key so checks and build never inherit it.
 unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 
+echo "==> Reconciling frontend/node_modules with package-lock.json"
+# The signed macOS bundle is built from frontend/node_modules, which is gitignored
+# and so not covered by the clean-worktree check above. Reinstall it from the
+# committed lockfile so the published build matches frontend/package-lock.json,
+# whatever was left in the local tree. --ignore-scripts skips install-time
+# package scripts.
+(cd frontend && rm -rf node_modules && npm ci --ignore-scripts)
+
 echo "==> Running the full check suite (matches CI)"
 # Mirror CI so a release can't ship something CI would have failed.
-(cd frontend && npx tsc --noEmit && npm test && npm run build && npm audit --audit-level=high)
+# --no-install: a missing local typescript devDependency fails the release
+# instead of npx downloading a different package named `tsc`.
+(cd frontend && npx --no-install tsc --noEmit && npm test && npm run build && npm audit --audit-level=high)
 (cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test)
 if command -v cargo-audit >/dev/null 2>&1 || cargo audit --version >/dev/null 2>&1; then
   (cd src-tauri && cargo audit)
