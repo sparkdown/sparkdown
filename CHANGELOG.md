@@ -5,6 +5,12 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
+## [Unreleased]
+
+### Improved
+
+- **Memory usage** reduced: Mermaid diagram rendering module is now released when no visible documents need it (reloaded on demand). Editor state cache for background tabs reduced from 20 to 10 tabs. (#216)
+
 ## [0.4.3] — 2026-11-13
 
 Fixes and reliability improvements on top of 0.4.2.

@@ -561,8 +561,9 @@ export class EditorManager {
 
   /** Retain full EditorStates (undo history, cursor, folds) for at most this
    *  many background tabs. Tab *content* lives in TabManager regardless —
-   *  eviction only costs history/cursor on tabs untouched the longest. */
-  private static readonly MAX_CACHED_STATES = 20;
+   *  eviction only costs history/cursor on tabs untouched the longest. Reduced
+   *  from 20 to 10 for lower memory footprint (#216). */
+  private static readonly MAX_CACHED_STATES = 10;
 
   saveStateFor(tabId: string): void {
     // Re-insert to make this the most recently used entry (Map preserves

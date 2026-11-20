@@ -233,6 +233,8 @@ export class PreviewPane {
   private visible = true;
   private currentBaseDir: string | null = null;
   private lastRendered: string | null = null;
+  /** Track the current document ID for mermaid resource management. */
+  private currentDocId: string | null = null;
   /**
    * Path of the document whose markup `lastRendered` holds. Tracked so
    * setRenderMode can clear the cache on any path change (not only when
@@ -475,6 +477,19 @@ export class PreviewPane {
     // (no data-processed) are visible here regardless of how they rendered.
     const pendingMermaid =
       this.container.querySelector('.mermaid:not([data-processed])') !== null;
+    const hasMermaid = this.container.querySelector('.mermaid') !== null;
+    
+    // Track mermaid usage for resource management (#216).
+    const docId = content.slice(0, 100); // Simple doc identifier
+    if (hasMermaid && docId !== this.currentDocId) {
+      if (this.currentDocId) this.mermaidLoader.unregisterDocument(this.currentDocId);
+      this.mermaidLoader.registerDocument(docId);
+      this.currentDocId = docId;
+    } else if (!hasMermaid && this.currentDocId) {
+      this.mermaidLoader.unregisterDocument(this.currentDocId);
+      this.currentDocId = null;
+    }
+
     if (pendingMermaid && this.diagramsEnabled) {
       await this.mermaidLoader.ensureLoaded();
       await this.mermaidLoader.renderAll(this.container);

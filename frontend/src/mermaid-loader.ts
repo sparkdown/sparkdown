@@ -77,6 +77,8 @@ export class MermaidLoader {
   private svgCache = new Map<string, string>();
   private theme: 'light' | 'dark' =
     document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+  /** Track if mermaid is currently needed by any visible document. */
+  private activeDocuments = new Set<string>();
 
   async ensureLoaded(): Promise<void> {
     if (mermaidModule) return;
@@ -90,6 +92,34 @@ export class MermaidLoader {
     })();
 
     return loading;
+  }
+
+  /** Mark a document as needing mermaid (call before rendering). */
+  registerDocument(docId: string): void {
+    this.activeDocuments.add(docId);
+  }
+
+  /** Mark a document as no longer needing mermaid (call when document closes/hides). */
+  unregisterDocument(docId: string): void {
+    this.activeDocuments.delete(docId);
+    // If no documents need mermaid, release the module after a delay
+    // to avoid thrashing if user quickly switches between documents.
+    if (this.activeDocuments.size === 0) {
+      setTimeout(() => {
+        if (this.activeDocuments.size === 0) {
+          this.releaseModule();
+        }
+      }, 5000); // 5 second grace period
+    }
+  }
+
+  /** Release the mermaid module to free memory when not needed (#216). */
+  private releaseModule(): void {
+    if (mermaidModule) {
+      mermaidModule = null;
+      loading = null;
+      // Keep the SVG cache - it's relatively small and helps with fast reloading
+    }
   }
 
   async renderAll(container: HTMLElement): Promise<void> {
