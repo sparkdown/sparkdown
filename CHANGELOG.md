@@ -50,6 +50,7 @@ requests.
 - **Diff view** (Reading mode): a changed leading indent now stays visible instead of being folded as formatting, marked "whitespace only".
 - **Preview**: a clicked link opens a file only when it is inside the open folder; with no folder open, only inside the previewed file's folder. Files that agents ask to open, and paths clicked in the terminal, must also be inside the open folder. Files you open yourself (Open dialog, explorer, Quick open, session restore) are not affected, and Ctrl+click (Cmd+click on macOS) on terminal paths inside the folder works as before.
 - **Preview**: for a file opened from outside the open folder (or with no folder open), images load only from that file's own folder, not from folders below it. Images inside the open folder load as before.
+- **Explorer**: deleting a symbolic link moves the link to the Trash (or deletes it on a remote folder) and leaves the file or folder it points to alone. The confirmation names what the link points to, and links show their target on hover.
 
 ### Fixed
 

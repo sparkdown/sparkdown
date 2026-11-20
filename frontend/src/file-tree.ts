@@ -40,7 +40,17 @@ type TreeRow =
   | { kind: 'new'; depth: number };
 
 /** What was right-clicked in the explorer. */
-export type MenuTarget = { kind: 'file' | 'dir'; path: string } | { kind: 'empty' };
+export type MenuTarget =
+  | {
+      kind: 'file' | 'dir';
+      path: string;
+      /** True if this entry is a symlink. Delete's prompt then names the
+       *  resolved target. */
+      isSymlink?: boolean;
+      /** Resolved symlink target (display only). */
+      symlinkTarget?: string;
+    }
+  | { kind: 'empty' };
 
 export type ExplorerAction = 'new-file' | 'new-folder' | 'delete' | 'reveal' | 'copy-path';
 
@@ -768,6 +778,16 @@ export class FileTree {
     const { entry, depth } = row;
     const el = document.createElement('div');
     el.className = row.kind === 'dir' ? 'tree-item directory' : 'tree-item';
+    // Mark symlinks in the tree (tooltip names the target).
+    if (entry.is_symlink) {
+      el.classList.add('symlink');
+      if (entry.symlink_target) {
+        el.title = `Symbolic link → ${entry.symlink_target}`;
+      } else {
+        el.title = 'Symbolic link';
+      }
+      el.setAttribute('aria-label', `${entry.name} (symbolic link)`);
+    }
     el.style.paddingLeft = `${rowIndent(row.kind, depth)}px`;
     el.dataset.path = entry.path;
     el.setAttribute('role', 'treeitem');
@@ -853,7 +873,15 @@ export class FileTree {
     el.addEventListener('contextmenu', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      this.openMenu(e.clientX, e.clientY, { kind: isFile ? 'file' : 'dir', path: entry.path });
+      const target: MenuTarget = entry.is_symlink
+        ? {
+            kind: isFile ? 'file' : 'dir',
+            path: entry.path,
+            isSymlink: true,
+            symlinkTarget: entry.symlink_target,
+          }
+        : { kind: isFile ? 'file' : 'dir', path: entry.path };
+      this.openMenu(e.clientX, e.clientY, target);
     });
   }
 
@@ -877,7 +905,19 @@ export class FileTree {
       case 'delete':
         if (target.kind === 'empty') return;
         // #121: confirmed, then to the trash (app.ts runs explorer-delete).
-        this.bus.emit(EVENTS.FILE_TREE_DELETE, { path: target.path, isDir: target.kind === 'dir' });
+        // Symlink fields only for links, so regular entries keep the same
+        // payload.
+        this.bus.emit(
+          EVENTS.FILE_TREE_DELETE,
+          target.isSymlink
+            ? {
+                path: target.path,
+                isDir: target.kind === 'dir',
+                isSymlink: true,
+                symlinkTarget: target.symlinkTarget,
+              }
+            : { path: target.path, isDir: target.kind === 'dir' },
+        );
         return;
       case 'reveal':
         if (target.kind === 'empty') return;
