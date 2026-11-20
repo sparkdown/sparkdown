@@ -182,6 +182,68 @@ describe('neutralizeUnicodeControls', () => {
     expect(neutralizeUnicodeControls('a\u00ADb\uFEFFc\u2060d')).toBe('a<U+00AD>b<U+FEFF>c<U+2060>d');
   });
 
+  it('neutralises every Bidi_Control code point (including U+061C ALM)', () => {
+    const bidiControls = [
+      0x061c, // ARABIC LETTER MARK
+      0x200e, 0x200f, // LRM, RLM
+      0x202a, 0x202b, 0x202c, 0x202d, 0x202e, // LRE, RLE, PDF, LRO, RLO
+      0x2066, 0x2067, 0x2068, 0x2069, // LRI, RLI, FSI, PDI
+    ];
+    for (const cp of bidiControls) {
+      const ch = String.fromCodePoint(cp);
+      const marker = `<U+${cp.toString(16).toUpperCase().padStart(4, '0')}>`;
+      const input = `a${ch}b`;
+      expect(neutralizeUnicodeControls(input)).toBe(`a${marker}b`);
+      expect(hasUnicodeControls(input)).toBe(true);
+      // The marker output must not itself contain any raw control.
+      expect(hasUnicodeControls(neutralizeUnicodeControls(input))).toBe(false);
+    }
+  });
+
+  it('neutralises U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR', () => {
+    expect(neutralizeUnicodeControls('line\u2028two')).toBe('line<U+2028>two');
+    expect(neutralizeUnicodeControls('p1\u2029p2')).toBe('p1<U+2029>p2');
+    expect(hasUnicodeControls('line\u2028two')).toBe(true);
+    expect(hasUnicodeControls('p1\u2029p2')).toBe(true);
+  });
+
+  it('neutralises other invisible / default-ignorable code points', () => {
+    // U+034F CGJ, U+180E MVS, U+3164 HANGUL FILLER, U+FE0F VS-16
+    expect(neutralizeUnicodeControls('a\u034Fb')).toBe('a<U+034F>b');
+    expect(neutralizeUnicodeControls('a\u180Eb')).toBe('a<U+180E>b');
+    expect(neutralizeUnicodeControls('a\u3164b')).toBe('a<U+3164>b');
+    expect(neutralizeUnicodeControls('a\uFE0Fb')).toBe('a<U+FE0F>b');
+    expect(hasUnicodeControls('a\u034Fb')).toBe(true);
+    expect(hasUnicodeControls('a\u3164b')).toBe(true);
+  });
+
+  it('neutralises astral tag characters (U+E0000..U+E007F)', () => {
+    // Surrogate pair for U+E0041 TAG LATIN CAPITAL LETTER A.
+    const tagA = String.fromCodePoint(0xe0041);
+    expect(neutralizeUnicodeControls(`a${tagA}b`)).toBe('a<U+E0041>b');
+    expect(hasUnicodeControls(`a${tagA}b`)).toBe(true);
+  });
+
+  it('leaves ordinary letters, digits and punctuation untouched', () => {
+    // These are Cf-adjacent but valid content and must not be stripped.
+    const sample = 'hello, world! 123 \u00e9\u00f1 \u4e2d\u6587 \u0627\u0644\u0639\u0631\u0628\u064a\u0629';
+    expect(neutralizeUnicodeControls(sample)).toBe(sample);
+    expect(hasUnicodeControls(sample)).toBe(false);
+  });
+
+  it('preserves tab, LF, CR so diff/preview whitespace renders literally', () => {
+    const sample = 'a\tb\nc\rd';
+    expect(neutralizeUnicodeControls(sample)).toBe(sample);
+    expect(hasUnicodeControls(sample)).toBe(false);
+  });
+
+  it('still neutralises other C0 controls (NUL, BEL, ESC)', () => {
+    expect(neutralizeUnicodeControls('a\u0000b')).toBe('a<U+0000>b');
+    expect(neutralizeUnicodeControls('a\u0007b')).toBe('a<U+0007>b');
+    expect(neutralizeUnicodeControls('a\u001Bb')).toBe('a<U+001B>b');
+    expect(hasUnicodeControls('a\u0007b')).toBe(true);
+  });
+
   it('leaves plain strings untouched', () => {
     expect(neutralizeUnicodeControls('hello world')).toBe('hello world');
     expect(neutralizeUnicodeControls('')).toBe('');
