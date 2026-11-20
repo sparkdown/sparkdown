@@ -2032,7 +2032,7 @@ fn fallback_shell() -> String {
 pub fn terminal_notify(
     app: tauri::AppHandle,
     webview_window: tauri::WebviewWindow,
-    pane_id: String,
+    _pane_id: String,
     title: String,
     message: String,
 ) -> Result<(), String> {
@@ -2054,7 +2054,6 @@ pub fn terminal_notify(
     // On platforms that support it (macOS, Linux), clicking the notification
     // focuses the window. The pane itself cannot be focused cross-platform via
     // notification click; the frontend focuses it when the window gains focus.
-    let _ = (notif, pane_id);
     let _ = webview_window.set_focus();
 
     Ok(())
