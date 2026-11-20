@@ -40,6 +40,7 @@ requests.
 - **Updates** download only from a release URL of the exact expected shape on github.com, and the app downloads the URL exactly as it was checked.
 - **Agents on Windows**: an external agent connection that does not present the current launch's key with its first message is closed, and every message it sent after that is refused.
 - **Remote (SSH)**: a terminal's agent tokens are kept in owner-only files in SparkDown's checked cache folder on the host, and the ssh and tmux command lines carry only the file paths.
+- **Diff view** marks more invisible characters as `<U+XXXX>`, including the Arabic letter mark, line and paragraph separators, variation selectors, tag characters and other control characters. Tabs and line breaks are shown as before.
 
 ### Changed
 

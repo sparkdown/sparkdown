@@ -164,15 +164,23 @@ export function escapeAttr(text: string): string {
  * algorithm draws. The output is plain text (angle brackets included) and must
  * still be HTML-escaped by the caller via {@link escapeHtml}.
  *
- *  - U+202A..U+202E  LRE, RLE, PDF, LRO, RLO (bidi overrides / embeddings)
- *  - U+2066..U+2069  LRI, RLI, FSI, PDI (bidi isolates)
- *  - U+200B..U+200F  ZWSP, ZWNJ, ZWJ, LRM, RLM (invisible / direction marks)
- *  - U+2060          WORD JOINER (invisible)
- *  - U+FEFF          BOM / zero-width no-break space
- *  - U+00AD          SOFT HYPHEN (invisible unless broken)
+ * Rather than enumerate individual code points (and risk missing one such as
+ * U+061C ARABIC LETTER MARK, which is a Bidi_Control but outside the previous
+ * BMP ranges), we filter by Unicode property so the set stays in sync with
+ * the Unicode database. The `u` flag also lets the class match astral code
+ * points such as the Unicode tag characters U+E0000..U+E007F.
+ *
+ *  - \p{Bidi_Control}                 all nine bidi controls incl. U+061C
+ *  - \p{Cf}                           format characters (ZWJ, ZWNJ, BOM, ...)
+ *  - C0/C1 control characters, except the common visible whitespace
+ *    \t \n \r which diff/preview surfaces must render literally.
+ *  - \p{Default_Ignorable_Code_Point} soft hyphen, variation selectors,
+ *                                     Hangul filler, tag characters, ...
+ *  - U+2028, U+2029                   LINE/PARAGRAPH SEPARATOR (forced breaks
+ *                                     in `white-space: pre-wrap` diff lines)
  */
 const UNICODE_CONTROL_CHARS_RE =
-  /[\u202A-\u202E\u2066-\u2069\u200B-\u200F\u2060\uFEFF\u00AD]/g;
+  /[\p{Bidi_Control}\p{Cf}\p{Default_Ignorable_Code_Point}\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u2028\u2029]/gu;
 
 /**
  * Replace Unicode bidi overrides and invisible formatting characters with a
@@ -184,7 +192,11 @@ const UNICODE_CONTROL_CHARS_RE =
  */
 export function neutralizeUnicodeControls(text: string): string {
   return text.replace(UNICODE_CONTROL_CHARS_RE, (ch) => {
-    const hex = ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0');
+    // Use codePointAt so astral code points (e.g. U+E0000..U+E007F tag
+    // characters, which are surrogate pairs in UTF-16) are reported as a
+    // single scalar value rather than a lone surrogate.
+    const cp = ch.codePointAt(0) ?? 0;
+    const hex = cp.toString(16).toUpperCase().padStart(4, '0');
     return `<U+${hex}>`;
   });
 }
