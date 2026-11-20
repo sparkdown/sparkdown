@@ -820,7 +820,6 @@ pub fn terminal_start(
     ) {
         cmd.env(k, v);
     }
-    }
 
     let mut child = pane_side
         .spawn_command(cmd)
