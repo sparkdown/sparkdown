@@ -5,7 +5,7 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
-## [Unreleased]
+## [0.4.4] — 2026-11-20
 
 ### Improved
 
@@ -254,6 +254,7 @@ The agent cockpit release.
 - **Linux `.deb`** as the preferred install; the AppImage is still built.
 - Hardening: the watcher ignores build and dependency folders, a stricter content policy, and dependency security updates.
 
+[0.4.4]: https://github.com/sparkdown/sparkdown/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/sparkdown/sparkdown/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/sparkdown/sparkdown/compare/v0.4.1...v0.4.2
 [0.3.1]: https://github.com/sparkdown/sparkdown/compare/v0.3.0...v0.3.1
