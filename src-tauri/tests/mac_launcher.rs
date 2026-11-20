@@ -49,9 +49,10 @@ fn run_launcher(args: &[&str]) -> Vec<String> {
     let canon = app.canonicalize().unwrap();
     let _ = fs::remove_dir_all(&root);
     let mut lines: Vec<String> = out.lines().map(str::to_string).collect();
-    // Compare against the canonical bundle path the script computed.
+    // The script may report the bundle with or without symlinks resolved
+    // (macOS temp folders live under /var, a link to /private/var).
     for l in &mut lines {
-        if *l == canon.to_string_lossy() {
+        if *l == canon.to_string_lossy() || *l == app.to_string_lossy() {
             *l = "<app>".to_string();
         }
     }
