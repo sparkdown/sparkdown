@@ -2074,8 +2074,15 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
                         let Ok(stream) = stream else { continue };
                         let (app, state) = (app.clone(), state.clone());
                         // External agents: never permitted to drive the
-                        // local-launch forward branch.
-                        std::thread::spawn(move || serve_client(stream, &app, &state, false));
+                        // local-launch forward branch, and every
+                        // `sparkdown_hello` must carry the per-launch
+                        // secret from the user-only endpoint file. A
+                        // failed handshake latches the connection shut
+                        // and is answered through `dispatch_rejected`
+                        // on every subsequent message.
+                        std::thread::spawn(move || {
+                            serve_client(stream, &app, &state, false, true)
+                        });
                     }
                 });
             }
@@ -2095,7 +2102,7 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
                 let Ok(stream) = stream else { continue };
                 let app = app.clone();
                 let state = state.clone();
-                std::thread::spawn(move || serve_client(stream, &app, &state, true));
+                std::thread::spawn(move || serve_client(stream, &app, &state, true, false));
             }
         })?;
     Ok(path)
@@ -2284,14 +2291,25 @@ fn serve_client(
     app: &AppHandle,
     state: &Arc<McpState>,
     allow_forward: bool,
+    requires_external_secret: bool,
 ) {
     use interprocess::local_socket::traits::Stream as _;
     let (read_half, write_half) = stream.split();
     let mut conn = Conn {
         allow_forward,
+        requires_external_secret,
+        // Transports that require the external-agent secret start locked:
+        // only a hello carrying the matching secret flips this to true.
+        handshake_ok: !requires_external_secret,
         ..Default::default()
     };
-    serve_lines(read_half, write_half, |msg| conn.handle(app, state, msg));
+    serve_lines(read_half, write_half, |msg| {
+        let reply = conn.handle(app, state, msg);
+        HandlerAction {
+            reply,
+            close: conn.close_after_reply,
+        }
+    });
 }
 
 /// One client: newline-delimited JSON-RPC in, one line per response out.
@@ -2313,7 +2331,13 @@ fn serve_client(
         allow_forward,
         ..Default::default()
     };
-    serve_lines(read_half, stream, |msg| conn.handle(app, state, msg));
+    serve_lines(read_half, stream, |msg| {
+        let reply = conn.handle(app, state, msg);
+        HandlerAction {
+            reply,
+            close: conn.close_after_reply,
+        }
+    });
 }
 
 // --- Connection routing (#64) ----------------------------------------------------
@@ -2345,7 +2369,6 @@ pub struct Hello {
 }
 
 /// One client connection's routing.
-#[derive(Default)]
 pub(crate) struct Conn {
     hello: Option<Hello>,
     /// A per-window socket (remote forward): always this window.
@@ -2366,6 +2389,48 @@ pub(crate) struct Conn {
     /// otherwise let a remote or external peer drive the local UI into
     /// opening arbitrary paths.
     pub(crate) allow_forward: bool,
+    /// Windows discoverable external-agent pipe: every `sparkdown_hello`
+    /// on this transport must carry the per-launch secret from
+    /// [`discoverable_endpoint_path`], regardless of `hello.terminal`.
+    /// The connection stays locked until the hello is accepted, and a
+    /// failed handshake is latched: every later message is answered with
+    /// [`dispatch_rejected`] and the connection is closed. False on every
+    /// other transport.
+    pub(crate) requires_external_secret: bool,
+    /// Latched outcome of the external-agent handshake. True by default
+    /// (transports that do not require it stay unlocked); initialised to
+    /// false when `requires_external_secret` is true, and flipped to true
+    /// only by a `sparkdown_hello` that quotes the matching secret.
+    pub(crate) handshake_ok: bool,
+    /// Set by [`Conn::handle`] after a failed external-agent handshake so
+    /// the transport loop can drop the connection once the refusal ack
+    /// has been written. Do not route anything on a connection whose
+    /// `close_after_reply` is true.
+    pub(crate) close_after_reply: bool,
+}
+
+impl Default for Conn {
+    fn default() -> Self {
+        Self {
+            hello: None,
+            fixed: None,
+            required_token: None,
+            token_ok: false,
+            started: false,
+            allow_forward: false,
+            requires_external_secret: false,
+            handshake_ok: true,
+            close_after_reply: false,
+        }
+    }
+}
+
+impl Conn {
+    /// True while this connection still owes a valid external-agent
+    /// handshake (the discoverable Windows pipe's per-launch secret).
+    fn needs_external_handshake(&self) -> bool {
+        self.requires_external_secret && !self.handshake_ok
+    }
 }
 
 /// Where a connection's tool calls go, given the open windows.
@@ -2459,15 +2524,16 @@ pub fn set_forward_handler(f: Box<ForwardFn>) {
     let _ = ON_FORWARD.set(f);
 }
 
-/// Windows external-agent gate: non-terminal connections must quote the
-/// per-launch secret from the user-only endpoint file. Nothing to refuse
-/// on non-Windows targets.
+/// Windows external-agent gate: on transports that require the per-launch
+/// secret (the discoverable pipe), every hello must quote it regardless of
+/// `hello.terminal`. Nothing to refuse on non-Windows targets.
 #[cfg(windows)]
-fn external_hello_bad_secret(hello: &Hello) -> bool {
-    !hello.terminal && !secret_matches(hello.secret.as_deref(), discoverable_endpoint_secret())
+fn external_hello_bad_secret(requires_external_secret: bool, hello: &Hello) -> bool {
+    requires_external_secret
+        && !secret_matches(hello.secret.as_deref(), discoverable_endpoint_secret())
 }
 #[cfg(not(windows))]
-fn external_hello_bad_secret(_hello: &Hello) -> bool {
+fn external_hello_bad_secret(_requires_external_secret: bool, _hello: &Hello) -> bool {
     false
 }
 
@@ -2633,6 +2699,19 @@ impl Conn {
         }
         // A per-window connection that never produced a valid hello gets an
         // error for everything except the protocol basics.
+        // A transport that requires the per-launch external-agent secret
+        // (the Windows discoverable pipe) stays locked until a hello
+        // quotes it. The check sits beside `needs_window_token` on
+        // purpose: both are latched handshake outcomes re-tested on
+        // every message so that a peer which ignores the `{"ok":false}`
+        // ack still gets `dispatch_rejected` (empty tool list, hard
+        // error for real work) on every subsequent line.
+        if self.needs_external_handshake() {
+            return Early::Reply(dispatch_rejected(
+                msg,
+                "SparkDown MCP: external-agent handshake failed; SparkDown refuses this connection.",
+            ));
+        }
         if needs_window_token(self.required_token.as_deref(), self.token_ok) {
             return Early::Reply(dispatch_rejected(
                 msg,
@@ -2675,7 +2754,22 @@ impl Conn {
                 // from the user-only endpoint file (a name conflict cannot read
                 // it). Terminal agents reach the primary pipe (with random suffix)
                 // via `$SPARKDOWN_MCP`, so no secret is required there.
-                let bad_secret = external_hello_bad_secret(&hello);
+                let bad_secret =
+                    external_hello_bad_secret(self.requires_external_secret, &hello);
+                // Latch the handshake outcome on connections that require it.
+                // `handshake_ok` was initialised to false for those transports,
+                // so a missing or wrong secret stays latched false and every
+                // later message is answered through `dispatch_rejected`
+                // (the same pattern `needs_window_token` uses, src-tauri/src/
+                // mcp.rs). On top of the latch we also ask the caller to drop
+                // the connection so a hand-written peer that ignores the ack
+                // cannot keep the socket open.
+                if self.requires_external_secret {
+                    self.handshake_ok = !bad_secret;
+                    if bad_secret {
+                        self.close_after_reply = true;
+                    }
+                }
                 self.hello = Some(hello);
                 return Some(match (refused, bad_secret, r) {
                     (true, _, Err(e)) => {
@@ -2688,6 +2782,9 @@ impl Conn {
                     _ => external_ack_ok(is_external),
                 });
             }
+            // First message was not a hello. If this transport requires the
+            // external-agent secret, keep the connection locked: `early` will
+            // answer every subsequent message through `dispatch_rejected`.
         }
         let route = match &self.fixed {
             Some(l) => Ok(l.clone()),
@@ -2747,15 +2844,35 @@ fn list_windows_result() -> Value {
     text_result(serde_json::to_string_pretty(&json!({ "windows": rows })).unwrap_or_default())
 }
 
+/// What the `serve_lines` handler returns for one line. `reply` is the
+/// JSON-RPC response to write back (or `None` for a notification); `close`
+/// asks the transport to drop the connection after that reply has been
+/// flushed. Used to fail a connection closed after a failed external-agent
+/// handshake.
+#[derive(Default)]
+pub struct HandlerAction {
+    pub reply: Option<Value>,
+    pub close: bool,
+}
+
+impl From<Option<Value>> for HandlerAction {
+    fn from(reply: Option<Value>) -> Self {
+        Self { reply, close: false }
+    }
+}
+
 /// Transport-agnostic line loop: read newline-delimited JSON-RPC from
 /// `reader`, write one line per response to `writer`. Notifications produce
 /// no reply. Shared by the socket server and the stdio shim. Returns when
-/// the peer hangs up or a write fails.
-pub fn serve_lines<R, W, F>(reader: R, mut writer: W, mut handle: F)
+/// the peer hangs up, a write fails, or the handler sets `close` on the
+/// `HandlerAction` it returns (so a failed handshake can drop the peer
+/// instead of waiting for them to hang up).
+pub fn serve_lines<R, W, F, A>(reader: R, mut writer: W, mut handle: F)
 where
     R: std::io::Read,
     W: Write,
-    F: FnMut(&Value) -> Option<Value>,
+    F: FnMut(&Value) -> A,
+    A: Into<HandlerAction>,
 {
     let buf = BufReader::new(reader);
     for line in buf.lines() {
@@ -2763,17 +2880,23 @@ where
         if line.trim().is_empty() {
             continue;
         }
-        let reply = match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => handle(&msg),
-            Err(_) => Some(rpc_error(Value::Null, -32700, "Parse error")),
+        let action: HandlerAction = match serde_json::from_str::<Value>(&line) {
+            Ok(msg) => handle(&msg).into(),
+            Err(_) => HandlerAction {
+                reply: Some(rpc_error(Value::Null, -32700, "Parse error")),
+                close: false,
+            },
         };
-        if let Some(r) = reply {
+        if let Some(r) = action.reply {
             if writeln!(writer, "{r}")
                 .and_then(|_| writer.flush())
                 .is_err()
             {
                 break;
             }
+        }
+        if action.close {
+            break;
         }
     }
 }
@@ -5440,6 +5563,34 @@ mod tests {
     fn conn_without_required_token_routes_as_before() {
         let mut c = Conn::default();
         assert_eq!(c.early(&hello_msg(None), true), Early::Continue);
+        assert_eq!(c.early(&tools_call(), false), Early::Continue);
+    }
+
+    #[test]
+    fn external_conn_rejects_every_message_while_handshake_is_not_ok() {
+        // Transports that require the external-agent secret start locked:
+        // `handshake_ok` is false and `early` must answer every message
+        // through `dispatch_rejected` — the same latched pattern the
+        // per-window remote-forward socket uses.
+        let mut c = Conn {
+            requires_external_secret: true,
+            handshake_ok: false,
+            ..Default::default()
+        };
+        assert!(is_error_reply(&c.early(&tools_call(), true)));
+        assert!(is_error_reply(&c.early(&tools_call(), false)));
+    }
+
+    #[test]
+    fn external_conn_unlocks_once_handshake_is_ok() {
+        // After a hello that quoted the right secret the hello branch in
+        // `handle` sets `handshake_ok` to true; later messages route as
+        // usual.
+        let mut c = Conn {
+            requires_external_secret: true,
+            handshake_ok: true,
+            ..Default::default()
+        };
         assert_eq!(c.early(&tools_call(), false), Early::Continue);
     }
 
