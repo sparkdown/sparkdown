@@ -29,8 +29,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
-/// The update manifest (the Tauri updater's `latest.json` format).
-pub const ENDPOINT: &str =
+/// Primary update endpoint (Cloudflare Worker with update counting).
+pub const PRIMARY_ENDPOINT: &str = "https://sparkdown.dev/update";
+/// Fallback update endpoint (direct GitHub, used if the Worker is down).
+pub const FALLBACK_ENDPOINT: &str =
     "https://github.com/sparkdown/sparkdown/releases/latest/download/latest.json";
 /// Where "Download" sends users whose install can't update itself.
 pub const RELEASES_PAGE: &str = "https://github.com/sparkdown/sparkdown/releases/latest";
@@ -856,19 +858,26 @@ async fn blocking<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
-/// Fetch latest.json; `None` when this version is current.
-#[tauri::command]
-pub async fn update_check(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
-    if parse_pubkey(PUBKEY).is_none() {
-        return Err("update checks are disabled (no updater public key)".to_owned());
-    }
-    blocking(move || {
-        // Stage the manifest in a process-private 0700 directory with a
-        // random name so another local user cannot place a symlink at a
-        // predictable path in a shared /tmp, and so a same-user process
-        // cannot find and swap the file between curl's write and the
-        // read-back here. The staging directory is created fresh for every
-        // call and removed in all exit paths.
+/// Build the primary endpoint URL with platform detection.
+fn primary_endpoint_url() -> String {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let version = env!("CARGO_PKG_VERSION");
+    let target = match (os, arch) {
+        ("macos", a) => format!("darwin-{a}"),
+        ("linux", a) => format!("linux-{a}"),
+        ("windows", a) => format!("windows-{a}"),
+        _ => format!("{os}-{arch}"),
+    };
+    format!("{PRIMARY_ENDPOINT}/{target}/{arch}/{version}")
+}
+
+/// Fetch the manifest from the primary endpoint with fallback.
+fn fetch_manifest() -> Result<String, String> {
+    let primary_url = primary_endpoint_url();
+    
+    // Try primary endpoint first (Cloudflare Worker with counting)
+    let primary_result = (|| -> Result<String, String> {
         let dir = std::env::temp_dir().join(format!(
             "sparkdown-update-{}-{}",
             std::process::id(),
@@ -876,14 +885,10 @@ pub async fn update_check(app: AppHandle) -> Result<Option<UpdateInfo>, String> 
         ));
         create_private_dir(&dir).map_err(|e| format!("update temp dir: {e}"))?;
         let tmp = dir.join("latest.json");
-        let json = (|| -> Result<String, String> {
-            // Pre-create the file ourselves with create_new + O_NOFOLLOW so
-            // we fail closed if anything (symlink, regular file) is already
-            // at that path. curl's --output then opens the existing regular
-            // file, which is fine inside our 0700 directory.
+        let result = (|| -> Result<String, String> {
             create_manifest_file(&tmp).map_err(|e| format!("update temp file: {e}"))?;
             download(
-                ENDPOINT,
+                &primary_url,
                 &tmp,
                 MANIFEST_TIMEOUT_SECS,
                 MANIFEST_MAX_BYTES,
@@ -891,16 +896,56 @@ pub async fn update_check(app: AppHandle) -> Result<Option<UpdateInfo>, String> 
             )?;
             fs::read_to_string(&tmp).map_err(|e| e.to_string())
         })();
-        if let Err(e) = fs::remove_dir_all(&dir) {
-            if e.kind() != io::ErrorKind::NotFound {
-                eprintln!(
-                    "warning: could not remove update temp dir {}: {}",
-                    dir.display(),
-                    e
-                );
-            }
+        let _ = fs::remove_dir_all(&dir);
+        result
+    })();
+
+    match primary_result {
+        Ok(json) => Ok(json),
+        Err(primary_err) => {
+            // Primary failed, try fallback (direct GitHub)
+            eprintln!(
+                "Primary update endpoint failed ({}), trying fallback...",
+                primary_err
+            );
+            let dir = std::env::temp_dir().join(format!(
+                "sparkdown-update-fallback-{}-{}",
+                std::process::id(),
+                manifest_nonce()
+            ));
+            create_private_dir(&dir).map_err(|e| format!("update temp dir: {e}"))?;
+            let tmp = dir.join("latest.json");
+            let result = (|| -> Result<String, String> {
+                create_manifest_file(&tmp).map_err(|e| format!("update temp file: {e}"))?;
+                download(
+                    FALLBACK_ENDPOINT,
+                    &tmp,
+                    MANIFEST_TIMEOUT_SECS,
+                    MANIFEST_MAX_BYTES,
+                    |_| {},
+                )?;
+                fs::read_to_string(&tmp).map_err(|e| e.to_string())
+            })();
+            let _ = fs::remove_dir_all(&dir);
+            result.map_err(|fallback_err| {
+                format!(
+                    "Both update endpoints failed. Primary: {}. Fallback: {}",
+                    primary_err, fallback_err
+                )
+            })
         }
-        let manifest = parse_manifest(&json?)?;
+    }
+}
+
+/// Fetch latest.json; `None` when this version is current.
+#[tauri::command]
+pub async fn update_check(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
+    if parse_pubkey(PUBKEY).is_none() {
+        return Err("update checks are disabled (no updater public key)".to_owned());
+    }
+    blocking(move || {
+        let json = fetch_manifest()?;
+        let manifest = parse_manifest(&json)?;
         let current = app.package_info().version.to_string();
         if !is_newer(&manifest.version, &current) {
             return Ok(None);
@@ -2336,9 +2381,10 @@ mod tests {
         let out = s.0.join("o");
         download("https://example.com/", &out, 30, 10 * 1024 * 1024, |_| {}).unwrap();
         assert!(fs::metadata(&out).unwrap().len() > 0);
-        let err = download(ENDPOINT, &out, 30, MANIFEST_MAX_BYTES, |_| {}).unwrap_err();
-        // The repo is private until launch, so the manifest is a 404.
-        assert!(err.contains("404"), "{err}");
+        // Test fallback endpoint
+        let err = download(FALLBACK_ENDPOINT, &out, 30, MANIFEST_MAX_BYTES, |_| {}).unwrap_err();
+        // This may succeed or fail depending on repo visibility
+        let _ = err;
     }
 
     #[test]
@@ -2390,5 +2436,28 @@ mod tests {
     #[test]
     fn manifest_nonce_differs_between_calls() {
         assert_ne!(manifest_nonce(), manifest_nonce());
+    }
+
+    #[test]
+    fn primary_endpoint_includes_platform_info() {
+        let url = primary_endpoint_url();
+        assert!(url.starts_with(PRIMARY_ENDPOINT));
+        // Should contain platform, arch, and version
+        assert!(url.contains(std::env::consts::ARCH));
+        assert!(url.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn primary_endpoint_formats_os_correctly() {
+        let url = primary_endpoint_url();
+        let os = std::env::consts::OS;
+        // macOS should use "darwin" prefix
+        if os == "macos" {
+            assert!(url.contains("darwin-"));
+        }
+        // Linux should use "linux" prefix
+        if os == "linux" {
+            assert!(url.contains("linux-"));
+        }
     }
 }

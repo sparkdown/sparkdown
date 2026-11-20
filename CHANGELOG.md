@@ -5,6 +5,12 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
+## [Unreleased]
+
+### Changed
+
+- Update checks now go through sparkdown.dev with a fallback to GitHub if the service is unavailable.
+
 ## [0.4.3] — 2026-11-13
 
 Fixes and reliability improvements on top of 0.4.2.

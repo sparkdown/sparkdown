@@ -1,0 +1,12 @@
+name = "sparkdown-updater"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Analytics Engine binding for recording update checks
+analytics_engine_datasets = [
+  { binding = "UPDATE_CHECKS" }
+]
+
+# Routes will be configured manually via Cloudflare dashboard
+# The worker should handle: sparkdown.dev/update/*
