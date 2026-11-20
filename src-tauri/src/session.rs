@@ -60,6 +60,10 @@ pub struct Stored {
     /// Kept as a map so keys from a newer build survive a save.
     pub prefs: Map<String, Value>,
     pub windows: BTreeMap<String, WindowSession>,
+    /// `true` when the stored prefs could not be parsed as an `AppConfig`
+    /// as a whole (a wrong JSON type, for example) and were filled in per
+    /// value by [`normalize_prefs`]. Not saved; worked out on every load.
+    pub prefs_unparsed: bool,
 }
 
 impl Default for Stored {
@@ -67,6 +71,7 @@ impl Default for Stored {
         Self {
             prefs: prefs_of(&AppConfig::default()),
             windows: BTreeMap::new(),
+            prefs_unparsed: false,
         }
     }
 }
@@ -108,9 +113,11 @@ impl Stored {
             for k in WINDOW_KEYS {
                 root.remove(*k);
             }
+            let (prefs, prefs_unparsed) = normalize_prefs(root);
             return Self {
-                prefs: normalize_prefs(root),
+                prefs,
                 windows,
+                prefs_unparsed,
             };
         }
         migrate_v1(root, window_state)
@@ -184,12 +191,40 @@ impl Stored {
 
 /// Run stored preferences through [`AppConfig`] so missing keys get their
 /// defaults, keeping unknown keys (a newer build's) as they were.
-fn normalize_prefs(mut raw: Map<String, Value>) -> Map<String, Value> {
-    let parsed: AppConfig = serde_json::from_value(Value::Object(raw.clone())).unwrap_or_default();
-    for (k, v) in prefs_of(&parsed) {
-        raw.insert(k, v);
+///
+/// Returns `(prefs, unparsed)`; `unparsed` is `true` when `raw` as a whole
+/// does not parse as an `AppConfig` (a wrong-typed field, for example).
+/// Then each stored value is kept only if the config still parses with it,
+/// so one bad value falls back to its default without resetting the others,
+/// and "Share editor context with agents" is set off until the user turns it
+/// on again. The file as read is kept in a copy (see
+/// [`keep_copy_of_unparsed`]).
+fn normalize_prefs(mut raw: Map<String, Value>) -> (Map<String, Value>, bool) {
+    match serde_json::from_value::<AppConfig>(Value::Object(raw.clone())) {
+        Ok(parsed) => {
+            for (k, v) in prefs_of(&parsed) {
+                raw.insert(k, v);
+            }
+            (raw, false)
+        }
+        Err(e) => {
+            eprintln!(
+                "session: could not parse stored preferences, using defaults for the values that do not parse: {e}"
+            );
+            let mut good = prefs_of(&AppConfig::default());
+            for (k, v) in raw {
+                let mut trial = good.clone();
+                trial.insert(k.clone(), v.clone());
+                if serde_json::from_value::<AppConfig>(Value::Object(trial)).is_ok() {
+                    good.insert(k, v);
+                }
+            }
+            // A default of `true` must not turn sharing on for a user who
+            // had it off in a file that no longer reads.
+            good.insert("agent_context_enabled".into(), Value::Bool(false));
+            (good, true)
+        }
     }
-    raw
 }
 
 fn migrate_v1(root: Map<String, Value>, window_state: Option<&str>) -> Stored {
@@ -198,7 +233,7 @@ fn migrate_v1(root: Map<String, Value>, window_state: Option<&str>) -> Stored {
     for k in WINDOW_KEYS {
         prefs.remove(*k);
     }
-    let prefs = normalize_prefs(prefs);
+    let (prefs, prefs_unparsed) = normalize_prefs(prefs);
     let folder = old
         .recent_folders
         .iter()
@@ -240,6 +275,7 @@ fn migrate_v1(root: Map<String, Value>, window_state: Option<&str>) -> Stored {
     Stored {
         prefs,
         windows: BTreeMap::from([(label, session)]),
+        prefs_unparsed,
     }
 }
 
@@ -411,6 +447,14 @@ impl ConfigStore {
             Some(t) => Stored::parse(t, ws.as_deref()),
             None => Stored::default(),
         };
+        // If the stored prefs could not be parsed, keep a copy of the file
+        // before the first save rewrites it, so the values can be recovered.
+        // Once per load; errors are ignored.
+        if stored.prefs_unparsed {
+            if let Some(t) = text.as_deref() {
+                let _ = keep_copy_of_unparsed(&path, t);
+            }
+        }
         let store = Self {
             path,
             inner: Mutex::new(Inner {
@@ -446,6 +490,13 @@ impl ConfigStore {
             .get(key)
             .and_then(Value::as_bool)
             .unwrap_or(default)
+    }
+
+    /// `true` when the last load could not parse the stored preferences as
+    /// an `AppConfig`.
+    #[cfg(test)]
+    pub fn prefs_unparsed(&self) -> bool {
+        self.lock().stored.prefs_unparsed
     }
 
     /// Re-key the window sections to the labels the restore uses (folder
@@ -623,8 +674,122 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     crate::fsio::write_private(path, bytes)
 }
 
+/// Keep a copy of a `config.json` whose preferences could not be parsed, so
+/// the stored values survive the first save that rewrites the file. The copy
+/// is `<path>.corrupt-<unix_seconds>` next to the original, owner-only like
+/// the file itself; an existing copy with that name is left alone. Callers
+/// ignore errors: the copy is for recovery, not needed to run.
+fn keep_copy_of_unparsed(path: &Path, text: &str) -> std::io::Result<()> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.json".to_string());
+    let copy = path.with_file_name(format!("{name}.corrupt-{ts}"));
+    if copy.exists() {
+        return Ok(());
+    }
+    crate::fsio::write_private(&copy, text.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unparsed_pref_file_keeps_its_values_and_a_copy() {
+        // `use_tmux: 7` has the wrong type, so the whole AppConfig does not
+        // parse. The other values are kept, `use_tmux` gets its default, the
+        // editor-context switch is off, and the file is copied next to it.
+        let dir = std::env::temp_dir().join(format!("sd-unparsed-prefs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let text = r#"{"version":2,"windows":{},"agent_context_enabled":true,"theme":"dark","use_tmux":7}"#;
+        std::fs::write(&path, text).unwrap();
+        let store = super::ConfigStore::open(path.clone());
+        assert!(store.prefs_unparsed());
+        let cfg = store.load_for("main");
+        assert_eq!(cfg.theme, crate::config::ThemeMode::Dark);
+        assert_eq!(cfg.use_tmux, super::AppConfig::default().use_tmux);
+        assert!(!cfg.agent_context_enabled);
+        assert!(!store.pref_bool("agent_context_enabled", true));
+        let copies: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("config.json.corrupt-"))
+            .collect();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(std::fs::read_to_string(copies[0].path()).unwrap(), text);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(copies[0].path()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parsed_prefs_have_no_copy_and_the_switch_follows_the_stored_value() {
+        let dir = std::env::temp_dir().join(format!("sd-parsed-prefs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"version":2,"windows":{},"agent_context_enabled":false}"#).unwrap();
+        let store = super::ConfigStore::open(path);
+        assert!(!store.prefs_unparsed());
+        assert!(!store.pref_bool("agent_context_enabled", true));
+        let store_on = {
+            let p = dir.join("on.json");
+            std::fs::write(&p, r#"{"version":2,"windows":{}}"#).unwrap();
+            super::ConfigStore::open(p)
+        };
+        assert!(store_on.pref_bool("agent_context_enabled", true));
+        let any_copy = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".corrupt-"));
+        assert!(!any_copy);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sharing_can_be_turned_on_again_after_an_unparsed_load() {
+        let dir = std::env::temp_dir().join(format!("sd-unparsed-on-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"version":2,"windows":{},"agent_context_enabled":true,"use_tmux":7}"#,
+        )
+        .unwrap();
+        let store = super::ConfigStore::open(path.clone());
+        let mut cfg = store.load_for("main");
+        assert!(!cfg.agent_context_enabled);
+        cfg.agent_context_enabled = true;
+        store.save_from("main", &cfg, None).unwrap();
+        assert!(store.pref_bool("agent_context_enabled", false));
+        store.flush().unwrap();
+        let again = super::ConfigStore::open(path);
+        assert!(!again.prefs_unparsed(), "the saved file parses");
+        assert!(again.pref_bool("agent_context_enabled", false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unknown_theme_or_view_mode_falls_back_for_that_field_only() {
+        let s = Stored::parse(
+            r#"{"version":2,"windows":{},"theme":"solarized","default_view_mode":"diff","agent_context_enabled":false}"#,
+            None,
+        );
+        assert!(!s.prefs_unparsed);
+        assert_eq!(s.prefs.get("theme"), Some(&serde_json::Value::from("system")));
+        assert_eq!(s.prefs.get("agent_context_enabled"), Some(&serde_json::Value::Bool(false)));
+    }
+
     #[test]
     fn pref_bool_prefers_the_stored_value_over_the_default() {
         let dir = std::env::temp_dir().join(format!("sd-pref-bool-{}", std::process::id()));

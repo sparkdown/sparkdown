@@ -14,7 +14,7 @@ use ts_rs::TS;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(TS), ts(export, export_to = "../../frontend/src/types/"))]
 pub struct AppConfig {
-    #[serde(default = "default_theme")]
+    #[serde(default = "default_theme", deserialize_with = "lenient_theme")]
     pub theme: ThemeMode,
 
     /// This window's saved open files (window section, see session.rs).
@@ -67,7 +67,7 @@ pub struct AppConfig {
     /// user picked in the title bar's view control (Diff is never a default).
     /// `None` in configs written before the view control: derive it from
     /// `preview_visible` (false → Edit, else Split).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_default_view_mode")]
     pub default_view_mode: Option<DefaultViewMode>,
 
     #[serde(default = "default_true")]
@@ -189,6 +189,35 @@ where
         .into_iter()
         .filter_map(|(k, v)| serde_json::from_value(v).ok().map(|l| (k, l)))
         .collect())
+}
+
+/// Read `theme` without ever failing the whole config: an unknown variant
+/// (a newer build's or a hand edit) is dropped and the compiled-in default
+/// (`System`) is used, matching the lenient treatment of `sidebar_view` and
+/// `terminal_layouts`, so one value this build does not know does not reset
+/// every other stored preference.
+fn lenient_theme<'de, D>(de: D) -> Result<ThemeMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(de)?;
+    Ok(serde_json::from_value(value).unwrap_or_else(|_| default_theme()))
+}
+
+/// Read `default_view_mode` without ever failing the whole config: an
+/// unknown variant (a newer build's or a hand edit, e.g. `"diff"`) is
+/// dropped and the field becomes `None` so the frontend can derive it from
+/// `preview_visible`. One value this build does not know does not reset
+/// every other stored preference.
+fn lenient_default_view_mode<'de, D>(de: D) -> Result<Option<DefaultViewMode>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(de)?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    Ok(serde_json::from_value(value).unwrap_or(None))
 }
 
 /// Per-document view a new tab opens in (see `AppConfig::default_view_mode`).
@@ -390,7 +419,14 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(json.contains(r#""default_view_mode":"preview""#));
 
-        // Diff is not a default view.
-        assert!(serde_json::from_str::<AppConfig>(r#"{"default_view_mode": "diff"}"#).is_err());
+        // Diff is not a default view: a value this build does not know falls
+        // back to `None` instead of failing the whole config load.
+        let diff: AppConfig =
+            serde_json::from_str(r#"{"default_view_mode": "diff"}"#).expect("lenient: parses");
+        assert_eq!(diff.default_view_mode, None);
+        // Same for a `theme` value this build does not know.
+        let theme: AppConfig =
+            serde_json::from_str(r#"{"theme": "solarized"}"#).expect("lenient: parses");
+        assert_eq!(theme.theme, ThemeMode::System);
     }
 }
