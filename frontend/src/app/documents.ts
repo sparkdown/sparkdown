@@ -33,6 +33,14 @@ export interface DocumentDeps {
  * before a write, unsaved-changes prompts, and the tab-origin guards that
  * keep remote and local files on their own machine.
  */
+/** How a file open was asked for. */
+export interface OpenFileOptions {
+  /** Open only a path inside this window's folder: set for paths that come
+   *  from a document link, terminal output or an agent, not for paths the
+   *  user picked. */
+  folderOnly?: boolean;
+}
+
 export class DocumentController {
   // Tabs with a save in progress: a watcher event that lands between our
   // write and markSaved() would otherwise look like a foreign change.
@@ -68,9 +76,10 @@ export class DocumentController {
     this.ownWrites.set(path, Date.now());
   }
 
-  async openFile(path: string): Promise<void> {
+  /** Open `path` in a tab. `folderOnly`: see {@link OpenFileOptions}. */
+  async openFile(path: string, options: OpenFileOptions = {}): Promise<void> {
     try {
-      const content = await api.readFile(path);
+      const content = await api.readFile(path, options.folderOnly ?? false);
       this.closePristineUntitled();
       this.ctx.tabs.openTab(path, content);
     } catch (err) {

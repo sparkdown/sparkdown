@@ -26,7 +26,7 @@ import { PaneController } from './app/panes';
 import { HtmlScriptsController } from './app/html-scripts';
 import { DiffController } from './app/diff';
 import { ViewModeController } from './app/view-mode';
-import { DocumentController } from './app/documents';
+import { DocumentController, type OpenFileOptions } from './app/documents';
 import { LifecycleController } from './app/lifecycle';
 import { WorkspaceController } from './app/workspace';
 import { WelcomeController } from './app/welcome';
@@ -161,7 +161,7 @@ export class App {
     this.panes = new PaneController(this.ctx, {
       scriptsAllowedForActive: () => this.htmlScripts.allowedForActive(),
       applyScriptsPolicy: () => this.htmlScripts.applyPolicy(),
-      openFile: (path) => void this.openFile(path),
+      openFile: (path, options) => void this.openFile(path, options),
       openDiffFind: () => this.diff.openFind(),
     });
     this.documents = new DocumentController(this.ctx, {
@@ -180,7 +180,7 @@ export class App {
       reload: () => window.location.reload(),
     });
     this.agent = new AgentContextBridge(this.ctx, {
-      openFile: (path) => this.openFile(path),
+      openFile: (path, options) => this.openFile(path, options),
     });
     this.cockpit = new CockpitController(this.ctx, {
       armAgentContext: () => this.agent.arm(),
@@ -534,8 +534,8 @@ export class App {
 
   // --- Public API (tests, remote.ts) — thin delegates -----------------------
 
-  openFile(path: string): Promise<void> {
-    return this.documents.openFile(path);
+  openFile(path: string, options?: OpenFileOptions): Promise<void> {
+    return this.documents.openFile(path, options);
   }
 
   openFileDialog(): Promise<void> {

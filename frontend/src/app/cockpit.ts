@@ -366,7 +366,7 @@ export class CockpitController {
     const target = terminalPathTarget(path, root);
     if (!target) return;
     try {
-      const content = await api.readFile(target);
+      const content = await api.readFile(target, true);
       this.deps.closePristineUntitled();
       this.ctx.tabs.openTab(target, content);
     } catch {

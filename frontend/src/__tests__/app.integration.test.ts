@@ -544,6 +544,21 @@ describe('App integration', () => {
       expect(tabTitles()).toEqual(['readme.md']);
     });
 
+    it('reads a file an agent asks to open with the folder check, and a picked file without it', async () => {
+      vfs.set('/docs/readme.md', '# Hello');
+      vfs.set('/docs/other.md', '# Other');
+      await startApp();
+      const reads = () => invokeCalls.filter((c) => c.cmd === 'read_file');
+
+      emitTauriEvent('mcp://open', { id: 7, path: '/docs/other.md', line: null });
+      await flush();
+      expect(reads().find((c) => c.args?.path === '/docs/other.md')?.args?.folderOnly).toBe(true);
+
+      emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/docs/readme.md' });
+      await flush();
+      expect(reads().find((c) => c.args?.path === '/docs/readme.md')?.args?.folderOnly).toBe(false);
+    });
+
     it('opens a file via the open-file-path event (macOS Open With)', async () => {
       vfs.set('/docs/readme.md', '# Hello');
       await startApp();

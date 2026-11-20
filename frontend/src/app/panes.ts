@@ -6,6 +6,7 @@ import { EVENTS } from '../event-names';
 import type { ViewMode } from '../view-mode';
 import { isMarkdownFile, isPreviewable, buildScrollMap, mapLineToY } from '../utils';
 import type { AppContext } from './context';
+import type { OpenFileOptions } from './documents';
 import { syncEditorInput } from './editor-gate';
 
 /** What the pane controller needs from its siblings. */
@@ -14,7 +15,7 @@ export interface PaneDeps {
   scriptsAllowedForActive(): boolean;
   applyScriptsPolicy(): void;
   /** Follow a local link clicked in the preview. */
-  openFile(path: string): void;
+  openFile(path: string, options?: OpenFileOptions): void;
   /** Find in the diff pane when it is on screen; false when it is not. */
   openDiffFind(): boolean;
 }
@@ -193,7 +194,10 @@ export class PaneController {
         () => { this.lastFocusedPane = 'preview'; },
         () => { this.lastFocusedPane = 'preview'; void this.openPreviewFind(); },
       );
-      p.setOpenFileHandler((path) => { void this.deps.openFile(path); });
+      // With a folder open, the backend checks the path is inside it too.
+      p.setOpenFileHandler((path) => {
+        void this.deps.openFile(path, { folderOnly: this.ctx.workspaceRoot !== null });
+      });
       // Remote tabs' images come over SSH, never from local asset:// paths.
       p.setOriginResolver(() => {
         const tab = this.ctx.tabs.activeTab();
@@ -201,6 +205,10 @@ export class PaneController {
       });
       p.setPathResolver(() => this.ctx.tabs.activeTab()?.path ?? null);
       if (this.ctx.baseDir) p.setBaseDir(this.ctx.baseDir);
+      // Preview links open only files inside the open folder (see
+      // PreviewPane.setWorkspaceRoot). Without a folder, they stay inside
+      // the previewed file's own directory.
+      p.setWorkspaceRoot(this.ctx.workspaceRoot);
       this.pane = p;
       return p;
     });
@@ -278,6 +286,12 @@ export class PaneController {
   /** Point relative links in the preview at `dir`. */
   setBaseDir(dir: string): void {
     this.pane?.setBaseDir(dir);
+  }
+
+  /** The open folder that preview links must stay inside; null when no
+   *  folder is open. See PreviewPane.setWorkspaceRoot. */
+  setWorkspaceRoot(root: string | null): void {
+    this.pane?.setWorkspaceRoot(root);
   }
 
   /** Close the preview-search widget; its highlights belong to the old

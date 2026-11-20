@@ -10,14 +10,16 @@ import { PreviewPane, classifyPreviewLink } from '../preview';
 import { EventBus } from '../events';
 import { invokeCalls, resetTauriMocks } from './helpers/tauri-mocks';
 
-/** Render `md` into a fresh pane (base dir /docs) and return its parts. */
-async function setup(md: string) {
+/** Render `md` into a fresh pane (base dir /docs, open folder
+ *  `workspaceRoot`, /docs by default) and return its parts. */
+async function setup(md: string, workspaceRoot: string | null = '/docs') {
   const pane = new PreviewPane(new EventBus());
   const container = document.createElement('div');
   document.body.appendChild(container);
   pane.init(container);
   pane.setRenderMode('/docs/readme.md');
   pane.setBaseDir('/docs');
+  pane.setWorkspaceRoot(workspaceRoot);
   const opened: string[] = [];
   pane.setOpenFileHandler((p) => opened.push(p));
   await pane.renderImmediateForExport(md);
@@ -54,7 +56,11 @@ describe('preview link interception', () => {
   });
 
   it('resolves a relative markdown link against the current file directory and opens it', async () => {
-    const { container, opened } = await setup('[next](../guide/other%20file.md#intro)');
+    // Open folder `/`: /docs/readme.md links into a sibling /guide folder.
+    const { container, opened } = await setup(
+      '[next](../guide/other%20file.md#intro)',
+      '/',
+    );
     const ev = clickLink(container);
     expect(ev.defaultPrevented).toBe(true);
     expect(opened).toEqual(['/guide/other file.md']);
@@ -95,6 +101,30 @@ describe('preview link interception', () => {
     container.querySelector('a strong')!.dispatchEvent(ev);
     expect(ev.defaultPrevented).toBe(true);
     expect(opened).toEqual(['/docs/notes.txt']);
+  });
+
+  it('does not open an absolute path outside the open folder', async () => {
+    const { container, opened } = await setup('[changelog](/Users/v/notes/config.json)');
+    const ev = clickLink(container);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(opened).toEqual([]);
+    expect(openExternalCalls()).toEqual([]);
+  });
+
+  it("does not open a relative path whose '../' leads out of the open folder", async () => {
+    const { container, opened } = await setup('[other](../../../../etc/hosts.conf)');
+    const ev = clickLink(container);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(opened).toEqual([]);
+  });
+  it('with no folder open, opens links only inside the previewed file directory', async () => {
+    const inDir = await setup('[n](sub/notes.md)', null);
+    clickLink(inDir.container);
+    expect(inDir.opened).toEqual(['/docs/sub/notes.md']);
+    document.body.innerHTML = '';
+    const outDir = await setup('[n](../other/notes.md)', null);
+    clickLink(outDir.container);
+    expect(outDir.opened).toEqual([]);
   });
 });
 
@@ -146,6 +176,7 @@ describe('classifyPreviewLink', () => {
     ['//evil.example/x.md', { kind: 'ignore' }],
     ['', { kind: 'ignore' }],
   ])('%s', (href, expected) => {
+    // No open folder: the folder-free rules.
     expect(classifyPreviewLink(href, '/docs')).toEqual(expected);
   });
 
@@ -157,6 +188,53 @@ describe('classifyPreviewLink', () => {
     expect(classifyPreviewLink('..\\..\\..\\b.md', 'C:\\docs\\a')).toEqual({
       kind: 'file',
       path: 'C:\\b.md',
+    });
+  });
+
+  describe('open folder', () => {
+    it('allows a relative link that stays inside the workspace', () => {
+      expect(classifyPreviewLink('./notes.txt', '/ws/docs', '/ws')).toEqual({
+        kind: 'file',
+        path: '/ws/docs/notes.txt',
+      });
+    });
+
+    it('ignores an absolute path outside the workspace', () => {
+      expect(classifyPreviewLink('/Users/v/.docker/config.json', '/ws/docs', '/ws')).toEqual({
+        kind: 'ignore',
+      });
+    });
+
+    it("ignores '../'-escaping relative paths that leave the workspace", () => {
+      expect(
+        classifyPreviewLink('../../../../etc/hosts.conf', '/ws/docs', '/ws'),
+      ).toEqual({ kind: 'ignore' });
+    });
+
+    it('opens a file:// URL inside the folder and ignores one outside it', () => {
+      expect(classifyPreviewLink('file:///ws/docs/notes.txt', '/ws/docs', '/ws')).toEqual({
+        kind: 'file',
+        path: '/ws/docs/notes.txt',
+      });
+      expect(classifyPreviewLink('file:///etc/hosts.yml', '/ws/docs', '/ws')).toEqual({
+        kind: 'ignore',
+      });
+    });
+
+    it('allows an absolute path that is inside the workspace', () => {
+      expect(
+        classifyPreviewLink('/ws/docs/sub/notes.json', '/ws/docs', '/ws'),
+      ).toEqual({ kind: 'file', path: '/ws/docs/sub/notes.json' });
+    });
+
+    it('compares Windows paths without regard to drive case or separators', () => {
+      expect(
+        classifyPreviewLink(
+          'C:\\Repo\\docs\\notes.txt',
+          'C:\\Repo\\docs',
+          'c:/Repo',
+        ),
+      ).toEqual({ kind: 'file', path: 'C:\\Repo\\docs\\notes.txt' });
     });
   });
 });

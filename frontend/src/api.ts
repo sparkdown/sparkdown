@@ -88,7 +88,15 @@ export const api = {
     invoke<void>("quit_prepare_reply", { id, ok }),
   windowSetRemoteFolder: () =>
     invoke<string | null>("window_set_remote_folder"),
-  readFile: (path: string) => invoke<string>("read_file", { path }),
+  /**
+   * Read a text file. With `folderOnly`, the backend refuses a path outside
+   * this window's folder (a window without a folder refuses every path).
+   * Used for paths that come from a document link, terminal output or an
+   * agent; paths the user picks (dialogs, the explorer, session restore)
+   * leave it off.
+   */
+  readFile: (path: string, folderOnly = false) =>
+    invoke<string>("read_file", { path, folderOnly }),
   writeFile: (path: string, content: string) =>
     invoke<void>("write_file", { path, content }),
   isDirectory: (path: string) => invoke<boolean>("is_directory", { path }),

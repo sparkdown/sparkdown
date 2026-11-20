@@ -402,6 +402,7 @@ export class PreviewPaneStub {
   setOriginResolver(): void {}
   setPathResolver(): void {}
   setBaseDir(): void {}
+  setWorkspaceRoot(): void {}
   setRenderMode(): void {}
   render(): void {}
   async renderImmediateForExport(): Promise<void> {}
