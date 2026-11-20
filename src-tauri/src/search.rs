@@ -449,12 +449,13 @@ mod tests {
 
     #[test]
     fn match_line_supports_regex() {
-        let re = compile_regex(r"w\w+d", false).unwrap();
+        // Use ERE syntax: [a-z]+ instead of \w+
+        let re = compile_regex(r"w[a-z]+d", false).unwrap();
         let m = match_line(
             "/r/a.md",
             1,
             "Hello World and word",
-            "w\\w+d",
+            "w[a-z]+d",
             false,
             Some(&re),
         )
@@ -585,15 +586,18 @@ mod tests {
         assert!(validate_query("a\nb", false).is_err());
         assert!(validate_query(&"x".repeat(MAX_QUERY_CHARS + 1), false).is_err());
         assert!(validate_query("ok", false).is_ok());
-        // Newlines rejected in both modes now (single-line rule)
+        // Single-line rule applies to both modes (remote grep -e treats \n as alternation)
         assert!(validate_query("a\nb", true).is_err());
+        assert!(validate_query("a\rb", true).is_err());
+        assert!(validate_query("a\0b", true).is_err());
     }
 
     #[test]
     fn compile_regex_rejects_invalid_patterns() {
         assert!(compile_regex(r"[unclosed", true).is_err());
         assert!(compile_regex(r"(?P<)", false).is_err());
-        assert!(compile_regex(r"valid\d+pattern", true).is_ok());
+        // Use ERE syntax: [0-9]+ instead of \d+
+        assert!(compile_regex(r"valid[0-9]+pattern", true).is_ok());
     }
 
     #[test]
