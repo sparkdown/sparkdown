@@ -7,25 +7,6 @@ requests.
 
 ## [Unreleased]
 
-### Fixed
-
-- Build no longer warns about mixed static/dynamic imports of `@tauri-apps/api/webviewWindow`.
-- MCP: `sparkdown_list_windows` answers with the same refusal as every other tool while editor context sharing is switched off.
-- MCP: A connection that SparkDown did not route to a window gets the routing message for every tool call, including `sparkdown_list_windows`.
-- SSH: Host-key checking is set on the ssh command line, so `StrictHostKeyChecking no` or `accept-new` in ~/.ssh/config no longer skips the fingerprint prompt for a new host.
-- SSH: Output from a failed remote command is shown as command output and no longer selects SparkDown's host-key messages.
-- Remote: The agent context and MCP shim folders on the host must be plain directories owned by your account; otherwise nothing is written there.
-- Remote: Preview images on a remote host must be inside the window's folder.
-- Git: The background fetch is skipped when the upstream remote or a remote URL uses a command or file transport, in any spelling; only https, http, ssh, git and file transports are allowed.
-- Git: Status, diff, commit and discard stop when the repository config places the work tree outside the folder that holds the checkout.
-- CLI (macOS): The `sparkdown` command opens the app bundle it belongs to by path, not by the name "SparkDown".
-- Preview: A file opened straight from your home folder no longer lets every image below it load in the preview.
-- Preview: A file with the same path on another machine is treated as a different document when HTML scripts are switched on or off.
-- Agents: The shared editor context includes only the tabs of the machine the window is connected to, so local buffers are not sent to a remote host and remote ones are not shown locally.
-- Changes: The discard dialog, hunk headers and git output show direction and invisible Unicode characters as `<U+XXXX>` markers.
-- Diff: Removed or added lines whose text starts with `-- ` or `++ ` are no longer dropped from the rendered diff and its counts.
-- Diff: Reading mode folds a changed line as an import only when the whole line is an import, so code after the statement stays visible.
-- Terminal: Clicking a path printed in the terminal opens it only when it is inside the open folder.
 ### Improved
 
 - **Diff view** shows direction and invisible characters in the discard dialog, in hunk headers and in git messages. Lines that start with `-- ` or `++ ` are no longer dropped, and the Reading view no longer folds code that follows an import on the same line, or a changed indent, as formatting only.
@@ -58,6 +39,7 @@ requests.
 
 ### Fixed
 
+- Build no longer warns about mixed static/dynamic imports of `@tauri-apps/api/webviewWindow`.
 - **Commit** of a renamed file no longer fails or stops the app when other changed files have names with accented or other non-ASCII characters.
 - **Remote (SSH)**: saving a file creates its temporary copy as a new file and never writes through a link that is already at that name.
 - **Remote (SSH)**: Quick open and Find in folder read file names as whole records, so a name with a line break no longer shows up as a different file; such names are left out of the list.
