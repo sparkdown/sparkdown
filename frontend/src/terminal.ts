@@ -171,6 +171,12 @@ export class TerminalPane {
   private onOpenPath: (path: string) => void;
   /** Split-grid keys pressed while this terminal has focus (⌘D, ⌘] …). */
   private onAction: ((action: TerminalPaneAction) => void) | null;
+  /** Whether this terminal is currently visible (IntersectionObserver). */
+  private isVisible = true;
+  /** Tracks visibility changes to pause rendering when hidden. */
+  private intersectionObserver: IntersectionObserver | null = null;
+  /** Data received while hidden, to be flushed when becoming visible. */
+  private pendingWrites: string[] = [];
   /** Timestamp of the last pty output — used to wait for the shell prompt
    *  to settle before typing into a fresh terminal. */
   private lastOutputAt = 0;
@@ -409,12 +415,32 @@ export class TerminalPane {
     if (this.disposed) return;
     this.fit.fit();
 
+    // Set up visibility tracking to pause rendering when off-screen (#213).
+    this.intersectionObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const wasVisible = this.isVisible;
+        this.isVisible = entry.isIntersecting;
+        // When becoming visible, flush any buffered writes and refresh the display.
+        if (!wasVisible && this.isVisible && this.pendingWrites.length > 0) {
+          const buffered = this.pendingWrites.join('');
+          this.pendingWrites = [];
+          this.term.write(buffered);
+        }
+      }
+    }, { threshold: 0 });
+    this.intersectionObserver.observe(container);
+
     // Route only THIS terminal's output/exit (events carry an id). Each listen
     // is async; if destroy() ran while it was pending, unlisten immediately —
     // destroy already drained unlisteners, so a late push would leak.
     const dataUn = await listen<{ id: string; chunk: string }>('terminal://data', (e) => {
       if (e.payload.id === this.id) {
-        this.term.write(e.payload.chunk);
+        // Buffer writes when hidden to pause rendering (#213).
+        if (!this.isVisible) {
+          this.pendingWrites.push(e.payload.chunk);
+        } else {
+          this.term.write(e.payload.chunk);
+        }
         this.lastOutputAt = performance.now();
       }
     });
@@ -688,6 +714,9 @@ export class TerminalPane {
     if (this.refitTimer) clearTimeout(this.refitTimer);
     this.refitTimer = null;
     this.resizeObserver?.disconnect();
+    this.intersectionObserver?.disconnect();
+    this.intersectionObserver = null;
+    this.pendingWrites = [];
     for (const un of this.unlisteners) un();
     this.unlisteners = [];
     void api.terminalClose(this.id);

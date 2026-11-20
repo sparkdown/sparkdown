@@ -5,6 +5,12 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
+## [Unreleased]
+
+### Improved
+
+- **Terminal rendering** pauses for hidden terminals (inactive tabs, collapsed panels) to reduce CPU usage. Output is buffered and displayed correctly when the terminal becomes visible again. (#213)
+
 ## [0.4.3] — 2026-11-13
 
 Fixes and reliability improvements on top of 0.4.2.
