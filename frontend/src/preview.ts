@@ -168,13 +168,19 @@ function segmentAtHeadings(md: string): { segments: string[]; defsPrefix: string
   const segs: string[] = [];
   const defs: string[] = [];
   let cur: string[] = [];
-  let fence: string | null = null;
+  let fence: { ch: string; len: number } | null = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const fm = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    const fm = line.match(/^ {0,3}(`{3,}|~{3,})(.*)/);
     if (fm) {
       const ch = fm[1][0];
-      fence = fence === null ? ch : ch === fence ? null : fence;
+      const len = fm[1].length;
+      const rest = fm[2];
+      if (fence === null) {
+        fence = { ch, len };
+      } else if (ch === fence.ch && len >= fence.len && rest.trim() === '') {
+        fence = null;
+      }
     } else if (fence === null) {
       if (
         /^#{1,6}\s/.test(line) &&
@@ -227,6 +233,13 @@ export class PreviewPane {
   private visible = true;
   private currentBaseDir: string | null = null;
   private lastRendered: string | null = null;
+  /**
+   * Path of the document whose markup `lastRendered` holds. Tracked so
+   * setRenderMode can clear the cache on any path change (not only when
+   * framed/SVG category changes), and so setAllowScripts can refuse to
+   * re-render markup that no longer corresponds to the active tab.
+   */
+  private currentPath: string | null = null;
   private framedMode = false;
   private svgMode = false;
   private allowScripts = false;
@@ -238,6 +251,8 @@ export class PreviewPane {
   private originResolver: () => string | null = () => null;
   /** Origin the current DOM was rendered for. */
   private renderedOrigin: string | null = null;
+  /** Resolver for the path of the document being previewed. */
+  private pathResolver: () => string | null = () => null;
   private scrollState = createScrollState();
   private renderDebounced = debounce((c: string) => { void this.renderImmediate(c); }, TIMING.PREVIEW_RENDER_MS);
   // Invoked on interaction inside the (same-origin) preview iframe — its events
@@ -347,6 +362,7 @@ export class PreviewPane {
   }
 
   render(markdownContent: string): void {
+    this.renderDebounced.cancel();
     this.renderDebounced(markdownContent);
   }
 
@@ -369,12 +385,19 @@ export class PreviewPane {
   setRenderMode(path: string | null): void {
     const framed = isFramedFile(path);
     const svg = isSvgFile(path);
-    if (framed !== this.framedMode || svg !== this.svgMode) {
+    const modeChanged = framed !== this.framedMode || svg !== this.svgMode;
+    const pathChanged = path !== this.currentPath;
+    if (modeChanged || pathChanged) {
       this.framedMode = framed;
       this.svgMode = svg;
+      this.currentPath = path;
+      // Drop cached content from any previous document: a framed->framed
+      // (html->html or svg->svg) tab switch would otherwise leave the
+      // previous file's markup in lastRendered, and a later setAllowScripts
+      // could re-render it as the "current" document.
       this.lastRendered = null;
-      // Framed mode replaces the container's children with an iframe, so the
-      // incremental block cache no longer describes the DOM.
+      // Incremental block cache belongs to the previous document's DOM too;
+      // drop it so the next render is a full rebuild for this path.
       this.prevBlocks = [];
       this.prevNodeCounts = [];
     }
@@ -383,12 +406,23 @@ export class PreviewPane {
   /**
    * Enable/disable script execution in the HTML-preview iframe. Off by default;
    * scripts only run for HTML files when the user opts in via the View menu.
-   * Re-renders so the change takes effect on the current document immediately.
+   *
+   * When `forPath` is supplied, the pane only re-renders cached markup if it
+   * matches the path the permission was granted for. Callers that just want to
+   * flip the flag can omit `forPath`.
    */
-  setAllowScripts(allow: boolean): void {
+  setAllowScripts(allow: boolean, forPath?: string | null): void {
     if (allow === this.allowScripts) return;
     this.allowScripts = allow;
-    if (this.framedMode && this.lastRendered !== null) {
+    // Only re-render when the cached markup is for the same document the
+    // permission applies to. On a tab switch, setRenderMode has already
+    // cleared lastRendered (path changed), so this is a no-op.
+    if (
+      this.framedMode &&
+      this.lastRendered !== null &&
+      forPath !== undefined &&
+      forPath === this.currentPath
+    ) {
       const content = this.lastRendered;
       this.lastRendered = null;
       void this.renderImmediate(content);
@@ -411,6 +445,7 @@ export class PreviewPane {
       // Same text on another machine: reused DOM nodes hold images resolved
       // against the old machine. Force a full rebuild.
       this.renderedOrigin = origin;
+      this.mermaidLoader.resetCache();
       this.prevBlocks = [];
       this.prevNodeCounts = [];
     }
@@ -473,21 +508,77 @@ export class PreviewPane {
     const tokens: ReturnType<typeof marked.lexer> =
       [] as unknown as ReturnType<typeof marked.lexer>;
     const links: Record<string, unknown> = {};
-    // Count tokens the defs-prefix itself produces so they can be dropped
-    // from each segment's stream (defs render nothing, but duplicating them
-    // per segment would bloat the token list).
-    const prefixTokenCount = defsPrefix ? marked.lexer(defsPrefix).length : 0;
-    for (const seg of segments) {
-      // Prepend doc-wide reference definitions: marked resolves [use][ref]
-      // during lexing, so each segment must see all definitions.
-      const segTokens = marked.lexer(defsPrefix + seg);
-      for (let i = prefixTokenCount; i < segTokens.length; i++) {
-        tokens.push(segTokens[i]);
+    // When a document has many reference-link definitions and many top-level
+    // headings, the segments × |defsPrefix| product can grow large: a ~440 KB
+    // file can feed the lexer ~7 GB of input and freeze the webview main thread.
+    // Bound the total extra bytes the prefix contributes (segments × |defsPrefix|)
+    // in addition to standalone caps on each dimension; when any cap is exceeded,
+    // fall back to a single whole-document lex whose cost is bounded by |content|.
+    const DEFS_PREFIX_MAX = 64 * 1024;
+    const SEGMENT_COUNT_MAX = 2000;
+    const PREFIX_BUDGET_BYTES = 4 * 1024 * 1024;
+    const useSegmented =
+      defsPrefix.length <= DEFS_PREFIX_MAX &&
+      segments.length <= SEGMENT_COUNT_MAX &&
+      segments.length * defsPrefix.length <= PREFIX_BUDGET_BYTES;
+    if (!useSegmented) {
+      // Fallback: a single whole-document lex is slower per byte for large
+      // docs but it is linear in |content| rather than quadratic in
+      // segments × defsPrefix, so large documents take longer but bounded time.
+      const whole = marked.lexer(content);
+      for (const t of whole) tokens.push(t);
+      Object.assign(links, whole.links ?? {});
+      tokens.links = links as ReturnType<typeof marked.lexer>['links'];
+      endLexOnly();
+    } else {
+      // Lex defsPrefix once up-front: its token count lets us skip the defs'
+      // own tokens when they are re-emitted inside a segment lex, and its
+      // resolved `links` map seeds cross-segment [use][ref] resolution. This
+      // replaces the previous per-segment re-lex of defsPrefix.
+      let prefixTokenCount = 0;
+      if (defsPrefix) {
+        const prefixTokens = marked.lexer(defsPrefix);
+        prefixTokenCount = prefixTokens.length;
+        Object.assign(links, prefixTokens.links);
       }
-      Object.assign(links, segTokens.links);
+      // Heuristic: only segments that actually use a reference-style link
+      // (`[text][ref]` or `[text][]`) need defsPrefix prepended so marked
+      // can resolve the ref during lexing. Fenced-code regions are skipped
+      // so a `][` inside ``` doesn't force a re-lex, and definition lines
+      // themselves aren't counted as usages. Segments without any reflink
+      // usage are lexed bare, so total input is O(|content|) in the common
+      // case even when defsPrefix is non-trivial.
+      const usesReflink = (seg: string): boolean => {
+        const lines = seg.split('\n');
+        let fence: string | null = null;
+        for (const line of lines) {
+          const fm = line.match(/^ {0,3}(`{3,}|~{3,})/);
+          if (fm) {
+            const ch = fm[1][0];
+            fence = fence === null ? ch : ch === fence ? null : fence;
+            continue;
+          }
+          if (fence !== null) continue;
+          // Reference-link definition lines are not usages.
+          if (/^ {0,3}\[[^\]]+\]:\s+\S/.test(line)) continue;
+          if (/\]\s*\[/.test(line)) return true;
+        }
+        return false;
+      };
+      for (const seg of segments) {
+        const needsPrefix = defsPrefix.length > 0 && usesReflink(seg);
+        const segTokens = needsPrefix
+          ? marked.lexer(defsPrefix + seg)
+          : marked.lexer(seg);
+        const skip = needsPrefix ? prefixTokenCount : 0;
+        for (let i = skip; i < segTokens.length; i++) {
+          tokens.push(segTokens[i]);
+        }
+        Object.assign(links, segTokens.links);
+      }
+      tokens.links = links as ReturnType<typeof marked.lexer>['links'];
+      endLexOnly();
     }
-    tokens.links = links as ReturnType<typeof marked.lexer>['links'];
-    endLexOnly();
     const endLex = span('parse-chunks');
 
     // Group top-level tokens into chunks. Chunk granularity balances two
@@ -499,10 +590,23 @@ export class PreviewPane {
     const CHUNK_TOKENS = 32;
     const nextCache = new Map<string, string>();
     const blocks: string[] = [];
+    // The rendered HTML of a chunk also depends on the document-wide
+    // reference-link definition map (`[tag]: url` lines that marked keeps
+    // in `tokens.links` without emitting a token, so they never appear in
+    // any chunk's `raw`). Mix a stable fingerprint of that map into every
+    // cache key so a different document with byte-identical body text but
+    // different `[ref]: url` targets cannot reuse the previous document's
+    // rendered href. The fingerprint is computed once per render.
+    const linksFingerprint = JSON.stringify(
+      Object.keys(links)
+        .sort()
+        .map((k) => [k, links[k]]),
+    );
     for (let i = 0; i < tokens.length; i += CHUNK_TOKENS) {
       const slice = tokens.slice(i, i + CHUNK_TOKENS);
       const raw = slice.map((t) => t.raw).join('');
-      let html: string | undefined = this.chunkCache.get(raw) ?? nextCache.get(raw);
+      const key = linksFingerprint + '\u0000' + raw;
+      let html: string | undefined = this.chunkCache.get(key) ?? nextCache.get(key);
       if (html === undefined) {
         const chunk = slice as unknown as Parameters<typeof marked.parser>[0] & {
           links: typeof links;
@@ -510,7 +614,7 @@ export class PreviewPane {
         chunk.links = links;
         html = marked.parser(chunk) ?? '';
       }
-      nextCache.set(raw, html);
+      nextCache.set(key, html);
       blocks.push(html);
     }
     // Entries not reused this render are dropped — cache size tracks the
@@ -606,14 +710,19 @@ export class PreviewPane {
     // SVG is wrapped in a host document that centres it; HTML is framed as-is
     // (with relative asset references rewritten through the asset protocol).
     const seq = ++this.htmlAssetSeq;
+    const scriptsDecision = this.allowScripts;
+    const docKey = this.currentDocKey();
     const resolved = this.svgMode
       ? this.wrapSvgDocument(content)
       : await this.rewriteHtmlAssets(content);
     // Remote images are fetched over SSH; a newer render may have finished
-    // while this one waited. Only the latest may reach the frame.
-    if (seq !== this.htmlAssetSeq) return;
+    // while this one waited. Only the latest may reach the frame. Also drop
+    // this render if the document changed (tab switch).
+    if (seq !== this.htmlAssetSeq || docKey !== this.currentDocKey()) return;
 
-    if (this.allowScripts) {
+    this.lastRendered = resolved;
+
+    if (scriptsDecision && this.allowScripts) {
       await this.renderHtmlWithScripts(resolved);
       return;
     }
@@ -670,7 +779,15 @@ export class PreviewPane {
 
   /** Serve the document from the custom protocol (own origin) so scripts run. */
   private async renderHtmlWithScripts(resolved: string): Promise<void> {
+    // Snapshot the seq and document key before the async IPC. A tab switch
+    // doesn't bump htmlAssetSeq, so also re-check the document key and scripts
+    // flag after await to ensure we don't frame a previous document when the
+    // user switched tabs while setHtmlPreview was pending.
+    const seq = this.htmlAssetSeq;
+    const docKey = this.currentDocKey();
+    const scriptsWereAllowed = this.allowScripts;
     await api.setHtmlPreview(resolved);
+    if (seq !== this.htmlAssetSeq || docKey !== this.currentDocKey() || !this.allowScripts || !scriptsWereAllowed) return;
     const frame = this.ensureFrame('scripts');
     frame.removeAttribute('srcdoc');
     // Cache-bust so live edits reload even though the path is constant.
@@ -721,6 +838,7 @@ export class PreviewPane {
   private async rewriteHtmlAssets(htmlContent: string): Promise<string> {
     const baseDir = this.currentBaseDir;
     const origin = this.originResolver();
+    const scriptsDecision = this.allowScripts;
     if (!baseDir && origin === null) return htmlContent;
     const doc = new DOMParser().parseFromString(htmlContent, 'text/html');
     const jobs: Promise<void>[] = [];
@@ -728,12 +846,16 @@ export class PreviewPane {
       const path = resolveImagePath(el.getAttribute('src') ?? '', baseDir);
       if (!path) return;
       if (origin !== null) {
+        if (scriptsDecision) {
+          el.removeAttribute('src');
+          return;
+        }
         el.removeAttribute('src');
         jobs.push(this.images.remoteUrl(origin, path).then((url) => {
           if (url) el.setAttribute('src', url);
         }));
       } else {
-        jobs.push(this.images.localUrl(path).then((url) => el.setAttribute('src', url)));
+        jobs.push(this.images.localUrl(path, baseDir).then((url) => el.setAttribute('src', url)));
       }
     });
     if (origin === null && baseDir) {
@@ -772,6 +894,19 @@ export class PreviewPane {
     this.originResolver = resolver;
   }
 
+  /** Tell the pane how to resolve the path of the document being previewed. */
+  setPathResolver(resolver: () => string | null): void {
+    this.pathResolver = resolver;
+  }
+
+  /** Document key for the current preview: origin\0path, or null. */
+  private currentDocKey(): string | null {
+    const path = this.pathResolver();
+    if (!path) return null;
+    const origin = this.originResolver();
+    return `${origin ?? ''}\0${path}`;
+  }
+
   /** Settles once every pending image URL has been applied (tests). */
   whenImagesResolved(): Promise<void> {
     return this.images.idle();
@@ -781,6 +916,7 @@ export class PreviewPane {
     if (dir === this.currentBaseDir) return;
     this.currentBaseDir = dir;
     this.images.resetRemoteCache();
+    this.mermaidLoader.resetCache();
     // Relative image srcs resolve against the base dir, but the incremental
     // renderer reuses DOM nodes whose block HTML is unchanged — and their
     // <img> src was already rewritten against the OLD dir. Two files in

@@ -171,6 +171,9 @@ jobs:
       - name: Attach to GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
+          # Keep it a draft: without this, attaching to an existing draft release
+          # publishes it. We must not publish until latest.json is written by hand.
+          draft: true
           files: |
             dist/**/*.AppImage
             dist/**/*.AppImage.sig

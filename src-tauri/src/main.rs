@@ -2,6 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod askpass;
+mod cli;
+mod cli_install;
 mod commands;
 mod config;
 mod context;
@@ -106,48 +108,14 @@ fn route_and_emit(app: &tauri::AppHandle, paths: &[String], new_window: bool) {
 /// Event for paths a second `sparkdown <path>…` launch forwarded (#51).
 const OPEN_PATHS_EVENT: &str = "open-paths";
 
-/// CLI flag forcing folders into a new window (#66).
-const NEW_WINDOW_FLAG: &str = "--new-window";
-
-/// Paths a second `sparkdown …` launch passed (#51), resolved against that
-/// launch's working directory (not ours). Flags are skipped; `--version`,
-/// `--help`, `--mcp-stdio` and the askpass helper never get here (they exit
-/// in `main` before the single-instance plugin starts).
-fn forwarded_paths(argv: &[String], cwd: &str) -> Vec<String> {
-    argv.iter()
-        .skip(1)
-        .filter(|a| !a.is_empty() && !a.starts_with('-'))
-        .map(|a| {
-            let p = std::path::Path::new(a);
-            let joined = if p.is_absolute() || cwd.is_empty() {
-                p.to_path_buf()
-            } else {
-                std::path::Path::new(cwd).join(p)
-            };
-            // `sparkdown .` → `<cwd>`, not `<cwd>/.`.
-            std::path::absolute(&joined)
-                .unwrap_or(joined)
-                .to_string_lossy()
-                .trim_end_matches(['/', '\\'])
-                .to_string()
-        })
-        .map(|p| {
-            if p.is_empty() {
-                "/".to_string()
-            } else if p.ends_with(':') {
-                format!("{p}\\") // `C:` alone would mean "the cwd on C:"
-            } else {
-                p
-            }
-        })
-        .collect()
-}
-
 /// A second launch (#51): bring the window forward and open its paths here.
 fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, cwd: String) {
-    let paths = forwarded_paths(&argv, &cwd);
-    // `sparkdown --new-window <folder>` (#66).
-    let new_window = argv.iter().skip(1).any(|a| a == NEW_WINDOW_FLAG);
+    open_forwarded_argv(app, argv, cwd, cli::wants_new_window);
+}
+
+/// Shared entry for single-instance forwards and macOS `RunEvent::Opened`
+/// paths once converted to argv-equivalent absolute paths (#160 decision 4).
+fn open_forwarded_paths(app: &tauri::AppHandle, paths: Vec<String>, new_window: bool) {
     eprintln!("another launch handed over {} path(s)", paths.len());
     if paths.is_empty() {
         if let Some(window) = windows::target_window(app) {
@@ -155,34 +123,157 @@ fn on_second_instance(app: &tauri::AppHandle, argv: Vec<String>, cwd: String) {
         }
         return;
     }
-    // Folders route (#62): focus the window that has it, else the focused
-    // window if empty, else a new window. Before the frontend has started,
-    // it takes these with the CLI's.
     if let Some(paths) = app.state::<PendingFiles>().offer(paths) {
         let app = app.clone();
         std::thread::spawn(move || route_and_emit(&app, &paths, new_window));
     }
 }
 
+fn open_forwarded_argv(
+    app: &tauri::AppHandle,
+    argv: Vec<String>,
+    cwd: String,
+    new_window_flag: fn(&[String]) -> bool,
+) {
+    let new_window = new_window_flag(&argv);
+    let paths = cli::forwarded_paths(&argv, &cwd);
+    open_forwarded_paths(app, paths, new_window);
+}
+
+/// The effective uid of this process.
+#[cfg(unix)]
+fn our_uid() -> u32 {
+    // SAFETY: geteuid() has no arguments and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// Decide whether a socket peer may receive the forwarded command line: its
+/// uid must have been read successfully and equal ours. A lookup error is
+/// a refusal.
+#[cfg(unix)]
+fn peer_uid_allowed(peer: std::io::Result<u32>, ours: u32) -> bool {
+    matches!(peer, Ok(uid) if uid == ours)
+}
+
+/// The uid of the process at the other end of `stream` (Linux: SO_PEERCRED).
+#[cfg(all(unix, target_os = "linux"))]
+fn peer_uid(stream: &std::os::unix::net::UnixStream) -> std::io::Result<u32> {
+    use std::os::unix::io::AsRawFd;
+
+    #[repr(C)]
+    struct Ucred {
+        pid: libc::pid_t,
+        uid: libc::uid_t,
+        gid: libc::gid_t,
+    }
+
+    let mut ucred = Ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut size = std::mem::size_of::<Ucred>() as libc::socklen_t;
+    // SAFETY: the buffer and its size match what SO_PEERCRED writes.
+    let ret = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut ucred as *mut Ucred as *mut libc::c_void,
+            &mut size,
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(ucred.uid)
+}
+
+/// The uid of the process at the other end of `stream` (macOS: getpeereid).
+#[cfg(all(unix, target_os = "macos"))]
+fn peer_uid(stream: &std::os::unix::net::UnixStream) -> std::io::Result<u32> {
+    use std::os::unix::io::AsRawFd;
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: both out-pointers are valid for the call.
+    let ret = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(uid)
+}
+
+/// Other Unix systems have no peer-credential call wired up here: the
+/// socket directory's 0700 mode is the only check, so report our own uid.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn peer_uid(_stream: &std::os::unix::net::UnixStream) -> std::io::Result<u32> {
+    Ok(our_uid())
+}
+
+/// Whether the reply to a forwarded command line is a well-formed
+/// `{"sparkdown_ack":{"ok":true}}`. Anything else (empty, not JSON, no ack
+/// object, `ok` missing or not `true`) counts as "not handed over".
+#[cfg(unix)]
+fn forward_ack_ok(reply: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(reply) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
+        return false;
+    };
+    value
+        .get("sparkdown_ack")
+        .and_then(|ack| ack.get("ok"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// Hand argv + cwd to a running SparkDown over its core socket. True when
 /// one took them.
 #[cfg(unix)]
 fn forward_to_running_core() -> bool {
-    use std::io::{Read, Write};
-    let Ok(mut s) = std::os::unix::net::UnixStream::connect(mcp::mcp_socket_path()) else {
+    let Some(path) = mcp::mcp_socket_path() else {
         return false;
     };
+    if let Some(dir) = path.parent() {
+        if mcp::ensure_socket_dir(dir).is_err() {
+            return false;
+        }
+    }
+    let Ok(s) = std::os::unix::net::UnixStream::connect(&path) else {
+        return false;
+    };
+    // The running instance refuses forwards that lack its per-launch nonce;
+    // we read it from the file it placed next to the socket. The read
+    // succeeds only for the owning user.
+    let Some(nonce) = mcp::read_forward_nonce() else {
+        return false;
+    };
+    forward_over(s, our_uid(), &nonce)
+}
+
+/// Send argv + cwd over `s` and wait for the ack, provided the process at
+/// the other end runs as `ours`. Returns true only for a well-formed ack.
+#[cfg(unix)]
+fn forward_over(mut s: std::os::unix::net::UnixStream, ours: u32, nonce: &str) -> bool {
+    use std::io::{Read, Write};
+    if !peer_uid_allowed(peer_uid(&s), ours) {
+        return false;
+    }
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
     let argv: Vec<String> = std::env::args().collect();
-    let msg = serde_json::json!({ "sparkdown_forward": { "argv": argv, "cwd": cwd } });
+    let msg = mcp::forward_message(&argv, &cwd, nonce);
     if writeln!(s, "{msg}").is_err() {
         return false;
     }
     let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-    let mut b = [0u8; 64];
-    matches!(s.read(&mut b), Ok(n) if n > 0)
+    let mut buf = [0u8; 512];
+    match s.read(&mut buf) {
+        Ok(n) if n > 0 => forward_ack_ok(&buf[..n]),
+        _ => false,
+    }
 }
 
 #[cfg(not(unix))]
@@ -218,6 +309,122 @@ fn dbus_address_looks_valid(v: &str) -> bool {
     ]
     .iter()
     .any(|t| first.starts_with(t) && first.len() > t.len())
+}
+
+/// Path of the lock file that serializes the D-Bus-fallback first instance
+/// before the MCP socket exists (#160).
+#[cfg(unix)]
+fn fallback_instance_lock_path() -> Option<std::path::PathBuf> {
+    mcp::mcp_socket_path().map(|p| p.with_extension("instance.lock"))
+}
+
+/// Result of trying to claim the fallback instance lock.
+#[cfg(unix)]
+enum LockResult {
+    Claimed(std::fs::File),
+    Held,
+    Failed,
+}
+
+/// Exclusive non-blocking flock. Returns the lock holder when successful,
+/// `Held` when another process holds it, or `Failed` when the folder check fails.
+#[cfg(unix)]
+fn try_claim_fallback_lock() -> LockResult {
+    use std::os::unix::io::AsRawFd;
+    let Some(path) = fallback_instance_lock_path() else {
+        return LockResult::Failed;
+    };
+    // Create the base recursively and harden the leaf with the same ownership
+    // check used by `mcp::start`, so a fresh HOME with no ~/.cache works.
+    if let Some(dir) = path.parent() {
+        if mcp::ensure_socket_dir(dir).is_err() {
+            return LockResult::Failed;
+        }
+    }
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+        {
+            Ok(f) => f,
+            Err(_) => return LockResult::Failed,
+        }
+    };
+    let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 };
+    if ok {
+        LockResult::Claimed(file)
+    } else {
+        LockResult::Held
+    }
+}
+
+#[cfg(unix)]
+fn hold_fallback_lock(file: std::fs::File) {
+    use std::sync::Mutex;
+    static HOLD: Mutex<Option<std::fs::File>> = Mutex::new(None);
+    *HOLD.lock().unwrap_or_else(|e| e.into_inner()) = Some(file);
+}
+
+/// Retry forwarding over the core socket while the first instance is still
+/// starting (socket not listening yet).
+fn forward_with_retry(budget: std::time::Duration) -> bool {
+    let start = std::time::Instant::now();
+    let mut delay = std::time::Duration::from_millis(50);
+    while start.elapsed() < budget {
+        if forward_to_running_core() {
+            return true;
+        }
+        std::thread::sleep(delay);
+        delay = (delay * 2).min(std::time::Duration::from_millis(400));
+    }
+    false
+}
+
+/// Without the single-instance plugin: forward to a running/starting app, or
+/// claim the fallback lock and become the primary (#160 D-Bus race).
+fn fallback_single_instance_or_forward() -> bool {
+    if forward_to_running_core() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        match try_claim_fallback_lock() {
+            LockResult::Claimed(lock) => {
+                hold_fallback_lock(lock);
+                return false; // we are primary
+            }
+            LockResult::Failed => {
+                // Folder check failed (no per-user base, or not owned by us):
+                // skip the socket entirely, start normally.
+                return false;
+            }
+            LockResult::Held => {
+                // Another process holds the lock: fall through to wait.
+            }
+        }
+        // Another process holds the lock (starting or running): wait for its
+        // socket and forward, never a second GUI.
+        if forward_with_retry(std::time::Duration::from_secs(12)) {
+            return true;
+        }
+        // Lock holder vanished without a socket: try to take over.
+        if let LockResult::Claimed(lock) = try_claim_fallback_lock() {
+            hold_fallback_lock(lock);
+            return false;
+        }
+        // Still contested: one last forward attempt, else start (rare).
+        forward_with_retry(std::time::Duration::from_secs(2))
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 /// Holds the HTML document currently being previewed with scripts enabled.
@@ -263,27 +470,6 @@ pub(crate) fn is_allowed_navigation(url: &tauri::Url) -> bool {
     }
 }
 
-/// What `sparkdown <first arg>` should print and exit with, for the flags that
-/// must never open a window (#33): `--version`/`-V` and `--help`/`-h`. Only
-/// the first argument counts, so a file that happens to be named `--help`
-/// later on the command line still opens.
-fn cli_info(first_arg: Option<&str>) -> Option<String> {
-    let version = env!("CARGO_PKG_VERSION");
-    match first_arg? {
-        "--version" | "-V" => Some(format!("SparkDown {version}\n")),
-        "--help" | "-h" => Some(format!(
-            "SparkDown {version}: a Markdown editor and agent cockpit.\n\n\
-             Usage:\n  \
-             sparkdown [FILE|FOLDER]...   open files or a folder in the app\n                               (in the open window, if SparkDown is running)\n  \
-             sparkdown --new-window FOLDER  open FOLDER in a new window (focuses it if already open)\n  \
-             sparkdown --mcp-stdio        run the stdio MCP bridge for agent CLIs\n  \
-             sparkdown --version, -V      print the version and exit\n  \
-             sparkdown --help, -h         print this help and exit\n"
-        )),
-        _ => None,
-    }
-}
-
 /// Release Windows builds use the GUI subsystem, which starts with no
 /// console: attach to the parent's (the terminal that ran us) so `--version`
 /// output shows there. Redirected output (a pipe or file) works without it.
@@ -312,7 +498,7 @@ fn main() {
     // `--version` / `--help`: print and exit before any window, single-instance
     // or MCP logic runs (#33).
     let first = std::env::args().nth(1);
-    if let Some(text) = cli_info(first.as_deref()) {
+    if let Some(text) = cli::cli_info(first.as_deref()) {
         #[cfg(windows)]
         attach_parent_console();
         use std::io::Write;
@@ -330,10 +516,21 @@ fn main() {
         return;
     }
 
-    // Fallback lock (decision 1): without the single-instance plugin (a
-    // malformed D-Bus address on Linux), a live core socket means SparkDown
-    // already runs: hand it our args and exit, never a second GUI process.
-    if !single_instance_supported() && forward_to_running_core() {
+    // Detach on first launch so the terminal is free (#160 decision 1).
+    // `--wait`, the Windows shim, and an already-detached child skip this.
+    let argv_all: Vec<String> = std::env::args().collect();
+    if cli::should_detach(&argv_all) {
+        match proc::spawn_detached_self(&argv_all) {
+            Ok(()) => return,
+            Err(e) => eprintln!("Warning: could not detach from terminal: {e}"),
+        }
+    }
+
+    // Fallback lock (#160): without the single-instance plugin (a malformed
+    // D-Bus address on Linux), forward to a running/starting instance, or
+    // claim the instance lock before the MCP socket exists so a second
+    // launch during startup cannot open another GUI.
+    if !single_instance_supported() && fallback_single_instance_or_forward() {
         return;
     }
 
@@ -446,6 +643,13 @@ fn main() {
 
             app.on_menu_event(move |app_handle, event| {
                 let id = event.id().0.as_str();
+                // PATH install/repair (#160): no window required.
+                if matches!(id, "cli-install" | "cli-uninstall" | "cli-repair") {
+                    let app = app_handle.clone();
+                    let id = id.to_string();
+                    std::thread::spawn(move || handle_cli_install_menu(&app, &id));
+                    return;
+                }
                 // Window-level actions are the core's (#65).
                 if id.starts_with(lifecycle::NEW_WINDOW_ID) {
                     let app = app_handle.clone();
@@ -474,7 +678,11 @@ fn main() {
                 }
             });
 
-            let cli_files: Vec<String> = std::env::args().skip(1).collect();
+            let argv: Vec<String> = std::env::args().collect();
+            let cwd = std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let cli_files = cli::forwarded_paths(&argv, &cwd);
             if !cli_files.is_empty() {
                 let _ = app.state::<PendingFiles>().offer(cli_files);
             }
@@ -592,6 +800,7 @@ fn main() {
             terminal::tmux_sessions,
             terminal::tmux_send_keys,
             terminal::tmux_kill_session,
+            terminal::tmux_wheel,
             watcher::watch_start,
             watcher::watch_stop,
             git::git_status,
@@ -600,6 +809,9 @@ fn main() {
             git_write::git_commit,
             git_write::git_pull,
             git_write::git_push,
+            git_write::git_fetch,
+            git_write::git_discard_preview,
+            git_write::git_discard,
             review::git_change_stats,
             review::review_state_load,
             review::review_state_save,
@@ -791,14 +1003,39 @@ fn main() {
                     let _ = window.set_focus();
                 }
 
-                // Queued for a frontend that hasn't started, else routed
-                // and sent to one window. Never both (#106).
-                if let Some(paths) = app.state::<PendingFiles>().offer(paths) {
-                    let app = app.clone();
-                    std::thread::spawn(move || route_and_emit(&app, &paths, false));
-                }
+                // Same path as single-instance (#160 decision 4 / #106).
+                open_forwarded_paths(app, paths, false);
             }
         });
+}
+
+/// SparkDown → Install/Uninstall/Repair 'sparkdown' Command (#160).
+fn handle_cli_install_menu(app: &tauri::AppHandle, id: &str) {
+    let Some(target) = cli_install::running_cli_target() else {
+        eprintln!("cli install: no target binary for this package");
+        return;
+    };
+    let dirs = cli_install::user_bin_dirs();
+    let msg = match id {
+        "cli-install" => match cli_install::install(&dirs, &target) {
+            Ok(link) => format!("Installed sparkdown → {}", link.display()),
+            Err(e) => format!("Could not install sparkdown: {e}"),
+        },
+        "cli-uninstall" => match cli_install::uninstall(&dirs, &target) {
+            Ok(()) => "Removed the sparkdown command from PATH.".into(),
+            Err(e) => format!("Could not uninstall sparkdown: {e}"),
+        },
+        "cli-repair" => match cli_install::repair(&dirs, &target) {
+            Ok(link) => format!("Repaired sparkdown → {}", link.display()),
+            Err(e) => format!("Could not repair sparkdown: {e}"),
+        },
+        _ => return,
+    };
+    eprintln!("{msg}");
+    // Best-effort UI notice when a window exists.
+    if let Some(window) = windows::target_window(app) {
+        let _ = app.emit_to(window.label(), "cli-install-status", msg);
+    }
 }
 
 /// Remember a window's outer geometry for the next launch (in memory; the
@@ -851,6 +1088,67 @@ fn release_window(app: &tauri::AppHandle, label: &str) {
 #[cfg(test)]
 mod tests {
     use super::PendingFiles;
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    struct EnvGuard {
+        home: Option<std::ffi::OsString>,
+        xdg: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    impl EnvGuard {
+        fn new() -> Self {
+            Self {
+                home: std::env::var_os("HOME"),
+                xdg: std::env::var_os("XDG_RUNTIME_DIR"),
+            }
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(ref h) = self.home {
+                std::env::set_var("HOME", h);
+            } else {
+                std::env::remove_var("HOME");
+            }
+            if let Some(ref x) = self.xdg {
+                std::env::set_var("XDG_RUNTIME_DIR", x);
+            } else {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[serial_test::serial]
+    fn lock_wait_skipped_on_folder_check_failure() {
+        use super::{fallback_instance_lock_path, try_claim_fallback_lock, LockResult};
+
+        let _guard = EnvGuard::new();
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        std::env::remove_var("HOME");
+
+        let start = std::time::Instant::now();
+        let result = try_claim_fallback_lock();
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, LockResult::Failed),
+            "lock returns Failed when no per-user base is available"
+        );
+        assert!(
+            elapsed.as_secs() < 1,
+            "lock check completes quickly without waiting ({}s)",
+            elapsed.as_secs()
+        );
+        assert!(
+            fallback_instance_lock_path().is_none(),
+            "lock path is None when no per-user base is available"
+        );
+    }
 
     fn v(xs: &[&str]) -> Vec<String> {
         xs.iter().map(|s| s.to_string()).collect()
@@ -905,43 +1203,30 @@ mod tests {
             !opened.contains("push_pending"),
             "Opened must not queue after the take"
         );
-        assert!(opened.contains(".offer("));
+        // Shared with single-instance (#160 decision 4).
+        assert!(
+            opened.contains("open_forwarded_paths("),
+            "Opened must use the shared open path"
+        );
     }
 
     #[test]
-    fn second_launch_paths_resolve_against_its_own_cwd() {
-        // #51: `sparkdown .` / `sparkdown notes` from another directory.
-        #[cfg(unix)]
-        {
-            let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-            assert_eq!(
-                super::forwarded_paths(&argv(&["sparkdown", "."]), "/home/u/proj"),
-                vec!["/home/u/proj"]
-            );
-            assert_eq!(
-                super::forwarded_paths(&argv(&["sparkdown", "notes", "a.md"]), "/home/u"),
-                vec!["/home/u/notes", "/home/u/a.md"]
-            );
-            assert_eq!(
-                super::forwarded_paths(&argv(&["/usr/bin/sparkdown", "/tmp/x/"]), "/home/u"),
-                vec!["/tmp/x"]
-            );
-            // Flags are not paths; a bare launch forwards nothing.
-            assert!(super::forwarded_paths(&argv(&["sparkdown", "--foo"]), "/h").is_empty());
-            assert!(super::forwarded_paths(&argv(&["sparkdown"]), "/h").is_empty());
-            assert_eq!(
-                super::forwarded_paths(&argv(&["sparkdown", "/"]), "/h"),
-                vec!["/"]
-            );
-        }
-        #[cfg(windows)]
-        {
-            let argv = vec!["sparkdown.exe".to_string(), "notes".to_string()];
-            assert_eq!(
-                super::forwarded_paths(&argv, r"C:\Users\u"),
-                vec![r"C:\Users\u\notes".to_string()]
-            );
-        }
+    fn opened_and_second_instance_share_one_open_path() {
+        // #160 decision 4: both routes call open_forwarded_paths → route_and_emit.
+        let src = include_str!("main.rs");
+        assert!(src.contains("fn open_forwarded_paths("));
+        assert!(
+            src.contains("open_forwarded_argv(app, argv, cwd, cli::wants_new_window)"),
+            "single-instance must use the shared open path"
+        );
+        assert!(
+            src.contains("open_forwarded_paths(app, paths, false)"),
+            "Opened must call open_forwarded_paths"
+        );
+        assert!(
+            src.contains("route_and_emit(&app, &paths, new_window)"),
+            "shared open must route_and_emit"
+        );
     }
 
     #[test]
@@ -955,28 +1240,6 @@ mod tests {
         assert!(!super::dbus_address_looks_valid(""));
         assert!(!super::dbus_address_looks_valid("garbage"));
         assert!(!super::dbus_address_looks_valid("unix:"));
-    }
-
-    #[test]
-    fn version_and_help_flags_print_instead_of_opening_the_app() {
-        let v = super::cli_info(Some("--version")).unwrap();
-        assert_eq!(v, format!("SparkDown {}\n", env!("CARGO_PKG_VERSION")));
-        assert_eq!(super::cli_info(Some("-V")), Some(v));
-        let help = super::cli_info(Some("--help")).unwrap();
-        assert!(
-            help.contains("--mcp-stdio") && help.contains("--version"),
-            "{help}"
-        );
-        assert_eq!(super::cli_info(Some("-h")), Some(help));
-        // Anything else (files, folders, the MCP flag, nothing) is not ours.
-        for other in [
-            None,
-            Some("notes.md"),
-            Some("--mcp-stdio"),
-            Some("-psn_0_1"),
-        ] {
-            assert_eq!(super::cli_info(other), None, "{other:?}");
-        }
     }
 
     use super::is_allowed_navigation;
@@ -1043,5 +1306,181 @@ mod tests {
         ] {
             assert!(hooks.contains(&line), "{hooks_rel} must contain `{line}`");
         }
+        assert!(
+            hooks.contains("NSIS_HOOK_POSTINSTALL")
+                && hooks.contains("SdAppendUserPath")
+                && hooks.contains("un.SdRemoveUserPath")
+                && hooks.contains("SdInstallPathShim")
+                && !hooks
+                    .lines()
+                    .any(|l| l.trim_start().starts_with("${un.StrLoc}"))
+                && !hooks.contains("!define MUI_FINISHPAGE_SHOWREADME"),
+            "PATH hooks (#160): un.SdRemoveUserPath without StrFunc/SHOWREADME defines"
+        );
+        assert!(
+            hooks.contains(r"$INSTDIR\bin")
+                && hooks.contains("sparkdown-shim.exe")
+                && hooks.contains(r"bin\sparkdown.exe"),
+            "PATH must use $INSTDIR\\bin\\sparkdown.exe (Windows case-safe, #160)"
+        );
+        assert!(
+            hooks.contains("/SDNOPATH") && hooks.contains("SdAppendUserPath"),
+            "PATH default-on in POSTINSTALL with /SDNOPATH opt-out (#160); Finish SHOWREADME is owned by Tauri desktop shortcut"
+        );
+        let package_ps1 =
+            std::fs::read_to_string(dir.join("../scripts/package-windows.ps1")).unwrap();
+        assert!(
+            package_ps1.contains("binaries/sparkdown-shim"),
+            "package-windows.ps1 must externalBin sparkdown-shim (#160)"
+        );
+        // Reject the case-colliding name (sparkdown next to SparkDown.exe).
+        let colliding = "binaries/sparkdown";
+        let safe = "binaries/sparkdown-shim";
+        assert!(
+            package_ps1.contains(safe)
+                && package_ps1
+                    .match_indices(colliding)
+                    .all(|(i, _)| package_ps1[i..].starts_with(safe)),
+            "externalBin must not use binaries/sparkdown without -shim (#160)"
+        );
+    }
+
+    #[test]
+    fn bump_cask_and_launcher_resource_for_cli_path() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let script = std::fs::read_to_string(dir.join("../scripts/bump-cask.sh")).unwrap();
+        assert!(
+            script.contains("Contents/Resources/bin/sparkdown") && script.contains("binary "),
+            "bump-cask.sh must ensure the cask binary stanza (#160)"
+        );
+        assert!(
+            dir.join("resources/bin/sparkdown").is_file(),
+            "macOS launcher must ship as Contents/Resources/bin/sparkdown"
+        );
+        let conf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("tauri.conf.json")).unwrap())
+                .unwrap();
+        let resources = conf["bundle"]["resources"].as_array().unwrap();
+        assert!(
+            resources
+                .iter()
+                .any(|r| r.as_str() == Some("resources/bin/sparkdown")),
+            "tauri.conf.json must bundle the macOS launcher"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn peer_uid_decision_accepts_only_our_uid() {
+        assert!(super::peer_uid_allowed(Ok(1000), 1000), "same uid");
+        assert!(!super::peer_uid_allowed(Ok(1001), 1000), "different uid");
+        assert!(!super::peer_uid_allowed(Ok(0), 1000), "root is not us");
+        assert!(
+            !super::peer_uid_allowed(Ok(1000), 0),
+            "we are root, peer is not"
+        );
+        assert!(super::peer_uid_allowed(Ok(0), 0), "root talking to root");
+        let lookup_error = Err(std::io::Error::other("getsockopt failed"));
+        assert!(
+            !super::peer_uid_allowed(lookup_error, 1000),
+            "a failed lookup is a refusal"
+        );
+    }
+
+    /// Both ends of a real socket pair belong to this user, so the real
+    /// lookup reports our own uid.
+    #[test]
+    #[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
+    fn peer_uid_of_a_real_socket_is_our_uid() {
+        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert_eq!(super::peer_uid(&a).unwrap(), super::our_uid());
+        assert_eq!(super::peer_uid(&b).unwrap(), super::our_uid());
+    }
+
+    /// Run `forward_over` against a server thread that replies with `reply`.
+    /// Returns (result, bytes the server received).
+    #[cfg(unix)]
+    fn forward_with(reply: &'static str, ours: u32) -> (bool, Vec<u8>) {
+        const NONCE: &str = "test-nonce-0123";
+        use std::io::{Read, Write};
+        let (client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            let mut byte = [0u8; 1];
+            // One request line, or EOF when the client sent nothing.
+            while let Ok(1) = server.read(&mut byte) {
+                got.push(byte[0]);
+                if byte[0] == b'\n' {
+                    let _ = server.write_all(reply.as_bytes());
+                    break;
+                }
+            }
+            got
+        });
+        let result = super::forward_over(client, ours, NONCE);
+        (result, handle.join().unwrap())
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
+    fn forward_over_hands_over_to_a_peer_with_our_uid() {
+        let (ok, request) = forward_with("{\"sparkdown_ack\":{\"ok\":true}}\n", super::our_uid());
+        assert!(ok);
+        let text = String::from_utf8(request).unwrap();
+        assert!(text.contains("sparkdown_forward"), "{text}");
+        assert!(text.contains("test-nonce-0123"), "nonce is sent: {text}");
+    }
+
+    /// A peer running as another uid never receives the command line.
+    #[test]
+    #[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
+    fn forward_over_refuses_a_peer_with_another_uid_without_sending() {
+        let other = super::our_uid().wrapping_add(1);
+        let (ok, request) = forward_with("{\"sparkdown_ack\":{\"ok\":true}}\n", other);
+        assert!(!ok);
+        assert!(request.is_empty(), "nothing was sent: {request:?}");
+    }
+
+    #[test]
+    #[cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
+    fn forward_over_needs_a_well_formed_ack() {
+        let ours = super::our_uid();
+        for reply in ["{\"sparkdown_ack\":{\"ok\":false}}\n", "ok\n", "{}\n"] {
+            let (ok, _) = forward_with(reply, ours);
+            assert!(!ok, "{reply:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn forward_ack_accepts_only_ok_true() {
+        let ok = |s: &str| super::forward_ack_ok(s.as_bytes());
+        assert!(ok(r#"{"sparkdown_ack":{"ok":true}}"#));
+        assert!(
+            ok("{\"sparkdown_ack\":{\"ok\":true}}\n"),
+            "trailing newline"
+        );
+        assert!(
+            ok(r#"{"sparkdown_ack":{"ok":true,"secret":"x"}}"#),
+            "extra fields"
+        );
+        assert!(!ok(r#"{"sparkdown_ack":{"ok":false}}"#), "ok false");
+        assert!(
+            !ok(r#"{"sparkdown_ack":{"ok":false,"error":"no"}}"#),
+            "refused"
+        );
+        assert!(!ok(r#"{"sparkdown_ack":{}}"#), "ok missing");
+        assert!(!ok(r#"{"sparkdown_ack":{"ok":"true"}}"#), "ok is a string");
+        assert!(!ok(r#"{"sparkdown_ack":{"ok":1}}"#), "ok is a number");
+        assert!(!ok(r#"{"sparkdown_ack":null}"#), "ack is null");
+        assert!(!ok(r#"{"sparkdown_ack":true}"#), "ack is not an object");
+        assert!(!ok(r#"{"ok":true}"#), "ok outside the ack");
+        assert!(!ok(r#"{"other":{"ok":true}}"#), "no ack key");
+        assert!(!ok("[]"), "wrong shape");
+        assert!(!ok("true"), "bare value");
+        assert!(!ok("not json"), "malformed");
+        assert!(!ok(r#"{"sparkdown_ack":{"ok":true}"#), "truncated");
+        assert!(!ok(""), "empty");
+        assert!(!super::forward_ack_ok(&[0xff, 0xfe, 0x7b]), "invalid utf-8");
     }
 }

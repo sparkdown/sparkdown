@@ -9,6 +9,9 @@ import {
   basename,
   parentDir,
   escapeHtml,
+  neutralizeUnicodeControls,
+  hasUnicodeControls,
+  escapeReviewText,
   debounce,
   mapLineToY,
   mapYToLine,
@@ -153,6 +156,42 @@ describe('escapeHtml', () => {
 
   it('leaves plain text untouched', () => {
     expect(escapeHtml('plain text')).toBe('plain text');
+  });
+});
+
+describe('neutralizeUnicodeControls', () => {
+  it('replaces bidi overrides with a visible marker', () => {
+    const out = neutralizeUnicodeControls('a\u202Eb\u2066c\u2069d');
+    expect(out).toBe('a<U+202E>b<U+2066>c<U+2069>d');
+    // The marker must not reintroduce the raw control characters.
+    expect(hasUnicodeControls(out)).toBe(false);
+  });
+
+  it('replaces invisible formatting characters', () => {
+    expect(neutralizeUnicodeControls('x\u200By\u200Fz')).toBe('x<U+200B>y<U+200F>z');
+    expect(neutralizeUnicodeControls('a\u00ADb\uFEFFc\u2060d')).toBe('a<U+00AD>b<U+FEFF>c<U+2060>d');
+  });
+
+  it('leaves plain strings untouched', () => {
+    expect(neutralizeUnicodeControls('hello world')).toBe('hello world');
+    expect(neutralizeUnicodeControls('')).toBe('');
+    expect(hasUnicodeControls('hello')).toBe(false);
+  });
+});
+
+describe('escapeReviewText', () => {
+  it('neutralises Unicode controls and then HTML-escapes the marker', () => {
+    // The literal `<` / `>` from the `<U+202E>` marker must be HTML-escaped
+    // so the DOM shows the escape text (not an unknown tag).
+    const out = escapeReviewText('if (admin \u202E)');
+    expect(out).toBe('if (admin &lt;U+202E&gt;)');
+    expect(out).not.toContain('\u202E');
+  });
+
+  it('still escapes &, <, >, and " like escapeHtml', () => {
+    expect(escapeReviewText('<a href="x">Tom & Jerry</a>')).toBe(
+      '&lt;a href=&quot;x&quot;&gt;Tom &amp; Jerry&lt;/a&gt;',
+    );
   });
 });
 

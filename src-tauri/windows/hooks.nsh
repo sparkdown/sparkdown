@@ -107,3 +107,149 @@ Function SdRecoverPreviousInstallDir
   Pop $R1
   Pop $R0
 FunctionEnd
+
+
+; ---------------------------------------------------------------------------
+; #160: add sparkdown to the user PATH (on by default), remove on uninstall.
+; Tauri's finish page already owns MUI_FINISHPAGE_SHOWREADME for the desktop
+; shortcut checkbox, so we cannot reuse that slot. PATH is added in
+; NSIS_HOOK_POSTINSTALL for every install (UI and silent) unless /SDNOPATH.
+; The console shim ships as $INSTDIR\sparkdown-shim.exe (externalBin). We copy
+; it to $INSTDIR\bin\sparkdown.exe and put $INSTDIR\bin on PATH — not $INSTDIR
+; itself — because Windows is case-insensitive and SparkDown.exe would collide
+; with sparkdown.exe in the same folder.
+; Uses ${StrLoc} (initialized by Tauri's installer.nsi before hooks).
+; ---------------------------------------------------------------------------
+
+Var SdOldPath
+Var SdNewPath
+Var SdPathNeedle
+Var SdPathIdx
+Var SdPathLeft
+Var SdPathRight
+Var SdPathLen
+
+!define SD_PATH_REGKEY "Environment"
+!define SD_PATH_BIN "$INSTDIR\bin"
+
+Function SdInstallPathShim
+  ; Place a case-safe sparkdown.exe on PATH ($INSTDIR\bin), sourced from the
+  ; distinctly named externalBin next to the GUI.
+  CreateDirectory "${SD_PATH_BIN}"
+  IfFileExists "$INSTDIR\sparkdown-shim.exe" 0 sd_shim_missing
+    CopyFiles /SILENT "$INSTDIR\sparkdown-shim.exe" "${SD_PATH_BIN}\sparkdown.exe"
+    Return
+  sd_shim_missing:
+    DetailPrint "sparkdown-shim.exe missing; PATH entry skipped"
+FunctionEnd
+
+Function SdAppendUserPath
+  StrCpy $SdPathNeedle "${SD_PATH_BIN}"
+  ReadRegStr $SdOldPath HKCU "${SD_PATH_REGKEY}" "Path"
+  ; Already present? Search ;path; form.
+  StrCpy $0 ";$SdOldPath;"
+  ${StrLoc} $SdPathIdx "$0" ";$SdPathNeedle;" ">"
+  ${If} $SdPathIdx != ""
+    Return
+  ${EndIf}
+  ${If} $SdOldPath == ""
+    StrCpy $SdNewPath "$SdPathNeedle"
+  ${Else}
+    StrCpy $SdNewPath "$SdOldPath;$SdPathNeedle"
+  ${EndIf}
+  WriteRegExpandStr HKCU "${SD_PATH_REGKEY}" "Path" "$SdNewPath"
+  WriteRegStr HKCU "${SD_UNINSTKEY}" "SdPathDir" "$SdPathNeedle"
+  System::Call 'user32::SendMessageTimeout(i 0xffff, i 0x1A, i 0, t "Environment", i 0, i 5000, *i .r0)'
+FunctionEnd
+
+Function un.SdRemoveUserPath
+  ; No ${StrLoc}/${un.StrLoc}: Tauri inits only ${StrLoc} for the installer,
+  ; and uninstall Calls must stay in un.* without StrFunc. Remove our dir
+  ; when it is the whole Path, a ";dir" suffix, a "dir;" prefix, or a
+  ; ";dir;" middle — using only StrCpy/StrCmp/StrLen.
+  ReadRegStr $SdPathNeedle HKCU "${SD_UNINSTKEY}" "SdPathDir"
+  ${If} $SdPathNeedle == ""
+    Return
+  ${EndIf}
+  ReadRegStr $SdOldPath HKCU "${SD_PATH_REGKEY}" "Path"
+  ${If} $SdOldPath == $SdPathNeedle
+    StrCpy $SdNewPath ""
+    Goto sd_un_path_write
+  ${EndIf}
+
+  ; Prefix "dir;"
+  StrCpy $0 "$SdPathNeedle;"
+  StrLen $SdPathLen $0
+  StrCpy $1 $SdOldPath $SdPathLen
+  ${If} $1 == $0
+    StrCpy $SdNewPath $SdOldPath "" $SdPathLen
+    Goto sd_un_path_write
+  ${EndIf}
+
+  ; Suffix ";dir"
+  StrCpy $0 ";$SdPathNeedle"
+  StrLen $SdPathLen $0
+  StrLen $1 $SdOldPath
+  IntOp $2 $1 - $SdPathLen
+  ${If} $2 >= 0
+    StrCpy $3 $SdOldPath "" $2
+    ${If} $3 == $0
+      StrCpy $SdNewPath $SdOldPath $2
+      Goto sd_un_path_write
+    ${EndIf}
+  ${EndIf}
+
+  ; Middle ";dir;" — scan by walking $SdOldPath
+  StrCpy $0 ";$SdPathNeedle;"
+  StrLen $SdPathLen $0
+  StrCpy $SdPathIdx 0
+  StrLen $1 $SdOldPath
+  sd_un_scan:
+    IntOp $2 $1 - $SdPathIdx
+    ${If} $2 < $SdPathLen
+      ; Not found: leave Path unchanged but still clear our marker.
+      Goto sd_un_path_clear_marker
+    ${EndIf}
+    StrCpy $3 $SdOldPath $SdPathLen $SdPathIdx
+    ${If} $3 == $0
+      StrCpy $SdPathLeft $SdOldPath $SdPathIdx
+      IntOp $4 $SdPathIdx + $SdPathLen
+      ; Keep one ';' — $0 was ";dir;", so drop the leading ';' of the match
+      ; by putting ';' back between left and right only if both sides nonempty.
+      IntOp $4 $4 - 1
+      StrCpy $SdPathRight $SdOldPath "" $4
+      ; $SdPathLeft + $SdPathRight where right still starts with ';'
+      ${If} $SdPathLeft == ""
+        StrCpy $SdNewPath $SdPathRight "" 1
+      ${Else}
+        StrCpy $SdNewPath "$SdPathLeft$SdPathRight"
+      ${EndIf}
+      Goto sd_un_path_write
+    ${EndIf}
+    IntOp $SdPathIdx $SdPathIdx + 1
+    Goto sd_un_scan
+
+  sd_un_path_write:
+    WriteRegExpandStr HKCU "${SD_PATH_REGKEY}" "Path" "$SdNewPath"
+  sd_un_path_clear_marker:
+  DeleteRegValue HKCU "${SD_UNINSTKEY}" "SdPathDir"
+  System::Call 'user32::SendMessageTimeout(i 0xffff, i 0x1A, i 0, t "Environment", i 0, i 5000, *i .r0)'
+FunctionEnd
+
+!macro NSIS_HOOK_POSTINSTALL
+  ; Always stage bin\sparkdown.exe when the shim is present (even if PATH is
+  ; opted out — a later Repair can still add PATH).
+  Call SdInstallPathShim
+  ; Default-on PATH for UI and silent installs; /SDNOPATH opts out.
+  ; (Cannot use MUI_FINISHPAGE_SHOWREADME — Tauri already uses it for desktop.)
+  ClearErrors
+  ${GetParameters} $0
+  ${GetOptions} $0 "/SDNOPATH" $1
+  IfErrors 0 sd_path_done
+    Call SdAppendUserPath
+  sd_path_done:
+!macroend
+
+!macro NSIS_HOOK_PREUNINSTALL
+  Call un.SdRemoveUserPath
+!macroend

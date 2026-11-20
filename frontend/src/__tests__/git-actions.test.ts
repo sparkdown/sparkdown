@@ -12,11 +12,11 @@ vi.mock('../api', () => ({
   },
 }));
 
-import { GitActions } from '../git-actions';
+import { GitActions, type GitActionsOptions } from '../git-actions';
 import { GitFeedback, STATUS_FADE_MS } from '../git-output';
 import type { GitBranchStatus, GitChange } from '../api';
 
-function make(root: string | null = '/repo') {
+function make(root: string | null = '/repo', extra: Partial<GitActionsOptions> = {}) {
   document.body.innerHTML = `
     <div id="acts" hidden>
       <button id="tog"></button>
@@ -45,7 +45,7 @@ function make(root: string | null = '/repo') {
       files: $('f'),
       commit: $('c') as HTMLButtonElement,
     },
-    { repoRoot: () => root, refresh, report: fb },
+    { repoRoot: () => root, refresh, report: fb, ...extra },
   );
   return { ga, refresh, $, fb, openOutput };
 }
@@ -253,5 +253,66 @@ describe('GitActions header + commit panel (0.4.1)', () => {
     expect($('acts').hidden).toBe(true);
     const r = make();
     expect(r.$('acts').hidden).toBe(false);
+  });
+});
+
+describe('GitActions: diverged pull and background fetch (#174, #175)', () => {
+  beforeEach(() => {
+    gitPull.mockReset();
+    gitPush.mockReset();
+  });
+
+  it('a merge conflict is a sticky status error; clicking opens the Git tab with the full output and files', async () => {
+    const { ga, $, fb, openOutput } = make();
+    ga.setBranch(branch({ ahead: 1, behind: 1 }));
+    gitPull.mockRejectedValue({
+      kind: 'merge_conflict',
+      message: 'Pull stopped on merge conflicts in 2 files. Resolve them, then commit.',
+      detail: 'CONFLICT (content): Merge conflict in a.md\n\nConflicted files:\n  a.md\n  b.md',
+      files: ['a.md', 'b.md'],
+    });
+    await ga.pull();
+    expect(fb.status.state()).toBe('error');
+    expect($('st').textContent).toContain('merge conflicts in 2 files');
+    await new Promise((r) => setTimeout(r, STATUS_FADE_MS + 50));
+    expect(fb.status.state()).toBe('error'); // persistent, no fade
+    expect($('out').textContent).toContain('Conflicted files:');
+    $('st').click();
+    expect(openOutput).toHaveBeenCalled();
+  }, STATUS_FADE_MS + 2000);
+
+  it('a rejected push triggers one background fetch after the refresh', async () => {
+    const onPushRejected = vi.fn(async () => {});
+    const order: string[] = [];
+    const { ga, refresh } = make('/repo', {
+      onPushRejected: () => {
+        order.push('fetch');
+        return onPushRejected();
+      },
+    });
+    refresh.mockImplementation(async () => {
+      order.push('refresh');
+    });
+    ga.setBranch(branch({ ahead: 1 }));
+    gitPush.mockRejectedValue({ kind: 'rejected', message: 'Pull first', detail: '' });
+    await ga.push();
+    expect(onPushRejected).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['refresh', 'fetch']);
+  });
+
+  it('other push failures do not fetch', async () => {
+    const onPushRejected = vi.fn();
+    const { ga } = make('/repo', { onPushRejected });
+    ga.setBranch(branch({ ahead: 1 }));
+    gitPush.mockRejectedValue({ kind: 'auth', message: 'no', detail: '' });
+    await ga.push();
+    expect(onPushRejected).not.toHaveBeenCalled();
+  });
+
+  it('the Pull tooltip says when the last fetch ran', () => {
+    const at = Date.now() - 3 * 60000;
+    const { ga, $ } = make('/repo', { lastFetched: () => at });
+    ga.setBranch(branch({ behind: 2 }));
+    expect($('pull').title).toBe('Pull main from its upstream (2 behind), last fetched 3 min ago');
   });
 });

@@ -1,6 +1,7 @@
 import { api, type GitActionError, type GitActionResult, type GitBranchStatus, type GitChange } from './api';
 import { escapeHtml } from './utils';
 import type { GitAction, GitReporter } from './git-output';
+import { fetchedAgo } from './git-fetch';
 
 /**
  * Commit / Pull / Push for the Changes view (#122, header icons since 0.4.1).
@@ -44,6 +45,11 @@ export interface GitActionsOptions {
   refresh(): Promise<void> | void;
   /** Status bar + Git output tab. */
   report: GitReporter;
+  /** #175: a push was rejected (the remote has new commits); the
+   *  background fetcher fetches once so the behind count shows. */
+  onPushRejected?(): Promise<unknown> | void;
+  /** #175: when the last background fetch succeeded (Pull tooltip). */
+  lastFetched?(): number | null;
 }
 
 type Busy = GitAction | null;
@@ -180,15 +186,17 @@ export class GitActions {
     this.busy = what;
     this.opts.report.start(what);
     this.sync();
+    let rejected = false;
     try {
       const r = await call();
       onOk?.();
       this.opts.report.done(what, r);
     } catch (e) {
-      this.opts.report.fail(
-        what,
-        isGitActionError(e) ? e : { kind: 'other', message: 'Git reported an error.', detail: String(e) },
-      );
+      const err: GitActionError = isGitActionError(e)
+        ? e
+        : { kind: 'other', message: 'Git reported an error.', detail: String(e) };
+      rejected = what === 'push' && err.kind === 'rejected';
+      this.opts.report.fail(what, err);
     } finally {
       this.busy = null;
       this.render();
@@ -196,6 +204,13 @@ export class GitActions {
         await this.opts.refresh();
       } catch {
         // The refresh shows its own error state.
+      }
+    }
+    if (rejected) {
+      try {
+        await this.opts.onPushRejected?.();
+      } catch {
+        // quiet: the fetch is best effort
       }
     }
   }
@@ -233,7 +248,9 @@ export class GitActions {
     setBusy(d.push, this.busy === 'push');
     const behind = canSync ? b!.behind : 0;
     const ahead = canSync ? b!.ahead : 0;
-    d.pull.title = why || `Pull ${b?.branch} from its upstream${behind ? ` (${behind} behind)` : ''}`;
+    const ago = fetchedAgo(this.opts.lastFetched?.() ?? null);
+    d.pull.title =
+      why || `Pull ${b?.branch} from its upstream${behind ? ` (${behind} behind)` : ''}${ago ? `, ${ago}` : ''}`;
     d.push.title = why || `Push ${b?.branch} to its upstream${ahead ? ` (${ahead} ahead)` : ''}, never forced`;
     d.pull.setAttribute('aria-label', behind ? `Pull, ${behind} behind` : 'Pull');
     d.push.setAttribute('aria-label', ahead ? `Push, ${ahead} ahead` : 'Push');

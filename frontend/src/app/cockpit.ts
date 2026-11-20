@@ -2,6 +2,7 @@ import type { TerminalManager } from '../terminal';
 import { api } from '../api';
 import { LAYOUT } from '../constants';
 import { attachResizeDrag } from '../resize-drag';
+import { TypeAhead } from '../type-ahead';
 import { isAbsolutePath, joinPath } from '../utils';
 import { applyWorkspaceLayout, workspaceLayoutFromConfig } from '../workspace-layout';
 import type { AppContext } from './context';
@@ -29,6 +30,8 @@ export class CockpitController {
    *  each pass the null check across the dynamic-import await and build two
    *  TerminalManagers (and two shells). */
   private terminalOpenInFlight: Promise<void> | null = null;
+  /** Takes the keys typed while the first shell is still starting. */
+  private typeAhead = new TypeAhead(() => document.getElementById('terminal-panel'));
   private terminalVisible = false;
   /** Terminals Only: terminal fills the center column; editor/preview hidden. */
   private terminalsOnly = false;
@@ -74,9 +77,10 @@ export class CockpitController {
     this.terminals?.applyTheme();
   }
 
-  /** Push tmux / agent-args settings to a live manager. */
+  /** Push tmux / agent-args / scrollback settings to a live manager. */
   applySettings(): void {
     this.terminals?.setUseTmux(this.ctx.config.use_tmux);
+    this.terminals?.setScrollback(this.ctx.config.terminal_scrollback);
     this.terminals?.setAgentArgs(this.ctx.config.agent_args ?? {});
   }
 
@@ -180,7 +184,10 @@ export class CockpitController {
     }
 
     this.setDrawerVisible(!this.terminalVisible);
-    if (!this.terminalVisible) return;
+    if (!this.terminalVisible) {
+      this.typeAhead.discard();
+      return;
+    }
     // ⌃` (or the toolbar) always reveals the terminals, never the Git log.
     this.selectBottomTab('terminals');
 
@@ -188,7 +195,14 @@ export class CockpitController {
     // and publishes right away so an agent started now sees current state.
     this.deps.armAgentContext();
 
-    await this.openTerminals();
+    // No terminal yet: keys typed from now on wait here, not in the editor,
+    // until the new shell can take them.
+    if (!this.terminals?.hasPanes()) this.typeAhead.start();
+    try {
+      await this.openTerminals();
+    } finally {
+      this.typeAhead.discard();
+    }
   }
 
   /**
@@ -211,6 +225,7 @@ export class CockpitController {
             // Split layout per workspace, persisted in AppConfig and
             // restored (tmux reattach) by restoreOrCreate.
             mgr.setOnTerminalsOnly(() => void this.toggleTerminalsOnly());
+            mgr.setEarlyInput(() => this.typeAhead.take());
             mgr.setLayoutStore({
               load: (key) => this.ctx.config.terminal_layouts?.[key],
               save: (key, layout) => this.saveLayout(key, layout),
@@ -237,6 +252,7 @@ export class CockpitController {
         // Root new shells at the open folder so agent and panes share a cwd.
         this.terminals.setCwd(this.ctx.fileTree.getRoot() ?? this.ctx.baseDir);
         this.terminals.setUseTmux(this.ctx.config.use_tmux);
+        this.terminals.setScrollback(this.ctx.config.terminal_scrollback);
         this.terminals.setAgentArgs(this.ctx.config.agent_args ?? {});
         // Reattach tmux sessions that survived a previous run (so a running
         // agent is right where the user left it); otherwise open one fresh
@@ -316,6 +332,11 @@ export class CockpitController {
   /** Move focus to the next (1) / previous (-1) terminal pane. */
   focusTerminalPane(delta: 1 | -1): void {
     if (this.terminalVisible) this.terminals?.focusNeighbor(delta);
+  }
+
+  /** Open the focused terminal pane's find bar; false when none is open. */
+  openTerminalFind(): boolean {
+    return this.terminalVisible && (this.terminals?.openFind() ?? false);
   }
 
   /** Whether keyboard focus is in a terminal pane (routes ⌘W to the pane). */

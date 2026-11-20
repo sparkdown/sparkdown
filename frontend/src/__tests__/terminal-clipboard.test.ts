@@ -64,6 +64,24 @@ describe('agentLaunchCommand', () => {
     );
   });
 
+  it('Claude launch line with apostrophe in path survives shell parsing', () => {
+    const odd = { program: "/home/o'brien/.local/bin/sparkdown", args: ['--mcp-stdio'] };
+    const cmd = agentLaunchCommand('claude', { shim: odd, installed: false });
+    
+    // The launch line must survive eval parsing. Extract the --mcp-config argument.
+    const match = cmd.match(/--mcp-config '([^']+(?:'\\''[^']+)*)'/);
+    expect(match).toBeDefined();
+    const inner = match![1];
+    
+    // Parse the JSON to verify it round-trips correctly through shell escaping.
+    // shq() escapes ' as '\'' (end quote, escaped quote, start quote).
+    const unescaped = inner.split("'\\''").join("'");
+    const parsed = JSON.parse(unescaped);
+    expect(parsed).toEqual({
+      mcpServers: { sparkdown: { command: "/home/o'brien/.local/bin/sparkdown", args: ['--mcp-stdio'] } },
+    });
+  });
+
   it('injects inline config for opencode that merges with the user config', () => {
     const cmd = agentLaunchCommand('opencode', { shim: SHIM, installed: false });
     const m = /^OPENCODE_CONFIG_CONTENT='(.*)' opencode$/.exec(cmd);

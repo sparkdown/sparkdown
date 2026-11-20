@@ -1,6 +1,7 @@
 [package]
 name = "sparkdown"
-version = "0.4.1"
+default-run = "sparkdown"
+version = "0.4.3"
 edition = "2021"
 description = "A small, local markdown editor for you and your coding agents"
 authors = ["Paulo Vitor Justino Pereira"]
@@ -62,6 +63,11 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Threading",
   # Toolhelp32 snapshot: does a terminal's shell have child processes (#43).
   "Win32_System_Diagnostics_ToolHelp",
+  # GetNamedPipeServerProcessId: the external-agent shim checks which
+  # process serves the pipe, and which user it runs as, before bridging an
+  # agent's JSON-RPC through it. Needs the Pipes API and
+  # PROCESS_QUERY_LIMITED_INFORMATION on the server process.
+  "Win32_System_Pipes",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -76,6 +82,8 @@ tauri-build = { version = "2", features = [] }
 # Tests only: sign fake update artifacts with a throwaway key made in-test.
 minisign = "0.10"
 ts-rs = "12"
+serial_test = "3"
+tempfile = "3"
 
 [features]
 # Test-only (E2E on Windows): let WebDriver attach to WebView2 by passing
@@ -90,3 +98,10 @@ strip = true
 opt-level = "z"
 codegen-units = 1
 panic = "abort"
+
+[[bin]]
+name = "sparkdown-shim"
+path = "src/bin/sparkdown_shim.rs"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

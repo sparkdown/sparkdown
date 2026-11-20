@@ -85,6 +85,12 @@ pub struct AppConfig {
     #[serde(default = "default_true")]
     pub use_tmux: bool,
 
+    /// Lines each embedded terminal keeps above the viewport. The frontend
+    /// clamps it to 200..=50000 (frontend/src/terminal-scrollback.ts) so a
+    /// hand-edited value can neither disable history nor exhaust memory.
+    #[serde(default = "default_terminal_scrollback")]
+    pub terminal_scrollback: u32,
+
     /// Agent context bridge: mirror what the user is viewing (and the live
     /// text of unsaved buffers) into a per-workspace temp dir that agents in
     /// the embedded terminal read via $SPARKDOWN_CONTEXT. On by default; off
@@ -131,6 +137,13 @@ pub struct AppConfig {
     /// user-only pipe (after a restart).
     #[serde(default)]
     pub mcp_external_agents: bool,
+
+    /// Fetch the current branch's upstream quietly in the background (on
+    /// window focus, every few minutes while focused, and after a rejected
+    /// push) so the Pull behind count is current (#175). Local repos only;
+    /// never prompts for credentials. On by default (Settings → Git).
+    #[serde(default = "default_true")]
+    pub git_background_fetch: bool,
 }
 
 /// One node of a persisted terminal split layout (see
@@ -203,6 +216,10 @@ fn default_theme() -> ThemeMode {
 fn default_sidebar_width() -> u32 {
     252
 }
+fn default_terminal_scrollback() -> u32 {
+    5000
+}
+
 fn default_terminal_height() -> u32 {
     200
 }
@@ -232,6 +249,7 @@ impl Default for AppConfig {
             show_hidden_files: false,
             enable_diagrams: true,
             use_tmux: true,
+            terminal_scrollback: default_terminal_scrollback(),
             agent_context_enabled: true,
             agent_args: std::collections::HashMap::new(),
             check_updates_automatically: true,
@@ -239,6 +257,7 @@ impl Default for AppConfig {
             terminal_layouts: std::collections::HashMap::new(),
             mcp_install_prompt_dismissed: vec![],
             mcp_external_agents: false,
+            git_background_fetch: true,
         }
     }
 }
@@ -311,6 +330,19 @@ mod tests {
         let not_a_map: AppConfig =
             serde_json::from_str(r#"{"terminal_layouts":[1,2]}"#).expect("parses");
         assert!(not_a_map.terminal_layouts.is_empty());
+    }
+
+    #[test]
+    fn terminal_scrollback_defaults_and_round_trips() {
+        let old: AppConfig = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+        assert_eq!(old.terminal_scrollback, 5000);
+        assert_eq!(AppConfig::default().terminal_scrollback, 5000);
+        let cfg = AppConfig {
+            terminal_scrollback: 20_000,
+            ..AppConfig::default()
+        };
+        let back: AppConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.terminal_scrollback, 20_000);
     }
 
     #[test]

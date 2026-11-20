@@ -331,7 +331,8 @@ export type TerminalPaneAction =
   | 'split-down'
   | 'close-pane'
   | 'focus-next'
-  | 'focus-prev';
+  | 'focus-prev'
+  | 'find';
 
 /**
  * Map a keydown inside a terminal pane to a split action, or null to let the
@@ -345,6 +346,10 @@ export type TerminalPaneAction =
  *  - Windows/Linux: Ctrl+Shift+D / Ctrl+Shift+E split right / down,
  *    Ctrl+Shift+W close pane, Ctrl+Shift+] / [ next / previous pane. Plain
  *    Ctrl+D / Ctrl+W stay EOF / delete-word for the shell.
+ *  - Find in terminal: ⌘F on macOS (the native Edit → Find accelerator
+ *    usually gets it first and is routed to the pane, see app/actions.ts);
+ *    Ctrl+Shift+F elsewhere, as in Windows Terminal, so plain Ctrl+F stays
+ *    the shell's forward-char. A focused terminal wins over Search in Files.
  *
  * ⌘⌥← / ⌘⌥→ already switch document tabs, so pane focus uses brackets (as
  * in iTerm2). Pure, so it is unit-tested without xterm.
@@ -364,12 +369,14 @@ export function terminalPaneAction(
   if (mac) {
     if (!e.metaKey || e.ctrlKey) return null;
     if (key === 'd') return e.shiftKey ? 'split-down' : 'split-right';
+    if (key === 'f') return e.shiftKey ? null : 'find';
     return e.shiftKey ? null : bracket;
   }
   if (!e.ctrlKey || !e.shiftKey || e.metaKey) return null;
   if (key === 'd') return 'split-right';
   if (key === 'e') return 'split-down';
   if (key === 'w') return 'close-pane';
+  if (key === 'f') return 'find';
   return bracket;
 }
 
@@ -384,6 +391,7 @@ export const TERMINAL_PANE_KEYS: Record<TerminalPaneAction, { mac: string; other
   'close-pane': { mac: 'Cmd+W', other: 'Ctrl+Shift+W' },
   'focus-next': { mac: 'Cmd+]', other: 'Ctrl+Shift+]' },
   'focus-prev': { mac: 'Cmd+[', other: 'Ctrl+Shift+[' },
+  find: { mac: 'Cmd+F', other: 'Ctrl+Shift+F' },
 };
 
 /** Label for a terminal pane key ("⌘D" / "Ctrl+Shift+D"). */

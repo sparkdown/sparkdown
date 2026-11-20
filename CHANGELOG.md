@@ -5,6 +5,69 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
+## [Unreleased]
+
+### Fixed
+
+- Build no longer warns about mixed static/dynamic imports of `@tauri-apps/api/webviewWindow`.
+
+## [0.4.3] — 2026-11-13
+
+Fixes and reliability improvements on top of 0.4.2.
+
+### Improved
+
+- **Diff view** handles invisible and bidirectional characters better.
+- **Search** is faster and more reliable, including preview search and fuzzy file matching in large folders.
+- **Preview** stays in sync with the document: diagrams, code blocks, and reference-style links update when the text changes, and images load from the open folder.
+- **Git** diffs time out after 20 seconds and skip special file types, with the same behaviour locally and over SSH. Viewing changes no longer runs hooks from the repository or triggers extra fetches in a partial clone. Settings from included config and worktrees are picked up correctly, including names with unusual characters.
+- Changes to **editor context** and **background fetch** in Settings apply in every window right away.
+
+### Fixed
+
+- Pasting in the terminal is treated as text when the shell supports it, so a multi-line paste is not run as separate commands.
+- Saving a file writes the new contents completely before replacing the old one. Opening unusual or very large files is handled more reliably.
+- Creating and deleting files on a remote host stays inside the open folder. Remote connections check all of your known_hosts files when confirming the host, and the SSH key passphrase prompt is tied to that connection.
+- JavaScript in an HTML preview stays with that document. Starting Claude from the terminal handles unusual paths correctly.
+- The `sparkdown` command only talks to a window running as you, and waits for a clear reply. Agent tools talk only to the window they belong to; on Windows, external agents connect to the right running app, and SparkDown will not replace a path another process is already using.
+- SparkDown finds installed agents from your PATH without depending on the current folder, and will not run an agent from a relative path. Background fetch is skipped when a repository's git config customizes how fetch runs.
+- Update checks use a fresh folder for each run, and only install the official build that matches the release.
+- **Saving while you type** writes the text the editor holds when the write starts, and a save you made yourself no longer makes the next Save ask whether to overwrite. The explorer no longer flashes the row of a file you just saved.
+- The **status bar** shows the cursor position of the file you open or switch to, and of a new file.
+- A **folder in the explorer** stays open when you click it twice quickly or the list refreshes while it loads, and one failed refresh no longer closes the folders you have open.
+- **Terminal:** keys typed right after opening it go to the terminal, in order, instead of the editor or getting lost while the shell starts.
+
+### Changed
+
+- **Agent tools on Linux** without `XDG_RUNTIME_DIR` now use `~/.cache/sparkdown` instead of `/tmp/sparkdown`. macOS is unchanged (still the per-user `$TMPDIR/sparkdown`), and Linux with `XDG_RUNTIME_DIR` set is unchanged. Terminals started before the upgrade need to be restarted to reconnect.
+- **Agent tools on a remote (SSH) host** need Python 3 on that host. Terminals that were already open need to be reopened after this upgrade.
+
+## [0.4.2] — 2026-11-09
+
+Terminal, Git and command-line improvements on top of 0.4.1. Not in this
+release: the Hyprland work (#186), the WSL agent tools (#187) and the
+terminal performance work (#219); they wait for testing on real machines.
+
+### New
+
+- **Find in the terminal:** `Ctrl+Shift+F` on Windows and Linux (plain `Ctrl+F` stays with the shell), `⌘F` or Edit > Find on macOS when a terminal has focus. Each pane has its own find bar with a match count (“2 of 5”, “No results”). `Enter` / `F3` go to the next match, `Shift+Enter` to the previous one, `Esc` closes the bar and returns to the terminal. Keys typed in the bar never reach the shell. (#184)
+- **Safer terminal links:** web links open only with `Ctrl`+click (`⌘`+click on macOS), and only `http` / `https` links with a host; a plain click no longer launches the browser. File paths still open with a plain click. Links that wrap onto the next row are recognised. (#184)
+- **Terminal scrollback setting:** Settings → Scrollback lines takes any whole number from 200 to 50,000 (default 5,000; values outside the range are clamped). The change is saved right away and applies to open and new terminals. (#184)
+- **Mouse wheel in tmux terminals** scrolls tmux's history instead of sending Up/Down to the shell, which used to recall old commands. Scrolling back to the bottom, or typing, leaves the history view. Full-screen apps inside tmux still get Up/Down. (#184)
+- **`sparkdown` command on your PATH:** the Windows installer adds it (skip with `/SDNOPATH`) and the uninstaller removes it; on macOS, and for the Linux AppImage, the SparkDown menu has Install / Uninstall / Repair 'sparkdown' Command in PATH. The `.deb` and AUR packages already ship `/usr/bin/sparkdown`. Run from a terminal, `sparkdown` gives the prompt back unless you pass `--wait`, and `--` ends the options so a path starting with `-` can be opened. (#188)
+- **Pull when branches have diverged:** if you have not set `pull.rebase` or `pull.ff`, Pull merges the remote changes instead of failing; your own git settings still win. Merge and rebase conflicts are reported with the files involved and are never aborted for you. (#218)
+- **Background fetch:** while a window is focused, SparkDown quietly fetches the current branch's upstream (on focus, every 5 minutes, and after a rejected push) so the Pull count shows new commits. It only fetches, never merges, never asks for credentials, and is off in remote (SSH) folders. Turn it off in Settings → Git → Fetch in the background. (#218)
+- **Discard changes** in the Changes view: a per-file Discard button, Discard Changes… in the right-click menu, **Discard All** in the Changes header, and `Shift+F10` / the Menu key on the selected file. A confirmation lists each file and what will happen to it: edits are reverted to the last commit, and new files are moved to the system Trash (the Recycle Bin on Windows), never deleted outright. A file that changed while the confirmation was open is left alone and reported. Open tabs with unsaved edits keep them unless you tick the box to drop them. Not available in remote (SSH) folders. (#218)
+
+### Fixed
+
+- **Status bar edges:** the first and last items no longer sit against the window border (8 px inset, 12 px on macOS for the rounded corners). (#178, #179)
+
+### Security
+
+- tokio 1.51.6, for [RUSTSEC-2026-0386](https://rustsec.org/advisories/RUSTSEC-2026-0386). (#157)
+- minisign-verify 0.3.0, the library that checks update signatures, which removes some `unsafe` code. (#4) minisign 0.10.0 is used only by the tests that sign fake updates. (#5)
+
 ## [0.4.1] — 2026-11-05
 
 Fixes and small features on top of 0.4.0.
@@ -156,5 +219,7 @@ The agent cockpit release.
 - **Linux `.deb`** as the preferred install; the AppImage is still built.
 - Hardening: the watcher ignores build and dependency folders, a stricter content policy, and dependency security updates.
 
+[0.4.3]: https://github.com/sparkdown/sparkdown/compare/v0.4.2...v0.4.3
+[0.4.2]: https://github.com/sparkdown/sparkdown/compare/v0.4.1...v0.4.2
 [0.3.1]: https://github.com/sparkdown/sparkdown/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/sparkdown/sparkdown/compare/v0.2.0...v0.3.0

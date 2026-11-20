@@ -1,5 +1,6 @@
 import { listen } from './window-events';
 import { ask, message } from '@tauri-apps/plugin-dialog';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { deleteEntry } from './explorer-delete';
 import { EditorManager } from './editor';
 import { Toolbar } from './toolbar';
@@ -41,6 +42,7 @@ import { api, type AppConfig, type FsChange } from './api';
 import { ACTIONS, EVENTS } from './event-names';
 import { initPerfTrace, span } from './perf-trace';
 import { GitFeedback } from './git-output';
+import { TERMINAL_SCROLLBACK_DEFAULT } from './terminal-scrollback';
 
 const DEFAULT_CONFIG: AppConfig = {
   theme: 'system',
@@ -58,6 +60,7 @@ const DEFAULT_CONFIG: AppConfig = {
   show_hidden_files: false,
   enable_diagrams: true,
   use_tmux: true,
+  terminal_scrollback: TERMINAL_SCROLLBACK_DEFAULT,
   agent_context_enabled: true,
   agent_args: {},
   check_updates_automatically: true,
@@ -65,6 +68,7 @@ const DEFAULT_CONFIG: AppConfig = {
   terminal_layouts: {},
   mcp_install_prompt_dismissed: [],
   mcp_external_agents: false,
+  git_background_fetch: true,
 };
 
 /**
@@ -292,9 +296,8 @@ export class App {
     // A menu action queued for this new window (macOS with no window open).
     const queuedMenu = await api.windowTakeMenu().catch(() => null);
     if (queuedMenu) {
-      void import('@tauri-apps/api/webviewWindow').then(({ getCurrentWebviewWindow }) =>
-        getCurrentWebviewWindow().emitTo(getCurrentWebviewWindow().label, `menu:${queuedMenu}`),
-      );
+      const window = getCurrentWebviewWindow();
+      void window.emitTo(window.label, `menu:${queuedMenu}`);
     }
     // A window opened by Open Folder routing (#62) opens its folder.
     const routed = await api.windowTakeOpen().catch(() => null);
@@ -791,7 +794,11 @@ export class App {
         if (!this.config.agent_context_enabled) void this.agent.clear();
         else this.agent.publishSoon();
         void this.refreshAgentTools();
-        this.debouncedSaveConfig();
+        // A committed Settings change is written now, not after the 2 s
+        // debounce: quitting (or a crash) right after closing Settings must
+        // not lose it.
+        this.debouncedSaveConfig.cancel();
+        void this.persistConfig();
       },
     };
     if (section) this.settingsDialog.showSection(host, section);
@@ -832,6 +839,7 @@ export class App {
         show_hidden_files: this.fileTree.isShowHidden(),
         enable_diagrams: this.config.enable_diagrams,
         use_tmux: this.config.use_tmux,
+        terminal_scrollback: this.config.terminal_scrollback ?? TERMINAL_SCROLLBACK_DEFAULT,
         agent_context_enabled: this.config.agent_context_enabled,
         agent_args: this.config.agent_args ?? {},
         check_updates_automatically: this.config.check_updates_automatically ?? true,
@@ -840,6 +848,7 @@ export class App {
         terminal_layouts: this.config.terminal_layouts ?? {},
         mcp_install_prompt_dismissed: this.config.mcp_install_prompt_dismissed ?? [],
         mcp_external_agents: this.config.mcp_external_agents ?? false,
+        git_background_fetch: this.config.git_background_fetch ?? true,
       };
       await api.saveConfig(config);
       this.configSaveFailures = 0;

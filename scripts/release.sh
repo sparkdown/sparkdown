@@ -182,9 +182,9 @@ if [ "$(updater_pubkey)" = "REPLACE_WITH_UPDATER_PUBLIC_KEY" ]; then
   echo "       and paste the PUBLIC key (~/.tauri/sparkdown-updater.key.pub) there." >&2
   exit 1
 fi
-# Kept as plain (unexported) shell variables so the test suite below never
-# sees them; only package-macos.sh gets them, and it hands them to the
-# signer alone.
+# Kept as plain (unexported) shell variables. The key is then unset before
+# running checks and the build, so npm/vite/cargo never inherit it; it is
+# passed only inline to the signing step's env.
 SIGN_KEY="${TAURI_SIGNING_PRIVATE_KEY:-}"
 if [ -z "$SIGN_KEY" ]; then
   UPDATER_KEY_FILE="${UPDATER_KEY_FILE:-$HOME/.tauri/sparkdown-updater.key}"
@@ -203,6 +203,8 @@ else
   read -rsp "Updater signing key password (Enter if none): " SIGN_PASSWORD </dev/tty
   echo
 fi
+
+# Unset the key so checks and build never inherit it.
 unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 
 echo "==> Running the full check suite (matches CI)"
@@ -225,14 +227,18 @@ sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" src-tauri/Cargo.toml
 # Refresh Cargo.lock's own-package version entry.
 (cd src-tauri && cargo update --workspace --quiet)
 
-echo "==> Building release bundle (+ signed updater artifact)"
+echo "==> Building release bundle"
+bash scripts/package-macos.sh
+
+# Sign the updater tarball with its final published name. Key and password
+# are passed only to the signer (not the build), then unset.
 TAURI_SIGNING_PRIVATE_KEY="$SIGN_KEY" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$SIGN_PASSWORD" \
-  bash scripts/package-macos.sh
+  bash scripts/sign-macos-updater.sh "$VERSION"
 unset SIGN_KEY SIGN_PASSWORD
 
 DMG="src-tauri/target/release/bundle/dmg/SparkDown_${VERSION}_aarch64.dmg"
 APP="src-tauri/target/release/bundle/macos/SparkDown.app"
-UPDATER_TGZ="src-tauri/target/release/bundle/macos/SparkDown.app.tar.gz"
+UPDATER_TGZ="src-tauri/target/release/bundle/macos/SparkDown_${VERSION}_aarch64.app.tar.gz"
 if [ ! -f "$DMG" ]; then
   echo "error: expected $DMG after build" >&2
   exit 1
@@ -242,12 +248,12 @@ if [ ! -f "$UPDATER_TGZ" ] || [ ! -f "$UPDATER_TGZ.sig" ]; then
   exit 1
 fi
 check_sig_key "$UPDATER_TGZ.sig"
-# Versioned asset names, so every release's files are distinct.
+# The updater tarball is already named for the release (SparkDown_<ver>_aarch64.app.tar.gz).
+# Upload it directly.
 UPLOAD_DIR=$(mktemp -d)
-cp "$UPDATER_TGZ" "$UPLOAD_DIR/$MAC_TGZ_ASSET"
 # Checked against the uploaded asset when latest.json is written.
-MAC_TGZ_LOCAL_SIZE=$(stat -f %z "$UPLOAD_DIR/$MAC_TGZ_ASSET")
-cp "$UPDATER_TGZ.sig" "$UPLOAD_DIR/$MAC_TGZ_ASSET.sig"
+MAC_TGZ_LOCAL_SIZE=$(stat -f %z "$UPDATER_TGZ")
+cp "$UPDATER_TGZ" "$UPDATER_TGZ.sig" "$UPLOAD_DIR/"
 
 echo "==> Committing, tagging v$VERSION, pushing"
 git add src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock \

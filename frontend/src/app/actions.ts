@@ -33,6 +33,7 @@ export interface ActionTargets {
     | 'closeTerminalPane'
     | 'focusTerminalPane'
     | 'hasTerminalFocus'
+    | 'openTerminalFind'
   >;
   htmlScripts: Pick<HtmlScriptsController, 'toggle'>;
   lifecycle: Pick<LifecycleController, 'requestQuit' | 'closeFolder'>;
@@ -58,6 +59,13 @@ export interface ActionTargets {
 function closeTabOrPane(t: ActionTargets): void {
   if (t.cockpit.hasTerminalFocus()) t.cockpit.closeTerminalPane();
   else t.tabs.closeCurrent();
+}
+
+/** ⌘F / Find: the focused terminal pane's find bar when a terminal (or its
+ *  find bar) has keyboard focus, otherwise the editor / preview / diff find. */
+function openFindForFocus(t: ActionTargets): void {
+  if (t.cockpit.hasTerminalFocus() && t.cockpit.openTerminalFind()) return;
+  t.panes.openFind();
 }
 
 /** Native menu items (Rust emits one Tauri event per item). */
@@ -86,7 +94,7 @@ export function registerMenuListeners(t: ActionTargets): void {
   });
   reg(MENU.TOGGLE_HTML_JS, () => t.htmlScripts.toggle(false));
   reg(MENU.EXPORT_HTML, () => t.exportHtml());
-  reg(MENU.FIND, () => t.panes.openFind());
+  reg(MENU.FIND, () => openFindForFocus(t));
   reg(MENU.SHOW_SHORTCUTS, () => showShortcutsDialog());
   reg(MENU.SHOW_SETTINGS, () => t.openSettings());
   reg(MENU.CHECK_UPDATES, () => t.checkForUpdates());
@@ -115,7 +123,7 @@ export function registerActionListeners(t: ActionTargets): void {
   t.bus.on(ACTIONS.SAVE_AS, () => t.saveAs());
   t.bus.on(ACTIONS.CLOSE_TAB, () => closeTabOrPane(t));
   t.bus.on(ACTIONS.EXPORT_HTML, () => t.exportHtml());
-  t.bus.on(ACTIONS.FIND, () => t.panes.openFind());
+  t.bus.on(ACTIONS.FIND, () => openFindForFocus(t));
   // Ctrl+Q (Windows/Linux) must take the same guarded path as Cmd+Q.
   t.bus.on(ACTIONS.QUIT, () => void t.lifecycle.requestQuit());
   t.bus.on(ACTIONS.NEW_WINDOW, () => void api.windowNew().catch(() => {}));

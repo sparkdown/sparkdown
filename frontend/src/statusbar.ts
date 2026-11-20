@@ -93,15 +93,20 @@ export class StatusBar {
       // Char count / selection can change without the caret line/col moving
       // (e.g. shift-select on the same line), so always refresh chars.
       this.updateCharCount(data.chars, data.selectedChars);
-      if (data.line === this.lastLine && data.column === this.lastColumn) return;
-      this.lastLine = data.line;
-      this.lastColumn = data.column;
-      this.cursorEl.textContent = `Ln ${data.line}, Col ${data.column}`;
+      this.updateCursor(data.line, data.column);
     });
 
     this.bus.on(EVENTS.WORD_WRAP_CHANGED, (data) => {
       this.wrapEl.textContent = `Wrap: ${data.enabled ? 'On' : 'Off'}`;
     });
+  }
+
+  /** Show the caret position (1-based line and column). */
+  updateCursor(line: number, column: number): void {
+    if (line === this.lastLine && column === this.lastColumn) return;
+    this.lastLine = line;
+    this.lastColumn = column;
+    this.cursorEl.textContent = `Ln ${line}, Col ${column}`;
   }
 
   /**

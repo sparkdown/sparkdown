@@ -18,7 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// Scope used when no window scope was entered (tests, background threads
@@ -85,8 +85,24 @@ where
 
 /// Short stable tag for a label, for names with length limits (ssh
 /// ControlPath, remote socket names).
+///
+/// Keyed SHA-256 truncated to 128 bits. Keying by the per-install
+/// TOKEN_SECRET means a folder name cannot be made to collide with
+/// another window's tag, and 128 bits of output make an accidental
+/// collision across any realistic number of windows effectively impossible.
 pub fn label_tag(label: &str) -> String {
-    crate::context::workspace_key(label)[..8].to_string()
+    use sha2::{Digest, Sha256};
+    let secret = TOKEN_SECRET.get_or_init(random_hex);
+    let mut h = Sha256::new();
+    h.update(secret.as_bytes());
+    // Domain-separate from folder_token so the two namespaces cannot be
+    // crossed even though they share the same key.
+    h.update([1u8]);
+    h.update(label.as_bytes());
+    h.finalize()[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 // --- Folder identity ---------------------------------------------------------
@@ -220,7 +236,7 @@ fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
 }
 
 /// 256 bits of OS-seeded randomness as hex.
-fn random_hex() -> String {
+pub(crate) fn random_hex() -> String {
     use std::hash::{BuildHasher, Hasher};
     let mut out = String::new();
     for i in 0..4u64 {
@@ -267,11 +283,13 @@ pub struct WindowEntry {
     /// The frontend reported unsaved tabs (decides "empty", #60 decision 7).
     pub dirty: bool,
     focus_seq: u64,
+    /// Directories of files opened via read_file (for preview image containment).
+    pub opened_dirs: HashSet<String>,
 }
 
 #[derive(Default)]
 pub struct Registry {
-    windows: HashMap<String, WindowEntry>,
+    pub windows: HashMap<String, WindowEntry>,
     focus_counter: u64,
     empty_counter: u64,
 }
@@ -443,6 +461,17 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn label_tag_is_128_bit_hex_and_differs_per_label() {
+        let a = label_tag("main");
+        assert_eq!(a.len(), 32, "{a}");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "{a}");
+        assert_eq!(a, label_tag("main"), "stable within a run");
+        assert_ne!(a, label_tag("main2"));
+        // Not the unkeyed 32-bit-style key older builds used.
+        assert_ne!(a[..8], crate::context::workspace_key("main")[..8]);
+    }
 
     fn local(p: &str) -> FolderId {
         FolderId::Local { path: p.into() }

@@ -90,17 +90,26 @@ fn git_command_with(root: &Path, safe_dirs: &[String]) -> Result<Command, String
     cmd.env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ALLOW_PROTOCOL", "")
         .arg("--no-pager")
+        .arg("--no-optional-locks")
         .arg("-c")
         .arg("core.quotepath=false")
         .arg("-c")
         .arg("core.fsmonitor=false")
         .arg("-c")
+        .arg("core.hooksPath=/dev/null")
+        .arg("-c")
         .arg("diff.external=")
         .arg("-c")
         .arg("diff.tool=")
         .arg("-c")
-        .arg("diff.submodule=short");
+        .arg("diff.submodule=short")
+        .arg("-c")
+        .arg("protocol.allow=never")
+        .arg("-c")
+        .arg("fetch.negotiationAlgorithm=noop");
     for dir in safe_dirs {
         cmd.arg("-c").arg(format!("safe.directory={dir}"));
     }
@@ -144,83 +153,152 @@ fn read_safe_directories(probe: impl Fn(&[&str]) -> Option<String>) -> Vec<Strin
     dirs
 }
 
-/// `-c key=value` overrides that disable every repo-local `filter.<x>` and
-/// `diff.<x>` driver, so opening an untrusted repo and viewing its changes
-/// never runs an attacker-supplied clean/smudge/process filter or diff
-/// textconv/command hook (these fire implicitly on `git status`/`git diff`
-/// through `.gitattributes`). We enumerate the local keys first (a read that
-/// executes nothing), then blank the code-executing sub-keys and force
-/// `filter.<x>.required=false` so a still-referenced-but-disabled filter can't
-/// make the command fail. Enumeration failure returns no overrides.
-fn local_exec_neutralisers(root: &Path) -> Vec<String> {
-    let mut cmd = match git_command(root) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    cmd.args([
-        "config",
-        "--local",
-        "--name-only",
-        "--get-regexp",
-        r"^(filter|diff)\.",
-    ]);
-    let output = match cmd.output() {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    // `--get-regexp` exits non-zero when there are no matching keys.
-    if !output.status.success() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut filters: BTreeSet<&str> = BTreeSet::new();
-    let mut diffs: BTreeSet<&str> = BTreeSet::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("filter.") {
-            if let Some((name, sub)) = rest.rsplit_once('.') {
-                if !name.is_empty() && matches!(sub, "clean" | "smudge" | "process" | "required") {
-                    filters.insert(name);
-                }
+/// Config (key, value) overrides that disable every repo-local `filter.<x>`
+/// and `diff.<x>` driver (covering local, worktree, and included config), so
+/// viewing changes never runs a repo-supplied clean/smudge/process filter or
+/// diff textconv/command hook (these fire implicitly on `git status`/`git diff`
+/// through `.gitattributes`). We enumerate keys with --includes (to follow
+/// include.path/includeIf) from both --local and --worktree scopes, then blank
+/// the code-executing sub-keys and force `filter.<x>.required=false` so a
+/// still-referenced-but-disabled filter can't make the command fail.
+/// Enumeration failure is an error (fail-closed). Public for reuse by fetch.
+/// Returned as (key, value) pairs to be applied via GIT_CONFIG_COUNT env vars,
+/// which prevents subsection names containing '=' from being misparsed.
+pub(crate) fn local_exec_neutralisers(root: &Path) -> Result<Vec<(String, String)>, String> {
+    fn collect_names(
+        root: &Path,
+        scope: &str,
+    ) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
+        let mut cmd = git_command(root)?;
+        cmd.env("LC_ALL", "C").env("LANG", "C").args([
+            "config",
+            scope,
+            "--includes",
+            "--name-only",
+            "--get-regexp",
+            r"^(filter|diff)\.",
+        ]);
+        let output = cmd
+            .output()
+            .map_err(|e| format!("failed to enumerate {scope} config: {e}"))?;
+        if !output.status.success() {
+            let code = output.status.code();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if code == Some(1) && output.stdout.is_empty() {
+                return Ok((BTreeSet::new(), BTreeSet::new()));
             }
-        } else if let Some(rest) = line.strip_prefix("diff.") {
-            if let Some((name, sub)) = rest.rsplit_once('.') {
-                if !name.is_empty() && matches!(sub, "command" | "textconv") {
-                    diffs.insert(name);
+            if stderr.contains("not a git repository")
+                || stderr.contains("can only be used inside a git repository")
+                || (code == Some(128)
+                    && stderr.contains("cannot be used with multiple working trees")
+                    && stderr.contains("worktreeConfig"))
+            {
+                return Ok((BTreeSet::new(), BTreeSet::new()));
+            }
+            return Err(format!("{scope} config enumeration failed: exit {code:?}"));
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut filters = BTreeSet::new();
+        let mut diffs = BTreeSet::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("filter.") {
+                if let Some((name, sub)) = rest.rsplit_once('.') {
+                    if !name.is_empty()
+                        && matches!(sub, "clean" | "smudge" | "process" | "required")
+                    {
+                        filters.insert(name.to_string());
+                    }
+                }
+            } else if let Some(rest) = line.strip_prefix("diff.") {
+                if let Some((name, sub)) = rest.rsplit_once('.') {
+                    if !name.is_empty() && matches!(sub, "command" | "textconv") {
+                        diffs.insert(name.to_string());
+                    }
                 }
             }
         }
+        Ok((filters, diffs))
     }
-    let mut args = Vec::new();
+
+    let (mut filters, mut diffs) = collect_names(root, "--local")?;
+    let (wf, wd) = collect_names(root, "--worktree")?;
+    filters.extend(wf);
+    diffs.extend(wd);
+
+    let mut pairs = Vec::new();
     for f in filters {
-        args.push("-c".to_string());
-        args.push(format!("filter.{f}.clean="));
-        args.push("-c".to_string());
-        args.push(format!("filter.{f}.smudge="));
-        args.push("-c".to_string());
-        args.push(format!("filter.{f}.process="));
-        args.push("-c".to_string());
-        args.push(format!("filter.{f}.required=false"));
+        pairs.push((format!("filter.{f}.clean"), String::new()));
+        pairs.push((format!("filter.{f}.smudge"), String::new()));
+        pairs.push((format!("filter.{f}.process"), String::new()));
+        pairs.push((format!("filter.{f}.required"), "false".to_string()));
     }
     for d in diffs {
-        args.push("-c".to_string());
-        args.push(format!("diff.{d}.command="));
-        args.push("-c".to_string());
-        args.push(format!("diff.{d}.textconv="));
+        pairs.push((format!("diff.{d}.command"), String::new()));
+        pairs.push((format!("diff.{d}.textconv"), String::new()));
     }
-    args
+    Ok(pairs)
 }
 
-/// Run a hardened git command and return its full `Output` (never fails on a
+/// Apply config overrides via GIT_CONFIG_COUNT/KEY/VALUE env vars. Key and
+/// value are transported separately, so a subsection name containing '=' is
+/// carried verbatim and cannot be misparsed as a key/value split.
+fn apply_config_env(cmd: &mut Command, overrides: &[(String, String)]) {
+    if overrides.is_empty() {
+        return;
+    }
+    cmd.env("GIT_CONFIG_COUNT", overrides.len().to_string());
+    for (i, (key, value)) in overrides.iter().enumerate() {
+        cmd.env(format!("GIT_CONFIG_KEY_{i}"), key);
+        cmd.env(format!("GIT_CONFIG_VALUE_{i}"), value);
+    }
+}
+
+/// Deadline for every read-only git invocation.
+const READ_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Run a read-only git command and return its full `Output` (never fails on a
 /// non-zero exit — the caller decides). This is the single builder used by
-/// every git invocation, so all of them get the same env + config + driver
-/// hardening.
+/// every git invocation, so all of them get the same environment, config, and
+/// driver overrides, plus a timeout to prevent repository content from blocking
+/// forever.
 fn run_git_raw(root: &Path, args: &[&str]) -> Result<Output, String> {
     let mut cmd = git_command(root)?;
-    let neutralisers = local_exec_neutralisers(root);
-    cmd.args(&neutralisers);
+    let neutralisers = local_exec_neutralisers(root)?;
+    apply_config_env(&mut cmd, &neutralisers);
     cmd.args(args);
-    cmd.output().map_err(|e| format!("failed to run git: {e}"))
+    let cwd = cmd
+        .get_current_dir()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| root.to_path_buf());
+    let outcome = crate::mcp::run_command_with_timeout(cmd, &cwd, READ_GIT_TIMEOUT)?;
+    match outcome {
+        crate::mcp::CliOutcome::Exited {
+            code,
+            stdout,
+            stderr,
+        } => {
+            #[cfg(unix)]
+            let status = {
+                use std::os::unix::process::ExitStatusExt;
+                match code {
+                    Some(c) => std::process::ExitStatus::from_raw((c & 0xff) << 8),
+                    None => std::process::ExitStatus::from_raw(0x09),
+                }
+            };
+            #[cfg(not(unix))]
+            let status = {
+                use std::os::windows::process::ExitStatusExt;
+                std::process::ExitStatus::from_raw(code.map(|c| c as u32).unwrap_or(1))
+            };
+            Ok(Output {
+                status,
+                stdout: stdout.into_bytes(),
+                stderr: stderr.into_bytes(),
+            })
+        }
+        _ => Err("git command failed".to_string()),
+    }
 }
 
 pub(crate) fn run_git(root: &Path, args: &[&str]) -> Result<String, String> {
@@ -904,7 +982,7 @@ mod tests {
         fs::write(dir.join(".gitattributes"), "data.txt filter=evil\n").unwrap();
         fs::write(dir.join("data.txt"), "changed contents\n").unwrap();
 
-        // Control: an unhardened `git diff` honours the local filter and
+        // Control: plain `git diff` honours the local filter and
         // creates the marker (it must clean the working file to diff it) —
         // proving the attack is real and the test below isn't vacuous.
         let _ = fs::remove_file(&marker);
@@ -1071,6 +1149,725 @@ mod tests {
         let bad2 = git_diff_file_impl("/tmp".to_string(), "../etc/passwd".to_string(), false);
         assert!(bad2.is_err());
     }
+
+    #[test]
+    fn git_neutralises_filter_name_with_equals() {
+        use std::fs;
+
+        let git = git_bin();
+        let base =
+            std::env::temp_dir().join(format!("sparkdown_filter_equals_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["config", "user.name", "test"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["config", "user.email", "test@example.com"])
+            .status()
+            .unwrap();
+
+        let marker = base.join("marker");
+        let marker_script = base.join("script.sh");
+        fs::write(
+            &marker_script,
+            format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&marker_script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args([
+                "config",
+                "filter.x=y.clean",
+                marker_script.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+
+        fs::write(repo.join(".gitattributes"), "*.txt filter=x=y\n").unwrap();
+        fs::write(repo.join("a.txt"), "content\n").unwrap();
+
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["add", ".gitattributes", "a.txt"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["commit", "-m", "initial"])
+            .status()
+            .unwrap();
+
+        let _ = fs::remove_file(&marker);
+
+        fs::write(repo.join("a.txt"), "modified\n").unwrap();
+
+        #[cfg(unix)]
+        {
+            let control = crate::proc::command(&git)
+                .current_dir(&repo)
+                .args(["diff", "HEAD", "--", "a.txt"])
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(control.status.success());
+            assert!(
+                marker.exists(),
+                "control: plain git diff must run filter with '=' in name"
+            );
+            let _ = fs::remove_file(&marker);
+        }
+
+        let _ = run_git(&repo, &["diff", "HEAD", "--", "a.txt"]);
+        assert!(
+            !marker.exists(),
+            "filter with '=' in name ran despite neutraliser"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn git_diff_against_fifo_returns_within_timeout() {
+        use std::fs;
+
+        let git = git_bin();
+        let base = std::env::temp_dir().join(format!("sparkdown_fifo_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+
+        fs::write(repo.join("regular.txt"), "content\n").unwrap();
+
+        let fifo = repo.join("pipe");
+        crate::proc::command("mkfifo").arg(&fifo).status().unwrap();
+
+        let start = std::time::Instant::now();
+        let result = git_diff_file_impl(
+            repo.to_string_lossy().into_owned(),
+            "pipe".to_string(),
+            true,
+        );
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "diff against FIFO should fail");
+        assert!(
+            elapsed < READ_GIT_TIMEOUT,
+            "diff should return before timeout"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn git_neutralises_filter_from_include_path() {
+        use std::fs;
+
+        let git = git_bin();
+        let base =
+            std::env::temp_dir().join(format!("sparkdown_include_filter_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["config", "user.name", "test"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["config", "user.email", "test@example.com"])
+            .status()
+            .unwrap();
+
+        let included = base.join("included.gitconfig");
+        let marker = base.join("marker");
+        let marker_script = base.join("script.sh");
+        fs::write(
+            &marker_script,
+            format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&marker_script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        fs::write(
+            &included,
+            format!(
+                "[filter \"external\"]\n\tclean = {}\n",
+                marker_script.display()
+            ),
+        )
+        .unwrap();
+
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args([
+                "config",
+                "--local",
+                "include.path",
+                included.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+
+        fs::write(repo.join(".gitattributes"), "*.txt filter=external\n").unwrap();
+        fs::write(repo.join("a.txt"), "content\n").unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["add", ".gitattributes", "a.txt"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["commit", "-m", "initial"])
+            .status()
+            .unwrap();
+
+        let _ = fs::remove_file(&marker);
+        fs::write(repo.join("a.txt"), "modified\n").unwrap();
+
+        {
+            let control = crate::proc::command(&git)
+                .current_dir(&repo)
+                .args(["diff", "HEAD", "--", "a.txt"])
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(control.status.success());
+            assert!(
+                marker.exists(),
+                "control: plain git diff must run filter from include.path"
+            );
+            let _ = fs::remove_file(&marker);
+        }
+
+        let _ = run_git(&repo, &["diff", "HEAD", "--", "a.txt"]);
+        assert!(
+            !marker.exists(),
+            "filter from include.path ran despite neutraliser"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn git_neutralises_filter_from_worktree_config() {
+        use std::fs;
+
+        let git = git_bin();
+        let base =
+            std::env::temp_dir().join(format!("sparkdown_worktree_filter_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["config", "user.name", "test"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["config", "user.email", "test@example.com"])
+            .status()
+            .unwrap();
+
+        let marker = base.join("marker");
+        let marker_script = base.join("script.sh");
+        fs::write(
+            &marker_script,
+            format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&marker_script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let set_ext_status = crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["config", "extensions.worktreeConfig", "true"])
+            .status()
+            .unwrap();
+        assert!(
+            set_ext_status.success(),
+            "failed to set extensions.worktreeConfig"
+        );
+
+        let set_filter_status = crate::proc::command(&git)
+            .current_dir(&repo)
+            .args([
+                "config",
+                "--worktree",
+                "filter.wt.clean",
+                marker_script.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        assert!(set_filter_status.success(), "failed to set worktree filter");
+
+        let worktree_config = repo.join(".git/config.worktree");
+        assert!(
+            worktree_config.exists(),
+            "worktree config must exist in .git/config.worktree"
+        );
+        let wt_content = fs::read_to_string(&worktree_config).unwrap();
+        assert!(
+            wt_content.contains("[filter \"wt\"]") && wt_content.contains("clean ="),
+            "worktree filter must be in .git/config.worktree, got: {}",
+            wt_content
+        );
+
+        fs::write(repo.join(".gitattributes"), "*.txt filter=wt\n").unwrap();
+        fs::write(repo.join("a.txt"), "content\n").unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["add", ".gitattributes", "a.txt"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["commit", "-m", "initial"])
+            .status()
+            .unwrap();
+
+        let _ = fs::remove_file(&marker);
+        fs::write(repo.join("a.txt"), "modified\n").unwrap();
+
+        {
+            let control = crate::proc::command(&git)
+                .current_dir(&repo)
+                .args(["diff", "HEAD", "--", "a.txt"])
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(control.status.success());
+            assert!(
+                marker.exists(),
+                "control: plain git diff must run filter from worktree config"
+            );
+            let _ = fs::remove_file(&marker);
+        }
+
+        let _ = run_git(&repo, &["diff", "HEAD", "--", "a.txt"]);
+        assert!(
+            !marker.exists(),
+            "filter from worktree config ran despite neutraliser"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn git_diff_does_not_trigger_lazy_fetch_uploadpack() {
+        use std::fs;
+
+        let git = git_bin();
+        let base =
+            std::env::temp_dir().join(format!("sparkdown_lazy_fetch_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+
+        let source = base.join("source");
+        fs::create_dir_all(&source).unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["config", "user.name", "test"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["config", "user.email", "test@example.com"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["config", "uploadpack.allowFilter", "true"])
+            .status()
+            .unwrap();
+
+        fs::write(source.join("a.txt"), "initial\n").unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["add", "a.txt"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["commit", "-m", "initial"])
+            .status()
+            .unwrap();
+
+        fs::write(source.join("a.txt"), "modified\n").unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["add", "a.txt"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&source)
+            .args(["commit", "-m", "modify"])
+            .status()
+            .unwrap();
+
+        let clone = base.join("clone");
+        let source_url = format!("file://{}", source.display());
+        crate::proc::command(&git)
+            .current_dir(&base)
+            .args([
+                "clone",
+                "--filter=blob:none",
+                &source_url,
+                clone.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+
+        let marker = base.join("uploadpack-ran");
+        let marker_script = base.join("uploadpack.sh");
+        fs::write(
+            &marker_script,
+            format!(
+                "#!/bin/sh\ntouch {}\nexec git-upload-pack \"$@\"\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&marker_script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        crate::proc::command(&git)
+            .current_dir(&clone)
+            .args([
+                "config",
+                "--local",
+                "remote.origin.uploadpack",
+                marker_script.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+
+        let blob_path = clone.join(".git/objects/pack");
+        if blob_path.exists() {
+            for entry in fs::read_dir(&blob_path).unwrap() {
+                let entry = entry.unwrap();
+                if entry.path().extension().and_then(|s| s.to_str()) == Some("pack") {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+
+        let _ = run_git(&clone, &["diff", "HEAD~1", "--", "a.txt"]);
+        assert!(
+            !marker.exists(),
+            "uploadpack ran during read-only diff despite lazy fetch block"
+        );
+
+        {
+            let control = crate::proc::command(&git)
+                .current_dir(&clone)
+                .args(["diff", "HEAD~1", "--", "a.txt"])
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(control.status.success());
+            assert!(
+                marker.exists(),
+                "control: plain git diff on partial clone must trigger lazy fetch"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Repo with one committed file and an executable `post-index-change`
+    /// hook that creates `<base>/marker`. Returns `(base, repo, marker)`.
+    #[cfg(unix)]
+    fn repo_with_index_hook(
+        name: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let git = git_bin();
+        let base = std::env::temp_dir().join(format!("sparkdown_{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.name", "test"],
+            vec!["config", "user.email", "test@example.com"],
+        ] {
+            let st = crate::proc::command(&git)
+                .current_dir(&repo)
+                .args(&args)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        }
+        let marker = base.join("marker");
+        let hook = repo.join(".git/hooks/post-index-change");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+        fs::write(repo.join("a.txt"), "initial\n").unwrap();
+        for args in [vec!["add", "a.txt"], vec!["commit", "-q", "-m", "initial"]] {
+            let st = crate::proc::command(&git)
+                .current_dir(&repo)
+                .args(&args)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        }
+        let _ = fs::remove_file(&marker);
+        (base, repo, marker)
+    }
+
+    /// Give `a.txt` a modification time git has not recorded, without
+    /// changing its content (use a different `secs` each time): git must refresh the index entry, which is an
+    /// optional write for `status` and a required one for `update-index`.
+    #[cfg(unix)]
+    fn make_stat_dirty(repo: &std::path::Path, secs: u64) {
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(repo.join("a.txt"))
+            .unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_status_does_not_rewrite_the_index() {
+        let git = git_bin();
+        let (base, repo, _marker) = repo_with_index_hook("index_untouched");
+        let index = repo.join(".git/index");
+
+        make_stat_dirty(&repo, 1_000_000);
+        let before = std::fs::read(&index).unwrap();
+        let status = git_status_impl(repo.to_string_lossy().into_owned()).unwrap();
+        assert!(status.changes.is_empty(), "content is unchanged");
+        assert_eq!(
+            std::fs::read(&index).unwrap(),
+            before,
+            "read-only status must not take optional locks / rewrite the index"
+        );
+
+        // Control: a plain `git status` does refresh and rewrite the index
+        // for the same stat-dirty file, so the check above can fail.
+        let control = crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["status", "--porcelain"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(control.status.success());
+        assert_ne!(
+            std::fs::read(&index).unwrap(),
+            before,
+            "control: plain git status rewrites the index"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_commands_do_not_run_repo_hooks() {
+        let git = git_bin();
+        let (base, repo, marker) = repo_with_index_hook("hooks_off");
+
+        // `update-index --refresh` always writes the index, so the
+        // post-index-change hook would fire unless hooks are switched off in
+        // the command built by git_command.
+        make_stat_dirty(&repo, 1_000_000);
+        let out = git_command(&repo)
+            .unwrap()
+            .args(["update-index", "--refresh"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !marker.exists(),
+            "git_command must not run the repository's hooks"
+        );
+
+        // Control: the same refresh without that setting does run the hook.
+        make_stat_dirty(&repo, 2_000_000);
+        let control = crate::proc::command(&git)
+            .current_dir(&repo)
+            .args(["update-index", "--refresh"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(control.status.success());
+        assert!(marker.exists(), "control: plain update-index runs the hook");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn git_status_and_fetch_work_in_linked_worktree() {
+        use std::fs;
+
+        let git = git_bin();
+        let base = std::env::temp_dir().join(format!(
+            "sparkdown_linked_worktree_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let main_repo = base.join("main");
+        fs::create_dir_all(&main_repo).unwrap();
+
+        crate::proc::command(&git)
+            .current_dir(&main_repo)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&main_repo)
+            .args(["config", "user.name", "test"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&main_repo)
+            .args(["config", "user.email", "test@example.com"])
+            .status()
+            .unwrap();
+
+        fs::write(main_repo.join("a.txt"), "initial\n").unwrap();
+        crate::proc::command(&git)
+            .current_dir(&main_repo)
+            .args(["add", "a.txt"])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&main_repo)
+            .args(["commit", "-m", "initial"])
+            .status()
+            .unwrap();
+
+        let linked_wt = base.join("linked");
+        crate::proc::command(&git)
+            .current_dir(&main_repo)
+            .args([
+                "worktree",
+                "add",
+                linked_wt.to_str().unwrap(),
+                "-b",
+                "feature",
+            ])
+            .status()
+            .unwrap();
+
+        let status = git_status_impl(linked_wt.to_string_lossy().into_owned()).unwrap();
+        assert!(
+            status.is_repo,
+            "linked worktree must be recognized as a repo"
+        );
+        assert_eq!(status.branch.as_deref(), Some("feature"));
+
+        fs::write(linked_wt.join("b.txt"), "new\n").unwrap();
+        let status2 = git_status_impl(linked_wt.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(status2.changes.len(), 1);
+
+        let bare = base.join("bare.git");
+        crate::proc::command(&git)
+            .args([
+                "clone",
+                "--bare",
+                main_repo.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ])
+            .status()
+            .unwrap();
+        crate::proc::command(&git)
+            .current_dir(&linked_wt)
+            .args(["remote", "set-url", "origin", bare.to_str().unwrap()])
+            .status()
+            .unwrap();
+
+        let fetch_result = crate::git_write::fetch_impl(
+            &linked_wt.to_string_lossy(),
+            &[("GIT_TERMINAL_PROMPT", "0")],
+        );
+        assert!(
+            !matches!(fetch_result, Ok(crate::git_write::FetchOutcome::Skipped)),
+            "fetch must not be skipped in linked worktree: {fetch_result:?}"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
 }
 
 /// Unified diff for one path in `root`'s working tree vs HEAD. For untracked
@@ -1128,6 +1925,27 @@ pub(crate) fn git_diff_file_impl(
     let rel_path = path.as_str();
 
     if untracked {
+        // For untracked files, check the file type before diffing. A FIFO would
+        // block git diff --no-index forever waiting for a writer. Symlinks to
+        // FIFOs are also rejected.
+        let full_path = root_path.join(rel_path);
+        match std::fs::symlink_metadata(&full_path) {
+            Ok(meta) => {
+                let ft = meta.file_type();
+                if !ft.is_file() && !ft.is_symlink() {
+                    return Err(format!("cannot diff special file: {}", path));
+                }
+                if ft.is_symlink() {
+                    if let Ok(target_meta) = std::fs::metadata(&full_path) {
+                        if !target_meta.is_file() {
+                            return Err(format!("cannot diff symlink to non-file: {}", path));
+                        }
+                    }
+                }
+            }
+            Err(e) => return Err(format!("failed to stat file: {e}")),
+        }
+
         // Show the whole new file as additions. `--no-index` exits 0 (no diff)
         // or 1 (diff found); anything else is a real error. One hardened call.
         let output = run_git_raw(

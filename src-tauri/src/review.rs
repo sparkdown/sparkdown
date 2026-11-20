@@ -295,11 +295,14 @@ pub(crate) fn remote_stats_script(
     hashed: &[&str],
     untracked: &[&str],
     quote: impl Fn(&str) -> String,
-) -> String {
+) -> Result<String, String> {
+    let (filters, diffs) = crate::remote::ssh::remote_collect_driver_names(root)?;
+    let neutralizers = crate::remote::ssh::remote_filter_neutralizers_env(&filters, &diffs);
     let mut s = format!(
         "g() {{ env -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS -u GIT_PAGER GIT_CONFIG_NOSYSTEM=1 \
-         GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 git -c core.fsmonitor=false \
-         -c diff.external= -c core.pager=cat -C {} \"$@\"; }}\n",
+         GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL= {neutralizers}\
+         git --no-optional-locks -c core.fsmonitor=false -c core.hooksPath=/dev/null \
+         -c diff.external= -c core.pager=cat -c protocol.allow=never -c fetch.negotiationAlgorithm=noop -C {} \"$@\"; }}\n",
         quote(root)
     );
     if tracked {
@@ -324,7 +327,7 @@ pub(crate) fn remote_stats_script(
         ));
     }
     s.push_str("true\n");
-    s
+    Ok(s)
 }
 
 /// Parsed remote script output.
@@ -554,6 +557,7 @@ pub fn review_state_save(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::TEST_SESSION_LOCK as TEST_LOCK;
 
     fn ch(path: &str, status: &str) -> ChangeRef {
         ChangeRef {
@@ -681,7 +685,8 @@ mod tests {
             ch("new.md", "untracked"),
         ];
         let (tracked, hashed, untracked) = remote_plan(&remote_changes);
-        let script = remote_stats_script(&root, tracked, &hashed, &untracked, q);
+        let script = remote_stats_script(&root, tracked, &hashed, &untracked, q)
+            .expect("remote_stats_script should succeed");
         if let Ok(out) = crate::proc::command("sh").arg("-c").arg(&script).output() {
             assert!(
                 out.status.success(),
@@ -706,7 +711,9 @@ mod tests {
 
     #[test]
     fn remote_script_quotes_every_path_and_skips_empty_loops() {
-        let s = remote_stats_script("/srv/repo", true, &["a b.md", "it's.md"], &["new.md"], q);
+        let _guard = TEST_LOCK.lock().unwrap();
+        let s = remote_stats_script("/srv/repo", true, &["a b.md", "it's.md"], &["new.md"], q)
+            .expect("remote_stats_script should succeed");
         assert!(s.contains("-C '/srv/repo'"));
         assert!(s.contains("diff --numstat -z --no-renames"));
         assert!(s.contains("hash-object --no-filters"));
@@ -714,7 +721,8 @@ mod tests {
         assert!(s.contains("--no-index --numstat"));
         assert!(s.contains("GIT_CONFIG_GLOBAL=/dev/null"));
         assert!(s.trim_end().ends_with("true"));
-        let empty = remote_stats_script("/r", false, &[], &[], q);
+        let empty = remote_stats_script("/r", false, &[], &[], q)
+            .expect("empty remote_stats_script should succeed");
         assert!(!empty.contains("for f in"));
         assert!(!empty.contains("--numstat"));
     }

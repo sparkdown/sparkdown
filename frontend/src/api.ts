@@ -126,9 +126,10 @@ export const api = {
     invoke<void>("show_app_menu", { x, y }),
   /** Open an http(s)/mailto URL in the system default handler (browser). */
   openExternal: (url: string) => invoke<void>("open_external", { url }),
-  /** Grant the asset protocol each local preview image (one flag per path). */
-  allowPreviewAssets: (paths: string[]) =>
-    invoke<boolean[]>("allow_preview_assets", { paths }),
+  /** Grant the asset protocol each local preview image (one flag per path).
+   *  `baseDir` is the previewed document's directory. */
+  allowPreviewAssets: (paths: string[], baseDir: string | null) =>
+    invoke<boolean[]>("allow_preview_assets", { paths, baseDir }),
   /** Raw bytes of an image on the SSH host `host` (must be the active one). */
   remoteReadImage: (host: string, path: string) =>
     invoke<ArrayBuffer>("remote_read_image", { host, path }),
@@ -151,6 +152,10 @@ export const api = {
    *  it can't race tmux's startup redraw and appear duplicated. */
   tmuxSendKeys: (session: string, text: string) =>
     invoke<void>("tmux_send_keys", { session, text }),
+  /** One mouse-wheel step on a tmux pane: >0 up, <0 down (tmux history /
+   *  the screen app), 0 leaves copy mode. Never types at a shell prompt. */
+  tmuxWheel: (session: string, lines: number) =>
+    invoke<void>("tmux_wheel", { session, lines }),
   tmuxKillSession: (session: string) =>
     invoke<void>("tmux_kill_session", { session }),
   terminalWrite: (id: string, data: string) =>
@@ -202,6 +207,17 @@ export const api = {
   gitPull: (root: string) => invoke<GitActionResult>("git_pull", { root }),
   /** #122: push the current branch to its upstream; never forced. */
   gitPush: (root: string) => invoke<GitActionResult>("git_push", { root }),
+  /** #175: quiet background fetch of the upstream remote (local repos
+   *  only; never prompts). "busy": this window already has one running.
+   *  "skipped": the repo config has keys that can execute commands. */
+  gitFetch: (root: string) => invoke<"fetched" | "busy" | "skipped">("git_fetch", { root }),
+  /** #172: what Discard would do to each path (fresh status). */
+  gitDiscardPreview: (root: string, paths: string[]) =>
+    invoke<DiscardItem[]>("git_discard_preview", { root, paths }),
+  /** #172: discard the changes of `paths` (revert to HEAD; files with no
+   *  committed version go to the OS trash). Rejects with a GitActionError. */
+  gitDiscard: (root: string, items: DiscardRequest[]) =>
+    invoke<DiscardResult>("git_discard", { root, items }),
   gitDiffFile: (root: string, path: string, untracked: boolean) =>
     invoke<string>("git_diff_file", { root, path, untracked }),
   /** Per changed file: +adds / −dels and a fingerprint of the change
@@ -358,6 +374,8 @@ type GitErrorKind =
   | "auth"
   | "network"
   | "conflict"
+  | "merge_conflict"
+  | "rebase_conflict"
   | "local_changes"
   | "diverged"
   | "rejected"
@@ -373,6 +391,8 @@ export interface GitActionError {
   kind: GitErrorKind;
   message: string;
   detail: string;
+  /** Repo-relative files the error is about (conflicted files, #174). */
+  files?: string[];
 }
 
 export interface GitActionResult {
@@ -384,6 +404,34 @@ export interface GitActionResult {
   commits: number | null;
   /** Pull / push: the upstream, such as `origin/main`. */
   target: string | null;
+}
+
+/** One row of the Discard confirmation (git_write.rs `DiscardItem`). */
+export interface DiscardItem {
+  path: string;
+  action: "revert" | "delete";
+  detail: string;
+  /** A staged rename's source, restored together with `path`. */
+  source?: string;
+  staged: boolean;
+  partially_staged: boolean;
+  untracked: boolean;
+  /** Opaque token for exactly what was previewed (status, index, bytes on
+   *  disk). Sent back unchanged; the core refuses a row that differs. */
+  fingerprint: string;
+}
+
+/** One confirmed row sent back to git_discard (git_write.rs
+ *  `DiscardRequest`): a path whose fresh plan differs is refused. */
+export type DiscardRequest = Pick<DiscardItem, "path" | "action" | "source" | "fingerprint">;
+
+/** git_write.rs `DiscardResult`. */
+export interface DiscardResult {
+  discarded: string[];
+  /** Among `discarded`: moved to the OS trash. */
+  trashed: string[];
+  failed: { path: string; message: string }[];
+  output: string;
 }
 
 /** Mirror of `GitBranchStatus` in src-tauri/src/git.rs. */

@@ -25,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -147,8 +149,16 @@ impl Default for McpState {
 pub fn mcp_publish(
     webview_window: tauri::WebviewWindow,
     state: tauri::State<'_, Arc<McpState>>,
-    snapshot: Snapshot,
+    store: tauri::State<'_, crate::session::ConfigStore>,
+    mut snapshot: Snapshot,
 ) {
+    // Override the renderer-supplied `enabled` with the authoritative value
+    // from the shared store, so a window whose in-memory config is stale
+    // (another window flipped Settings → Agents → Share editor context and
+    // this one has not reloaded) cannot keep publishing `enabled: true`
+    // and have snapshot_tool serve its buffer text. Default `true`
+    // matches AppConfig::default() / Snapshot::default().
+    snapshot.enabled = store.pref_bool("agent_context_enabled", true);
     publish_for(&state, webview_window.label(), snapshot);
 }
 
@@ -482,7 +492,11 @@ pub(crate) fn run_program_windows(
     full.extend(rest.iter().map(std::ffi::OsString::from));
     let mut command = crate::proc::command(&runner);
     command.args(&full);
-    run_command_with_timeout(command, &std::env::temp_dir(), timeout)
+    // Private per-call cwd (dropped at the end of this call): agent CLIs
+    // scan `cwd` for project config, so using the shared temp dir would
+    // let another local account place config they would load.
+    let _guard = private_cwd_or_temp().map_err(|e| format!("private cwd: {e}"))?;
+    run_command_with_timeout(command, _guard.path(), timeout)
 }
 
 /// How an agent CLI run ended.
@@ -795,6 +809,187 @@ const CLI_TIMEOUT: Duration = Duration::from_secs(20);
 /// The remove step that a Repair runs before `mcp add`: best effort.
 const REPAIR_REMOVE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// A fresh, per-call, owner-only (0700) working directory for a child
+/// process we spawn. Dropped: the directory is removed. Agent CLIs scan
+/// `cwd` for project config, so using `std::env::temp_dir()` on a
+/// shared Linux box (world-writable `/tmp` when `TMPDIR` is unset) would
+/// let another local account place `./.mcp.json`, `./.gemini/settings.json`,
+/// `./.claude/settings.json` for the agent to load. The isolated dir
+/// avoids that: it is created mode 0700, owned by us, with a name no
+/// other process knows.
+pub(crate) struct PrivateCwd {
+    path: PathBuf,
+}
+
+impl PrivateCwd {
+    /// A fresh directory under `<root>/sparkdown`.
+    fn new_in(root: &std::path::Path) -> std::io::Result<Self> {
+        let base = private_cwd_base_in(root)?;
+        Ok(Self {
+            path: private_cwd_fresh_in(&base)?,
+        })
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for PrivateCwd {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Root under which the per-call working directories live: on Unix,
+/// `$XDG_RUNTIME_DIR` (the same per-user root as the MCP socket) when it is
+/// set to an absolute path, else the temp dir.
+fn private_cwd_root() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// `<root>/sparkdown`, created (or verified) as a real directory we own
+/// with mode 0700. Shared across calls, so it may already exist.
+fn private_cwd_base_in(root: &std::path::Path) -> std::io::Result<PathBuf> {
+    let base = root.join("sparkdown");
+    ensure_private_dir(&base)?;
+    Ok(base)
+}
+
+/// Create a fresh, uniquely named 0700 directory under `base` and return
+/// its path. The caller owns it (and removes it via [`PrivateCwd`]).
+fn private_cwd_fresh_in(base: &std::path::Path) -> std::io::Result<PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    // The pid + a monotonic counter + nanos keeps the name unique per
+    // process and across threads; the parent dir is already 0700, so
+    // no other account can see this name.
+    for _ in 0..32 {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let path = base.join(format!("cli-{}-{}-{}", std::process::id(), n, nanos));
+        match create_private_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other(
+        "could not create a private working directory",
+    ))
+}
+
+/// Create `dir` with mode 0700 (Unix) / default ACL (Windows). Fails if the
+/// name already exists.
+#[cfg(unix)]
+fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(dir)
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    // Per-user `%LOCALAPPDATA%\\Temp` already has a per-user ACL that the new
+    // directory inherits; nothing else to do.
+    std::fs::create_dir(dir)
+}
+
+/// Ensure the base dir exists, is a real directory (not a symlink) we own,
+/// and has mode 0700 on Unix. Shared across calls, so it may already exist.
+#[cfg(unix)]
+fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    // symlink_metadata: never follow a placed symlink.
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.file_type().is_dir() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a directory",
+            dir.display()
+        )));
+    }
+    // The current effective uid: `geteuid(2)` takes no arguments and cannot
+    // fail (same pattern as context::current_euid).
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: geteuid() has no arguments, no error path, no side effects.
+    let euid = unsafe { geteuid() };
+    if meta.uid() != euid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} is not owned by the current user", dir.display()),
+        ));
+    }
+    if meta.mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
+/// A private per-call working directory. Tries `<root>/sparkdown/…` first;
+/// if that base cannot be used (read-only runtime dir, a name taken by another
+/// account, exhausted inodes), falls back to a randomly named 0700 directory
+/// directly under the temp dir. Never returns a shared directory: when both
+/// fail the caller gets an error and must not spawn.
+pub(crate) fn private_cwd_or_temp() -> std::io::Result<PrivateCwd> {
+    private_cwd_in(&private_cwd_root(), &std::env::temp_dir())
+}
+
+/// [`private_cwd_or_temp`] with both locations passed in.
+fn private_cwd_in(
+    root: &std::path::Path,
+    fallback_dir: &std::path::Path,
+) -> std::io::Result<PrivateCwd> {
+    PrivateCwd::new_in(root).or_else(|_| private_cwd_fallback_in(fallback_dir))
+}
+
+/// `<dir>/sparkdown-<128-bit random>`, created 0700 with create-new
+/// semantics (an existing name is never reused) and checked to be ours.
+fn private_cwd_fallback_in(dir: &std::path::Path) -> std::io::Result<PrivateCwd> {
+    for _ in 0..10 {
+        let path = dir.join(format!("sparkdown-{}", random_token()));
+        match create_private_dir(&path) {
+            Ok(()) => {
+                let cwd = PrivateCwd { path };
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    let meta = std::fs::symlink_metadata(cwd.path())?;
+                    if meta.uid() != crate::context::current_euid() {
+                        // Dropping `cwd` removes the directory.
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "fallback private directory is not owned by the current user",
+                        ));
+                    }
+                }
+                return Ok(cwd);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other(
+        "could not create a private working directory after 10 attempts",
+    ))
+}
+
 /// Run `program args…` with a deadline: stdin closed, stdout/stderr drained
 /// on helper threads (so a chatty child never blocks on a full pipe), and the
 /// child killed if it outlives `timeout`. Returns (success, stdout, stderr).
@@ -909,15 +1104,31 @@ fn kill_tree(child: &mut std::process::Child) {
 /// shell's PATH, then on the interactive shell's PATH (an rc file can add
 /// to PATH, e.g. nvm), and the CLI runs with that PATH. Only a name that is
 /// neither (an alias or shell function) still goes through `$SHELL -lic`,
-/// with the noise lines dropped from its error. The working directory is
-/// the temp dir, NOT the app's (home or `/` for a Dock launch): agent CLIs
-/// scan the cwd for project config, and a scan of `$HOME` touches
-/// Documents/Downloads/Desktop, which macOS attributes to SparkDown and
-/// prompts for. Blocking: call from a worker thread, never the UI.
+/// with the noise lines dropped from its error. The working directory is a
+/// per-user, app-private 0700 dir (see [`private_cwd_or_temp`]), NOT the shared temp
+/// dir and NOT the app's (home or `/` for a Dock launch): agent CLIs scan
+/// the cwd for project config, so using a shared `/tmp` would let
+/// another local user place `.mcp.json` / `.claude/` / `.gemini/` /
+/// `AGENTS.md` that the CLI loads while running as the target, and
+/// using `$HOME` would make them scan Documents/Downloads/Desktop
+/// which macOS attributes to SparkDown and prompts for. Blocking: call from
+/// a worker thread, never the UI.
 #[cfg_attr(windows, allow(dead_code))]
 fn run_local_argv_unix(argv: &[String], timeout: Duration) -> Result<CliOutcome, String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    run_local_argv_unix_with(&shell, argv, timeout)
+}
+
+/// [`run_local_argv_unix`] with the login shell passed in (used for a name
+/// that is not an executable on either PATH, e.g. an alias).
+#[cfg_attr(windows, allow(dead_code))]
+fn run_local_argv_unix_with(
+    shell: &str,
+    argv: &[String],
+    timeout: Duration,
+) -> Result<CliOutcome, String> {
     let (bin, rest) = argv.split_first().ok_or("empty agent command")?;
-    let tmp = std::env::temp_dir();
+    let _guard = private_cwd_or_temp().map_err(|e| format!("private cwd: {e}"))?;
     let login = crate::context::login_shell_path();
     let found = crate::context::find_in_path(bin, &login, "", false)
         .map(|p| (p, login.clone()))
@@ -929,13 +1140,12 @@ fn run_local_argv_unix(argv: &[String], timeout: Duration) -> Result<CliOutcome,
         Some((program, path)) => {
             let mut command = crate::proc::command(&program);
             command.args(rest).env("PATH", path);
-            run_command_with_timeout(command, &tmp, timeout)
+            run_command_with_timeout(command, _guard.path(), timeout)
         }
         None => {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
             let mut command = crate::proc::command(shell);
             command.args(["-lic", &posix_command_line(argv)]);
-            run_command_with_timeout(command, &tmp, timeout)
+            run_command_with_timeout(command, _guard.path(), timeout)
         }
     }
 }
@@ -949,19 +1159,28 @@ fn interactive_shell_path() -> Option<String> {
     static PATH: OnceLock<Option<String>> = OnceLock::new();
     PATH.get_or_init(|| {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        let (ok, stdout, _noise) = run_with_timeout(
-            &shell,
-            &["-lic", "printf '\\n__SD_PATH__%s\\n' \"$PATH\""],
-            &std::env::temp_dir(),
-            Duration::from_secs(5),
-        )
-        .ok()?;
-        if !ok {
-            return None;
-        }
-        marked_path(&stdout)
+        probe_interactive_path(&shell)
     })
     .clone()
+}
+
+/// One `shell -lic` run that prints PATH after a marker line, in a private
+/// per-call working directory (see [`PrivateCwd`]). None when the directory
+/// cannot be made or the shell fails.
+#[cfg_attr(windows, allow(dead_code))]
+fn probe_interactive_path(shell: &str) -> Option<String> {
+    let cwd = private_cwd_or_temp().ok()?;
+    let (ok, stdout, _noise) = run_with_timeout(
+        shell,
+        &["-lic", "printf '\\n__SD_PATH__%s\\n' \"$PATH\""],
+        cwd.path(),
+        Duration::from_secs(5),
+    )
+    .ok()?;
+    if !ok {
+        return None;
+    }
+    marked_path(&stdout)
 }
 
 /// The PATH after the last `__SD_PATH__` marker line of a probe's output.
@@ -1247,6 +1466,10 @@ pub async fn mcp_agent_installed(webview_window: tauri::WebviewWindow, bin: Stri
 pub const SOCKET_ENV: &str = "SPARKDOWN_MCP";
 /// The routing token of a terminal's folder (#64, decision 3).
 pub const TOKEN_ENV: &str = "SPARKDOWN_MCP_TOKEN";
+/// Per-connection secret required by the per-window socket's sparkdown_hello.
+/// Generated fresh when the socket is created, exported into SparkDown
+/// terminals only, and read by the remote shim.
+pub const WINDOW_TOKEN_ENV: &str = "SPARKDOWN_MCP_WINDOW_TOKEN";
 /// The folder an external agent names (or `--folder <path>`).
 pub const FOLDER_ENV: &str = "SPARKDOWN_FOLDER";
 
@@ -1302,16 +1525,85 @@ pub(crate) fn stale_command(
     (!same).then_some(StaleCommand::Other)
 }
 
-/// Stable per-user socket path: `<runtime dir>/sparkdown/mcp.sock`. macOS
-/// `$TMPDIR` is already per-user; Linux prefers `$XDG_RUNTIME_DIR`. The
-/// parent dir is created 0700. Stable (not per-pid) so tmux sessions that
-/// outlive an app restart keep a working `$SPARKDOWN_MCP`.
+/// Stable per-user socket path: `<runtime dir>/sparkdown/mcp.sock`. The
+/// parent dir is created 0700 and verified owned by the current euid before
+/// the socket is bound (see `start`). Stable (not per-pid) so tmux sessions
+/// that outlive an app restart keep a working `$SPARKDOWN_MCP`.
+///
+/// Base selection must be strictly per-user, because `<base>/sparkdown` and
+/// `mcp.sock` carry the only access control the MCP channel has. In order:
+///   1. `$XDG_RUNTIME_DIR` when set to a non-empty value (Linux, per-user,
+///      0700).
+///   2. On macOS, `std::env::temp_dir()` — `$TMPDIR` resolves to the
+///      per-user `/var/folders/<...>/T` dir (0700).
+///   3. Otherwise an app-private dir under `$HOME` (`$HOME/.cache/sparkdown/mcp.sock`).
+///
+/// Returns `None` when no per-user base is available (both XDG_RUNTIME_DIR
+/// and HOME are unset or empty on Linux).
 #[cfg(unix)]
-pub fn mcp_socket_path() -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("sparkdown").join("mcp.sock")
+pub fn mcp_socket_path() -> Option<PathBuf> {
+    runtime_base().map(|b| b.join("sparkdown").join("mcp.sock"))
+}
+
+/// Pick the per-user runtime base used by `mcp_socket_path`. See its doc
+/// comment for the ordering. Empty env vars are rejected, matching
+/// `context.rs::context_root`.
+#[cfg(unix)]
+fn runtime_base() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(v));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // `$TMPDIR` on macOS is a per-user 0700 dir; keep the previous
+        // behaviour there.
+        Some(std::env::temp_dir())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::env::var_os("HOME")
+            .filter(|v| !v.is_empty())
+            .map(|h| PathBuf::from(h).join(".cache"))
+    }
+}
+
+/// Create the socket directory under the runtime base. The base itself
+/// (XDG_RUNTIME_DIR or ~/.cache) is assumed to exist or be creatable;
+/// we create and harden only the sparkdown subdirectory.
+#[cfg(unix)]
+pub(crate) fn ensure_socket_dir(dir: &Path) -> std::io::Result<()> {
+    // Extract base and leaf. For ~/.cache/sparkdown/mcp.sock parent,
+    // base is ~/.cache and leaf is sparkdown.
+    let leaf = dir.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "socket dir has no name")
+    })?;
+    let base = dir.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "socket dir has no parent")
+    })?;
+    // Create base recursively if needed (e.g. ~/.cache on fresh machine).
+    std::fs::create_dir_all(base)?;
+    // Create and harden the leaf (sparkdown) with ownership check.
+    let leaf_path = base.join(leaf);
+    crate::context::ensure_owned_dir(&leaf_path)?;
+    Ok(())
+}
+
+/// Check that a Unix socket path fits in the platform's sockaddr_un limit.
+/// macOS allows 104 bytes, Linux 108.
+#[cfg(unix)]
+fn check_socket_path_length(path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    const LIMIT: usize = 104;
+    #[cfg(not(target_os = "macos"))]
+    const LIMIT: usize = 108;
+    let len = path.as_os_str().len();
+    if len >= LIMIT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("socket path too long ({len} bytes, limit {LIMIT})"),
+        ));
+    }
+    Ok(())
 }
 
 /// Windows: a per-launch named pipe with an unguessable name. Pipes live in
@@ -1349,10 +1641,8 @@ pub fn mcp_socket_path() -> PathBuf {
 }
 
 /// 128 bits of OS-seeded randomness as hex, no extra crate. `RandomState` is
-/// seeded from the platform RNG (it backs HashMap's hash-flooding defence), so
-/// hashing a fixed input under two fresh instances yields an unguessable token
-/// for the pipe name.
-#[cfg(windows)]
+/// seeded from the platform RNG (it backs HashMap's collision resistance), so
+/// hashing a fixed input under two fresh instances yields a random token.
 pub(crate) fn random_token() -> String {
     use std::hash::{BuildHasher, Hasher};
     let mut token = String::with_capacity(32);
@@ -1362,6 +1652,76 @@ pub(crate) fn random_token() -> String {
         token.push_str(&format!("{:016x}", h.finish()));
     }
     token
+}
+
+/// Per-launch secret for the sparkdown_forward second-launch protocol.
+///
+/// The forward branch runs before the sparkdown_hello handshake and before
+/// routing, so without this gate any client that can connect to the socket
+/// could make the GUI open files and bind windows to folders. The nonce is
+/// generated fresh at server start, stored next to the socket (so only
+/// the owning user can read it), and the second-launch forwarder reads it
+/// and attaches it to its message. A client that lacks file-system access
+/// to the nonce file is refused.
+#[cfg(unix)]
+static FORWARD_NONCE: OnceLock<String> = OnceLock::new();
+
+/// Path of the per-launch forward nonce file (next to the MCP socket on Unix).
+#[cfg(unix)]
+pub fn forward_nonce_path() -> PathBuf {
+    mcp_socket_path()
+        .unwrap_or_else(|| PathBuf::from("/tmp/sparkdown-mcp.nonce"))
+        .with_file_name("mcp.nonce")
+}
+
+/// Create or refresh the per-launch forward nonce file. Called by start once
+/// the socket directory exists. On failure the cached nonce is still set, so
+/// the forward branch keeps rejecting any client that cannot read the file.
+#[cfg(unix)]
+fn init_forward_nonce() {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let nonce = FORWARD_NONCE.get_or_init(random_token).clone();
+    let path = forward_nonce_path();
+    // Replace in place so we never widen permissions on an existing file.
+    let _ = std::fs::remove_file(&path);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+    {
+        let _ = f.write_all(nonce.as_bytes());
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
+/// Read the per-launch forward nonce for a second-launch client to attach
+/// to its sparkdown_forward message. Returns None when the running instance
+/// has not written one yet (socket not up).
+#[cfg(unix)]
+pub fn read_forward_nonce() -> Option<String> {
+    let bytes = std::fs::read(forward_nonce_path()).ok()?;
+    // Trim any whitespace.
+    let s = String::from_utf8(bytes).ok()?.trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// The first line a second launch sends to the running instance.
+#[cfg(unix)]
+pub fn forward_message(argv: &[String], cwd: &str, nonce: &str) -> Value {
+    json!({ "sparkdown_forward": { "argv": argv, "cwd": cwd, "nonce": nonce } })
+}
+
+/// Constant-time comparison of the client-supplied forward nonce against
+/// the running instance's cached value.
+#[cfg(unix)]
+fn forward_nonce_matches(supplied: &str) -> bool {
+    let Some(expected) = FORWARD_NONCE.get() else {
+        return false;
+    };
+    constant_time_eq(expected.as_bytes(), supplied.as_bytes())
 }
 
 static SOCKET: OnceLock<PathBuf> = OnceLock::new();
@@ -1382,10 +1742,13 @@ pub fn shutdown() {
     #[cfg(unix)]
     if let Some(p) = SOCKET.get() {
         let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_file(forward_nonce_path());
     }
     // Claude Code's Windows session config (never written elsewhere).
     if cfg!(windows) {
         let _ = std::fs::remove_file(claude_session_config_path());
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(discoverable_endpoint_path());
     }
 }
 
@@ -1397,12 +1760,24 @@ pub fn shutdown() {
 pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
-    let path = mcp_socket_path();
+    let Some(path) = mcp_socket_path() else {
+        eprintln!(
+            "SparkDown MCP socket: no per-user base available (XDG_RUNTIME_DIR and HOME unset)"
+        );
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no per-user base directory available",
+        ));
+    };
+    check_socket_path_length(&path)?;
     let dir = path.parent().expect("socket path has a parent");
-    std::fs::create_dir_all(dir)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    // Create base recursively (e.g. ~/.cache) and harden only the leaf
+    // (sparkdown) with ownership check, so root-owned /home is fine.
+    ensure_socket_dir(dir)?;
     if path.exists() {
         // Live socket → another instance owns it. Dead file (crash) → reclaim.
+        // Validate the folder before connecting, same as when binding.
+        ensure_socket_dir(dir)?;
         if UnixStream::connect(&path).is_ok() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AddrInUse,
@@ -1412,8 +1787,18 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
         let _ = std::fs::remove_file(&path);
     }
     let listener = UnixListener::bind(&path)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    if std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).is_err() {
+        let _ = std::fs::remove_file(&path);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "failed to set socket permissions",
+        ));
+    }
     let _ = SOCKET.set(path.clone());
+    // Per-launch nonce for the sparkdown_forward branch: a file next to the
+    // socket that only the owning user can read, which the second-launch
+    // sender attaches to its forward message.
+    init_forward_nonce();
     eprintln!("SparkDown MCP socket: {}", path.display());
     std::thread::Builder::new()
         .name("sparkdown-mcp".into())
@@ -1424,10 +1809,64 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
                 let state = state.clone();
                 // One thread per client (one shim per agent process); a slow
                 // round trip in one never blocks another.
-                std::thread::spawn(move || serve_client(stream, &app, &state));
+                std::thread::spawn(move || serve_client(stream, &app, &state, true));
             }
         })?;
     Ok(path)
+}
+
+/// Per-window socket state: path + per-session random token the client must
+/// present in sparkdown_hello before any dispatch. One entry per window
+/// label; the token is exported into the window's SparkDown terminals only.
+#[cfg(unix)]
+#[derive(Clone)]
+pub(crate) struct WindowSock {
+    pub(crate) path: PathBuf,
+    pub(crate) token: String,
+}
+
+#[cfg(unix)]
+fn window_socks() -> &'static Mutex<HashMap<String, WindowSock>> {
+    static SOCKS: OnceLock<Mutex<HashMap<String, WindowSock>>> = OnceLock::new();
+    SOCKS.get_or_init(Default::default)
+}
+
+/// The per-connection secret agents in label's terminals must send in
+/// sparkdown_hello.token to use the window's forwarded MCP socket, if one
+/// has been created. Exposed so remote can plumb it into the terminal env.
+#[cfg(unix)]
+pub fn window_socket_token(label: &str) -> Option<String> {
+    window_socks()
+        .lock()
+        .ok()?
+        .get(label)
+        .map(|w| w.token.clone())
+}
+
+/// Tests: set or clear the window token `window_socket_token` reports.
+#[cfg(all(test, unix))]
+pub(crate) fn set_window_token_for_test(label: &str, token: Option<&str>) {
+    let mut socks = window_socks().lock().unwrap();
+    match token {
+        Some(t) => {
+            socks.insert(
+                label.to_string(),
+                WindowSock {
+                    path: PathBuf::from("/nonexistent"),
+                    token: t.to_string(),
+                },
+            );
+        }
+        None => {
+            socks.remove(label);
+        }
+    }
+}
+
+/// Non-Unix: there is no per-window socket, so there is no token.
+#[cfg(not(unix))]
+pub fn window_socket_token(_label: &str) -> Option<String> {
+    None
 }
 
 /// The local end of one window's remote MCP forward (#64): a socket of its
@@ -1436,37 +1875,122 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
 #[cfg(unix)]
 pub fn window_socket(app: &AppHandle, label: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::net::UnixListener;
-    static SOCKS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
-    let socks = SOCKS.get_or_init(Default::default);
-    if let Some(p) = socks.lock().ok()?.get(label) {
-        if p.exists() {
-            return Some(p.clone());
+    use std::os::unix::net::{UnixListener, UnixStream};
+    // Per-window registry of sockets this process bound. Only paths
+    // recorded here are considered this process's own: never remove_file
+    // a path that is not in the registry and is live, so a tag collision (or
+    // a name conflict) cannot make us take another window's socket.
+    let socks = window_socks();
+    if let Some(w) = socks.lock().ok()?.get(label) {
+        if w.path.exists() {
+            return Some(w.path.clone());
         }
     }
-    let path =
-        mcp_socket_path().with_file_name(format!("mcp-{}.sock", crate::windows::label_tag(label)));
-    let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path).ok()?;
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    socks.lock().ok()?.insert(label.to_string(), path.clone());
+    // 128-bit keyed label_tag makes an accidental collision between two
+    // labels effectively impossible, but a stale socket from a previous
+    // launch of *this* label can still be on disk. Attempt to connect: a
+    // successful connect means some live process already owns the name, so
+    // we refuse to clobber it; a connection-refused (or ENOENT) means the
+    // file is dead and can be unlinked.
+    let base_path =
+        mcp_socket_path()?.with_file_name(format!("mcp-{}.sock", crate::windows::label_tag(label)));
+    let mut path = base_path.clone();
+    check_socket_path_length(&path).ok()?;
+    if let Some(dir) = path.parent() {
+        ensure_socket_dir(dir).ok()?;
+    }
+    let mut listener: Option<UnixListener> = None;
+    for attempt in 0u32..8 {
+        if path.exists() {
+            // Live? Then this is not our socket to touch.
+            match UnixStream::connect(&path) {
+                Ok(_) => {
+                    // Someone is listening. Try a fresh suffix so we never
+                    // disturb a live socket, even in the (unreachable with
+                    // a 128-bit keyed tag) event of a collision.
+                    path = base_path.with_file_name(format!(
+                        "mcp-{}-{}.sock",
+                        crate::windows::label_tag(label),
+                        attempt + 1
+                    ));
+                    if check_socket_path_length(&path).is_err() {
+                        return None;
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    // ECONNREFUSED / ENOENT: the file is a stale socket;
+                    // dropping it before bind is standard practice.
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+        match UnixListener::bind(&path) {
+            Ok(l) => {
+                listener = Some(l);
+                break;
+            }
+            Err(_) => {
+                // Lost a race or the dir is unwritable: retry with a
+                // different suffix.
+                path = base_path.with_file_name(format!(
+                    "mcp-{}-{}.sock",
+                    crate::windows::label_tag(label),
+                    attempt + 1
+                ));
+                if check_socket_path_length(&path).is_err() {
+                    return None;
+                }
+                continue;
+            }
+        }
+    }
+    let listener = listener?;
+    if std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).is_err() {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    // Fresh per-connect secret: a direct connection to the forwarded socket
+    // that does not know this token can neither read/edit buffers nor send
+    // sparkdown_forward.
+    let token = crate::windows::random_hex();
+    socks.lock().ok()?.insert(
+        label.to_string(),
+        WindowSock {
+            path: path.clone(),
+            token: token.clone(),
+        },
+    );
     let app = app.clone();
     let state = app.state::<Arc<McpState>>().inner().clone();
+    let socks_ref = socks;
     let label = label.to_string();
+    let bound_path = path.clone();
     let _ = std::thread::Builder::new()
         .name("sparkdown-mcp-window".into())
         .spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let (app, state, label) = (app.clone(), state.clone(), label.clone());
+                // Verify the socket we are accepting on still belongs to
+                // this window's label. If the registry no longer maps
+                // label -> bound_path, this listener may not match the label
+                // (e.g. the file was unlinked and the entry
+                // overwritten); drop the connection instead of pinning
+                // Conn::fixed to a label we can no longer vouch for.
+                let owned = socks_ref
+                    .lock()
+                    .ok()
+                    .is_some_and(|g| g.get(&label).is_some_and(|w| w.path == bound_path));
+                if !owned {
+                    continue;
+                }
+                let (app, state, label, token) =
+                    (app.clone(), state.clone(), label.clone(), token.clone());
                 std::thread::spawn(move || {
                     let Ok(read_half) = stream.try_clone() else {
                         return;
                     };
-                    let mut conn = Conn {
-                        fixed: Some(label),
-                        ..Default::default()
-                    };
+                    let mut conn = Conn::for_window(label, token);
                     serve_lines(read_half, stream, |msg| conn.handle(&app, &state, msg));
                 });
             }
@@ -1474,17 +1998,51 @@ pub fn window_socket(app: &AppHandle, label: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-/// Windows: a stable, discoverable pipe for external agents, created only
-/// when Settings → Agents → External agents is on (decision 2). Same
-/// user-only DACL and first-instance guard as the secret pipe.
+/// Windows: a per-launch named pipe with a random name for external agents,
+/// created only when Settings → Agents → External agents is on. Same
+/// three-layer checks as the primary pipe: random per-launch suffix,
+/// `FILE_FLAG_FIRST_PIPE_INSTANCE`, and the user+SYSTEM DACL
+/// (`pipe_sddl`). The random name is published in
+/// [`discoverable_endpoint_path`] (a per-user file), so only the current
+/// user can learn it; the USERNAME is kept as a human-readable prefix but
+/// is never relied on alone.
 #[cfg(windows)]
 pub fn discoverable_pipe_path() -> PathBuf {
-    let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".into());
-    let safe: String = user
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect();
-    PathBuf::from(format!(r"\\.\pipe\sparkdown-{safe}-mcp-external"))
+    static PIPE: OnceLock<PathBuf> = OnceLock::new();
+    PIPE.get_or_init(|| {
+        let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".into());
+        let user_part: String = user
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .collect();
+        PathBuf::from(format!(
+            r"\\.\pipe\sparkdown-{user_part}-{}-mcp-external",
+            random_token()
+        ))
+    })
+    .clone()
+}
+
+/// Per-launch external-agent handshake secret (128 bits of OS randomness).
+/// Published in the user-only endpoint file so a name conflict cannot create it.
+#[cfg(windows)]
+pub(crate) fn discoverable_endpoint_secret() -> &'static str {
+    static SECRET: OnceLock<String> = OnceLock::new();
+    SECRET.get_or_init(random_token).as_str()
+}
+
+/// Per-user file that publishes the external pipe name and handshake
+/// secret. In `%LOCALAPPDATA%\Temp` (same per-user ACL as
+/// [`claude_session_config_path`]), removed in [`shutdown`].
+#[cfg(windows)]
+pub(crate) fn discoverable_endpoint_path() -> PathBuf {
+    std::env::temp_dir().join("sparkdown-mcp-external.json")
+}
+
+/// Serialise the published external endpoint: the pipe path and secret.
+#[cfg(windows)]
+pub(crate) fn discoverable_endpoint_json(pipe: &std::path::Path, secret: &str) -> String {
+    json!({ "pipe": pipe.to_string_lossy(), "secret": secret }).to_string()
 }
 
 /// Windows: serve on a per-user named pipe via `interprocess`. Same
@@ -1500,17 +2058,34 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
         let ext = discoverable_pipe_path();
         match create_pipe_listener(&ext) {
             Ok(l) => {
+                // Publish the pipe name (with random suffix) and secret for the
+                // shim. The user-only temp-dir ACL keeps a foreign account
+                // from reading either.
+                let endpoint = discoverable_endpoint_path();
+                let secret = discoverable_endpoint_secret();
+                if let Err(e) = std::fs::write(&endpoint, discoverable_endpoint_json(&ext, secret))
+                {
+                    eprintln!("Warning: external-agent endpoint not published: {e}");
+                }
                 let (app, state) = (app.clone(), state.clone());
                 std::thread::spawn(move || {
                     use interprocess::local_socket::traits::ListenerExt as _;
                     for stream in l.incoming() {
                         let Ok(stream) = stream else { continue };
                         let (app, state) = (app.clone(), state.clone());
-                        std::thread::spawn(move || serve_client(stream, &app, &state));
+                        // External agents: never permitted to drive the
+                        // local-launch forward branch.
+                        std::thread::spawn(move || serve_client(stream, &app, &state, false));
                     }
                 });
             }
-            Err(e) => eprintln!("Warning: external-agent pipe unavailable: {e}"),
+            Err(e) => {
+                // Another process already owns the pipe name.
+                eprintln!("Warning: external-agent pipe unavailable: {e}");
+                // Drop any stale endpoint file: it would point at a pipe
+                // we do not own.
+                let _ = std::fs::remove_file(discoverable_endpoint_path());
+            }
         }
     }
     std::thread::Builder::new()
@@ -1520,7 +2095,7 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
                 let Ok(stream) = stream else { continue };
                 let app = app.clone();
                 let state = state.clone();
-                std::thread::spawn(move || serve_client(stream, &app, &state));
+                std::thread::spawn(move || serve_client(stream, &app, &state, true));
             }
         })?;
     Ok(path)
@@ -1534,10 +2109,28 @@ fn pipe_sddl(user_sid: &str) -> String {
     format!("D:P(A;;GA;;;{user_sid})(A;;GA;;;SY)")
 }
 
+/// Constant-time secret comparison for the external-agent handshake. An
+/// absent or mismatching length is a mismatch; equal-length inputs are
+/// compared with a bitwise accumulator so a mismatch does not short-circuit.
+#[cfg(any(windows, test))]
+pub(crate) fn secret_matches(got: Option<&str>, want: &str) -> bool {
+    let Some(got) = got else { return false };
+    if got.len() != want.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in got.as_bytes().iter().zip(want.as_bytes().iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
 /// The current process user's SID as a string (`S-1-5-21-...`), read from
-/// the process token (`TokenUser`), not from the environment.
+/// the process token (`TokenUser`), not from the environment. Visible to
+/// the shim module as well so it can verify the external-agent pipe's
+/// server end.
 #[cfg(windows)]
-fn current_user_sid() -> std::io::Result<String> {
+pub(crate) fn current_user_sid() -> std::io::Result<String> {
     use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
     use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
@@ -1595,6 +2188,68 @@ fn current_user_sid() -> std::io::Result<String> {
     Ok(s)
 }
 
+/// SID (as a string) of the user that owns the process with pid `pid`.
+/// Used by the external-agent shim to verify the pipe server end.
+#[cfg(windows)]
+pub(crate) fn process_user_sid(pid: u32) -> std::io::Result<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    struct Owned(HANDLE);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            // SAFETY: closed exactly once; handle from a checked Open*.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    // SAFETY: args by value; NULL on failure.
+    let proc_handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if proc_handle.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let proc_h = Owned(proc_handle);
+    let mut raw: HANDLE = std::ptr::null_mut();
+    // SAFETY: valid process handle; valid out-pointer.
+    if unsafe { OpenProcessToken(proc_h.0, TOKEN_QUERY, &mut raw) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let token = Owned(raw);
+
+    let mut len = 0u32;
+    // SAFETY: size query.
+    unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+    if len == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+    // SAFETY: buffer has `len` writable bytes.
+    let ok =
+        unsafe { GetTokenInformation(token.0, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: TOKEN_USER's SID pointer points inside the same buffer.
+    let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let mut wide: *mut u16 = std::ptr::null_mut();
+    // SAFETY: valid SID; valid out-pointer.
+    if unsafe { ConvertSidToStringSidW(sid, &mut wide) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: on success `wide` is a NUL-terminated UTF-16 string we own.
+    let s = unsafe {
+        let n = (0..).take_while(|&i| *wide.add(i) != 0).count();
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(wide, n));
+        LocalFree(wide.cast());
+        s
+    };
+    Ok(s)
+}
+
 /// The MCP pipe's security descriptor: current user + SYSTEM only.
 #[cfg(windows)]
 fn pipe_security_descriptor(
@@ -1628,21 +2283,36 @@ fn serve_client(
     stream: interprocess::local_socket::Stream,
     app: &AppHandle,
     state: &Arc<McpState>,
+    allow_forward: bool,
 ) {
     use interprocess::local_socket::traits::Stream as _;
     let (read_half, write_half) = stream.split();
-    let mut conn = Conn::default();
+    let mut conn = Conn {
+        allow_forward,
+        ..Default::default()
+    };
     serve_lines(read_half, write_half, |msg| conn.handle(app, state, msg));
 }
 
 /// One client: newline-delimited JSON-RPC in, one line per response out.
-/// Notifications get no reply. Runs until the client hangs up.
+/// Notifications get no reply. Runs until the client hangs up. `allow_forward`
+/// is true only for the process-wide core socket (the local second-launch
+/// channel); every other transport (per-window remote forward, Windows
+/// discoverable external pipe) must pass false.
 #[cfg(unix)]
-fn serve_client(stream: std::os::unix::net::UnixStream, app: &AppHandle, state: &Arc<McpState>) {
+fn serve_client(
+    stream: std::os::unix::net::UnixStream,
+    app: &AppHandle,
+    state: &Arc<McpState>,
+    allow_forward: bool,
+) {
     let Ok(read_half) = stream.try_clone() else {
         return;
     };
-    let mut conn = Conn::default();
+    let mut conn = Conn {
+        allow_forward,
+        ..Default::default()
+    };
     serve_lines(read_half, stream, |msg| conn.handle(app, state, msg));
 }
 
@@ -1665,6 +2335,13 @@ pub struct Hello {
     /// Launched from a SparkDown terminal (`$SPARKDOWN_MCP` was set).
     #[serde(default)]
     pub terminal: bool,
+    /// Windows external-agent handshake: the per-launch secret the shim
+    /// read from the user-only endpoint file. The server refuses an
+    /// external connection without a matching secret, and the shim refuses
+    /// to bridge unless the server echoes the same value in its ack —
+    /// two-sided authentication over a pipe with a random name.
+    #[serde(default)]
+    pub secret: Option<String>,
 }
 
 /// One client connection's routing.
@@ -1673,7 +2350,22 @@ pub(crate) struct Conn {
     hello: Option<Hello>,
     /// A per-window socket (remote forward): always this window.
     pub(crate) fixed: Option<String>,
+    /// Per-connection secret the client must present in sparkdown_hello
+    /// before anything on this socket dispatches. Set when the socket is
+    /// reachable from a channel where filesystem permissions are insufficient
+    /// (the per-window remote-forwarded one).
+    pub(crate) required_token: Option<String>,
+    /// True once a hello carried the matching required_token.
+    pub(crate) token_ok: bool,
     started: bool,
+    /// Honour `sparkdown_forward` on this connection. True only for the
+    /// process-wide core socket/pipe created by `mcp::start` (the local
+    /// second-launch channel). False on the per-window remote-forward
+    /// socket (reverse-forwarded to the SSH remote host) and on the
+    /// Windows discoverable external-agent pipe: either of those would
+    /// otherwise let a remote or external peer drive the local UI into
+    /// opening arbitrary paths.
+    pub(crate) allow_forward: bool,
 }
 
 /// Where a connection's tool calls go, given the open windows.
@@ -1767,6 +2459,190 @@ pub fn set_forward_handler(f: Box<ForwardFn>) {
     let _ = ON_FORWARD.set(f);
 }
 
+/// Windows external-agent gate: non-terminal connections must quote the
+/// per-launch secret from the user-only endpoint file. Nothing to refuse
+/// on non-Windows targets.
+#[cfg(windows)]
+fn external_hello_bad_secret(hello: &Hello) -> bool {
+    !hello.terminal && !secret_matches(hello.secret.as_deref(), discoverable_endpoint_secret())
+}
+#[cfg(not(windows))]
+fn external_hello_bad_secret(_hello: &Hello) -> bool {
+    false
+}
+
+/// Ack after a successful hello. Windows external agents receive the
+/// per-launch secret so the shim can verify the server (two-sided).
+#[cfg(windows)]
+fn external_ack_ok(is_external: bool) -> Value {
+    if is_external {
+        json!({ "sparkdown_ack": {
+            "ok": true,
+            "secret": discoverable_endpoint_secret(),
+        } })
+    } else {
+        json!({ "sparkdown_ack": { "ok": true } })
+    }
+}
+#[cfg(not(windows))]
+fn external_ack_ok(_is_external: bool) -> Value {
+    json!({ "sparkdown_ack": { "ok": true } })
+}
+
+/// Constant-time byte compare (short-circuit only on length). Used so a
+/// peer cannot time-oracle the per-window token.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut d: u8 = 0;
+    for i in 0..a.len() {
+        d |= a[i] ^ b[i];
+    }
+    d == 0
+}
+
+/// Check if a window token matches the required token.
+fn window_token_valid(presented: &str, required: &str) -> bool {
+    constant_time_eq(presented.as_bytes(), required.as_bytes())
+}
+
+/// True while this connection still owes the window token.
+fn needs_window_token(required_token: Option<&str>, token_ok: bool) -> bool {
+    required_token.is_some() && !token_ok
+}
+
+/// Check if forward requests are allowed on this transport.
+fn forward_allowed(allow_forward: bool, fixed: Option<&str>, required_token: Option<&str>) -> bool {
+    allow_forward && fixed.is_none() && required_token.is_none()
+}
+
+/// A connection without a valid token: initialize, ping,
+/// and notifications still answer so the stdio shim doesn't look hung, but
+/// any real work is a hard error.
+fn dispatch_rejected(msg: &Value, err: &str) -> Option<Value> {
+    let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+    let id = msg.get("id").cloned();
+    // Notifications never get a reply.
+    let id = id?;
+    match method {
+        "initialize" => Some(rpc_result(
+            id,
+            initialize_result(msg.get("params").unwrap_or(&Value::Null)),
+        )),
+        "ping" => Some(rpc_result(id, json!({}))),
+        "tools/list" => Some(rpc_result(id, json!({ "tools": [] }))),
+        "resources/list" => Some(rpc_result(id, json!({ "resources": [] }))),
+        "prompts/list" => Some(rpc_result(id, json!({ "prompts": [] }))),
+        _ => Some(rpc_result(
+            id,
+            json!({ "content": [{ "type": "text", "text": err }], "isError": true }),
+        )),
+    }
+}
+
+/// What `Conn::handle` does with a message before it routes it. Decided
+/// without an `AppHandle` so tests can drive it directly.
+#[derive(Debug, PartialEq)]
+enum Early {
+    /// Answer now (`None`: a notification, no reply).
+    Reply(Option<Value>),
+    /// Hand argv/cwd to the second-launch handler, then acknowledge.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Forward { argv: Vec<String>, cwd: String },
+    /// Nothing to decide here: route the message as usual.
+    Continue,
+}
+
+impl Conn {
+    /// A connection on one window's forwarded socket: always that window, and
+    /// nothing dispatches until a `sparkdown_hello` carries `token`.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn for_window(label: String, token: String) -> Conn {
+        Conn {
+            fixed: Some(label),
+            required_token: Some(token),
+            ..Default::default()
+        }
+    }
+
+    /// Window-token hello, `sparkdown_forward` gates and the token gate.
+    fn early(&mut self, msg: &Value, first: bool) -> Early {
+        if first {
+            if let Some(h) = msg.get("sparkdown_hello") {
+                let Some(required) = self.required_token.as_deref() else {
+                    return Early::Continue;
+                };
+                let hello: Hello = serde_json::from_value(h.clone()).unwrap_or_default();
+                let presented = hello.token.as_deref().unwrap_or("");
+                let ok = window_token_valid(presented, required);
+                self.token_ok = ok;
+                self.hello = Some(hello);
+                return Early::Reply(Some(if ok {
+                    json!({ "sparkdown_ack": { "ok": true } })
+                } else {
+                    json!({
+                        "sparkdown_ack": { "ok": false, "error": "missing or wrong SparkDown MCP window token" }
+                    })
+                }));
+            }
+            if let Some(f) = msg.get("sparkdown_forward") {
+                if !forward_allowed(
+                    self.allow_forward,
+                    self.fixed.as_deref(),
+                    self.required_token.as_deref(),
+                ) {
+                    return Early::Reply(Some(json!({ "sparkdown_ack": {
+                        "ok": false,
+                        "error": "sparkdown_forward is not allowed on this transport"
+                    } })));
+                }
+                #[cfg(unix)]
+                {
+                    let nonce = f.get("nonce").and_then(Value::as_str).unwrap_or("");
+                    if !forward_nonce_matches(nonce) {
+                        return Early::Reply(Some(json!({
+                            "sparkdown_ack": {
+                                "ok": false,
+                                "error": "sparkdown_forward: missing or invalid nonce"
+                            }
+                        })));
+                    }
+                    let argv: Vec<String> = f
+                        .get("argv")
+                        .and_then(|a| serde_json::from_value(a.clone()).ok())
+                        .unwrap_or_default();
+                    let cwd = f
+                        .get("cwd")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    return Early::Forward { argv, cwd };
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = f;
+                    return Early::Reply(Some(json!({
+                        "sparkdown_ack": {
+                            "ok": false,
+                            "error": "sparkdown_forward is not supported on this platform"
+                        }
+                    })));
+                }
+            }
+        }
+        // A per-window connection that never produced a valid hello gets an
+        // error for everything except the protocol basics.
+        if needs_window_token(self.required_token.as_deref(), self.token_ok) {
+            return Early::Reply(dispatch_rejected(
+                msg,
+                "SparkDown MCP: missing or wrong window token in sparkdown_hello",
+            ));
+        }
+        Early::Continue
+    }
+}
+
 impl Conn {
     pub(crate) fn handle(
         &mut self,
@@ -1776,6 +2652,16 @@ impl Conn {
     ) -> Option<Value> {
         let first = !self.started;
         self.started = true;
+        match self.early(msg, first) {
+            Early::Reply(r) => return r,
+            Early::Forward { argv, cwd } => {
+                if let Some(h) = ON_FORWARD.get() {
+                    h(app, argv, cwd);
+                }
+                return Some(json!({ "sparkdown_ack": { "ok": true } }));
+            }
+            Early::Continue => {}
+        }
         if first {
             if let Some(h) = msg.get("sparkdown_hello") {
                 let hello: Hello = serde_json::from_value(h.clone()).unwrap_or_default();
@@ -1783,30 +2669,24 @@ impl Conn {
                     let reg = crate::windows::registry();
                     resolve_route(&reg, Some(&hello), externals_allowed(app))
                 };
-                // Refuse an external agent outright when they are off; any
-                // other routing problem is reported per tool call (a window
-                // may open later).
                 let refused = !hello.terminal && !externals_allowed(app);
+                let is_external = !hello.terminal;
+                // Windows external agents must quote the per-launch secret
+                // from the user-only endpoint file (a name conflict cannot read
+                // it). Terminal agents reach the primary pipe (with random suffix)
+                // via `$SPARKDOWN_MCP`, so no secret is required there.
+                let bad_secret = external_hello_bad_secret(&hello);
                 self.hello = Some(hello);
-                return Some(match (refused, r) {
-                    (true, Err(e)) => json!({ "sparkdown_ack": { "ok": false, "error": e } }),
-                    _ => json!({ "sparkdown_ack": { "ok": true } }),
+                return Some(match (refused, bad_secret, r) {
+                    (true, _, Err(e)) => {
+                        json!({ "sparkdown_ack": { "ok": false, "error": e } })
+                    }
+                    (_, true, _) => json!({ "sparkdown_ack": {
+                        "ok": false,
+                        "error": "external-agent handshake failed: SparkDown refuses this connection."
+                    } }),
+                    _ => external_ack_ok(is_external),
                 });
-            }
-            if let Some(f) = msg.get("sparkdown_forward") {
-                let argv: Vec<String> = f
-                    .get("argv")
-                    .and_then(|a| serde_json::from_value(a.clone()).ok())
-                    .unwrap_or_default();
-                let cwd = f
-                    .get("cwd")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                if let Some(h) = ON_FORWARD.get() {
-                    h(app, argv, cwd);
-                }
-                return Some(json!({ "sparkdown_ack": { "ok": true } }));
             }
         }
         let route = match &self.fixed {
@@ -3029,7 +3909,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn socket_path_is_under_a_sparkdown_dir() {
-        let p = mcp_socket_path();
+        let p = mcp_socket_path().unwrap();
         assert!(p.ends_with("sparkdown/mcp.sock"), "{}", p.display());
     }
     /// The POSIX form (local Unix and every remote host) is the same command
@@ -3786,6 +4666,196 @@ mod tests {
         );
         assert!(r.unwrap_err().contains("did not finish"));
     }
+    /// `PrivateCwd` creates a 0700 directory owned by the current user and
+    /// removes it on drop. This is what defeats the placed-config scenario on
+    /// `/tmp` for `run_local_argv_unix` / `run_program_windows`.
+    #[cfg(unix)]
+    #[test]
+    fn private_cwd_returns_sparkdown_directory() {
+        let guard = private_cwd_or_temp().expect("private cwd creation");
+        let path_str = guard.path().to_string_lossy();
+        assert!(
+            path_str.contains("sparkdown"),
+            "private_cwd should return a sparkdown-prefixed directory, got: {path_str}"
+        );
+        // Should not be the bare temp root
+        assert_ne!(
+            guard.path(),
+            std::env::temp_dir(),
+            "should not return bare temp_dir()"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn private_cwd_is_owner_only_and_cleaned_up() {
+        use std::os::unix::fs::MetadataExt;
+        let guard = private_cwd_or_temp().expect("private cwd creation");
+        let path = guard.path().to_path_buf();
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert!(meta.file_type().is_dir());
+        assert_eq!(meta.mode() & 0o777, 0o700, "private cwd must be 0700");
+        // Owned by us: ensure_private_dir rejects anything else.
+        extern "C" {
+            fn geteuid() -> u32;
+        }
+        // SAFETY: geteuid() has no arguments and cannot fail.
+        let euid = unsafe { geteuid() };
+        assert_eq!(meta.uid(), euid);
+        drop(guard);
+        assert!(
+            !path.exists(),
+            "private cwd must be removed on drop: {}",
+            path.display()
+        );
+    }
+
+    /// `run_local_argv_unix` runs the CLI in a private per-call directory.
+    #[test]
+    #[cfg(unix)]
+    fn run_local_argv_unix_uses_private_cwd() {
+        let outcome = run_local_argv_unix(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                cwd_probe::REPORT_SCRIPT.to_string(),
+            ],
+            std::time::Duration::from_secs(10),
+        )
+        .expect("run /bin/sh");
+        let CliOutcome::Exited {
+            code: Some(0),
+            stdout,
+            ..
+        } = outcome
+        else {
+            panic!("the probe did not exit 0: {outcome:?}");
+        };
+        cwd_probe::assert_report(&stdout);
+    }
+
+    /// A name that is on neither PATH (an alias or function) goes through the
+    /// login shell, which also starts in a private per-call directory.
+    #[test]
+    #[cfg(unix)]
+    fn run_local_argv_unix_shell_fallback_uses_private_cwd() {
+        let shell = cwd_probe::FakeShell::new("argv-fallback");
+        let outcome = run_local_argv_unix_with(
+            shell.path(),
+            &["sd-no-such-agent-binary".to_string()],
+            std::time::Duration::from_secs(10),
+        )
+        .expect("run the fake shell");
+        assert!(
+            matches!(outcome, CliOutcome::Exited { code: Some(0), .. }),
+            "{outcome:?}"
+        );
+        shell.assert_ran_in_private_cwd();
+    }
+
+    /// The interactive-shell PATH probe runs in a private per-call directory.
+    #[test]
+    #[cfg(unix)]
+    fn interactive_shell_path_probe_uses_private_cwd() {
+        let shell = cwd_probe::FakeShell::new("interactive");
+        let path = probe_interactive_path(shell.path()).expect("probe output");
+        assert!(!path.is_empty());
+        shell.assert_ran_in_private_cwd();
+    }
+
+    /// The private-cwd directory is created under the base, is a fresh name
+    /// per call and is removed with its guard.
+    #[test]
+    #[cfg(unix)]
+    fn private_cwd_in_uses_the_runtime_root_when_it_works() {
+        let root = cwd_probe::scratch_dir("root-ok");
+        let a = private_cwd_in(&root, &root.join("unused")).unwrap();
+        let b = private_cwd_in(&root, &root.join("unused")).unwrap();
+        assert_ne!(a.path(), b.path());
+        assert_eq!(a.path().parent().unwrap(), root.join("sparkdown"));
+        cwd_probe::assert_private_dir(a.path());
+        let a_path = a.path().to_path_buf();
+        drop(a);
+        assert!(!a_path.exists());
+        assert!(b.path().exists());
+        drop(b);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// When the primary base cannot be used, the fallback is a randomly
+    /// named 0700 directory owned by us directly under the fallback dir,
+    /// never reused between calls, and removed when dropped.
+    #[test]
+    #[cfg(unix)]
+    fn private_cwd_fallback_is_random_owner_only_and_removed() {
+        let scratch = cwd_probe::scratch_dir("fallback");
+        // A regular file where the base directory would go: mkdir under it
+        // fails, so the primary location is unusable.
+        let bad_root = scratch.join("not-a-dir");
+        std::fs::write(&bad_root, b"x").unwrap();
+        let fallback_dir = scratch.join("tmp");
+        std::fs::create_dir(&fallback_dir).unwrap();
+
+        let a = private_cwd_in(&bad_root, &fallback_dir).unwrap();
+        let b = private_cwd_in(&bad_root, &fallback_dir).unwrap();
+        assert_ne!(a.path(), b.path(), "names are never reused");
+        for g in [&a, &b] {
+            assert_eq!(g.path().parent().unwrap(), fallback_dir);
+            let name = g.path().file_name().unwrap().to_string_lossy().into_owned();
+            let token = name.strip_prefix("sparkdown-").expect("sparkdown- prefix");
+            assert_eq!(token.len(), 32, "128-bit hex token: {name}");
+            assert!(token.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
+            cwd_probe::assert_private_dir(g.path());
+        }
+        let a_path = a.path().to_path_buf();
+        drop(a);
+        assert!(!a_path.exists(), "removed on drop");
+        assert!(b.path().exists(), "the other guard is unaffected");
+        drop(b);
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// When neither the primary base nor the fallback dir can be used the
+    /// result is an error: no shared directory is ever handed out.
+    #[test]
+    #[cfg(unix)]
+    fn private_cwd_errors_when_both_bases_fail() {
+        let scratch = cwd_probe::scratch_dir("both-fail");
+        let bad_root = scratch.join("not-a-dir");
+        std::fs::write(&bad_root, b"x").unwrap();
+        // Fallback dir that does not exist, and one that is a file.
+        assert!(private_cwd_in(&bad_root, &scratch.join("missing")).is_err());
+        assert!(private_cwd_in(&bad_root, &bad_root).is_err());
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// `run_program_windows` runs the CLI in a private per-call directory.
+    #[test]
+    #[cfg(windows)]
+    fn run_program_windows_uses_private_cwd() {
+        let outcome = run_program_windows(
+            &PathBuf::from("cmd.exe"),
+            &["/c".to_string(), "cd".to_string()],
+            std::time::Duration::from_secs(10),
+        )
+        .expect("run cmd.exe");
+        let CliOutcome::Exited {
+            code: Some(0),
+            stdout,
+            ..
+        } = outcome
+        else {
+            panic!("cmd.exe did not exit 0: {outcome:?}");
+        };
+        let cwd = PathBuf::from(stdout.trim());
+        assert!(
+            cwd.to_string_lossy().contains("sparkdown"),
+            "expected a sparkdown directory, got {}",
+            cwd.display()
+        );
+        assert_ne!(cwd, std::env::temp_dir(), "must not be the shared temp dir");
+    }
+
     /// The review tools against this very repository (CI checkouts have .git).
     #[test]
     fn review_tools_read_this_repo() {
@@ -3905,5 +4975,670 @@ mod tests {
         let p = mcp_socket_path();
         assert!(p.to_string_lossy().starts_with(r"\\.\pipe\sparkdown-"));
         assert_eq!(p, mcp_socket_path(), "stable within one launch");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn socket_dir_creates_base_and_hardens_leaf() {
+        let tmp = std::env::temp_dir().join(format!("sd-sockdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let base = tmp.join("base");
+        let leaf = base.join("sparkdown");
+        let sock = leaf.join("mcp.sock");
+        ensure_socket_dir(sock.parent().unwrap()).unwrap();
+        assert!(leaf.is_dir());
+        let meta = std::fs::metadata(&leaf).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn socket_dir_works_with_missing_base() {
+        let tmp = std::env::temp_dir().join(format!("sd-nobase-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let base = tmp.join("not-yet");
+        let leaf = base.join("sparkdown");
+        ensure_socket_dir(&leaf).unwrap();
+        assert!(leaf.is_dir());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn socket_dir_accepts_root_owned_parent() {
+        use std::os::unix::fs::MetadataExt;
+        let parent = std::path::PathBuf::from("/tmp");
+        let parent_meta = std::fs::metadata(&parent).unwrap();
+        let my_uid = unsafe { libc::geteuid() };
+
+        if parent_meta.uid() == my_uid {
+            eprintln!("skip: /tmp is user-owned, cannot test root-owned parent");
+            return;
+        }
+
+        let leaf = parent.join(format!("sd-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&leaf);
+
+        assert!(
+            ensure_socket_dir(&leaf).is_ok(),
+            "accept root-owned parent when leaf is ours"
+        );
+        assert!(leaf.is_dir());
+        let leaf_meta = std::fs::metadata(&leaf).unwrap();
+        assert_eq!(leaf_meta.uid(), my_uid);
+        assert_eq!(leaf_meta.mode() & 0o777, 0o700);
+        let _ = std::fs::remove_dir_all(&leaf);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn socket_dir_refuses_symlink() {
+        let tmp = std::env::temp_dir().join(format!("sd-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let target = tmp.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = tmp.join("sparkdown");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(ensure_socket_dir(&link).is_err(), "refuses symlinked leaf");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn socket_dir_refuses_non_user_leaf() {
+        use std::os::unix::fs::MetadataExt;
+        let my_uid = unsafe { libc::geteuid() };
+
+        if my_uid == 0 {
+            let tmp = std::env::temp_dir().join(format!("sd-notours-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir(&tmp).unwrap();
+            let other_uid = 65534; // nobody
+            unsafe {
+                libc::chown(
+                    std::ffi::CString::new(tmp.to_str().unwrap())
+                        .unwrap()
+                        .as_ptr(),
+                    other_uid,
+                    0,
+                );
+            }
+            let meta = std::fs::metadata(&tmp).unwrap();
+            if meta.uid() == other_uid {
+                assert!(
+                    ensure_socket_dir(&tmp).is_err(),
+                    "refuses leaf owned by another user (root test with chown)"
+                );
+            } else {
+                eprintln!("skip: chown failed");
+            }
+            let _ = std::fs::remove_dir_all(&tmp);
+        } else {
+            let non_user_dir = std::path::PathBuf::from("/tmp");
+            let meta = std::fs::metadata(&non_user_dir).unwrap();
+            if meta.uid() != my_uid {
+                assert!(
+                    ensure_socket_dir(&non_user_dir).is_err(),
+                    "refuses leaf owned by another user (non-root test on /tmp)"
+                );
+            } else {
+                eprintln!("skip: /tmp is user-owned, cannot test non-user directory");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn socket_path_length_is_checked() {
+        let short = PathBuf::from("/tmp/a.sock");
+        assert!(check_socket_path_length(&short).is_ok());
+        let long = PathBuf::from(format!("/tmp/{}.sock", "x".repeat(200)));
+        assert!(check_socket_path_length(&long).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn socket_works_on_fresh_home() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let _guard = EnvGuard::new();
+        let tmp = std::env::temp_dir().join(format!("sd-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir(&tmp).unwrap();
+        std::env::set_var("HOME", &tmp);
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        let path = mcp_socket_path().unwrap();
+        #[cfg(target_os = "macos")]
+        let expected = std::env::temp_dir().join("sparkdown").join("mcp.sock");
+        #[cfg(not(target_os = "macos"))]
+        let expected = tmp.join(".cache").join("sparkdown").join("mcp.sock");
+        assert_eq!(path, expected);
+        if let Some(dir) = path.parent() {
+            ensure_socket_dir(dir).unwrap();
+        }
+        let _ = std::fs::remove_file(&path);
+        let _listener = UnixListener::bind(&path).unwrap();
+        assert!(UnixStream::connect(&path).is_ok());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn xdg_runtime_dir_wins() {
+        use std::os::unix::net::UnixStream;
+        let _guard = EnvGuard::new();
+        let tmp = std::env::temp_dir().join(format!("sd-xdg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir(&tmp).unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", &tmp);
+        let path = mcp_socket_path().unwrap();
+        assert_eq!(path, tmp.join("sparkdown").join("mcp.sock"));
+        if let Some(dir) = path.parent() {
+            ensure_socket_dir(dir).unwrap();
+        }
+        let _ = std::fs::remove_file(&path);
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert!(UnixStream::connect(&path).is_ok());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn fallback_lock_succeeds_on_fresh_home() {
+        let _guard = EnvGuard::new();
+        let tmp = std::env::temp_dir().join(format!("sd-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir(&tmp).unwrap();
+        std::env::set_var("HOME", &tmp);
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        let start = std::time::Instant::now();
+        let lock_path = tmp.join(".cache").join("sparkdown").join("instance.lock");
+        if let Some(dir) = lock_path.parent() {
+            ensure_socket_dir(dir).unwrap();
+        }
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let ok = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 };
+        let elapsed = start.elapsed();
+        assert!(ok, "lock acquired");
+        assert!(elapsed.as_secs() < 1, "lock acquired quickly");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    struct EnvGuard {
+        home: Option<std::ffi::OsString>,
+        xdg: Option<std::ffi::OsString>,
+    }
+
+    #[cfg(unix)]
+    impl EnvGuard {
+        fn new() -> Self {
+            Self {
+                home: std::env::var_os("HOME"),
+                xdg: std::env::var_os("XDG_RUNTIME_DIR"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(ref h) = self.home {
+                std::env::set_var("HOME", h);
+            } else {
+                std::env::remove_var("HOME");
+            }
+            if let Some(ref x) = self.xdg {
+                std::env::set_var("XDG_RUNTIME_DIR", x);
+            } else {
+                std::env::remove_var("XDG_RUNTIME_DIR");
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[serial_test::serial]
+    fn socket_returns_none_when_no_base_available() {
+        let _guard = EnvGuard::new();
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        std::env::remove_var("HOME");
+        assert!(mcp_socket_path().is_none());
+    }
+
+    /// Runs `f` with XDG_RUNTIME_DIR pointing at a fresh temp dir, so nothing
+    /// touches the real runtime dir of whoever runs the tests.
+    #[cfg(unix)]
+    fn with_temp_runtime_dir(f: impl FnOnce(&Path)) {
+        let _guard = EnvGuard::new();
+        let dir = std::env::temp_dir().join(format!("sd-nonce-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sparkdown")).unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", &dir);
+        f(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn forward_nonce_file_sits_next_to_the_socket_and_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        with_temp_runtime_dir(|dir| {
+            let s = mcp_socket_path().unwrap();
+            let n = forward_nonce_path();
+            assert_eq!(n.parent(), s.parent());
+            assert!(n.starts_with(dir));
+            assert_eq!(n.file_name().and_then(|f| f.to_str()), Some("mcp.nonce"));
+            init_forward_nonce();
+            let mode = std::fs::metadata(&n).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+            let on_disk = read_forward_nonce().expect("nonce file");
+            assert!(forward_nonce_matches(&on_disk));
+            assert!(!forward_nonce_matches("wrong"));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forward_nonce_matches_rejects_without_server_init() {
+        // Comparison without a cached nonce (fresh test process) always fails.
+        assert!(!forward_nonce_matches("anything"));
+        assert!(!forward_nonce_matches(""));
+    }
+
+    #[test]
+    fn constant_time_eq_checks_length_and_content() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+        assert!(!constant_time_eq(b"hello", b"world"));
+        assert!(!constant_time_eq(b"hello", b"hell"));
+        assert!(!constant_time_eq(b"hello", b"helloo"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn window_token_requires_exact_match() {
+        let required = "secret123";
+
+        assert!(window_token_valid("secret123", required));
+        assert!(!window_token_valid("wrong", required));
+        assert!(!window_token_valid("", required));
+        assert!(!window_token_valid("secret12", required));
+        assert!(!window_token_valid("secret1234", required));
+    }
+
+    #[test]
+    fn dispatch_requires_window_token() {
+        assert!(needs_window_token(Some("token"), false));
+        assert!(!needs_window_token(Some("token"), true));
+        assert!(!needs_window_token(None, false));
+        assert!(!needs_window_token(None, true));
+    }
+
+    #[test]
+    fn dispatch_rejected_method_handling() {
+        let init = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        });
+        let result = dispatch_rejected(&init, "test error");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.get("result").is_some());
+
+        let tools_list = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list"
+        });
+        let result = dispatch_rejected(&tools_list, "test error");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        let tools = r.get("result").and_then(|r| r.get("tools"));
+        assert_eq!(tools, Some(&json!([])));
+
+        let tool_call = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "something"}
+        });
+        let result = dispatch_rejected(&tool_call, "test error");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        let content = r.get("result").and_then(|r| r.get("content"));
+        assert!(content.is_some());
+        let is_error = r.get("result").and_then(|r| r.get("isError"));
+        assert_eq!(is_error, Some(&json!(true)));
+
+        // Notifications get no reply.
+        let notif = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/progress"
+        });
+        let result = dispatch_rejected(&notif, "test error");
+        assert!(result.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forward_requires_core_socket() {
+        assert!(!forward_allowed(true, None, Some("token")));
+        assert!(!forward_allowed(true, Some("window"), None));
+        assert!(!forward_allowed(false, None, None));
+        assert!(forward_allowed(true, None, None));
+    }
+
+    // ---- Conn::early: the decisions Conn::handle takes before routing ----
+
+    fn window_conn(token: &str) -> Conn {
+        Conn::for_window("w".into(), token.into())
+    }
+
+    fn hello_msg(token: Option<&str>) -> Value {
+        match token {
+            Some(t) => json!({ "sparkdown_hello": { "token": t, "terminal": true } }),
+            None => json!({ "sparkdown_hello": { "terminal": true } }),
+        }
+    }
+
+    fn tools_call() -> Value {
+        json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "x" } })
+    }
+
+    fn ack_ok(e: &Early) -> Option<bool> {
+        match e {
+            Early::Reply(Some(v)) => v["sparkdown_ack"]["ok"].as_bool(),
+            _ => None,
+        }
+    }
+
+    fn is_error_reply(e: &Early) -> bool {
+        matches!(e, Early::Reply(Some(v)) if v["result"]["isError"] == json!(true))
+    }
+
+    #[test]
+    fn window_conn_without_hello_never_reaches_routing() {
+        let mut c = window_conn("tok");
+        assert!(is_error_reply(&c.early(&tools_call(), true)));
+        assert!(is_error_reply(&c.early(&tools_call(), false)));
+    }
+
+    #[test]
+    fn window_conn_refuses_wrong_and_missing_token() {
+        for presented in [Some("nope"), Some(""), Some("to"), Some("tokk"), None] {
+            let mut c = window_conn("tok");
+            let e = c.early(&hello_msg(presented), true);
+            assert_eq!(ack_ok(&e), Some(false), "{presented:?}: {e:?}");
+            assert!(
+                is_error_reply(&c.early(&tools_call(), false)),
+                "{presented:?} must stay locked"
+            );
+        }
+    }
+
+    #[test]
+    fn window_conn_right_token_unlocks_routing() {
+        let mut c = window_conn("tok");
+        let e = c.early(&hello_msg(Some("tok")), true);
+        assert_eq!(ack_ok(&e), Some(true), "{e:?}");
+        assert_eq!(c.early(&tools_call(), false), Early::Continue);
+    }
+
+    #[test]
+    fn a_later_hello_does_not_unlock_a_window_conn() {
+        let mut c = window_conn("tok");
+        assert!(is_error_reply(&c.early(&tools_call(), true)));
+        // A hello is only honoured as the first message; later it is dropped.
+        assert_eq!(c.early(&hello_msg(Some("tok")), false), Early::Reply(None));
+        assert!(is_error_reply(&c.early(&tools_call(), false)));
+    }
+
+    #[test]
+    fn conn_without_required_token_routes_as_before() {
+        let mut c = Conn::default();
+        assert_eq!(c.early(&hello_msg(None), true), Early::Continue);
+        assert_eq!(c.early(&tools_call(), false), Early::Continue);
+    }
+
+    #[cfg(unix)]
+    fn forward_msg(nonce: Option<&str>) -> Value {
+        let mut f = json!({ "argv": ["sparkdown", "/tmp/x.md"], "cwd": "/tmp" });
+        if let Some(n) = nonce {
+            f["nonce"] = json!(n);
+        }
+        json!({ "sparkdown_forward": f })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_second_launch_message_is_accepted_by_the_core_socket() {
+        let nonce = FORWARD_NONCE.get_or_init(random_token).clone();
+        let argv = vec!["sparkdown".to_string(), "notes.md".to_string()];
+        let msg = forward_message(&argv, "/work", &nonce);
+        let mut core = Conn {
+            allow_forward: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            core.early(&msg, true),
+            Early::Forward {
+                argv,
+                cwd: "/work".into()
+            }
+        );
+        // The same message without the nonce is refused.
+        let bare = forward_message(&["sparkdown".to_string()], "/work", "");
+        let mut core = Conn {
+            allow_forward: true,
+            ..Default::default()
+        };
+        assert_eq!(ack_ok(&core.early(&bare, true)), Some(false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forward_is_refused_on_every_transport_but_the_core_socket() {
+        let nonce = FORWARD_NONCE.get_or_init(random_token).clone();
+        let msg = forward_msg(Some(&nonce));
+        let window = Conn {
+            allow_forward: true,
+            fixed: Some("w".into()),
+            ..Default::default()
+        };
+        let token = Conn {
+            allow_forward: true,
+            required_token: Some("t".into()),
+            ..Default::default()
+        };
+        let external = Conn::default();
+        for (name, mut c) in [("window", window), ("token", token), ("external", external)] {
+            let e = c.early(&msg, true);
+            assert_eq!(ack_ok(&e), Some(false), "{name}: {e:?}");
+            assert!(format!("{e:?}").contains("not allowed"), "{name}: {e:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forward_on_the_core_socket_needs_the_launch_nonce() {
+        let nonce = FORWARD_NONCE.get_or_init(random_token).clone();
+        let core = || Conn {
+            allow_forward: true,
+            ..Default::default()
+        };
+        for bad in [
+            None,
+            Some(""),
+            Some("wrong"),
+            Some(&nonce[..nonce.len() - 1]),
+        ] {
+            let e = core().early(&forward_msg(bad), true);
+            assert_eq!(ack_ok(&e), Some(false), "{bad:?}: {e:?}");
+            assert!(format!("{e:?}").contains("nonce"), "{bad:?}: {e:?}");
+        }
+        let e = core().early(&forward_msg(Some(&nonce)), true);
+        assert_eq!(
+            e,
+            Early::Forward {
+                argv: vec!["sparkdown".into(), "/tmp/x.md".into()],
+                cwd: "/tmp".into()
+            }
+        );
+        // Only the first message of a connection can forward.
+        assert_eq!(
+            core().early(&forward_msg(Some(&nonce)), false),
+            Early::Continue
+        );
+    }
+
+    #[test]
+    fn external_handshake_secret_compares_constant_time() {
+        assert!(secret_matches(Some("abcdef0123456789"), "abcdef0123456789"));
+        assert!(!secret_matches(
+            Some("abcdef0123456789"),
+            "abcdef012345678A"
+        ));
+        assert!(!secret_matches(Some("short"), "abcdef0123456789"));
+        assert!(!secret_matches(None, "abcdef0123456789"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_external_pipe_has_random_suffix() {
+        let p = discoverable_pipe_path();
+        let s = p.to_string_lossy();
+        assert!(s.starts_with(r"\\.\pipe\sparkdown-"));
+        assert!(s.ends_with("-mcp-external"));
+        let core = s
+            .trim_start_matches(r"\\.\pipe\sparkdown-")
+            .trim_end_matches("-mcp-external");
+        let token = core.rsplit('-').next().unwrap();
+        assert_eq!(token.len(), 32);
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(p, discoverable_pipe_path());
+        assert_eq!(discoverable_endpoint_secret().len(), 32);
+    }
+}
+
+/// Test support: a stand-in login shell that records the directory it ran
+/// in, so tests can check where each probe spawns its child.
+#[cfg(all(test, unix))]
+pub(crate) mod cwd_probe {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Shell snippet: print the working directory, then its mode and owner uid.
+    pub(crate) const REPORT_SCRIPT: &str = "pwd -P; set -- $(ls -ldn .); echo \"$1 $3\"";
+
+    pub(crate) fn scratch_dir(tag: &str) -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "sd-cwd-{tag}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// `path` is a real directory, mode 0700, owned by the current user.
+    pub(crate) fn assert_private_dir(path: &Path) {
+        let meta = std::fs::symlink_metadata(path).unwrap();
+        assert!(meta.file_type().is_dir(), "{}", path.display());
+        assert_eq!(meta.mode() & 0o777, 0o700, "{}", path.display());
+        assert_eq!(
+            meta.uid(),
+            crate::context::current_euid(),
+            "{}",
+            path.display()
+        );
+    }
+
+    /// Check a [`REPORT_SCRIPT`] report: the child ran in a private,
+    /// owner-only directory (not the shared temp dir) that is gone now.
+    pub(crate) fn assert_report(report: &str) {
+        let mut lines = report.lines().filter(|l| !l.trim().is_empty());
+        let cwd = PathBuf::from(lines.next().expect("cwd line").trim());
+        let mode_uid = lines.next().expect("mode line");
+        let mut fields = mode_uid.split_whitespace();
+        let mode = fields.next().unwrap();
+        let uid: u32 = fields.next().unwrap().parse().unwrap();
+        let temp = std::env::temp_dir();
+        assert_ne!(cwd, temp, "ran in the shared temp dir");
+        assert_ne!(Some(cwd.as_path()), temp.canonicalize().ok().as_deref());
+        assert!(
+            cwd.to_string_lossy().contains("sparkdown"),
+            "not a sparkdown directory: {}",
+            cwd.display()
+        );
+        assert!(
+            mode.starts_with("drwx------"),
+            "mode {mode} in {}",
+            cwd.display()
+        );
+        assert_eq!(uid, crate::context::current_euid());
+        assert!(
+            !cwd.exists(),
+            "not removed after the call: {}",
+            cwd.display()
+        );
+    }
+
+    /// An executable script that ignores its arguments, writes
+    /// [`REPORT_SCRIPT`]'s report to `<script>.cwd` and prints a PATH marker
+    /// line. Removed on drop.
+    pub(crate) struct FakeShell {
+        dir: PathBuf,
+        script: PathBuf,
+    }
+
+    impl FakeShell {
+        pub(crate) fn new(tag: &str) -> Self {
+            let dir = scratch_dir(tag);
+            let script = dir.join("shell");
+            std::fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\n{{ {REPORT_SCRIPT}; }} > \"$0.cwd\"\n\
+                     printf '\\n__SD_PATH__%s\\n' \"$(pwd -P)\"\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            Self { dir, script }
+        }
+
+        pub(crate) fn path(&self) -> &str {
+            self.script.to_str().unwrap()
+        }
+
+        /// The shell ran, in a private directory that is gone now.
+        pub(crate) fn assert_ran_in_private_cwd(&self) {
+            let report = std::fs::read_to_string(format!("{}.cwd", self.path()))
+                .expect("the fake shell did not run");
+            assert_report(&report);
+        }
+    }
+
+    impl Drop for FakeShell {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }

@@ -73,6 +73,29 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
     let app_menu = SubmenuBuilder::new(app, "SparkDown").about(Some(about));
     #[cfg(target_os = "macos")]
     let app_menu = app_menu.item(&check_updates);
+
+    // #160: Install / Uninstall / Repair the `sparkdown` command on PATH.
+    // macOS always; Linux only for AppImage ($APPIMAGE). deb/AUR already
+    // ship /usr/bin/sparkdown.
+    let cli_install =
+        MenuItemBuilder::with_id("cli-install", "Install 'sparkdown' Command in PATH")
+            .build(app)?;
+    let cli_uninstall =
+        MenuItemBuilder::with_id("cli-uninstall", "Uninstall 'sparkdown' Command from PATH")
+            .build(app)?;
+    let cli_repair =
+        MenuItemBuilder::with_id("cli-repair", "Repair 'sparkdown' Command in PATH").build(app)?;
+    let show_cli_path_items = crate::cli_install::menu_applicable();
+
+    let app_menu = if show_cli_path_items {
+        app_menu
+            .separator()
+            .item(&cli_install)
+            .item(&cli_uninstall)
+            .item(&cli_repair)
+    } else {
+        app_menu
+    };
     let app_menu = app_menu
         .separator()
         .item(&settings)

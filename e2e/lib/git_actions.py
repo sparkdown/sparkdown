@@ -102,7 +102,7 @@ def run(R, D, title, folder):
     if js("return document.getElementById('changes-git-actions').hidden"):
         return "FAIL", "the Commit / Pull / Push icons never showed for a git repo"
     order = js("return [...document.querySelector('#sidebar-changes .sidebar-head').querySelectorAll('button')].map(b=>b.id)")
-    ok0 = order == ["btn-git-commit", "btn-git-pull", "btn-git-push", "btn-changes-refresh"]
+    ok0 = order == ["btn-git-commit", "btn-git-pull", "btn-git-push", "btn-changes-discard-all", "btn-changes-refresh"]
     steps.append(f"header order ok={ok0}")
 
     # 1. Open the panel: message focused, Commit disabled until a message;
