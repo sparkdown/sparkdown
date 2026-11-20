@@ -966,7 +966,11 @@ fn check_repo_config(root: &Path, extra: ExtraEnv, action: Action) -> Result<(),
     if !repo_config_has_exec_keys(root, extra) {
         return Ok(());
     }
-    let verb = if action == Action::Push { "Push" } else { "Pull" };
+    let verb = if action == Action::Push {
+        "Push"
+    } else {
+        "Pull"
+    };
     Err(GitActionError::new(
         GitErrorKind::RepoConfig,
         format!(
@@ -2099,10 +2103,20 @@ mod tests {
         commit_impl(&root(&sb), "Rename", Some(vec!["\u{fc}.md".into()]), &env).unwrap();
         let files = sb.git(
             &sb.work,
-            &["-c", "core.quotepath=false", "show", "--name-status", "--format=", "HEAD"],
+            &[
+                "-c",
+                "core.quotepath=false",
+                "show",
+                "--name-status",
+                "--format=",
+                "HEAD",
+            ],
         );
         assert!(files.starts_with('R'), "{files}");
-        let status = sb.git(&sb.work, &["-c", "core.quotepath=false", "status", "--porcelain"]);
+        let status = sb.git(
+            &sb.work,
+            &["-c", "core.quotepath=false", "status", "--porcelain"],
+        );
         assert_eq!(status, "M \u{e9}.md");
     }
 
@@ -2621,13 +2635,24 @@ mod tests {
     fn pull_and_push_stop_on_repo_helper_or_url_rewrite() {
         for (key, value) in [
             ("credential.helper", "store"),
-            ("url.https://example.invalid/.insteadOf", "https://github.com/"),
+            (
+                "url.https://example.invalid/.insteadOf",
+                "https://github.com/",
+            ),
         ] {
             let sb = sandbox();
             let env = sb.env();
             set_local(&sb, key, value);
-            assert_eq!(pull_impl(&root(&sb), &env).unwrap_err().kind, GitErrorKind::RepoConfig, "{key}");
-            assert_eq!(push_impl(&root(&sb), &env).unwrap_err().kind, GitErrorKind::RepoConfig, "{key}");
+            assert_eq!(
+                pull_impl(&root(&sb), &env).unwrap_err().kind,
+                GitErrorKind::RepoConfig,
+                "{key}"
+            );
+            assert_eq!(
+                push_impl(&root(&sb), &env).unwrap_err().kind,
+                GitErrorKind::RepoConfig,
+                "{key}"
+            );
         }
     }
 
@@ -2636,7 +2661,10 @@ mod tests {
         let sb = sandbox();
         let env = sb.env();
         set_local(&sb, "remote.origin.pushurl", "ext::git %s /dev/null");
-        assert_eq!(push_impl(&root(&sb), &env).unwrap_err().kind, GitErrorKind::RepoConfig);
+        assert_eq!(
+            push_impl(&root(&sb), &env).unwrap_err().kind,
+            GitErrorKind::RepoConfig
+        );
     }
 
     #[test]
@@ -2645,7 +2673,10 @@ mod tests {
         let env = sb.env();
         let url = format!("file://{}", sb.bare.display());
         set_local(&sb, "branch.main.remote", &url);
-        assert_eq!(pull_impl(&root(&sb), &env).unwrap_err().kind, GitErrorKind::RepoConfig);
+        assert_eq!(
+            pull_impl(&root(&sb), &env).unwrap_err().kind,
+            GitErrorKind::RepoConfig
+        );
     }
 
     #[test]

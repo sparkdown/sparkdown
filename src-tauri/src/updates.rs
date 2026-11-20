@@ -365,7 +365,11 @@ pub fn check_release_url(url: &str) -> Result<String, String> {
         if decoded == "." || decoded == ".." {
             return reject("dot-segment after percent-decoding");
         }
-        if decoded.as_bytes().iter().any(|b| *b == b'/' || *b < 0x20 || *b == 0x7f) {
+        if decoded
+            .as_bytes()
+            .iter()
+            .any(|b| *b == b'/' || *b < 0x20 || *b == 0x7f)
+        {
             return reject("control or slash in decoded segment");
         }
         segments.push(decoded);
@@ -403,9 +407,8 @@ pub fn check_release_url(url: &str) -> Result<String, String> {
 /// `SparkDown_1.0.0_amd64.AppImage`).
 fn is_plain_url_component(s: &str) -> bool {
     !s.is_empty()
-        && s.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b'~')
-        })
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b'~'))
 }
 
 /// Percent-decode a single URL path segment. Returns `None` on malformed
@@ -1684,10 +1687,9 @@ mod tests {
 
     #[test]
     fn release_url_prefix_rejects_foreign_hosts() {
-        let ok = check_release_url(
-            "https://github.com/sparkdown/sparkdown/releases/download/v1.0.0/x",
-        )
-        .expect("prefix-match URL should parse");
+        let ok =
+            check_release_url("https://github.com/sparkdown/sparkdown/releases/download/v1.0.0/x")
+                .expect("prefix-match URL should parse");
         assert_eq!(
             ok,
             "https://github.com/sparkdown/sparkdown/releases/download/v1.0.0/x"

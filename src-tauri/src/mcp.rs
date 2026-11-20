@@ -133,6 +133,19 @@ impl McpState {
             g.remove(label);
         }
     }
+
+    /// "Share editor context with agents" was switched off: drop every
+    /// window's cached text and mark each snapshot off, so a window that
+    /// does not publish again still answers with the refusal.
+    pub fn disable_all(&self) {
+        if let Ok(mut g) = self.snapshots.lock() {
+            for snap in g.values_mut() {
+                snap.enabled = false;
+                snap.tabs.clear();
+                snap.selection = None;
+            }
+        }
+    }
 }
 
 impl Default for McpState {
@@ -2080,9 +2093,7 @@ pub fn start(app: AppHandle, state: Arc<McpState>) -> std::io::Result<PathBuf> {
                         // failed handshake latches the connection shut
                         // and is answered through `dispatch_rejected`
                         // on every subsequent message.
-                        std::thread::spawn(move || {
-                            serve_client(stream, &app, &state, false, true)
-                        });
+                        std::thread::spawn(move || serve_client(stream, &app, &state, false, true));
                     }
                 });
             }
@@ -2754,8 +2765,7 @@ impl Conn {
                 // from the user-only endpoint file (a name conflict cannot read
                 // it). Terminal agents reach the primary pipe (with random suffix)
                 // via `$SPARKDOWN_MCP`, so no secret is required there.
-                let bad_secret =
-                    external_hello_bad_secret(self.requires_external_secret, &hello);
+                let bad_secret = external_hello_bad_secret(self.requires_external_secret, &hello);
                 // Latch the handshake outcome on connections that require it.
                 // `handshake_ok` was initialised to false for those transports,
                 // so a missing or wrong secret stays latched false and every
@@ -2857,7 +2867,10 @@ pub struct HandlerAction {
 
 impl From<Option<Value>> for HandlerAction {
     fn from(reply: Option<Value>) -> Self {
-        Self { reply, close: false }
+        Self {
+            reply,
+            close: false,
+        }
     }
 }
 
@@ -3061,7 +3074,12 @@ fn call_tool(app: &AppHandle, state: &Arc<McpState>, params: &Value) -> Result<V
         .and_then(Value::as_str)
         .ok_or("missing tool name")?;
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
-    let snap = state.snapshot_of(&crate::windows::current_label());
+    let mut snap = state.snapshot_of(&crate::windows::current_label());
+    // Read the setting on every call, not only from the last publish, so
+    // switching it off takes effect before any window publishes again.
+    if let Some(store) = app.try_state::<crate::session::ConfigStore>() {
+        snap.enabled &= store.pref_bool("agent_context_enabled", true);
+    }
     if let Some(result) = snapshot_tool(&snap, name, &args) {
         return Ok(result);
     }
@@ -3746,6 +3764,23 @@ mod tests {
     }
 
     /// Call a snapshot tool the way `tools/call` does: (isError, text).
+    #[test]
+    fn switching_sharing_off_drops_every_window_cached_text() {
+        let state = McpState::new();
+        publish_for(&state, "w-a", snap());
+        publish_for(&state, "w-b", snap());
+        state.disable_all();
+        for label in ["w-a", "w-b"] {
+            let s = state.snapshot_of(label);
+            assert!(!s.enabled);
+            assert!(s.tabs.is_empty());
+            assert!(s.selection.is_none());
+            let (err, text) = call(&s, "sparkdown_read_buffer", json!({ "path": "/w/a.md" }));
+            assert!(err);
+            assert!(text.contains("switched off"), "{text}");
+        }
+    }
+
     fn call(s: &Snapshot, name: &str, args: Value) -> (bool, String) {
         let r = snapshot_tool(s, name, &args).expect("a snapshot tool");
         (

@@ -3195,10 +3195,7 @@ Host *.example.com
             s.contains("sd_sz() { wc -c < \"$1\" | tr -d ' \\t'; }"),
             "{s}"
         );
-        assert!(
-            s.contains("[ \"$(sd_sz \"$1\")\" -eq \"$N\" ]"),
-            "{s}"
-        );
+        assert!(s.contains("[ \"$(sd_sz \"$1\")\" -eq \"$N\" ]"), "{s}");
         assert!(s.contains("rm -f -- \"$t\"; exit 1"), "{s}");
         // Fallback: staged + checked before the in-place copy; never a bare
         // `cat > "$f"` straight from stdin.
@@ -3309,8 +3306,15 @@ Host *.example.com
             dir.display()
         );
         let out = run_write_script_with(&target, 12, b"new contents", Some(&stage), &prelude);
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        assert!(!std::fs::symlink_metadata(&target).unwrap().file_type().is_symlink());
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!std::fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new contents");
         assert_eq!(std::fs::read_to_string(&other).unwrap(), "keep");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3334,7 +3338,11 @@ Host *.example.com
             let (w, f) = (last.join("mcp.wtok"), last.join("mcp.ftok"));
             let mut child = crate::proc::command("/bin/sh")
                 .arg("-c")
-                .arg(token_files_script(levels, w.to_str().unwrap(), f.to_str().unwrap()))
+                .arg(token_files_script(
+                    levels,
+                    w.to_str().unwrap(),
+                    f.to_str().unwrap(),
+                ))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .spawn()

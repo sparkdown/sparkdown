@@ -981,6 +981,7 @@ pub fn load_config(
 /// session goes to its own section.
 #[tauri::command]
 pub fn save_config(
+    app: AppHandle,
     webview_window: tauri::WebviewWindow,
     store: State<'_, crate::session::ConfigStore>,
     config: AppConfig,
@@ -989,9 +990,19 @@ pub fn save_config(
     let folder = crate::windows::registry()
         .get(label)
         .and_then(|w| w.folder.clone().map(|f| (f, w.display.clone())));
-    store
+    let saved = store
         .save_from(label, &config, folder)
-        .map_err(AppError::Config)
+        .map_err(AppError::Config);
+    // Editor context sharing is off after this save (in any window): drop
+    // the cached text of every window and every context dir on disk, not
+    // only the folders this window wrote.
+    if !store.pref_bool("agent_context_enabled", true) {
+        if let Some(mcp) = app.try_state::<std::sync::Arc<crate::mcp::McpState>>() {
+            mcp.disable_all();
+        }
+        crate::context::remove_all_context_dirs();
+    }
+    saved
 }
 
 /// Returns and clears any file paths received via macOS "Open With" or CLI args
@@ -2291,13 +2302,7 @@ mod create_entry_tests {
         opened_dirs.insert(fake_home_canon.to_string_lossy().to_string());
 
         assert!(
-            !preview_image_allowed(
-                &img_canon,
-                None,
-                &opened_dirs,
-                None,
-                Some(&fake_home_canon)
-            ),
+            !preview_image_allowed(&img_canon, None, &opened_dirs, None, Some(&fake_home_canon)),
             "an opened_dirs entry equal to $HOME must not act as a grant root"
         );
     }

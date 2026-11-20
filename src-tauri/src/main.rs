@@ -697,6 +697,9 @@ fn main() {
             if let Some(dir) = config_file.parent() {
                 windows::init_token_secret(dir);
             }
+            // Context dirs left by a run that ended without clearing them
+            // (killed, crashed). No window of this run has written one yet.
+            context::remove_all_context_dirs();
             let store = session::ConfigStore::open(config_file);
             let plan = session::plan_restore(&store.stored());
             store.adopt(&plan);
@@ -877,6 +880,9 @@ fn main() {
                 let _ = app.state::<session::ConfigStore>().flush();
                 remote::shutdown();
                 mcp::shutdown();
+                // The page's own clear does not run on every exit (a hidden
+                // window's dock Quit, a killed webview).
+                context::remove_all_context_dirs();
                 return;
             }
 
@@ -1074,6 +1080,7 @@ fn note_geometry(app: &tauri::AppHandle, label: &str) {
 fn release_window(app: &tauri::AppHandle, label: &str) {
     windows::registry().unregister(label);
     app.state::<Arc<mcp::McpState>>().release_window(label);
+    context::release_window(label);
     let app = app.clone();
     let label = label.to_string();
     std::thread::spawn(move || {

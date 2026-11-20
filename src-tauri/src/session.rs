@@ -718,14 +718,22 @@ mod tests {
         let copies: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with("config.json.corrupt-"))
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("config.json.corrupt-")
+            })
             .collect();
         assert_eq!(copies.len(), 1);
         assert_eq!(std::fs::read_to_string(copies[0].path()).unwrap(), text);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(copies[0].path()).unwrap().permissions().mode() & 0o777;
+            let mode = std::fs::metadata(copies[0].path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
             assert_eq!(mode, 0o600);
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -737,7 +745,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.json");
-        std::fs::write(&path, r#"{"version":2,"windows":{},"agent_context_enabled":false}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"version":2,"windows":{},"agent_context_enabled":false}"#,
+        )
+        .unwrap();
         let store = super::ConfigStore::open(path);
         assert!(!store.prefs_unparsed());
         assert!(!store.pref_bool("agent_context_enabled", true));
@@ -786,8 +798,14 @@ mod tests {
             None,
         );
         assert!(!s.prefs_unparsed);
-        assert_eq!(s.prefs.get("theme"), Some(&serde_json::Value::from("system")));
-        assert_eq!(s.prefs.get("agent_context_enabled"), Some(&serde_json::Value::Bool(false)));
+        assert_eq!(
+            s.prefs.get("theme"),
+            Some(&serde_json::Value::from("system"))
+        );
+        assert_eq!(
+            s.prefs.get("agent_context_enabled"),
+            Some(&serde_json::Value::Bool(false))
+        );
     }
 
     #[test]
