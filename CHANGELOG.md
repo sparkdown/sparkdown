@@ -5,6 +5,16 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
+## [Unreleased]
+
+### Improved
+
+- **Git status** calls use `--no-optional-locks` to avoid index lock contention with concurrent operations. Watcher-triggered status refreshes are debounced (400ms for full refresh, 600ms for count-only) to coalesce file change bursts into single calls.
+
+### Fixed
+
+- Build no longer warns about mixed static/dynamic imports of `@tauri-apps/api/webviewWindow`.
+
 ## [0.4.3] — 2026-11-13
 
 Fixes and reliability improvements on top of 0.4.2.
