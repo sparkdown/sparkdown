@@ -17,7 +17,7 @@ pub struct TerminalNotification {
 /// Supported sequences:
 /// - BEL (`\x07`): simple bell, no message
 /// - OSC 9 (`\x1b]9;<message>\x07` or `\x1b]9;<message>\x1b\\`): iTerm2 notification
-/// - OSC 777 notify (`\x1b]777;notify;<message>\x07` or `\x1b]777;notify;<message>\x1b\\`): 
+/// - OSC 777 notify (`\x1b]777;notify;<message>\x07` or `\x1b]777;notify;<message>\x1b\\`):
 ///   tmux/terminal-notifier format
 ///
 /// Only the first match is returned (agents typically send one per prompt).
@@ -45,10 +45,7 @@ pub fn parse_notification(output: &str) -> Option<TerminalNotification> {
                 if bytes[end] == 0x07 {
                     terminated = true;
                     break;
-                } else if bytes[end] == 0x1b
-                    && end + 1 < bytes.len()
-                    && bytes[end + 1] == b'\\'
-                {
+                } else if bytes[end] == 0x1b && end + 1 < bytes.len() && bytes[end + 1] == b'\\' {
                     terminated = true;
                     break;
                 }
@@ -61,13 +58,13 @@ pub fn parse_notification(output: &str) -> Option<TerminalNotification> {
 
             // We have an OSC sequence from start..end
             let osc_content = &bytes[start..end];
-            
+
             // OSC 9;message
             if osc_content.starts_with(b"9;") {
                 let message = String::from_utf8_lossy(&osc_content[2..]).into_owned();
                 return Some(TerminalNotification { message });
             }
-            
+
             // OSC 777;notify;message
             if osc_content.starts_with(b"777;notify;") {
                 let message = String::from_utf8_lossy(&osc_content[11..]).into_owned();

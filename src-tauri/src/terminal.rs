@@ -2035,24 +2035,24 @@ pub fn terminal_notify(
     message: String,
 ) -> Result<(), String> {
     use tauri_plugin_notification::NotificationExt;
-    
+
     let body = if message.is_empty() {
         "Terminal needs attention".to_string()
     } else {
         message
     };
-    
+
     app.notification()
         .builder()
         .title(title)
         .body(body)
         .show()
         .map_err(|e| format!("Failed to show notification: {}", e))?;
-    
+
     // Store the pane_id in app state so we can focus it when notification is clicked
     // (handled by frontend via window focus event)
     let _ = pane_id; // Will be used when implementing click handler
-    
+
     Ok(())
 }
 

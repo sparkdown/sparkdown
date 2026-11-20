@@ -43,6 +43,8 @@ vi.mock('../terminal', () => ({
     setUseTmux() {}
     setScrollback() {}
     setAgentArgs() {}
+    setConfig() {}
+    setWindowFocused() {}
     setOnEmpty() {}
     setOnTerminalsOnly() {}
     setEarlyInput(source: (() => string) | null) {
