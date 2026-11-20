@@ -2,16 +2,6 @@ import { marked, type Tokens, type RendererObject } from 'marked';
 import DOMPurify from 'dompurify';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import hljs from 'highlight.js/lib/core';
-import javascript from 'highlight.js/lib/languages/javascript';
-import typescript from 'highlight.js/lib/languages/typescript';
-import python from 'highlight.js/lib/languages/python';
-import rust from 'highlight.js/lib/languages/rust';
-import xml from 'highlight.js/lib/languages/xml';
-import css from 'highlight.js/lib/languages/css';
-import json from 'highlight.js/lib/languages/json';
-import yaml from 'highlight.js/lib/languages/yaml';
-import sql from 'highlight.js/lib/languages/sql';
-import bash from 'highlight.js/lib/languages/bash';
 import { MermaidLoader } from './mermaid-loader';
 import { EventBus } from './events';
 import { api } from './api';
@@ -31,21 +21,98 @@ import { EVENTS } from './event-names';
 import { isTextFile } from './file-types';
 import { PreviewImageResolver, resolveAgainst, resolveImagePath } from './preview-images';
 
-hljs.registerLanguage('javascript', javascript);
-hljs.registerLanguage('js', javascript);
-hljs.registerLanguage('typescript', typescript);
-hljs.registerLanguage('ts', typescript);
-hljs.registerLanguage('python', python);
-hljs.registerLanguage('rust', rust);
-hljs.registerLanguage('html', xml);
-hljs.registerLanguage('xml', xml);
-hljs.registerLanguage('css', css);
-hljs.registerLanguage('json', json);
-hljs.registerLanguage('yaml', yaml);
-hljs.registerLanguage('yml', yaml);
-hljs.registerLanguage('sql', sql);
-hljs.registerLanguage('bash', bash);
-hljs.registerLanguage('sh', bash);
+/**
+ * Lazy-loaded highlight.js language modules. Languages are imported on first
+ * use of a fenced code block in that language, reducing the initial preview
+ * bundle size. The language module -> alias mapping is maintained here.
+ */
+const languageAliases: Record<string, string> = {
+  javascript: 'javascript',
+  js: 'javascript',
+  typescript: 'typescript',
+  ts: 'typescript',
+  python: 'python',
+  py: 'python',
+  rust: 'rust',
+  rs: 'rust',
+  html: 'xml',
+  xml: 'xml',
+  css: 'css',
+  json: 'json',
+  yaml: 'yaml',
+  yml: 'yaml',
+  sql: 'sql',
+  bash: 'bash',
+  sh: 'bash',
+};
+
+const loadingLanguages = new Map<string, Promise<void>>();
+
+async function loadLanguage(lang: string): Promise<void> {
+  if (hljs.getLanguage(lang)) return;
+  
+  const canonical = languageAliases[lang.toLowerCase()] || lang;
+  const canonicalLang = hljs.getLanguage(canonical);
+  if (canonicalLang) {
+    if (canonical !== lang) {
+      hljs.registerLanguage(lang, () => canonicalLang);
+    }
+    return;
+  }
+  
+  const existing = loadingLanguages.get(canonical);
+  if (existing) return existing;
+  
+  const loadPromise = (async () => {
+    try {
+      let module;
+      switch (canonical) {
+        case 'javascript':
+          module = await import('highlight.js/lib/languages/javascript');
+          break;
+        case 'typescript':
+          module = await import('highlight.js/lib/languages/typescript');
+          break;
+        case 'python':
+          module = await import('highlight.js/lib/languages/python');
+          break;
+        case 'rust':
+          module = await import('highlight.js/lib/languages/rust');
+          break;
+        case 'xml':
+          module = await import('highlight.js/lib/languages/xml');
+          break;
+        case 'css':
+          module = await import('highlight.js/lib/languages/css');
+          break;
+        case 'json':
+          module = await import('highlight.js/lib/languages/json');
+          break;
+        case 'yaml':
+          module = await import('highlight.js/lib/languages/yaml');
+          break;
+        case 'sql':
+          module = await import('highlight.js/lib/languages/sql');
+          break;
+        case 'bash':
+          module = await import('highlight.js/lib/languages/bash');
+          break;
+        default:
+          return;
+      }
+      const langDef = module.default;
+      hljs.registerLanguage(canonical, langDef);
+      if (canonical !== lang.toLowerCase()) {
+        hljs.registerLanguage(lang.toLowerCase(), langDef);
+      }
+    } finally {
+      loadingLanguages.delete(canonical);
+    }
+  })();
+  
+  loadingLanguages.set(canonical, loadPromise);
+  return loadPromise;
+}
 
 /**
  * Comment marker joined between per-block HTML strings so block boundaries
@@ -262,6 +329,7 @@ export class PreviewPane {
   private onFrameFind: (() => void) | null = null;
   // Opens a local file clicked in the preview (wired to App.openFile).
   private onOpenFile: ((path: string) => void) | null = null;
+  private lastContent: string | null = null;
 
   constructor(bus: EventBus) {
     this.bus = bus;
@@ -322,6 +390,8 @@ export class PreviewPane {
     }
   }
 
+  private pendingLanguages = new Set<string>();
+  
   private configureMarked(): void {
     const hlCache = new Map<string, string>();
     const HL_CACHE_MAX = 256;
@@ -337,6 +407,8 @@ export class PreviewPane {
       hlCache.set(key, value);
       return value;
     };
+    const pendingLanguages = this.pendingLanguages;
+    const triggerRerender = () => this.rerenderIfNeeded();
     const renderer: RendererObject = {
       heading(token: Tokens.Heading): string {
         const id = slugifyHeading(token.text);
@@ -354,11 +426,30 @@ export class PreviewPane {
           lang && hljs.getLanguage(lang)
             ? highlightCached(lang, code)
             : escapeHtml(code);
+        // If the language isn't loaded yet, trigger async load.
+        if (lang && !hljs.getLanguage(lang) && !pendingLanguages.has(lang)) {
+          pendingLanguages.add(lang);
+          void loadLanguage(lang).then(() => {
+            pendingLanguages.delete(lang);
+            triggerRerender();
+          });
+        }
         // Escape lang — it comes straight from the fence info string.
         return `<pre><code class="hljs language-${escapeHtml(lang)}">${highlighted}</code></pre>`;
       },
     };
     marked.use({ renderer, gfm: true, breaks: false });
+  }
+  
+  private rerenderIfNeeded(): void {
+    if (this.pendingLanguages.size === 0 && this.lastContent) {
+      const savedScroll = this.container.scrollTop / 
+        Math.max(1, this.container.scrollHeight - this.container.clientHeight);
+      this.renderDebounced(this.lastContent);
+      requestAnimationFrame(() => {
+        scrollElementToRatio(this.container, savedScroll, this.scrollState);
+      });
+    }
   }
 
   render(markdownContent: string): void {
@@ -372,6 +463,15 @@ export class PreviewPane {
     this.visible = true;
     try {
       await this.renderImmediate(markdownContent);
+      // Wait for any pending language loads to complete and re-render
+      if (this.pendingLanguages.size > 0) {
+        const languagesToLoad = Array.from(this.pendingLanguages);
+        await Promise.all(languagesToLoad.map(lang => loadLanguage(lang)));
+        // Clear pending languages and force a re-render
+        this.pendingLanguages.clear();
+        this.lastRendered = null;
+        await this.renderImmediate(markdownContent);
+      }
     } finally {
       this.visible = wasVisible;
     }
@@ -439,6 +539,7 @@ export class PreviewPane {
 
   private async renderImmediate(content: string): Promise<void> {
     if (!this.visible) return;
+    this.lastContent = content;
     const origin = this.originResolver();
     if (content === this.lastRendered && origin === this.renderedOrigin) return;
     if (origin !== this.renderedOrigin) {

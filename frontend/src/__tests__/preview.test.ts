@@ -14,8 +14,14 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { marked } from 'marked';
+import hljs from 'highlight.js/lib/core';
+import javascript from 'highlight.js/lib/languages/javascript';
 import { PreviewPane, sanitizeMarkdownHtml } from '../preview';
 import { EventBus } from '../events';
+
+// Pre-register JavaScript for tests that need highlighting
+hljs.registerLanguage('javascript', javascript);
+hljs.registerLanguage('js', javascript);
 
 /**
  * Render markdown through the real marked pipeline configured by PreviewPane
