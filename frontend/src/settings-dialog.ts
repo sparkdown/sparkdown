@@ -143,6 +143,21 @@ function buildSettingsOverlay(host: SettingsHost, close: () => void): HTMLElemen
     }),
   );
 
+  section.appendChild(
+    toggleRow({
+      label: 'Notify when a terminal needs attention',
+      desc:
+        'Show an OS notification when a terminal emits a bell or notification ' +
+        'sequence (from agents waiting for input), but only when the SparkDown ' +
+        'window is not focused.',
+      checked: host.config.terminal_notify ?? true,
+      onToggle: (value) => {
+        host.config.terminal_notify = value;
+        host.onChange();
+      },
+    }),
+  );
+
   dialog.appendChild(section);
 
   // #175: Settings → Git.

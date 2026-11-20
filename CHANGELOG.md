@@ -7,6 +7,10 @@ requests.
 
 ## [Unreleased]
 
+### Added
+
+- **Terminal notifications**: when a terminal emits a bell (BEL) or notification sequence (OSC 9, OSC 777 notify) — typically from an agent CLI waiting for input — SparkDown shows an OS notification, but only when the window is not focused. Respects a per-pane rate limit (one notification per 10 seconds) and can be toggled in Settings → Terminals. (#205)
+
 ### Fixed
 
 - Build no longer warns about mixed static/dynamic imports of `@tauri-apps/api/webviewWindow`.

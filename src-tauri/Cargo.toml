@@ -16,6 +16,7 @@ publish = false
 [dependencies]
 tauri = { version = "2", features = ["macos-private-api", "protocol-asset"] }
 tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 # preserve_order: keep key order when SparkDown edits a user's JSON file
 # (the one Cursor entry in ~/.cursor/mcp.json). indexmap is already in the

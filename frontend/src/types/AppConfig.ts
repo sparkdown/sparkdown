@@ -60,6 +60,11 @@ use_tmux: boolean,
  */
 terminal_scrollback: number, 
 /**
+ * Show an OS notification when a terminal needs attention (BEL, OSC 9,
+ * OSC 777 notify), but only when the window is not focused. On by default.
+ */
+terminal_notify: boolean,
+/**
  * Agent context bridge: mirror what the user is viewing (and the live
  * text of unsaved buffers) into a per-workspace temp dir that agents in
  * the embedded terminal read via $SPARKDOWN_CONTEXT. On by default; off

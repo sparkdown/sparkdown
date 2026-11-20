@@ -91,6 +91,11 @@ pub struct AppConfig {
     #[serde(default = "default_terminal_scrollback")]
     pub terminal_scrollback: u32,
 
+    /// Show an OS notification when a terminal needs attention (BEL, OSC 9,
+    /// OSC 777 notify), but only when the window is not focused. On by default.
+    #[serde(default = "default_terminal_notify")]
+    pub terminal_notify: bool,
+
     /// Agent context bridge: mirror what the user is viewing (and the live
     /// text of unsaved buffers) into a per-workspace temp dir that agents in
     /// the embedded terminal read via $SPARKDOWN_CONTEXT. On by default; off
@@ -219,6 +224,9 @@ fn default_sidebar_width() -> u32 {
 fn default_terminal_scrollback() -> u32 {
     5000
 }
+fn default_terminal_notify() -> bool {
+    true
+}
 
 fn default_terminal_height() -> u32 {
     200
@@ -250,6 +258,7 @@ impl Default for AppConfig {
             enable_diagrams: true,
             use_tmux: true,
             terminal_scrollback: default_terminal_scrollback(),
+            terminal_notify: default_terminal_notify(),
             agent_context_enabled: true,
             agent_args: std::collections::HashMap::new(),
             check_updates_automatically: true,

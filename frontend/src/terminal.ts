@@ -30,6 +30,7 @@ import type { TerminalLayout } from './types/TerminalLayout';
 import { isSafeHttpUrl, linksForBufferRow } from './terminal-links';
 import { TerminalSearch, type TerminalSearchTarget } from './terminal-search';
 import { TERMINAL_SCROLLBACK_DEFAULT, clampScrollback } from './terminal-scrollback';
+import { handleTerminalNotification } from './terminal-notifications';
 
 // Keep in sync with --font-mono in themes.css. xterm measures cells in
 // JS/canvas and needs a LITERAL font stack (a `var(--…)` never resolves).
@@ -171,6 +172,8 @@ export class TerminalPane {
   private onOpenPath: (path: string) => void;
   /** Split-grid keys pressed while this terminal has focus (⌘D, ⌘] …). */
   private onAction: ((action: TerminalPaneAction) => void) | null;
+  /** Called when terminal output may contain a notification sequence. */
+  private onNotificationRequest: ((output: string) => void) | null;
   /** Timestamp of the last pty output — used to wait for the shell prompt
    *  to settle before typing into a fresh terminal. */
   private lastOutputAt = 0;
@@ -192,11 +195,13 @@ export class TerminalPane {
     id: string,
     onOpenPath: (path: string) => void,
     onAction: ((action: TerminalPaneAction) => void) | null = null,
+    onNotificationRequest: ((output: string) => void) | null = null,
     scrollback = TERMINAL_SCROLLBACK_DEFAULT,
   ) {
     this.id = id;
     this.onOpenPath = onOpenPath;
     this.onAction = onAction;
+    this.onNotificationRequest = onNotificationRequest;
     this.term = new XTerm({
       cursorBlink: true,
       fontFamily: TERM_FONT,
@@ -414,8 +419,11 @@ export class TerminalPane {
     // destroy already drained unlisteners, so a late push would leak.
     const dataUn = await listen<{ id: string; chunk: string }>('terminal://data', (e) => {
       if (e.payload.id === this.id) {
-        this.term.write(e.payload.chunk);
+        const chunk = e.payload.chunk;
+        this.term.write(chunk);
         this.lastOutputAt = performance.now();
+        // Check for notification sequences (BEL, OSC 9, OSC 777)
+        this.onNotificationRequest?.(chunk);
       }
     });
     if (this.disposed) return void dataUn();
@@ -1072,6 +1080,10 @@ export class TerminalManager {
   private scrollback = TERMINAL_SCROLLBACK_DEFAULT;
   /** Each pane's find bar, built on first use and mounted in its card. */
   private searches = new Map<string, TerminalSearch>();
+  /** App config (for terminal_notify setting). */
+  private config: import('./api').AppConfig | null = null;
+  /** Whether the SparkDown window currently has focus. */
+  private windowFocused = true;
   /** Login shell name ("zsh"/"bash"), resolved once for pane names. */
   private shellName = '';
   private store: LayoutStore | null = null;
@@ -1096,6 +1108,16 @@ export class TerminalManager {
   /** Where the layout is persisted (the cockpit wires AppConfig here). */
   setLayoutStore(store: LayoutStore): void {
     this.store = store;
+  }
+
+  /** Set the app config (for terminal notification setting). */
+  setConfig(config: import('./api').AppConfig): void {
+    this.config = config;
+  }
+
+  /** Update whether the window has focus (for notification gating). */
+  setWindowFocused(focused: boolean): void {
+    this.windowFocused = focused;
   }
 
   constructor(host: HTMLElement, onOpenPath: (path: string) => void) {
@@ -1437,6 +1459,7 @@ export class TerminalManager {
       id,
       this.onOpenPath,
       (action) => this.onPaneAction(id, action),
+      (output) => this.onPaneNotificationRequest(id, output),
       this.scrollback,
     );
     this.panes.set(id, pane);
@@ -1468,6 +1491,22 @@ export class TerminalManager {
       this.renderHeaders();
     };
     return { id, pane, start };
+  }
+
+  /** Handle terminal output that may contain notification sequences. */
+  private onPaneNotificationRequest(id: string, output: string): void {
+    if (!this.config) return;
+    const meta = this.meta.get(id);
+    if (!meta) return;
+    const process = meta.agentId ?? meta.shell;
+    const paneName = meta.customName ?? process;
+    void handleTerminalNotification(
+      output,
+      id,
+      paneName,
+      this.config,
+      this.windowFocused,
+    );
   }
 
   /** Close a terminal by id (kills its shell); its split collapses. Empties
