@@ -162,6 +162,37 @@ Get-FileHash .\SparkDown_0.3.1_x64-setup.exe -Algorithm SHA256
 - **MCP server**: agents in SparkDown terminals connect through a per-user
   Windows named pipe (`\\.\pipe\sparkdown-<user>-<random>-mcp`). Only your
   user account and SYSTEM can open it. CI runs the pipe tests on Windows.
+- **Agents under WSL** (#116): type `wsl` in a SparkDown terminal and the
+  Linux shell keeps the terminal's routing: SparkDown lists
+  `SPARKDOWN_MCP`, `SPARKDOWN_MCP_TOKEN`, `SPARKDOWN_CONTEXT` and
+  `SPARKDOWN_MCP_SHIM` in `WSLENV` (names only, added to your own
+  `WSLENV`). `$SPARKDOWN_MCP_SHIM` is SparkDown's own program as a WSL path
+  (`/mnt/c/.../sparkdown.exe`). Register it once in each Linux agent, from
+  a `wsl` shell in a SparkDown terminal:
+
+  ```sh
+  claude mcp add sparkdown --scope user -- "$SPARKDOWN_MCP_SHIM" --mcp-stdio
+  grok mcp add -s user sparkdown "$SPARKDOWN_MCP_SHIM" -- --mcp-stdio
+  gemini mcp add sparkdown "$SPARKDOWN_MCP_SHIM" --mcp-stdio
+  ```
+
+  Codex starts its servers with a filtered environment, so its entry in
+  `~/.codex/config.toml` (inside WSL) must forward the variables, `WSLENV`
+  included:
+
+  ```toml
+  [mcp_servers.sparkdown]
+  command = "/mnt/c/.../sparkdown.exe"  # the value of $SPARKDOWN_MCP_SHIM
+  args = ["--mcp-stdio"]
+  env_vars = ["SPARKDOWN_MCP", "SPARKDOWN_MCP_TOKEN", "WSLENV"]
+  ```
+
+  The agent then starts the Windows `sparkdown.exe` as its server, which
+  opens the same user-only pipe and routes to the terminal's window, as for
+  a native agent. Outside a SparkDown terminal the entry has no tools. WSL
+  drops the variables in a shell that does not inherit them (a `tmux`
+  server started earlier, `sudo`, `su -`). Not yet tested on a Windows PC
+  with WSL.
 - **Updates**: SparkDown checks GitHub Releases (at most once a day) and
   shows when there is a new version. On Windows this is **notify-only**: the
   notice offers **Download**, which opens the release page. Download and run
