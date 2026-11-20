@@ -206,9 +206,12 @@ pub(crate) fn send_loop(
             continue;
         }
         let n = batch.len();
-        if send(batch) {
-            flow.sent(n);
-        } else {
+        // Count the credit BEFORE sending: if the ack arrives before sent(),
+        // saturating_sub would clamp to 0 and the window would drift.
+        flow.sent(n);
+        if !send(batch) {
+            // Send failed (channel closed): roll back the credit we reserved.
+            flow.ack(n as u64);
             live = false;
         }
     }
@@ -385,5 +388,30 @@ mod tests {
         });
         r.join().unwrap();
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn ack_arriving_before_sent_completes_does_not_drift_credit() {
+        // Regression test for the race where flow.sent(n) was called AFTER send(),
+        // so an ack arriving in between would saturating_sub to 0 and inflate credit.
+        let flow = OutputFlow::new();
+        let (tx, rx) = queue();
+        tx.send(b"batch".to_vec()).unwrap();
+        drop(tx);
+
+        let f2 = flow.clone();
+        let h = std::thread::spawn(move || {
+            send_loop(rx, &f2, MAX_BATCH, HIGH_WATER, STALL_TIMEOUT, |batch| {
+                let n = batch.len();
+                // Simulate ack arriving immediately (before sent() would complete).
+                f2.ack(n as u64);
+                true
+            })
+        });
+        h.join().unwrap();
+
+        // Credit must be balanced: sent() is called before send(), and if send
+        // succeeds, the ack above exactly cancels it. in_flight must be 0.
+        assert_eq!(flow.in_flight(), 0);
     }
 }

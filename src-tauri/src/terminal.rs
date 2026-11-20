@@ -950,17 +950,79 @@ pub fn terminal_start(
         }
     }
 
+    // Per-terminal writer thread (see Terminal.input_tx): owns the pty writer
+    // and drains the channel, so `terminal_write` only does a cheap, non-
+    // blocking `send` while holding the map lock. Ends when the sender is
+    // dropped (close/replace) or the pty write fails.
+    let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>();
+
+    let tmux_session = if mode == "tmux" && !is_remote {
+        session.clone()
+    } else {
+        None
+    };
+
+    // Insert the terminal into state BEFORE starting the output threads, so
+    // acks for early output are not dropped (terminal_ack finds the terminal).
+    let flow = crate::terminal_stream::OutputFlow::new();
+    {
+        let mut guard = state.0.lock().map_err(|_| "terminal state poisoned")?;
+        if let Some(s) = &tmux_session {
+            window_sessions().record(s, &label);
+            // A reloaded webview reattaching this session under a new id: the
+            // previous webview's client of it goes (one tab per session).
+            let prefix = format!("{label}/");
+            let stale: Vec<String> = guard
+                .iter()
+                .filter(|(k, t)| {
+                    k.starts_with(&prefix) && **k != key && t.tmux_session.as_deref() == Some(s)
+                })
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in stale {
+                if let Some(mut old) = guard.remove(&k) {
+                    old.silenced.store(true, Ordering::SeqCst);
+                    let _ = old.killer.kill();
+                }
+            }
+        }
+        guard.insert(
+            key,
+            Terminal {
+                input_tx,
+                controller,
+                silenced: silenced.clone(),
+                killer: map_killer,
+                shell_pid,
+                tmux_session,
+                remote: is_remote,
+                flow: crate::terminal_stream::FlowCloser(flow.clone()),
+            },
+        );
+    }
+    // Lock is released; now start the threads. The terminal is in state, so
+    // acks can be processed immediately.
+
+    {
+        let mut writer = writer;
+        std::thread::spawn(move || {
+            while let Ok(data) = input_rx.recv() {
+                if writer.write_all(&data).is_err() {
+                    break;
+                }
+                let _ = writer.flush();
+            }
+        });
+    }
+
     // Reader thread → bounded queue → sender thread → this pane's Channel.
     // The reader keeps multibyte characters whole (decode_pty_utf8); the
     // sender coalesces what is queued into one raw-bytes message and waits
     // for xterm's acks past a high-water mark (terminal_stream.rs). Exit is
     // emitted after the last batch has been handed to the Channel.
-    let flow = crate::terminal_stream::OutputFlow::new();
     {
         let (tx, rx) = crate::terminal_stream::queue();
         std::thread::spawn(move || crate::terminal_stream::read_loop(reader, tx));
-        let silenced = silenced.clone();
-        let flow = flow.clone();
         std::thread::spawn(move || {
             crate::terminal_stream::send_loop(
                 rx,
@@ -982,61 +1044,6 @@ pub fn terminal_start(
         });
     }
 
-    // Per-terminal writer thread (see Terminal.input_tx): owns the pty writer
-    // and drains the channel, so `terminal_write` only does a cheap, non-
-    // blocking `send` while holding the map lock. Ends when the sender is
-    // dropped (close/replace) or the pty write fails.
-    let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>();
-    {
-        let mut writer = writer;
-        std::thread::spawn(move || {
-            while let Ok(data) = input_rx.recv() {
-                if writer.write_all(&data).is_err() {
-                    break;
-                }
-                let _ = writer.flush();
-            }
-        });
-    }
-
-    let tmux_session = if mode == "tmux" && !is_remote {
-        session.clone()
-    } else {
-        None
-    };
-    let mut guard = state.0.lock().map_err(|_| "terminal state poisoned")?;
-    if let Some(s) = &tmux_session {
-        window_sessions().record(s, &label);
-        // A reloaded webview reattaching this session under a new id: the
-        // previous webview's client of it goes (one tab per session).
-        let prefix = format!("{label}/");
-        let stale: Vec<String> = guard
-            .iter()
-            .filter(|(k, t)| {
-                k.starts_with(&prefix) && **k != key && t.tmux_session.as_deref() == Some(s)
-            })
-            .map(|(k, _)| k.clone())
-            .collect();
-        for k in stale {
-            if let Some(mut old) = guard.remove(&k) {
-                old.silenced.store(true, Ordering::SeqCst);
-                let _ = old.killer.kill();
-            }
-        }
-    }
-    guard.insert(
-        key,
-        Terminal {
-            input_tx,
-            controller,
-            silenced,
-            killer: map_killer,
-            shell_pid,
-            tmux_session,
-            remote: is_remote,
-            flow: crate::terminal_stream::FlowCloser(flow),
-        },
-    );
     Ok(mode.to_string())
 }
 
