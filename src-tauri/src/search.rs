@@ -240,7 +240,7 @@ pub(crate) fn search_local(
                 &text,
                 query,
                 case_sensitive,
-                regex.as_ref(),
+                regex,
                 MAX_RESULTS + 1,
                 &mut matches,
             );
@@ -342,7 +342,7 @@ pub(crate) fn parse_remote_output(
         let Some((line_no, text)) = split_line_text(tail) else {
             continue;
         };
-        if let Some(m) = match_line(path, line_no, text, query, case_sensitive, regex.as_ref()) {
+        if let Some(m) = match_line(path, line_no, text, query, case_sensitive, regex) {
             matches.push(m);
         }
     }
