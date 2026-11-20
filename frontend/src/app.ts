@@ -1,5 +1,6 @@
 import { listen } from './window-events';
 import { ask, message } from '@tauri-apps/plugin-dialog';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { deleteEntry } from './explorer-delete';
 import { EditorManager } from './editor';
 import { Toolbar } from './toolbar';
@@ -295,9 +296,8 @@ export class App {
     // A menu action queued for this new window (macOS with no window open).
     const queuedMenu = await api.windowTakeMenu().catch(() => null);
     if (queuedMenu) {
-      void import('@tauri-apps/api/webviewWindow').then(({ getCurrentWebviewWindow }) =>
-        getCurrentWebviewWindow().emitTo(getCurrentWebviewWindow().label, `menu:${queuedMenu}`),
-      );
+      const window = getCurrentWebviewWindow();
+      void window.emitTo(window.label, `menu:${queuedMenu}`);
     }
     // A window opened by Open Folder routing (#62) opens its folder.
     const routed = await api.windowTakeOpen().catch(() => null);
