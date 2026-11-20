@@ -1272,13 +1272,17 @@ pub async fn remote_read_image(
 /// Signal that the frontend has painted and the window can be shown (#214).
 /// Called once during app initialization, after the DOM is built.
 #[tauri::command]
-pub fn window_ready(webview_window: tauri::WebviewWindow) {
+pub fn window_ready(app: tauri::AppHandle, webview_window: tauri::WebviewWindow) {
     let _ = webview_window.show();
     // Focus if create_window requested it (set_focus on hidden window is lost).
     let label = webview_window.label();
     if crate::windows::registry().take_focus_intent(label) {
         let _ = webview_window.set_focus();
     }
+    // #214: Capture initial geometry now that the window is visible. Hidden
+    // windows may not fire Moved/Resized events, so we must record geometry
+    // explicitly after show() to ensure it's saved for the next launch.
+    crate::note_geometry_public(&app, label);
 }
 
 #[cfg(test)]

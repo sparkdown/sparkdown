@@ -1070,6 +1070,11 @@ fn note_geometry(app: &tauri::AppHandle, label: &str) {
     );
 }
 
+/// Public wrapper for note_geometry, called from window_ready (#214).
+pub fn note_geometry_public(app: &tauri::AppHandle, label: &str) {
+    note_geometry(app, label);
+}
+
 /// Free everything a closed window owned. Runs off the event loop: closing
 /// terminals and the SSH session can block.
 fn release_window(app: &tauri::AppHandle, label: &str) {

@@ -1074,4 +1074,41 @@ mod tests {
         // No monitors reported: left as saved.
         assert_eq!(clamp_geometry(g(5, 5, 10, 10), &[]), g(5, 5, 10, 10));
     }
+
+    #[test]
+    fn hidden_window_saves_geometry_after_show_214() {
+        // Windows that start hidden and are shown after first paint must still
+        // save their geometry for the next launch. This test verifies that
+        // note_geometry works for windows after they become visible.
+        let dir = tmpdir("hidden-show");
+        let store = ConfigStore::open(dir.join("config.json"));
+        let label = "w-test";
+
+        // Simulate a window that is shown with specific geometry
+        let geom = Geometry {
+            x: 100,
+            y: 100,
+            width: 1200,
+            height: 800,
+            maximized: false,
+        };
+
+        // Record geometry as if note_geometry was called after show()
+        store.note_geometry(label, geom);
+
+        // Verify it was saved
+        let saved = store.stored();
+        assert!(
+            saved.windows.contains_key(label),
+            "Window geometry should be saved"
+        );
+        let window_geom = saved.windows[label].geometry.unwrap();
+        assert_eq!(window_geom.x, 100);
+        assert_eq!(window_geom.y, 100);
+        assert_eq!(window_geom.width, 1200);
+        assert_eq!(window_geom.height, 800);
+        assert!(!window_geom.maximized);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
