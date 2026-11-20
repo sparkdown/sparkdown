@@ -1045,6 +1045,8 @@ pub fn list_directory(path: &str, include_hidden: bool) -> Result<Vec<FileEntry>
             name: name.to_string(),
             path: child,
             is_dir: kind.starts_with('d'),
+            is_symlink: kind.starts_with('l'),
+            symlink_target: None,
         });
     }
     // If find %y is 'l', we currently treat as file. Fine for v1.

@@ -70,3 +70,25 @@ describe('Explorer Delete (#121)', () => {
     expect(tabsUnder(t, 'c:/w/p/a.md', false)).toHaveLength(1);
   });
 });
+
+describe('Explorer Delete of a symbolic link', () => {
+  it('names the link target in the prompt and deletes the link path', async () => {
+    const d = deps();
+    const out = await deleteEntry(
+      { path: '/w/p/link.md', isDir: false, isSymlink: true, symlinkTarget: '/w/p/a.md' },
+      false,
+      d,
+    );
+    expect(out).toBe('trashed');
+    const prompt = String((d.ask.mock.calls[0] as unknown[])[0]);
+    expect(prompt).toContain('“link.md”');
+    expect(prompt).toContain('symbolic link pointing to “/w/p/a.md”');
+    expect(d.deletePath).toHaveBeenCalledWith('/w/p/link.md');
+    // The tab showing the target stays open.
+    expect(d.closeTab).not.toHaveBeenCalledWith('a');
+  });
+
+  it('leaves the prompt as before for a regular file', () => {
+    expect(deletePrompt('/w/p/a.md', false, false)).not.toContain('symbolic link');
+  });
+});

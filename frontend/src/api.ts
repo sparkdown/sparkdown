@@ -32,6 +32,12 @@ export interface FileEntry {
   name: string;
   path: string;
   is_dir: boolean;
+  /** True if this entry is a symbolic link. Delete acts on the link itself,
+   *  not on what it points to. */
+  is_symlink?: boolean;
+  /** Resolved target of the symlink, for display only (the Delete
+   *  confirmation names it). */
+  symlink_target?: string;
 }
 
 /** Absolute path currently watched, so watchStart can no-op for nested roots. */

@@ -21,7 +21,15 @@ export type EventMap = {
   [EVENTS.CONFIRM_CLOSE_TAB]: { tabId: string };
   [EVENTS.ALL_TABS_CLOSED]: Record<string, never>;
   [EVENTS.FILE_TREE_OPEN]: { path: string };
-  [EVENTS.FILE_TREE_DELETE]: { path: string; isDir: boolean };
+  [EVENTS.FILE_TREE_DELETE]: {
+    path: string;
+    isDir: boolean;
+    /** True if the entry is a symbolic link. Delete acts on the link
+     *  itself; the prompt names the resolved target. */
+    isSymlink?: boolean;
+    /** Resolved target for display in the Delete confirmation prompt. */
+    symlinkTarget?: string;
+  };
   [EVENTS.TOC_GOTO_LINE]: { line: number };
   [EVENTS.TOC_SCROLL_PREVIEW]: { id: string };
   [EVENTS.INSERT_AT_CURSOR]: { text: string };

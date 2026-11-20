@@ -54,6 +54,15 @@ pub struct FileEntry {
     pub path: String,
     /// Whether this entry is a directory (including symlinks to directories).
     pub is_dir: bool,
+    /// Whether this entry is a symbolic link. The explorer marks links and
+    /// the Delete prompt names the resolved target.
+    #[serde(default)]
+    pub is_symlink: bool,
+    /// Resolved absolute target of the symlink, when `is_symlink` is true
+    /// and the target can be resolved. Display only; never the path any
+    /// action is taken on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symlink_target: Option<String>,
 }
 
 /// Maximum file size: 50 MB
@@ -158,6 +167,44 @@ fn validate_write_path(path: &str) -> Result<PathBuf, AppError> {
         .ok_or_else(|| AppError::InvalidPath("No filename".into()))?;
 
     Ok(canonical_parent.join(filename))
+}
+
+/// Validates a path for Delete **without following a symlink in the final
+/// component**. Uses `symlink_metadata` to
+/// detect the entry type, then canonicalises only the *parent* directory and
+/// re-attaches the original filename, so a symlink entry resolves to the link
+/// itself rather than its target. Returns the resolved absolute path and
+/// whether the entry is a symlink.
+///
+/// Canonicalising the full path would move the link's target to the Trash
+/// instead of the link the user picked.
+fn validate_delete_path(path: &str) -> Result<(PathBuf, bool), AppError> {
+    let p = Path::new(path);
+
+    // symlink_metadata() does not follow the final component, so the link
+    // itself is inspected rather than its target.
+    let meta = fs::symlink_metadata(p).map_err(|_| {
+        AppError::InvalidPath(format!("Invalid or inaccessible path: {}", p.display()))
+    })?;
+    let is_symlink = meta.file_type().is_symlink();
+
+    // Canonicalise only the parent directory and re-attach the final
+    // component (matches validate_write_path). For a non-symlink this is
+    // equivalent to canonicalising the whole path; for a symlink it keeps
+    // the link itself as the target of the operation.
+    let parent = p
+        .parent()
+        .ok_or_else(|| AppError::InvalidPath("No parent directory".into()))?;
+    let filename = p
+        .file_name()
+        .ok_or_else(|| AppError::InvalidPath("No filename".into()))?;
+    let canonical_parent = parent.canonicalize().map_err(|_| {
+        AppError::InvalidPath(format!(
+            "Cannot access parent directory: {}",
+            parent.display()
+        ))
+    })?;
+    Ok((canonical_parent.join(filename), is_symlink))
 }
 
 /// Read a file's contents as UTF-8. Validates the path to prevent directory
@@ -565,7 +612,11 @@ pub async fn delete_path(
         if crate::remote::is_active() {
             return crate::remote::delete_file(&path).map(|()| DeleteOutcome::Deleted);
         }
-        let canon = validate_path(&path)?;
+        // Resolve the path *without* following a final symlink, so deleting
+        // a symlink entry moves the link itself, not what it points at. The
+        // folder check runs on this path, so a link whose own location is
+        // outside the window folder is refused.
+        let (canon, _is_symlink) = validate_delete_path(&path)?;
         let canon_s = canon.to_string_lossy().to_string();
         let folder = crate::windows::registry()
             .get(&label)
@@ -858,9 +909,14 @@ fn list_directory_impl(path: &str, include_hidden: bool) -> Result<Vec<FileEntry
         // file_type() uses readdir's d_type when available (no extra stat on
         // macOS), unlike metadata() which always stats. We only need is_dir.
         // Fall back to metadata() if the type is unknown (e.g. some FUSE FSes).
-        let is_dir = match entry.file_type() {
-            Ok(ft) if !ft.is_symlink() => ft.is_dir(),
-            // Symlink: follow via canonicalize to detect circular links.
+        let ft = entry.file_type();
+        let is_symlink = matches!(ft, Ok(ref t) if t.is_symlink());
+        let (is_dir, symlink_target) = match ft {
+            Ok(ref t) if !t.is_symlink() => (t.is_dir(), None),
+            // Symlink: follow via canonicalize to detect circular links and to
+            // learn the resolved target type for display. The resolved path is
+            // never the path any action is taken on (see delete_path): Delete
+            // on a symlink acts on the link itself.
             _ => match entry.path().canonicalize() {
                 Ok(real) => {
                     // Skip entries that point back to a parent of the listing
@@ -868,10 +924,26 @@ fn list_directory_impl(path: &str, include_hidden: bool) -> Result<Vec<FileEntry
                     if safe_path.starts_with(&real) {
                         continue;
                     }
-                    real.is_dir()
+                    let dir = real.is_dir();
+                    let target = if is_symlink {
+                        Some(real.to_string_lossy().into_owned())
+                    } else {
+                        None
+                    };
+                    (dir, target)
                 }
-                // Broken symlink — treat as file
-                Err(_) => false,
+                // Broken symlink — treat as file, target is the raw link read
+                // (best-effort, display-only).
+                Err(_) => {
+                    let target = if is_symlink {
+                        fs::read_link(entry.path())
+                            .ok()
+                            .map(|p| p.to_string_lossy().into_owned())
+                    } else {
+                        None
+                    };
+                    (false, target)
+                }
             },
         };
 
@@ -879,6 +951,8 @@ fn list_directory_impl(path: &str, include_hidden: bool) -> Result<Vec<FileEntry
             path: base.join(&name).to_string_lossy().into_owned(),
             name,
             is_dir,
+            is_symlink,
+            symlink_target,
         });
     }
 
@@ -1774,6 +1848,84 @@ mod delete_tests {
             assert_eq!(items.len(), 1, "the file is in the trash");
             trash::os_limited::purge_all(items).unwrap();
         }
+    }
+
+    /// A symlink entry resolves to the link itself, not its target, so
+    /// Delete removes the link. The folder check uses the link's own
+    /// location.
+    #[cfg(unix)]
+    #[test]
+    fn validate_delete_path_does_not_follow_terminal_symlinks() {
+        let tag = format!("sd_delpath_{}", std::process::id());
+        let root = std::env::temp_dir().join(&tag);
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("notes")).unwrap();
+        let real = root.join("keep.md");
+        fs::write(&real, "important").unwrap();
+        let link = root.join("notes").join("scratch.md");
+        std::os::unix::fs::symlink("../keep.md", &link).unwrap();
+
+        let (resolved, is_symlink) = validate_delete_path(link.to_str().unwrap()).unwrap();
+        assert!(is_symlink, "the explorer entry is a symlink");
+        // The resolved path is the link itself (parent canonicalised,
+        // filename re-attached) — NOT the target `keep.md`.
+        let canon_notes = root.join("notes").canonicalize().unwrap();
+        assert_eq!(resolved, canon_notes.join("scratch.md"));
+        assert_ne!(resolved.file_name().unwrap(), "keep.md");
+
+        // A regular file resolves as before.
+        let (resolved_real, is_symlink_real) =
+            validate_delete_path(real.to_str().unwrap()).unwrap();
+        assert!(!is_symlink_real);
+        assert_eq!(resolved_real, real.canonicalize().unwrap());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// End to end: moving a symlink entry to the Trash removes the link and
+    /// leaves the target as it was. Skipped if the host has no usable trash.
+    #[cfg(unix)]
+    #[test]
+    fn trashing_a_symlink_entry_removes_the_link_not_its_target() {
+        let tag = format!("sd_del_symlink_{}", std::process::id());
+        let root = std::env::temp_dir().join(&tag);
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("notes")).unwrap();
+        let real = root.join("keep.md");
+        fs::write(&real, "important").unwrap();
+        let link = root.join("notes").join("scratch.md");
+        std::os::unix::fs::symlink("../keep.md", &link).unwrap();
+
+        let (resolved, is_symlink) = validate_delete_path(link.to_str().unwrap()).unwrap();
+        assert!(is_symlink);
+        if let Err(e) = trash::delete(&resolved) {
+            // No usable trash on this runner: nothing is gone, so the
+            // check still holds.
+            assert!(
+                link.symlink_metadata().is_ok() && real.exists(),
+                "trash failed ({e}) yet the tree changed"
+            );
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+        assert!(
+            real.exists(),
+            "the symlink target must survive a delete of the link"
+        );
+        assert!(
+            link.symlink_metadata().is_err(),
+            "the symlink itself is gone"
+        );
+        #[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+        {
+            let items: Vec<_> = trash::os_limited::list()
+                .unwrap()
+                .into_iter()
+                .filter(|i| i.name == "scratch.md")
+                .collect();
+            trash::os_limited::purge_all(items).unwrap();
+        }
+        let _ = fs::remove_dir_all(&root);
     }
 }
 
