@@ -21,7 +21,9 @@
 //! never-saved) buffers become readable through their shadow files.
 
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// Max bytes we'll mirror for one unsaved buffer (agents don't need more, and
@@ -89,6 +91,75 @@ fn context_root() -> Option<PathBuf> {
 /// workspaces.
 pub fn context_dir_for(root: &str) -> Option<PathBuf> {
     context_root().map(|r| r.join(workspace_key(root)))
+}
+
+/// Which context dirs (by `workspace_key`) each window has written, so a
+/// closed window's dirs can be removed even if its page never ran its own
+/// clear (a crashed or killed webview).
+fn written_dirs() -> std::sync::MutexGuard<'static, HashMap<String, HashSet<String>>> {
+    static DIRS: OnceLock<Mutex<HashMap<String, HashSet<String>>>> = OnceLock::new();
+    DIRS.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `true` for a name `workspace_key` produces (16 lowercase hex digits).
+/// Only such entries are ever removed from the context base, which also
+/// holds `mcp.sock` and `instance.lock`.
+fn is_context_key(name: &str) -> bool {
+    name.len() == 16 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Remove every context dir under `base` whose name is not in `keep`.
+/// Only real directories with a key-shaped name are removed; a link is
+/// left alone, so nothing outside `base` is touched. Errors are ignored.
+fn remove_context_dirs_in(base: &Path, keep: &HashSet<String>) {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_context_key(name) || keep.contains(name) {
+            continue;
+        }
+        let is_dir = std::fs::symlink_metadata(entry.path())
+            .map(|m| m.file_type().is_dir())
+            .unwrap_or(false);
+        if is_dir {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Remove every local context dir on this machine: at startup (left over
+/// from a run that ended without its own clear), at exit, and when
+/// "Share editor context with agents" is switched off, since one window's
+/// clear only covers the folders that window wrote.
+pub fn remove_all_context_dirs() {
+    written_dirs().clear();
+    if let Some(base) = context_root() {
+        remove_context_dirs_in(&base, &HashSet::new());
+    }
+}
+
+/// A window closed: remove the context dirs it wrote that no other open
+/// window has written too.
+pub fn release_window(label: &str) {
+    let Some(base) = context_root() else { return };
+    for key in release_keys(&mut written_dirs(), label) {
+        let _ = std::fs::remove_dir_all(base.join(key));
+    }
+}
+
+/// Drop `label`'s entry and return the ones no other window still uses.
+fn release_keys(map: &mut HashMap<String, HashSet<String>>, label: &str) -> Vec<String> {
+    let Some(mine) = map.remove(label) else {
+        return Vec::new();
+    };
+    mine.into_iter()
+        .filter(|k| !map.values().any(|other| other.contains(k)))
+        .collect()
 }
 
 /// File-name-safe version of a tab title ("Untitled" → "Untitled.md").
@@ -181,6 +252,10 @@ fn agent_context_update_impl(
     // the victim's home, and the cleanup loop below (plus every write) would
     // hit those targets instead.
     secure_context_tree(&buf_dir).map_err(|e| format!("context dir: {e}"))?;
+    written_dirs()
+        .entry(crate::windows::current_label())
+        .or_default()
+        .insert(workspace_key(&root));
 
     write_private_file(&dir.join("context.json"), context_json.as_bytes())
         .map_err(|e| format!("context write: {e}"))?;
@@ -221,6 +296,10 @@ pub async fn agent_context_clear(
 fn agent_context_clear_impl(root: String) -> Result<(), String> {
     if crate::remote::is_active() {
         return crate::remote::agent_context_clear(&root);
+    }
+    let key = workspace_key(&root);
+    for keys in written_dirs().values_mut() {
+        keys.remove(&key);
     }
     let Some(dir) = context_dir_for(&root) else {
         return Ok(()); // Nothing to clear if no context dir is available.
@@ -580,6 +659,68 @@ pub async fn detect_agents(webview_window: tauri::WebviewWindow) -> Vec<AgentCli
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_keys_are_sixteen_lowercase_hex_digits() {
+        assert!(is_context_key(&workspace_key("/w")));
+        assert!(!is_context_key("mcp.sock"));
+        assert!(!is_context_key("instance.lock"));
+        assert!(!is_context_key("A430D84680AABD0B"));
+        assert!(!is_context_key("a430d84680aabd0"));
+    }
+
+    #[test]
+    fn removing_context_dirs_leaves_other_entries_and_kept_keys() {
+        let base = std::env::temp_dir().join(format!("sd-ctx-purge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let gone = workspace_key("/gone");
+        let kept = workspace_key("/kept");
+        for d in [&gone, &kept, &"notakey".to_string()] {
+            std::fs::create_dir_all(base.join(d).join("buffers")).unwrap();
+            std::fs::write(base.join(d).join("buffers").join("x.md"), "text").unwrap();
+        }
+        std::fs::write(base.join("mcp.sock"), "").unwrap();
+        remove_context_dirs_in(&base, &HashSet::from([kept.clone()]));
+        assert!(!base.join(&gone).exists());
+        assert!(base.join(&kept).join("buffers").join("x.md").exists());
+        assert!(base.join("notakey").exists());
+        assert!(base.join("mcp.sock").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removing_context_dirs_leaves_a_link_and_its_target() {
+        let base = std::env::temp_dir().join(format!("sd-ctx-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep.md"), "mine").unwrap();
+        let inner = base.join("ctx");
+        std::fs::create_dir_all(&inner).unwrap();
+        let key = workspace_key("/linked");
+        std::os::unix::fs::symlink(&outside, inner.join(&key)).unwrap();
+        remove_context_dirs_in(&inner, &HashSet::new());
+        assert!(std::fs::symlink_metadata(inner.join(&key)).is_ok());
+        assert!(outside.join("keep.md").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_closed_window_releases_only_dirs_no_other_window_uses() {
+        let mut map: HashMap<String, HashSet<String>> = HashMap::new();
+        map.insert(
+            "w-a".into(),
+            HashSet::from(["k1".to_string(), "k2".to_string()]),
+        );
+        map.insert("w-b".into(), HashSet::from(["k2".to_string()]));
+        let mut freed = release_keys(&mut map, "w-a");
+        freed.sort();
+        assert_eq!(freed, vec!["k1".to_string()]);
+        assert!(!map.contains_key("w-a"));
+        assert_eq!(release_keys(&mut map, "w-b"), vec!["k2".to_string()]);
+        assert!(release_keys(&mut map, "w-c").is_empty());
+    }
 
     #[test]
     fn sanitizes_buffer_names() {

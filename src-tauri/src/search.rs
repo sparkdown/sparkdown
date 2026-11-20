@@ -532,7 +532,8 @@ mod tests {
     #[test]
     fn parse_remote_output_handles_colons_and_truncation() {
         // `grep --null` separates the file name and line:text with a NUL.
-        let raw = "/r/a.md\x0012:  Find me here\n/r/we:ird:name.md\x003:find ME\n/r/x.md\x00notanumber\n";
+        let raw =
+            "/r/a.md\x0012:  Find me here\n/r/we:ird:name.md\x003:find ME\n/r/x.md\x00notanumber\n";
         let res = parse_remote_output(raw, "/r", "find me", false);
         assert_eq!(res.matches.len(), 2);
         assert_eq!(res.matches[0].path, "/r/a.md");
