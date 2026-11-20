@@ -1270,10 +1270,15 @@ pub async fn remote_read_image(
 }
 
 /// Signal that the frontend has painted and the window can be shown (#214).
-/// Called once during app initialization, after the first render completes.
+/// Called once during app initialization, after the DOM is built.
 #[tauri::command]
 pub fn window_ready(webview_window: tauri::WebviewWindow) {
     let _ = webview_window.show();
+    // Focus if create_window requested it (set_focus on hidden window is lost).
+    let label = webview_window.label();
+    if crate::windows::registry().take_focus_intent(label) {
+        let _ = webview_window.set_focus();
+    }
 }
 
 #[cfg(test)]

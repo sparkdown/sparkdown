@@ -322,19 +322,15 @@ export class App {
 
     await this.cockpit.restore();
 
+    // #214: Signal that the window is ready to show, right after DOM build.
+    // WebKitGTK doesn't run rAF for hidden windows, so signal immediately.
+    void api.windowReady().catch(() => {});
+
     this.ready = true;
     this.remoteHandler?.attach();
     if (this.forwardedPaths.length > 0) {
       void this.openForwardedPaths(this.forwardedPaths.splice(0));
     }
-
-    // #214: Signal that the window has painted and can be shown.
-    // Double requestAnimationFrame ensures the browser has actually painted.
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        void api.windowReady();
-      });
-    });
   }
 
   /** A second launch's files and folders (#51): opened like CLI paths. */

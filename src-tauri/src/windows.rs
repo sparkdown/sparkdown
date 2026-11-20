@@ -285,6 +285,8 @@ pub struct WindowEntry {
     focus_seq: u64,
     /// Directories of files opened via read_file (for preview image containment).
     pub opened_dirs: HashSet<String>,
+    /// Whether this window should be focused when window_ready is called (#214).
+    pub focus_intent: bool,
 }
 
 #[derive(Default)]
@@ -351,6 +353,24 @@ impl Registry {
         let n = self.focus_counter;
         if let Some(w) = self.windows.get_mut(label) {
             w.focus_seq = n;
+        }
+    }
+
+    /// Store focus intent for window_ready to consume (#214).
+    pub fn set_focus_intent(&mut self, label: &str) {
+        if let Some(w) = self.windows.get_mut(label) {
+            w.focus_intent = true;
+        }
+    }
+
+    /// Take and clear focus intent (#214).
+    pub fn take_focus_intent(&mut self, label: &str) -> bool {
+        if let Some(w) = self.windows.get_mut(label) {
+            let intent = w.focus_intent;
+            w.focus_intent = false;
+            intent
+        } else {
+            false
         }
     }
 
@@ -775,10 +795,19 @@ pub fn create_window(
         }
     }
     registry().register(label);
-    // #214: Window stays hidden until the frontend signals it has painted.
-    // A safety timeout in main.rs shows it anyway if the signal never arrives.
+    // #214: Safety timeout shows the window after 3s if frontend never signals.
+    // Applies to all windows (not just restored), and calls show() unconditionally.
+    let label_owned = label.to_string();
+    let app_owned = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        if let Some(w) = app_owned.get_webview_window(&label_owned) {
+            let _ = w.show();
+        }
+    });
+    // Store focus intent for window_ready to use (set_focus on hidden window is lost).
     if focus {
-        let _ = window.set_focus();
+        registry().set_focus_intent(label);
     }
     Ok(window)
 }

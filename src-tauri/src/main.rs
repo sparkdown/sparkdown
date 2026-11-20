@@ -712,19 +712,6 @@ fn main() {
                 if let Err(e) = windows::create_window(&handle, &p.label, p.session.geometry, false)
                 {
                     eprintln!("Warning: could not restore window {}: {e}", p.label);
-                } else {
-                    // #214: Safety timeout to show the window if the frontend never signals.
-                    // The frontend should call window_ready once it has painted.
-                    let label = p.label.clone();
-                    let app_handle = handle.clone();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_secs(3));
-                        if let Some(window) = app_handle.get_webview_window(&label) {
-                            if !window.is_visible().unwrap_or(true) {
-                                let _ = window.show();
-                            }
-                        }
-                    });
                 }
             }
             if let Some(w) = plan
