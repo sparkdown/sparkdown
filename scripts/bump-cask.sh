@@ -19,7 +19,7 @@ TAP="${SPARKDOWN_TAP:-sparkdown/homebrew-tap}"
 CASK="Casks/sparkdown.rb"
 ASSET="SparkDown_${VERSION}_aarch64.dmg"
 # Homebrew cask binary stanza: the launcher shipped inside the .app (#160).
-BINARY_LINE='  binary "#{appdir}/SparkDown.app/Contents/Resources/bin/sparkdown"'
+BINARY_LINE='  binary "#{appdir}/SparkDown.app/Contents/Resources/resources/bin/sparkdown"'
 
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "error: version must be X.Y.Z, got '$VERSION'" >&2; exit 1; }
 
@@ -41,6 +41,11 @@ sed -i.bak -E "s/^  version \"[^\"]+\"/  version \"$VERSION\"/; s/^  sha256 \"[0
 rm -f "$CASK.bak"
 grep -q "version \"$VERSION\"" "$CASK" && grep -q "sha256 \"$SHA\"" "$CASK" || { echo "error: cask rewrite failed" >&2; exit 1; }
 
+# Tauri bundles resources under their source path, so the launcher is at
+# Contents/Resources/resources/bin. Point an older stanza there.
+sed -i.bak 's#SparkDown\.app/Contents/Resources/bin/sparkdown"#SparkDown.app/Contents/Resources/resources/bin/sparkdown"#' "$CASK"
+rm -f "$CASK.bak"
+
 # Ensure the binary stanza exists (idempotent). Insert after the `app` line
 # when missing so `brew install --cask sparkdown` puts sparkdown on PATH.
 if ! grep -qE '^\s*binary "' "$CASK"; then
@@ -55,7 +60,7 @@ if ! grep -qE '^\s*binary "' "$CASK"; then
     exit 1
   fi
 fi
-grep -q 'binary "#{appdir}/SparkDown.app/Contents/Resources/bin/sparkdown"' "$CASK" \
+grep -q 'binary "#{appdir}/SparkDown.app/Contents/Resources/resources/bin/sparkdown"' "$CASK" \
   || { echo "error: binary stanza missing after rewrite" >&2; exit 1; }
 
 if git diff --quiet; then echo "==> cask already at $VERSION with binary stanza"; exit 0; fi

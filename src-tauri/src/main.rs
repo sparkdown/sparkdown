@@ -1357,7 +1357,8 @@ mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let script = std::fs::read_to_string(dir.join("../scripts/bump-cask.sh")).unwrap();
         assert!(
-            script.contains("Contents/Resources/bin/sparkdown") && script.contains("binary "),
+            script.contains("Contents/Resources/resources/bin/sparkdown")
+                && script.contains("binary "),
             "bump-cask.sh must ensure the cask binary stanza (#160)"
         );
         assert!(
