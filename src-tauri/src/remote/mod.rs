@@ -898,10 +898,13 @@ pub fn write_file(path: &str, content: &str) -> Result<(), AppError> {
 /// - A symlinked target is resolved first (`readlink`, max 40 hops), so the
 ///   link stays a link and its target gets the new contents.
 /// - The temp file lives in the target's directory (same filesystem, so the
-///   final `mv -f` is a rename). For an existing file it starts as a
-///   `cp` of the original under `umask 0`, so it gets the original's mode
-///   bits without GNU-only `stat`/`chmod --reference`; `cat` then replaces
-///   the contents. New files get the default umask, same as `cat >`.
+///   final `mv -f` is a rename). It is created exclusively with `set -C`
+///   (O_EXCL) and not used if it is a symlink, so `cp` and `cat` only ever
+///   write the new file in that directory. For an existing file the already-created temp is overwritten by
+///   `cp -p`, which duplicates the original's mode bits without GNU-only
+///   `stat`/`chmod --reference`; `cat` then replaces the contents. New
+///   files get the default umask, same as `cat >`. `[ ! -L "$t" ]` is
+///   checked again right before each later open of `$t`.
 /// - Length check: `len` is the exact payload size. If the SSH channel
 ///   closes early (network drop, ServerAlive kill, our write timeout), the
 ///   remote `cat` sees EOF and exits 0 with a short file; without a check
@@ -949,9 +952,11 @@ pub(crate) fn remote_write_script(path: &str, parent: &str, len: usize) -> Strin
          if [ ! -L \"$f\" ]; then\n\
          t=\"$(dirname -- \"$f\")/.$(basename -- \"$f\").sparkdown-tmp-$$\"\n\
          rm -f -- \"$t\"\n\
-         if {{ if [ -e \"$f\" ]; then (umask 0; cp -- \"$f\" \"$t\"); else : > \"$t\"; fi; }} 2>/dev/null; then\n\
-         if cat > \"$t\" && sd_full \"$t\" && mv -f -- \"$t\" \"$f\"; then exit 0; fi\n\
+         if (set -C; : > \"$t\") 2>/dev/null && [ ! -L \"$t\" ]; then\n\
+         if {{ if [ -e \"$f\" ]; then cp -p -- \"$f\" \"$t\"; fi; }} 2>/dev/null; then\n\
+         if [ ! -L \"$t\" ] && cat > \"$t\" && sd_full \"$t\" && [ ! -L \"$t\" ] && mv -f -- \"$t\" \"$f\"; then exit 0; fi\n\
          rm -f -- \"$t\"; exit 1\n\
+         fi\n\
          fi\n\
          rm -f -- \"$t\"\n\
          fi\n\
@@ -3087,15 +3092,27 @@ Host *.example.com
         );
         assert!(s.contains("mkdir -p -- '/home/u' || exit 1"), "{s}");
         assert!(s.contains(".sparkdown-tmp-$$"), "{s}");
-        assert!(s.contains("(umask 0; cp -- \"$f\" \"$t\")"), "{s}");
+        // The in-directory temp is created exclusively (set -C) and not
+        // used if it is a symlink.
+        assert!(s.contains("(set -C; : > \"$t\")"), "{s}");
+        assert!(s.contains("[ ! -L \"$t\" ]"), "{s}");
+        // For an existing file, `cp -p` into the already-created temp
+        // duplicates mode bits (POSIX, no GNU-only `stat`/`--reference`).
+        assert!(s.contains("cp -p -- \"$f\" \"$t\""), "{s}");
+        // The temp must still be a regular file at each later open/rename.
+        assert!(
+            s.contains(
+                "[ ! -L \"$t\" ] && cat > \"$t\" && sd_full \"$t\" && [ ! -L \"$t\" ] && mv -f -- \"$t\" \"$f\""
+            ),
+            "{s}"
+        );
         // The size check sits between the receive and the rename.
         assert!(
             s.contains("sd_sz() { wc -c < \"$1\" | tr -d ' \\t'; }"),
             "{s}"
         );
-        assert!(s.contains("[ \"$(sd_sz \"$1\")\" -eq \"$N\" ]"), "{s}");
         assert!(
-            s.contains("cat > \"$t\" && sd_full \"$t\" && mv -f -- \"$t\" \"$f\""),
+            s.contains("[ \"$(sd_sz \"$1\")\" -eq \"$N\" ]"),
             "{s}"
         );
         assert!(s.contains("rm -f -- \"$t\"; exit 1"), "{s}");
@@ -3186,6 +3203,33 @@ Host *.example.com
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.canonicalize().unwrap()
+    }
+
+    /// A link already sitting at the in-folder temp name is never written
+    /// through or renamed onto the file: the save goes through the staged
+    /// copy instead, and the link's target is left as it was.
+    #[cfg(unix)]
+    #[test]
+    fn write_script_does_not_use_a_link_at_the_temp_name() {
+        let dir = fresh_test_dir("remote-write-templink");
+        let stage = dir.join("stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        let target = dir.join("doc.md");
+        std::fs::write(&target, "old").unwrap();
+        let other = dir.join("other.txt");
+        std::fs::write(&other, "keep").unwrap();
+        // `rm` is a no-op here so the link survives the script's own cleanup.
+        let prelude = format!(
+            "rm() {{ :; }}; ln -s '{}' '{}/.doc.md.sparkdown-tmp-'$$",
+            other.display(),
+            dir.display()
+        );
+        let out = run_write_script_with(&target, 12, b"new contents", Some(&stage), &prelude);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(!std::fs::symlink_metadata(&target).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new contents");
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "keep");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The read-for-edit script tells "missing" from "present" (and from a

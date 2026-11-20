@@ -50,6 +50,7 @@ requests.
 ### Fixed
 
 - **Commit** of a renamed file no longer fails or stops the app when other changed files have names with accented or other non-ASCII characters.
+- **Remote (SSH)**: saving a file creates its temporary copy as a new file and never writes through a link that is already at that name.
 
 ## [0.4.3] — 2026-11-13
 
