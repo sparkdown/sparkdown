@@ -44,9 +44,9 @@ fn resolve_symlinks(path: &Path) -> io::Result<PathBuf> {
 /// Create a fresh temp file next to `name` in `dir`
 /// (`.<name>.sparkdown-tmp-<pid>-<n>`), never reusing an existing path.
 ///
-/// On Unix the file is created with mode 0o600 so the staged contents are
-/// never readable by other local accounts, even for the window between the
-/// first write and the final `set_permissions`. Callers widen the mode
+/// On Unix the file is created with mode 0o600, so the staged contents are
+/// readable only by the owner until the final `set_permissions`, even
+/// between the first write and that call. Callers widen the mode
 /// afterwards (to match the existing target, or to 0o666 & ~umask for new
 /// files) only once the data has been written.
 fn create_temp(dir: &Path, name: &std::ffi::OsStr, mode: u32) -> io::Result<(PathBuf, File)> {
@@ -117,8 +117,8 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     let result = (|| {
         file.write_all(data)?;
         // Only widen the mode after the data is on disk. On Unix the file
-        // was created 0o600, so the staged contents are never readable by
-        // other local accounts; here we match the target's existing mode.
+        // was created 0o600, so the staged contents are owner-only until
+        // here; now we match the target's existing mode.
         if let Some(perms) = existing_perms {
             file.set_permissions(perms)?;
         }
