@@ -49,6 +49,7 @@ requests.
 - **Remote (SSH)**: SparkDown's own background ssh connections no longer forward your SSH agent or X11, even if `~/.ssh/config` asks for it. The terminal keeps using your own ssh config.
 - **Diff view** (Reading mode): a changed leading indent now stays visible instead of being folded as formatting, marked "whitespace only".
 - **Preview**: a clicked link opens a file only when it is inside the open folder; with no folder open, only inside the previewed file's folder. Files that agents ask to open, and paths clicked in the terminal, must also be inside the open folder. Files you open yourself (Open dialog, explorer, Quick open, session restore) are not affected, and Ctrl+click (Cmd+click on macOS) on terminal paths inside the folder works as before.
+- **Preview**: for a file opened from outside the open folder (or with no folder open), images load only from that file's own folder, not from folders below it. Images inside the open folder load as before.
 
 ### Fixed
 

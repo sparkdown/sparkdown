@@ -1074,11 +1074,6 @@ fn canonical_dir(path: &str, home: Option<&Path>) -> Option<PathBuf> {
     Some(canon)
 }
 
-/// Component-wise containment check.
-fn path_within(child: &Path, parent: &Path) -> bool {
-    child == parent || child.starts_with(parent)
-}
-
 /// Validate a base directory for preview-image grants. Returns `Some` only when
 /// the directory is absolute, existing, not too shallow (not `/` or home), and
 /// is either inside the window folder or equal to one of the opened directories.
@@ -1108,13 +1103,23 @@ fn validated_base_dir(
 }
 
 /// Decide whether a preview image path should be granted to the asset protocol.
-/// Returns `true` if the canonical image path is contained by the window folder,
-/// any opened directory, or the validated base directory.
+/// Returns `true` if the canonical image path is inside the window folder, or
+/// sits directly in the directory of a file opened with `read_file` (an
+/// `opened_dirs` entry that [`is_too_shallow_for_asset_grant`] accepts) or in
+/// the validated base directory.
+///
+/// Outside the window folder the match is same-directory, not recursive:
+/// `read_file` records the parent of every file it reads, so opening
+/// `~/proj/src/main.rs` lets images in `~/proj/src` load, but not images in
+/// folders below it. A base directory is validated by being inside the folder
+/// (already covered by the first check) or equal to an opened directory, so
+/// the same rule applies to it.
 fn preview_image_allowed(
     canonical: &Path,
     folder: Option<&crate::windows::FolderId>,
     opened_dirs: &HashSet<String>,
     base_dir: Option<&Path>,
+    home: Option<&Path>,
 ) -> bool {
     let path_str = canonical.to_string_lossy();
 
@@ -1125,18 +1130,25 @@ fn preview_image_allowed(
         }
     }
 
-    // Check if image is inside any directory that was opened in this window
-    for dir in opened_dirs {
-        if let Ok(d_folder) = crate::windows::local_folder_id(dir) {
-            if d_folder.contains_local(&path_str) {
+    // Same directory as a file opened in this window. Entries at root or
+    // home depth (/, /Users, /home, the home directory) never count.
+    if let Some(image_parent) = canonical.parent() {
+        for dir in opened_dirs {
+            let Ok(od_canon) = fs::canonicalize(dir) else {
+                continue;
+            };
+            if is_too_shallow_for_asset_grant(&od_canon, home) {
+                continue;
+            }
+            if od_canon == image_parent {
                 return true;
             }
         }
     }
 
-    // Check if image is inside the validated base directory
-    if let Some(base) = base_dir {
-        if path_within(canonical, base) {
+    // Directly in the validated base directory.
+    if let (Some(base), Some(image_parent)) = (base_dir, canonical.parent()) {
+        if image_parent == base {
             return true;
         }
     }
@@ -1176,10 +1188,10 @@ fn grant_preview_images(
     home: Option<&Path>,
     mut grant: impl FnMut(&Path) -> bool,
 ) -> Vec<bool> {
-    // An opened directory counts as a root for images below it, so one that
-    // is the filesystem root, `/Users`, `/home` or the home directory (a file
-    // opened straight from there records its parent) would cover far too much.
-    // The same guard `list_directory` applies to its grant is applied here.
+    // An opened directory lets images directly in it load, so one that is the
+    // filesystem root, `/Users`, `/home` or the home directory (a file opened
+    // straight from there records its parent) would cover far too much. The
+    // same guard `list_directory` applies to its grant is applied here.
     let opened_dirs: HashSet<String> = opened_dirs
         .iter()
         .filter(|d| {
@@ -1204,6 +1216,7 @@ fn grant_preview_images(
                 folder,
                 opened_dirs,
                 base_dir_validated.as_deref(),
+                home,
             ) {
                 return false;
             }
@@ -1950,6 +1963,7 @@ mod create_entry_tests {
             &inside_canon,
             Some(&folder),
             &opened_dirs,
+            None,
             None
         ));
         // Image outside folder denied
@@ -1957,6 +1971,7 @@ mod create_entry_tests {
             &outside_canon,
             Some(&folder),
             &opened_dirs,
+            None,
             None
         ));
     }
@@ -1979,11 +1994,12 @@ mod create_entry_tests {
         let img_in_canon = fs::canonicalize(&img_in).unwrap();
         let img_out_canon = fs::canonicalize(&img_out).unwrap();
 
-        // Image in opened dir allowed
+        // Image in opened dir allowed (same-directory match)
         assert!(preview_image_allowed(
             &img_in_canon,
             None,
             &opened_dirs,
+            None,
             None
         ));
         // Image outside denied
@@ -1991,6 +2007,7 @@ mod create_entry_tests {
             &img_out_canon,
             None,
             &opened_dirs,
+            None,
             None
         ));
     }
@@ -2016,14 +2033,28 @@ mod create_entry_tests {
             &sibling_canon,
             None,
             &opened_dirs,
-            Some(&docs_canon)
+            Some(&docs_canon),
+            None
         ));
         // Image outside denied
         assert!(!preview_image_allowed(
             &outside_canon,
             None,
             &opened_dirs,
-            Some(&docs_canon)
+            Some(&docs_canon),
+            None
+        ));
+        // Image in a folder below the base directory denied
+        let nested_img = docs_dir.join("sub").join("nested.png");
+        fs::create_dir(docs_dir.join("sub")).unwrap();
+        fs::write(&nested_img, b"\x89PNG").unwrap();
+        let nested_canon = fs::canonicalize(&nested_img).unwrap();
+        assert!(!preview_image_allowed(
+            &nested_canon,
+            None,
+            &opened_dirs,
+            Some(&docs_canon),
+            None
         ));
     }
 
@@ -2052,8 +2083,89 @@ mod create_entry_tests {
             &link_canon,
             None,
             &opened_dirs,
-            Some(&proj_canon)
+            Some(&proj_canon),
+            None
         ));
+    }
+
+    #[test]
+    fn preview_image_allowed_opened_dirs_requires_same_directory() {
+        // Outside the window folder, an opened directory lets only the
+        // images directly in it load.
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = tmp.path().join("docs");
+        let sub = docs.join("sub");
+        let same_img = docs.join("ok.png");
+        let nested_img = sub.join("nested.png");
+
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(&same_img, b"\x89PNG").unwrap();
+        fs::write(&nested_img, b"\x89PNG").unwrap();
+
+        let docs_canon = fs::canonicalize(&docs).unwrap();
+        let mut opened_dirs = HashSet::new();
+        opened_dirs.insert(docs_canon.to_string_lossy().to_string());
+
+        let same_canon = fs::canonicalize(&same_img).unwrap();
+        let nested_canon = fs::canonicalize(&nested_img).unwrap();
+
+        assert!(
+            preview_image_allowed(&same_canon, None, &opened_dirs, None, None),
+            "image in opened dir itself must be allowed"
+        );
+        assert!(
+            !preview_image_allowed(&nested_canon, None, &opened_dirs, None, None),
+            "image in a subdirectory of an opened dir must NOT be allowed via opened_dirs"
+        );
+    }
+
+    #[test]
+    fn preview_image_allowed_opened_dirs_rejects_too_shallow_entries() {
+        // Opening a file directly in the home directory records it in
+        // opened_dirs; it still does not count, as for list_directory.
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("fakehome");
+        fs::create_dir(&fake_home).unwrap();
+        let fake_home_canon = fs::canonicalize(&fake_home).unwrap();
+
+        // An image file placed directly in the (fake) home directory.
+        let img = fake_home.join("shot.png");
+        fs::write(&img, b"\x89PNG").unwrap();
+        let img_canon = fs::canonicalize(&img).unwrap();
+
+        // opened_dirs contains the home directory itself (what read_file
+        // records when a user opens ~/TODO.md).
+        let mut opened_dirs = HashSet::new();
+        opened_dirs.insert(fake_home_canon.to_string_lossy().to_string());
+
+        assert!(
+            !preview_image_allowed(
+                &img_canon,
+                None,
+                &opened_dirs,
+                None,
+                Some(&fake_home_canon)
+            ),
+            "an opened_dirs entry equal to $HOME must not act as a grant root"
+        );
+    }
+
+    #[test]
+    fn preview_image_allowed_opened_dirs_rejects_root() {
+        // The filesystem root (or /Users, /home) never counts, even when it
+        // is in opened_dirs.
+        let tmp = tempfile::tempdir().unwrap();
+        let img = tmp.path().join("x.png");
+        fs::write(&img, b"\x89PNG").unwrap();
+        let img_canon = fs::canonicalize(&img).unwrap();
+
+        let mut opened_dirs = HashSet::new();
+        opened_dirs.insert("/".to_string());
+
+        assert!(
+            !preview_image_allowed(&img_canon, None, &opened_dirs, None, None),
+            "'/' must never be a grant root via opened_dirs"
+        );
     }
 
     #[test]
