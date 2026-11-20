@@ -1,4 +1,3 @@
-import { WebglAddon } from '@xterm/addon-webgl';
 import type { ITerminalAddon } from '@xterm/xterm';
 
 /**
@@ -26,6 +25,15 @@ interface AddonHost {
 /** The part of WebglAddon used here (injectable for tests). */
 interface WebglLike extends ITerminalAddon {
   onContextLoss(listener: () => void): { dispose(): void };
+}
+
+/** Dynamic import of WebglAddon to keep it out of the main bundle. */
+async function loadWebglAddon(): Promise<{ WebglAddon: new () => WebglLike } | null> {
+  try {
+    return await import('@xterm/addon-webgl');
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -57,28 +65,43 @@ export function webgl2Supported(
  * else keep the built-in DOM renderer. Must run after `term.open()`.
  *
  * - No WebGL2 (some Linux GPU stacks, software-only WebKitGTK, jsdom): we
- *   never construct the addon; return 'dom' and xterm keeps the DOM renderer.
+ *   never load the addon module; return 'dom' and xterm keeps the DOM renderer.
  * - Addon construction / activate throws: dispose what we can, return 'dom'.
  * - Context lost later (GPU reset, driver switch, sleep): dispose the addon,
  *   which hands rendering back to the DOM renderer with the existing buffer,
  *   and report it.
  *
  * Each call owns one addon instance for one terminal. Returns which renderer
- * is active after the attempt.
+ * is active after the attempt. The addon is loaded via dynamic import() to
+ * keep it out of the main bundle.
  */
-export function loadWebglRenderer(
+export async function loadWebglRenderer(
   term: AddonHost,
   onFallback: (reason: string) => void = () => {},
-  make: () => WebglLike = () => new WebglAddon(),
+  make?: () => Promise<WebglLike | null>,
   probeWebgl2: () => boolean = () => webgl2Supported(),
-): 'webgl' | 'dom' {
+): Promise<'webgl' | 'dom'> {
   if (!probeWebgl2()) {
     onFallback('webgl2 unavailable');
     return 'dom';
   }
   let addon: WebglLike;
   try {
-    addon = make();
+    if (make) {
+      const a = await make();
+      if (!a) {
+        onFallback('webgl addon unavailable');
+        return 'dom';
+      }
+      addon = a;
+    } else {
+      const mod = await loadWebglAddon();
+      if (!mod) {
+        onFallback('webgl addon unavailable');
+        return 'dom';
+      }
+      addon = new mod.WebglAddon();
+    }
   } catch (e) {
     onFallback(`webgl addon unavailable: ${e}`);
     return 'dom';

@@ -43,26 +43,26 @@ function fakeAddon() {
 }
 
 describe('loadWebglRenderer', () => {
-  it('loads the WebGL addon when WebGL2 is available and it starts', () => {
+  it('loads the WebGL addon when WebGL2 is available and it starts', async () => {
     const addon = fakeAddon();
     const term = { loadAddon: vi.fn() };
     const fallback = vi.fn();
-    expect(loadWebglRenderer(term, fallback, () => addon, () => true)).toBe('webgl');
+    expect(await loadWebglRenderer(term, fallback, async () => addon, () => true)).toBe('webgl');
     expect(term.loadAddon).toHaveBeenCalledWith(addon);
     expect(fallback).not.toHaveBeenCalled();
   });
 
-  it('keeps the DOM renderer when WebGL2 is unavailable (never constructs addon)', () => {
-    const make = vi.fn(() => fakeAddon());
+  it('keeps the DOM renderer when WebGL2 is unavailable (never constructs addon)', async () => {
+    const make = vi.fn(async () => fakeAddon());
     const term = { loadAddon: vi.fn() };
     const fallback = vi.fn();
-    expect(loadWebglRenderer(term, fallback, make, () => false)).toBe('dom');
+    expect(await loadWebglRenderer(term, fallback, make, () => false)).toBe('dom');
     expect(make).not.toHaveBeenCalled();
     expect(term.loadAddon).not.toHaveBeenCalled();
     expect(fallback).toHaveBeenCalledWith('webgl2 unavailable');
   });
 
-  it('keeps the DOM renderer when activate throws', () => {
+  it('keeps the DOM renderer when activate throws', async () => {
     const addon = fakeAddon();
     const term = {
       loadAddon: vi.fn(() => {
@@ -70,18 +70,18 @@ describe('loadWebglRenderer', () => {
       }),
     };
     const fallback = vi.fn();
-    expect(loadWebglRenderer(term, fallback, () => addon, () => true)).toBe('dom');
+    expect(await loadWebglRenderer(term, fallback, async () => addon, () => true)).toBe('dom');
     expect(addon.dispose).toHaveBeenCalled();
     expect(fallback).toHaveBeenCalledWith(expect.stringContaining('WebGL2 not supported'));
   });
 
-  it('keeps the DOM renderer when the addon cannot be constructed', () => {
+  it('keeps the DOM renderer when the addon cannot be constructed', async () => {
     const term = { loadAddon: vi.fn() };
     const fallback = vi.fn();
-    const r = loadWebglRenderer(
+    const r = await loadWebglRenderer(
       term,
       fallback,
-      () => {
+      async () => {
         throw new Error('boom');
       },
       () => true,
@@ -91,10 +91,10 @@ describe('loadWebglRenderer', () => {
     expect(fallback).toHaveBeenCalledWith(expect.stringContaining('boom'));
   });
 
-  it('falls back to the DOM renderer when the GL context is lost', () => {
+  it('falls back to the DOM renderer when the GL context is lost', async () => {
     const addon = fakeAddon();
     const fallback = vi.fn();
-    loadWebglRenderer({ loadAddon: vi.fn() }, fallback, () => addon, () => true);
+    await loadWebglRenderer({ loadAddon: vi.fn() }, fallback, async () => addon, () => true);
     addon.loseContext();
     expect(addon.dispose).toHaveBeenCalled();
     expect(fallback).toHaveBeenCalledWith('webgl context lost');
@@ -106,7 +106,7 @@ describe('loadWebglRenderer', () => {
     term.open(document.createElement('div'));
     const fallback = vi.fn();
     // Default probe + make: must not throw, must not leave a half-loaded addon.
-    expect(loadWebglRenderer(term, fallback)).toBe('dom');
+    expect(await loadWebglRenderer(term, fallback)).toBe('dom');
     expect(fallback).toHaveBeenCalledWith('webgl2 unavailable');
     term.dispose();
   });

@@ -400,9 +400,12 @@ export class TerminalPane {
     // GPU rendering when the webview has WebGL2; otherwise (or after a lost
     // context) xterm keeps its built-in DOM renderer. A flood of output is
     // drawn once per frame either way; WebGL makes each frame much cheaper.
-    this.renderer = loadWebglRenderer(this.term, (reason) => {
+    // The addon is loaded via dynamic import() to keep it out of the main bundle.
+    loadWebglRenderer(this.term, (reason) => {
       this.renderer = 'dom';
       console.warn(`terminal ${this.id}: DOM renderer (${reason})`);
+    }).then((renderer) => {
+      this.renderer = renderer;
     });
 
     this.registerLinks();
