@@ -8,10 +8,14 @@ use std::time::Instant;
 
 fn main() {
     // Realistic terminal output: mix of text, escape codes, UTF-8.
-    let payload = "Running tests... \x1b[32m✓\x1b[0m test_one\r\n\x1b[32m✓\x1b[0m test_two 😀 ❯\r\n";
+    let payload =
+        "Running tests... \x1b[32m✓\x1b[0m test_one\r\n\x1b[32m✓\x1b[0m test_two 😀 ❯\r\n";
     let size = 100 * 1024 * 1024; // 100 MiB of data
 
-    println!("Terminal throughput benchmark: {} MiB of terminal output", size / (1024 * 1024));
+    println!(
+        "Terminal throughput benchmark: {} MiB of terminal output",
+        size / (1024 * 1024)
+    );
     println!("Unit payload: {} bytes\n", payload.len());
 
     let iterations = size / payload.len();
@@ -37,7 +41,10 @@ fn main() {
         }
         let elapsed = start.elapsed().as_secs_f64();
         let mbps = (total_sent as f64 / elapsed) / (1024.0 * 1024.0);
-        println!("  Run {}: {:.2}s, {:.1} MiB/s ({} bytes total)", run, elapsed, mbps, total_sent);
+        println!(
+            "  Run {}: {:.2}s, {:.1} MiB/s ({} bytes total)",
+            run, elapsed, mbps, total_sent
+        );
         old_times.push((elapsed, mbps));
     }
 
@@ -63,8 +70,14 @@ fn main() {
         let total_sent: usize = batches.iter().map(|b| b.len()).sum();
         let elapsed = start.elapsed().as_secs_f64();
         let mbps = (total_sent as f64 / elapsed) / (1024.0 * 1024.0);
-        println!("  Run {}: {:.2}s, {:.1} MiB/s ({} bytes in {} batches)", 
-                 run, elapsed, mbps, total_sent, batches.len());
+        println!(
+            "  Run {}: {:.2}s, {:.1} MiB/s ({} bytes in {} batches)",
+            run,
+            elapsed,
+            mbps,
+            total_sent,
+            batches.len()
+        );
         new_times.push((elapsed, mbps));
     }
 
@@ -75,8 +88,14 @@ fn main() {
     let (new_median_time, new_median_mbps) = new_times[1];
 
     println!("\nMedian results (100 MiB):");
-    println!("  Old (JSON events): {:.2}s at {:.1} MiB/s", old_median_time, old_median_mbps);
-    println!("  New (binary Channel): {:.2}s at {:.1} MiB/s", new_median_time, new_median_mbps);
+    println!(
+        "  Old (JSON events): {:.2}s at {:.1} MiB/s",
+        old_median_time, old_median_mbps
+    );
+    println!(
+        "  New (binary Channel): {:.2}s at {:.1} MiB/s",
+        new_median_time, new_median_mbps
+    );
     println!("  Speedup: {:.2}x", old_median_time / new_median_time);
     println!("\nNote: This measures formatting/serialization overhead only.");
     println!("Flow control, UTF-8 handling, and threading are tested in unit tests.");
