@@ -326,6 +326,8 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       return [];
     case 'shell_name':
       return 'bash';
+    case 'window_ready':
+      return undefined;
     default:
       throw new Error(`tauri-mocks: unmocked command "${cmd}"`);
   }

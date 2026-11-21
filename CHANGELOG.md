@@ -50,6 +50,10 @@ requests.
 
 - **Terminal notifications**: when a terminal emits OSC 9 or OSC 777 notify (agent CLIs waiting for input), SparkDown shows an OS notification, but only when the window is not focused. Bell (BEL) notifications are a separate setting, off by default. Respects a per-pane rate limit (one notification per 10 seconds) and can be configured in Settings → Terminal. (#205)
 
+### Improved
+
+- **Window startup** now shows the window only after the frontend has painted, eliminating blank/white frames at launch. A safety timeout ensures the window appears even if the frontend signal is missed. (#214)
+
 ### Fixed
 
 - **Git** status and diff no longer run commands set in a repository's local config.

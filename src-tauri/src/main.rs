@@ -795,6 +795,7 @@ fn main() {
             commands::open_external,
             commands::allow_preview_assets,
             commands::remote_read_image,
+            commands::window_ready,
             terminal::terminal_start,
             terminal::terminal_write,
             terminal::terminal_ack,
@@ -1077,6 +1078,11 @@ fn note_geometry(app: &tauri::AppHandle, label: &str) {
             maximized: false,
         },
     );
+}
+
+/// Public wrapper for note_geometry, called from window_ready (#214).
+pub fn note_geometry_public(app: &tauri::AppHandle, label: &str) {
+    note_geometry(app, label);
 }
 
 /// Free everything a closed window owned. Runs off the event loop: closing
