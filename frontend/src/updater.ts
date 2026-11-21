@@ -6,7 +6,8 @@ import type { AppConfig } from './types/AppConfig';
  * Auto-update UI. The work happens in Rust (src-tauri/src/updates.rs: system
  * curl + minisign verification). Calm by design: one quiet check shortly
  * after launch, at most once per 24 h, plus the manual "Check for Updates..."
- * menu item. A found update shows a small status-bar chip; nothing downloads
+ * menu item when the Settings toggle is on. A found update shows a small
+ * status-bar chip; nothing downloads
  * until the user clicks Install, and the restart goes through the app's
  * unsaved-changes flow first (a Cancel there aborts the restart).
  */
@@ -127,6 +128,12 @@ export class UpdateManager {
    */
   async check(manual: boolean): Promise<void> {
     if (this.busy) return;
+    if (!(this.host.config.check_updates_automatically ?? true)) {
+      if (manual) {
+        this.showChip('Update checks are turned off in Settings.', [this.dismissButton()]);
+      }
+      return;
+    }
     if (this.update) {
       // Already found (the chip may have been dismissed with Later).
       if (manual) this.showAvailable();

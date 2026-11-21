@@ -29,8 +29,12 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
-/// The update manifest (the Tauri updater's `latest.json` format).
-pub const ENDPOINT: &str =
+/// Primary update manifest URL prefix. The app appends
+/// `/{target}/{arch}/{version}` (for example
+/// `/linux-x86_64/x86_64/0.4.4`) and sends nothing else.
+pub const PRIMARY_ENDPOINT: &str = "https://sparkdown.dev/update";
+/// Fallback update manifest, used when the primary URL is unreachable.
+pub const FALLBACK_ENDPOINT: &str =
     "https://github.com/sparkdown/sparkdown/releases/latest/download/latest.json";
 /// Where "Download" sends users whose install can't update itself.
 pub const RELEASES_PAGE: &str = "https://github.com/sparkdown/sparkdown/releases/latest";
@@ -509,6 +513,28 @@ pub fn verify_file(
 /// for redirects (GitHub redirects release assets to its CDN); the URL goes
 /// through `--url` so it can never be read as an option.
 pub fn curl_args(url: &str, out: &Path, max_time_secs: u64, max_bytes: u64) -> Vec<OsString> {
+    curl_argv(url, out, max_time_secs, max_bytes, true)
+}
+
+/// argv for a manifest fetch: same as [`curl_args`], but without a custom
+/// User-Agent. The path already names the app version; the check should
+/// send nothing beyond that URL.
+pub fn curl_args_manifest(
+    url: &str,
+    out: &Path,
+    max_time_secs: u64,
+    max_bytes: u64,
+) -> Vec<OsString> {
+    curl_argv(url, out, max_time_secs, max_bytes, false)
+}
+
+fn curl_argv(
+    url: &str,
+    out: &Path,
+    max_time_secs: u64,
+    max_bytes: u64,
+    app_user_agent: bool,
+) -> Vec<OsString> {
     let mut v: Vec<OsString> = [
         "--fail",
         "--silent",
@@ -529,8 +555,10 @@ pub fn curl_args(url: &str, out: &Path, max_time_secs: u64, max_bytes: u64) -> V
     v.push(max_time_secs.to_string().into());
     v.push("--max-filesize".into());
     v.push(max_bytes.to_string().into());
-    v.push("--user-agent".into());
-    v.push(format!("SparkDown/{}", env!("CARGO_PKG_VERSION")).into());
+    if app_user_agent {
+        v.push("--user-agent".into());
+        v.push(format!("SparkDown/{}", env!("CARGO_PKG_VERSION")).into());
+    }
     v.push("--output".into());
     v.push(out.as_os_str().to_owned());
     v.push("--url".into());
@@ -627,14 +655,40 @@ fn download(
     out: &Path,
     max_time_secs: u64,
     max_bytes: u64,
+    on_progress: impl FnMut(u64),
+) -> Result<(), String> {
+    download_with(
+        url,
+        out,
+        max_time_secs,
+        on_progress,
+        curl_args(url, out, max_time_secs, max_bytes),
+    )
+}
+
+fn download_manifest(url: &str, out: &Path) -> Result<(), String> {
+    download_with(
+        url,
+        out,
+        MANIFEST_TIMEOUT_SECS,
+        |_| {},
+        curl_args_manifest(url, out, MANIFEST_TIMEOUT_SECS, MANIFEST_MAX_BYTES),
+    )
+}
+
+fn download_with(
+    url: &str,
+    out: &Path,
+    max_time_secs: u64,
     mut on_progress: impl FnMut(u64),
+    args: Vec<OsString>,
 ) -> Result<(), String> {
     if !url.starts_with("https://") {
         return Err(format!("refusing a non-HTTPS update URL: {url}"));
     }
     let _ = fs::remove_file(out);
     let mut cmd = crate::proc::command(curl_program());
-    cmd.args(curl_args(url, out, max_time_secs, max_bytes))
+    cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -1070,51 +1124,117 @@ async fn blocking<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
-/// Fetch latest.json; `None` when this version is current.
+/// Platform key used in the primary update URL (`darwin` on macOS).
+fn update_target(os: &str, arch: &str) -> String {
+    match os {
+        "macos" => format!("darwin-{arch}"),
+        "linux" => format!("linux-{arch}"),
+        "windows" => format!("windows-{arch}"),
+        other => format!("{other}-{arch}"),
+    }
+}
+
+/// Primary endpoint, with platform, architecture, and app version in the path.
+fn primary_endpoint_url() -> String {
+    let arch = std::env::consts::ARCH;
+    let version = env!("CARGO_PKG_VERSION");
+    format!(
+        "{PRIMARY_ENDPOINT}/{}/{arch}/{version}",
+        update_target(std::env::consts::OS, arch)
+    )
+}
+
+fn remove_update_temp(dir: &Path) {
+    if let Err(e) = fs::remove_dir_all(dir) {
+        if e.kind() != io::ErrorKind::NotFound {
+            eprintln!(
+                "warning: could not remove update temp dir {}: {}",
+                dir.display(),
+                e
+            );
+        }
+    }
+}
+
+/// Download one manifest URL into a fresh 0700 directory and return its text.
+fn fetch_one_manifest(
+    url: &str,
+    prefix: &str,
+    mut get: impl FnMut(&str, &Path) -> Result<(), String>,
+) -> Result<String, String> {
+    // Stage the manifest in a process-private 0700 directory with a
+    // random name so another local user cannot place a symlink at a
+    // predictable path in a shared /tmp, and so a same-user process
+    // cannot find and swap the file between curl's write and the
+    // read-back here. The staging directory is created fresh for every
+    // call and removed in all exit paths.
+    let dir = std::env::temp_dir().join(format!(
+        "{prefix}-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    create_private_dir(&dir).map_err(|e| format!("update temp dir: {e}"))?;
+    let tmp = dir.join("latest.json");
+    let result = (|| -> Result<String, String> {
+        // Pre-create the file ourselves with create_new + O_NOFOLLOW so
+        // we fail closed if anything (symlink, regular file) is already
+        // at that path. curl's --output then opens the existing regular
+        // file, which is fine inside our 0700 directory.
+        create_manifest_file(&tmp).map_err(|e| format!("update temp file: {e}"))?;
+        get(url, &tmp)?;
+        fs::read_to_string(&tmp).map_err(|e| e.to_string())
+    })();
+    remove_update_temp(&dir);
+    result
+}
+
+/// Fetch the manifest from the primary endpoint, then the GitHub fallback.
+/// `get` is the downloader so tests can watch which URLs are requested.
+fn fetch_manifest_from(
+    primary_url: &str,
+    fallback_url: &str,
+    mut get: impl FnMut(&str, &Path) -> Result<(), String>,
+) -> Result<String, String> {
+    match fetch_one_manifest(primary_url, "sparkdown-update", &mut get) {
+        Ok(json) => Ok(json),
+        Err(primary_err) => {
+            eprintln!("Primary update endpoint failed ({primary_err}), trying fallback...");
+            fetch_one_manifest(fallback_url, "sparkdown-update-fallback", &mut get).map_err(
+                |fallback_err| {
+                    format!(
+                        "Both update endpoints failed. Primary: {primary_err}. Fallback: {fallback_err}"
+                    )
+                },
+            )
+        }
+    }
+}
+
+fn fetch_manifest() -> Result<String, String> {
+    fetch_manifest_from(&primary_endpoint_url(), FALLBACK_ENDPOINT, |url, dest| {
+        download_manifest(url, dest)
+    })
+}
+
+/// Fetch latest.json; `None` when this version is current. When the Settings
+/// toggle is off, this returns an error and does not talk to the network.
 #[tauri::command]
-pub async fn update_check(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
+pub async fn update_check(
+    app: AppHandle,
+    store: tauri::State<'_, crate::session::ConfigStore>,
+) -> Result<Option<UpdateInfo>, String> {
     if parse_pubkey(PUBKEY).is_none() {
         return Err("update checks are disabled (no updater public key)".to_owned());
     }
+    // Live gate on the shared preference (Settings → Updates → Check for
+    // updates). Default `true` matches AppConfig, and a missing key falls
+    // back per field the same way other preferences do.
+    if !store.pref_bool("check_updates_automatically", true) {
+        return Err("update checks are turned off".to_owned());
+    }
     blocking(move || {
-        // Stage the manifest in a process-private 0700 directory with a
-        // random name so another local user cannot place a symlink at a
-        // predictable path in a shared /tmp, and so a same-user process
-        // cannot find and swap the file between curl's write and the
-        // read-back here. The staging directory is created fresh for every
-        // call and removed in all exit paths.
-        let dir = std::env::temp_dir().join(format!(
-            "sparkdown-update-{}-{}",
-            std::process::id(),
-            unique_suffix()
-        ));
-        create_private_dir(&dir).map_err(|e| format!("update temp dir: {e}"))?;
-        let tmp = dir.join("latest.json");
-        let json = (|| -> Result<String, String> {
-            // Pre-create the file ourselves with create_new + O_NOFOLLOW so
-            // we fail closed if anything (symlink, regular file) is already
-            // at that path. curl's --output then opens the existing regular
-            // file, which is fine inside our 0700 directory.
-            create_manifest_file(&tmp).map_err(|e| format!("update temp file: {e}"))?;
-            download(
-                ENDPOINT,
-                &tmp,
-                MANIFEST_TIMEOUT_SECS,
-                MANIFEST_MAX_BYTES,
-                |_| {},
-            )?;
-            fs::read_to_string(&tmp).map_err(|e| e.to_string())
-        })();
-        if let Err(e) = fs::remove_dir_all(&dir) {
-            if e.kind() != io::ErrorKind::NotFound {
-                eprintln!(
-                    "warning: could not remove update temp dir {}: {}",
-                    dir.display(),
-                    e
-                );
-            }
-        }
-        let manifest = parse_manifest(&json?)?;
+        let json = fetch_manifest()?;
+        let manifest = parse_manifest(&json)?;
         let current = app.package_info().version.to_string();
         if !is_newer(&manifest.version, &current) {
             return Ok(None);
@@ -2675,9 +2795,10 @@ mod tests {
         let out = s.0.join("o");
         download("https://example.com/", &out, 30, 10 * 1024 * 1024, |_| {}).unwrap();
         assert!(fs::metadata(&out).unwrap().len() > 0);
-        let err = download(ENDPOINT, &out, 30, MANIFEST_MAX_BYTES, |_| {}).unwrap_err();
-        // The repo is private until launch, so the manifest is a 404.
-        assert!(err.contains("404"), "{err}");
+        // The GitHub fallback may succeed or fail depending on network and
+        // whether latest.json is there. Either outcome is fine; this used
+        // to require a failure and panicked when the download succeeded.
+        let _ = download(FALLBACK_ENDPOINT, &out, 30, MANIFEST_MAX_BYTES, |_| {});
     }
 
     #[test]
@@ -2729,5 +2850,114 @@ mod tests {
     #[test]
     fn unique_suffix_differs_between_calls() {
         assert_ne!(unique_suffix(), unique_suffix());
+    }
+
+    #[test]
+    fn update_target_uses_darwin_on_macos() {
+        assert_eq!(update_target("macos", "aarch64"), "darwin-aarch64");
+        assert_eq!(update_target("linux", "x86_64"), "linux-x86_64");
+        assert_eq!(update_target("windows", "x86_64"), "windows-x86_64");
+        assert_eq!(update_target("freebsd", "amd64"), "freebsd-amd64");
+    }
+
+    #[test]
+    fn primary_endpoint_includes_platform_arch_and_version() {
+        let url = primary_endpoint_url();
+        let arch = std::env::consts::ARCH;
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(url.starts_with(&format!("{PRIMARY_ENDPOINT}/")), "{url}");
+        assert!(url.contains(&format!("/{arch}/{version}")), "{url}");
+        assert!(!url.contains('?'), "{url}");
+        match std::env::consts::OS {
+            "macos" => assert!(url.contains("/darwin-"), "{url}"),
+            "linux" => assert!(url.contains("/linux-"), "{url}"),
+            "windows" => assert!(url.contains("/windows-"), "{url}"),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn manifest_curl_args_have_no_custom_user_agent() {
+        let args = curl_args_manifest(
+            "https://sparkdown.dev/update/linux-x86_64/x86_64/0.4.4",
+            Path::new("/tmp/o"),
+            30,
+            1024,
+        );
+        let s: Vec<String> = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(!s.iter().any(|a| a == "--user-agent"), "{s:?}");
+        assert!(!s.iter().any(|a| a.contains("SparkDown/")), "{s:?}");
+        assert_eq!(s[s.len() - 2], "--url");
+        assert_eq!(
+            s.last().unwrap(),
+            "https://sparkdown.dev/update/linux-x86_64/x86_64/0.4.4"
+        );
+    }
+
+    #[test]
+    fn no_network_when_update_checks_are_off() {
+        fn manifest_if_enabled(
+            enabled: bool,
+            get: impl FnMut(&str, &Path) -> Result<(), String>,
+        ) -> Result<String, String> {
+            if !enabled {
+                return Err("update checks are turned off".to_owned());
+            }
+            fetch_manifest_from("https://sparkdown.dev/update/t/a/v", FALLBACK_ENDPOINT, get)
+        }
+
+        let mut calls: Vec<String> = Vec::new();
+        let err = manifest_if_enabled(false, |url, dest| {
+            calls.push(url.to_string());
+            fs::write(dest, "{}").map_err(|e| e.to_string())
+        })
+        .unwrap_err();
+        assert_eq!(err, "update checks are turned off");
+        assert!(calls.is_empty(), "{calls:?}");
+    }
+
+    #[test]
+    fn fetch_manifest_uses_fallback_when_primary_fails() {
+        let primary = "https://sparkdown.dev/update/linux-x86_64/x86_64/0.4.4";
+        let mut calls: Vec<String> = Vec::new();
+        let json = fetch_manifest_from(primary, FALLBACK_ENDPOINT, |url, dest| {
+            calls.push(url.to_string());
+            if url == primary {
+                return Err("worker down".to_owned());
+            }
+            fs::write(dest, r#"{"ok":true}"#).map_err(|e| e.to_string())
+        })
+        .expect("fallback should succeed");
+        assert_eq!(json, r#"{"ok":true}"#);
+        assert_eq!(
+            calls,
+            vec![primary.to_string(), FALLBACK_ENDPOINT.to_string()]
+        );
+    }
+
+    #[test]
+    fn fetch_manifest_returns_primary_body_without_calling_fallback() {
+        let primary = "https://sparkdown.dev/update/linux-x86_64/x86_64/0.4.4";
+        let mut calls: Vec<String> = Vec::new();
+        let json = fetch_manifest_from(primary, FALLBACK_ENDPOINT, |url, dest| {
+            calls.push(url.to_string());
+            fs::write(dest, r#"{"from":"primary"}"#).map_err(|e| e.to_string())
+        })
+        .expect("primary should succeed");
+        assert_eq!(json, r#"{"from":"primary"}"#);
+        assert_eq!(calls, vec![primary.to_string()]);
+    }
+
+    #[test]
+    fn fetch_manifest_reports_both_failures() {
+        let primary = "https://sparkdown.dev/update/linux-x86_64/x86_64/0.4.4";
+        let err = fetch_manifest_from(primary, FALLBACK_ENDPOINT, |_, _| Err("nope".to_owned()))
+            .unwrap_err();
+        assert!(err.contains("Both update endpoints failed"), "{err}");
+        assert!(err.contains("Primary: nope"), "{err}");
+        assert!(err.contains("Fallback: nope"), "{err}");
     }
 }

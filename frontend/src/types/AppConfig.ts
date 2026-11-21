@@ -86,8 +86,10 @@ agent_context_enabled: boolean,
  */
 agent_args: { [key in string]: string }, 
 /**
- * Check GitHub Releases for a new version at startup (at most once per
- * 24 h). On by default; "Check for Updates..." works either way.
+ * Check for a new version at startup (at most once per 24 h). On by
+ * default. When off, SparkDown makes no update-check request at all,
+ * including "Check for Updates..." in the menu. The key is unchanged
+ * so an existing preference still applies.
  */
 check_updates_automatically: boolean, 
 /**

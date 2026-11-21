@@ -341,4 +341,24 @@ describe('UpdateManager notice', () => {
     await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
     expect(invoke).not.toHaveBeenCalled();
   });
+
+  it('makes no request when Check for updates is off, even for a manual check', async () => {
+    const be = backend({ update: { version: '1.2.3' } });
+    const host = makeHost();
+    host.config.check_updates_automatically = false;
+    const mgr = new UpdateManager(host);
+
+    await mgr.check(false);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(be.log).toEqual([]);
+    expect(chip()).toBeNull();
+    expect(host.config.last_update_check_ms).toBe(0);
+    expect(host.saveConfig).not.toHaveBeenCalled();
+
+    await mgr.check(true);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(be.log).toEqual([]);
+    expect(chipText()).toBe('Update checks are turned off in Settings.');
+    expect(host.config.last_update_check_ms).toBe(0);
+  });
 });

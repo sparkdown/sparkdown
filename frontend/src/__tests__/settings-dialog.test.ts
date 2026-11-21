@@ -205,6 +205,23 @@ describe('SettingsDialog', () => {
     a.close();
     expect(overlays()).toHaveLength(0);
   });
+
+  it('labels the updates toggle Check for updates and writes the preference', async () => {
+    const dialog = new SettingsDialog();
+    dialog.toggle(host());
+    const section = [...document.querySelectorAll('.settings-section')].find((el) =>
+      el.querySelector('h3')?.textContent === 'Updates',
+    )!;
+    expect(section.textContent).toContain('Check for updates');
+    expect(section.textContent).not.toContain('Check for updates automatically');
+    const toggle = section.querySelector<HTMLInputElement>('.settings-switch')!;
+    expect(toggle.checked).toBe(true);
+    toggle.checked = false;
+    toggle.dispatchEvent(new Event('change'));
+    expect(config.check_updates_automatically).toBe(false);
+    expect(changes).toBe(1);
+    dialog.close();
+  });
 });
 
 describe('SettingsDialog → Agents MCP rows', () => {
@@ -388,4 +405,5 @@ describe('agent MCP row actions (#49)', () => {
     expect(desc.textContent).toContain('did not answer');
     dialog.close();
   });
+
 });

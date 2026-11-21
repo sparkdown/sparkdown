@@ -298,11 +298,13 @@ function buildSettingsOverlay(host: SettingsHost, close: () => void): HTMLElemen
   updates.appendChild(updatesHeading);
   updates.appendChild(
     toggleRow({
-      label: 'Check for updates automatically',
+      label: 'Check for updates',
       desc:
-        'Look for a new version on GitHub Releases shortly after launch, at ' +
-        'most once a day. Nothing is downloaded until you choose Install. ' +
-        '"Check for Updates..." in the menu works either way.',
+        'Look for a new version shortly after launch, at most once a day, ' +
+        'through sparkdown.dev (or GitHub if that is unavailable). Nothing ' +
+        'is downloaded until you choose Install. When this is off, ' +
+        'SparkDown makes no update check, including Check for Updates in ' +
+        'the menu.',
       checked: host.config.check_updates_automatically ?? true,
       onToggle: (value) => {
         host.config.check_updates_automatically = value;
