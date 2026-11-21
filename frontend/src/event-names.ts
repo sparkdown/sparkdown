@@ -54,6 +54,7 @@ export const MENU = {
   SHOW_SHORTCUTS: 'menu:show-shortcuts',
   SHOW_SETTINGS: 'menu:show-settings',
   CHECK_UPDATES: 'menu:check-updates',
+  SEND_FEEDBACK: 'menu:send-feedback',
   SHOW_FILES: 'menu:show-files',
   SHOW_CHANGES: 'menu:show-changes',
   SEARCH_IN_FILES: 'menu:search-in-files',

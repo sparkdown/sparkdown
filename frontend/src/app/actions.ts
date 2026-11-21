@@ -98,6 +98,15 @@ export function registerMenuListeners(t: ActionTargets): void {
   reg(MENU.SHOW_SHORTCUTS, () => showShortcutsDialog());
   reg(MENU.SHOW_SETTINGS, () => t.openSettings());
   reg(MENU.CHECK_UPDATES, () => t.checkForUpdates());
+  reg(MENU.SEND_FEEDBACK, () => {
+    void api.getAppInfo().then(([version, os]) => {
+      const params = new URLSearchParams({ version, os });
+      const url = `https://github.com/sparkdown/sparkdown/issues/new?template=feedback.yml&${params}`;
+      void api.openExternal(url);
+    }).catch(() => {
+      void api.openExternal('https://github.com/sparkdown/sparkdown/issues/new?template=feedback.yml');
+    });
+  });
   reg(MENU.CLOSE_TAB, () => closeTabOrPane(t));
   reg(MENU.TERMINAL_SPLIT_RIGHT, () => void t.cockpit.splitTerminal('right'));
   reg(MENU.TERMINAL_SPLIT_DOWN, () => void t.cockpit.splitTerminal('down'));
