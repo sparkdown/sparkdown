@@ -1,6 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { isUnderRoot } from "./utils";
 import type { AppConfig } from "./types/AppConfig";
+import { ptyBytes, type PtyOutput } from "./terminal-output";
 
 export type { AppConfig };
 
@@ -150,7 +151,10 @@ export const api = {
 
   // Agent cockpit: embedded terminals + file watching.
   // Each terminal is keyed by a frontend-generated id so several can run at once.
-  /** Returns "tmux" (persistent session) or "shell" (plain fallback). */
+  /** Returns "tmux" (persistent session) or "shell" (plain fallback).
+   *  `onOutput` receives this pane's pty output in order, over a Channel owned
+   *  by this call (no other pane or window can receive it). Ack the bytes with
+   *  `terminalAck` once xterm has parsed them (flow control). */
   terminalStart: (
     id: string,
     cwd: string | null,
@@ -158,8 +162,14 @@ export const api = {
     rows: number,
     session: string | null,
     launch: string | null = null,
-  ) =>
-    invoke<string>("terminal_start", { id, cwd, cols, rows, session, launch }),
+    onOutput: (bytes: Uint8Array) => void = () => {},
+  ) => {
+    const output = new Channel<PtyOutput>((msg) => onOutput(ptyBytes(msg)));
+    return invoke<string>("terminal_start", { id, cwd, cols, rows, session, launch, output });
+  },
+  /** xterm has parsed `bytes` more bytes of terminal `id`'s output. */
+  terminalAck: (id: string, bytes: number) =>
+    invoke<void>("terminal_ack", { id, bytes }),
   tmuxSessions: (prefix: string) =>
     invoke<string[]>("tmux_sessions", { prefix }),
   /** Type text into a tmux session (no Enter) via tmux's own input cycle, so

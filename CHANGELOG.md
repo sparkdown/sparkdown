@@ -37,6 +37,11 @@ requests.
 - **Agents**: switching off "Share editor context with agents" now takes effect for every window at once: agents get the "switched off" answer right away, and the unsaved-text copies of every window are removed, not only those of the window where you changed the setting. These copies are also removed when their window closes, when SparkDown quits, and at the next launch if SparkDown was stopped before it could remove them.
 - **Remote**: a program that connects to SparkDown's key passphrase helper and then stops talking no longer delays the next passphrase request.
 
+### Improved
+
+- **Terminal rendering** uses the WebGL renderer when the system GPU supports WebGL2, with automatic fallback to the DOM renderer on context loss or when WebGL is unavailable. Large terminal output is drawn more efficiently.
+- **Terminal output streaming** sends PTY bytes as binary over a dedicated channel per terminal with flow control, reducing overhead and preventing unbounded buffering during floods of output.
+
 ### Fixed
 
 - **Git** status and diff no longer run commands set in a repository's local config.
