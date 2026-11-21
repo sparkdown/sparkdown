@@ -5,19 +5,32 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
-## [Unreleased]
+## [0.4.5] — 2026-11-21
 
 ### New
 
-- **Send Feedback…** in the Help menu opens a GitHub issue form (Feedback / idea) in your browser, prefilled with the app version and OS.
-- **GitHub issue templates:** Feedback / idea and Bug report forms replace the old markdown templates.
-- **Send feedback** link on the sparkdown.dev website footer.
+- **Send Feedback…** in the Help menu opens a GitHub issue form (Feedback / idea) in your browser, prefilled with the app version and OS. (#229)
+- **GitHub issue templates:** Feedback / idea and Bug report forms replace the old markdown templates. (#229)
+- **Send feedback** link on the sparkdown.dev website footer. (#229)
+- **Regex search in files**: a regex toggle (.*) in the Search sidebar. Local folders use Rust regex syntax (including `\d`, `\w`, and `(?i)`). Remote (SSH) folders use POSIX Extended Regular Expression (ERE) via `grep -E`. For patterns that work in both, use ERE syntax. Invalid patterns show an error. (#234)
+- **Terminal notifications**: when a terminal emits OSC 9 or OSC 777 notify (agent CLIs waiting for input), SparkDown shows an OS notification, but only when the window is not focused. Bell (BEL) notifications are a separate setting, off by default. One notification per pane every 10 seconds; configured in Settings → Terminal. (#236)
+
+### Improved
+
+- **Terminal rendering** uses the WebGL renderer when the system GPU supports WebGL2, and falls back to the DOM renderer if WebGL is unavailable or the context is lost. Large terminal output is drawn more efficiently. (#232)
+- **Terminal output streaming** sends PTY bytes as binary over a dedicated channel per terminal with flow control, so large output is not held in an unbounded buffer. (#232)
+- **Preview** code highlighting loads language modules on demand. The highlight.js core chunk is 8.0 KB gzipped (was 21.8 KB with all languages bundled). Documents with code blocks load only the languages they use. (#235)
+- **Window startup** shows the window after the frontend has painted, so launch no longer flashes a blank frame. If the frontend never signals, the window still appears after a short wait. (#238)
 
 ### Changed
 
 - Update checks now go through sparkdown.dev, with a fallback to GitHub, and can be turned off in Settings.
 - **Git**: Pull and Push now ask before running commands set in a repository's own Git settings, instead of refusing.
 - **macOS**: the bundled `sparkdown` command and Install Command in PATH now use `Contents/Resources/resources/bin/sparkdown`, where the app bundle actually keeps the script.
+
+### Fixed
+
+- A window is shown only if it is still hidden, and focus is recorded when it is shown, so a later timeout does not raise a window over one that already has focus.
 
 ## [0.4.4] — 2026-11-20
 
@@ -50,27 +63,6 @@ requests.
 - **Settings**: one preference SparkDown cannot read (for example a theme from a newer version) now falls back to its default on its own instead of resetting every preference. If the preferences file cannot be read as a whole, the other settings are kept, "Share editor context with agents" stays off until you turn it on again, and a copy of the file is saved next to it as `config.json.corrupt-<time>`.
 - **Agents**: switching off "Share editor context with agents" now takes effect for every window at once: agents get the "switched off" answer right away, and the unsaved-text copies of every window are removed, not only those of the window where you changed the setting. These copies are also removed when their window closes, when SparkDown quits, and at the next launch if SparkDown was stopped before it could remove them.
 - **Remote**: a program that connects to SparkDown's key passphrase helper and then stops talking no longer delays the next passphrase request.
-
-### Improved
-
-- **Terminal rendering** uses the WebGL renderer when the system GPU supports WebGL2, with automatic fallback to the DOM renderer on context loss or when WebGL is unavailable. Large terminal output is drawn more efficiently.
-- **Terminal output streaming** sends PTY bytes as binary over a dedicated channel per terminal with flow control, reducing overhead and preventing unbounded buffering during floods of output.
-
-### Improved
-
-- **Preview** code highlighting loads language modules on demand. The highlight.js core chunk is now 8.0 KB gzipped (was 21.8 KB with all languages bundled), saving ~14 KB for documents with no code blocks. Documents with code blocks load only the languages they use (JavaScript 2.6 KB, TypeScript 3.1 KB, Python 1.5 KB, Rust 1.4 KB, CSS 4.3 KB, SQL 2.4 KB, Bash 1.6 KB, YAML 0.8 KB, JSON 0.4 KB, XML 0.8 KB, all gzipped).
-
-### Added
-
-- **Terminal notifications**: when a terminal emits OSC 9 or OSC 777 notify (agent CLIs waiting for input), SparkDown shows an OS notification, but only when the window is not focused. Bell (BEL) notifications are a separate setting, off by default. Respects a per-pane rate limit (one notification per 10 seconds) and can be configured in Settings → Terminal. (#205)
-
-### Improved
-
-- **Window startup** now shows the window only after the frontend has painted, eliminating blank/white frames at launch. A safety timeout ensures the window appears even if the frontend signal is missed. (#214)
-
-### New
-
-- **Regex search in files**: a regex toggle (.*) in the Search sidebar enables regular expression matching. Local folders use Rust regex syntax (supports `\d`, `\w`, `(?i)`, etc.). Remote (SSH) folders use POSIX Extended Regular Expression (ERE) via `grep -E` (character classes `[0-9]`, quantifiers `+*?{n,m}`, alternation `|`, groups `()`, anchors `^$`; no `\d`, `\w`, or Perl features). For portability across both, use ERE syntax. Invalid patterns show an error (first line only). Remote search compiles the regex before running grep to catch invalid patterns early.
 
 ### Fixed
 
