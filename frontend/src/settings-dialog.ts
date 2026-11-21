@@ -143,6 +143,36 @@ function buildSettingsOverlay(host: SettingsHost, close: () => void): HTMLElemen
     }),
   );
 
+  section.appendChild(
+    toggleRow({
+      label: 'Notify when an agent waits for input',
+      desc:
+        'Show an OS notification when a terminal emits OSC 9 or OSC 777 notify ' +
+        '(agent CLIs waiting for input), but only when the SparkDown window is ' +
+        'not focused.',
+      checked: host.config.terminal_notify ?? true,
+      onToggle: (value) => {
+        host.config.terminal_notify = value;
+        host.onChange();
+      },
+    }),
+  );
+
+  section.appendChild(
+    toggleRow({
+      label: 'Notify on terminal bell',
+      desc:
+        'Show an OS notification when a terminal emits BEL (bell character), but ' +
+        'only when the SparkDown window is not focused. Off by default because ' +
+        'shell tab completion rings the bell.',
+      checked: host.config.terminal_notify_bell ?? false,
+      onToggle: (value) => {
+        host.config.terminal_notify_bell = value;
+        host.onChange();
+      },
+    }),
+  );
+
   dialog.appendChild(section);
 
   // #175: Settings → Git.

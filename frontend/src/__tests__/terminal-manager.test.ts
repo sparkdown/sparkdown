@@ -164,11 +164,13 @@ vi.mock('@xterm/xterm', () => ({
     dataHandler: ((d: string) => void) | null = null;
     selection = '';
     linkProviders: { provideLinks(y: number, cb: (links: unknown) => void): void }[] = [];
+    parser = { registerOscHandler: () => false };
     constructor(opts: Record<string, unknown> = {}) {
       this.options = { ...opts };
       terms.all.push(this);
     }
     loadAddon() {}
+    onBell() {}
     attachCustomKeyEventHandler(h: (e: KeyboardEvent) => boolean) {
       this.keyHandler = h;
     }

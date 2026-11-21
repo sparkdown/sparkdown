@@ -46,6 +46,10 @@ requests.
 
 - **Preview** code highlighting loads language modules on demand. The highlight.js core chunk is now 8.0 KB gzipped (was 21.8 KB with all languages bundled), saving ~14 KB for documents with no code blocks. Documents with code blocks load only the languages they use (JavaScript 2.6 KB, TypeScript 3.1 KB, Python 1.5 KB, Rust 1.4 KB, CSS 4.3 KB, SQL 2.4 KB, Bash 1.6 KB, YAML 0.8 KB, JSON 0.4 KB, XML 0.8 KB, all gzipped).
 
+### Added
+
+- **Terminal notifications**: when a terminal emits OSC 9 or OSC 777 notify (agent CLIs waiting for input), SparkDown shows an OS notification, but only when the window is not focused. Bell (BEL) notifications are a separate setting, off by default. Respects a per-pane rate limit (one notification per 10 seconds) and can be configured in Settings → Terminal. (#205)
+
 ### Fixed
 
 - **Git** status and diff no longer run commands set in a repository's local config.

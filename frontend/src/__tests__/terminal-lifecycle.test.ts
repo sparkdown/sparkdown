@@ -54,9 +54,11 @@ vi.mock('@xterm/xterm', () => ({
     rows = 24;
     element: HTMLElement | null = null;
     buffer = { active: { getLine: () => null } };
+    parser = { registerOscHandler: () => false };
     loadAddon() {}
     attachCustomKeyEventHandler() {}
     attachCustomWheelEventHandler() {}
+    onBell() {}
     registerLinkProvider() {
       return { dispose() {} };
     }

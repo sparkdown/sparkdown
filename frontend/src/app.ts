@@ -37,7 +37,7 @@ import { registerBuiltinCommands, type ViewMode } from './app/builtin-commands';
 import { Palette } from './palette';
 import { commands } from './commands';
 import { RecentFolderCommands } from './app/recent-folders';
-import { onWindowFocus } from './window-events';
+import { onWindowFocus, onWindowFocusChange } from './window-events';
 import { api, type AppConfig, type FsChange } from './api';
 import { ACTIONS, EVENTS } from './event-names';
 import { initPerfTrace, span } from './perf-trace';
@@ -47,6 +47,8 @@ import { TERMINAL_SCROLLBACK_DEFAULT } from './terminal-scrollback';
 const DEFAULT_CONFIG: AppConfig = {
   theme: 'system',
   last_open_files: [],
+  terminal_notify: true,
+  terminal_notify_bell: false,
   recent_folders: [],
   terminal_visible: false,
   terminal_height: 200,
@@ -683,6 +685,10 @@ export class App {
       this.welcome.refreshMarks();
     };
     void onWindowFocus(() => this.refreshRecents());
+    // Track window focus state for terminal notifications (#205).
+    void onWindowFocusChange((focused) => {
+      this.cockpit.setTerminalWindowFocused(focused);
+    });
     registerBuiltinCommands(commands, {
       bus: this.bus,
       tabs: this.tabs,
@@ -840,6 +846,8 @@ export class App {
         enable_diagrams: this.config.enable_diagrams,
         use_tmux: this.config.use_tmux,
         terminal_scrollback: this.config.terminal_scrollback ?? TERMINAL_SCROLLBACK_DEFAULT,
+        terminal_notify: this.config.terminal_notify ?? true,
+        terminal_notify_bell: this.config.terminal_notify_bell ?? false,
         agent_context_enabled: this.config.agent_context_enabled,
         agent_args: this.config.agent_args ?? {},
         check_updates_automatically: this.config.check_updates_automatically ?? true,

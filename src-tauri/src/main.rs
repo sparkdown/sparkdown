@@ -607,6 +607,7 @@ fn main() {
                 .unwrap()
         })
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_drag::init())
         .plugin(
             tauri::plugin::Builder::<Wry>::new("navigation-guard")
@@ -800,6 +801,7 @@ fn main() {
             terminal::terminal_resize,
             terminal::terminal_close,
             terminal::terminal_busy,
+            terminal::terminal_notify,
             terminal::shell_name,
             terminal::terminal_launch_shell,
             terminal::tmux_sessions,

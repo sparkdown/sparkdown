@@ -82,6 +82,12 @@ export class CockpitController {
     this.terminals?.setUseTmux(this.ctx.config.use_tmux);
     this.terminals?.setScrollback(this.ctx.config.terminal_scrollback);
     this.terminals?.setAgentArgs(this.ctx.config.agent_args ?? {});
+    this.terminals?.setConfig(this.ctx.config);
+  }
+
+  /** Update terminal manager's window focus state (for notification gating). */
+  setTerminalWindowFocused(focused: boolean): void {
+    this.terminals?.setWindowFocused(focused);
   }
 
   /** Drag-to-resize the terminal drawer height (gutter hit-target + selection lock). */
@@ -254,6 +260,7 @@ export class CockpitController {
         this.terminals.setUseTmux(this.ctx.config.use_tmux);
         this.terminals.setScrollback(this.ctx.config.terminal_scrollback);
         this.terminals.setAgentArgs(this.ctx.config.agent_args ?? {});
+        this.terminals.setConfig(this.ctx.config);
         // Reattach tmux sessions that survived a previous run (so a running
         // agent is right where the user left it); otherwise open one fresh
         // terminal. Always keeps at least one terminal when the drawer is open
