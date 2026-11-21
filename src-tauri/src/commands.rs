@@ -1415,11 +1415,17 @@ pub async fn remote_read_image(
 /// Called once during app initialization, after the DOM is built.
 #[tauri::command]
 pub fn window_ready(app: tauri::AppHandle, webview_window: tauri::WebviewWindow) {
-    let _ = webview_window.show();
-    // Focus if create_window requested it (set_focus on hidden window is lost).
+    // The 3s safety timeout may already have shown this window; calling
+    // show() again can raise it over a window that has since been focused.
+    crate::windows::show_if_hidden(&webview_window);
+    // Focus if create_window requested it (set_focus on a hidden window is lost).
+    // Record it in the registry here: some hosts never emit Focused(true)
+    // for a window that was created hidden, and routing uses registry.focused()
+    // as the caller when a path is forwarded to an already-running process.
     let label = webview_window.label();
     if crate::windows::registry().take_focus_intent(label) {
         let _ = webview_window.set_focus();
+        crate::windows::registry().mark_focused(label);
     }
     // #214: Capture initial geometry now that the window is visible. Hidden
     // windows may not fire Moved/Resized events, so we must record geometry

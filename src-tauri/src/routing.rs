@@ -190,6 +190,7 @@ pub fn focus(app: &AppHandle, label: &str) {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+        crate::windows::registry().mark_focused(label);
     }
 }
 

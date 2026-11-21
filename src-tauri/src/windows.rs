@@ -684,6 +684,13 @@ mod tests {
         std::env::remove_var(super::E2E_WEBVIEW2_ARGS_ENV);
         assert_eq!(super::e2e_webview2_args(), None);
     }
+
+    #[test]
+    fn safety_show_skips_only_when_already_visible() {
+        assert!(!should_show(Ok::<bool, ()>(true)));
+        assert!(should_show(Ok::<bool, ()>(false)));
+        assert!(should_show(Err::<bool, ()>(())));
+    }
 }
 
 // --- Lifecycle ---------------------------------------------------------------
@@ -795,21 +802,40 @@ pub fn create_window(
         }
     }
     registry().register(label);
-    // #214: Safety timeout shows the window after 3s if frontend never signals.
-    // Applies to all windows (not just restored), and calls show() unconditionally.
+    // #214: if the frontend never calls window_ready, show after 3s.
+    // show() on an already-visible window can raise it over one the
+    // user (or a later open) has focused, so only show when hidden.
+    // is_visible errors are treated as hidden so the window still appears.
     let label_owned = label.to_string();
     let app_owned = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(3));
         if let Some(w) = app_owned.get_webview_window(&label_owned) {
-            let _ = w.show();
+            show_if_hidden(&w);
+            if registry().take_focus_intent(&label_owned) {
+                let _ = w.set_focus();
+                registry().mark_focused(&label_owned);
+            }
         }
     });
-    // Store focus intent for window_ready to use (set_focus on hidden window is lost).
+    // Store focus intent for window_ready (set_focus on a hidden window is lost).
     if focus {
         registry().set_focus_intent(label);
     }
     Ok(window)
+}
+
+/// Call `show()` only when the window is not already on screen.
+/// `is_visible` errors are treated as hidden so the window still appears.
+pub(crate) fn show_if_hidden(window: &tauri::WebviewWindow) {
+    if should_show(window.is_visible()) {
+        let _ = window.show();
+    }
+}
+
+/// `Ok(true)` means already visible; anything else should still be shown.
+pub(crate) fn should_show<E>(visible: Result<bool, E>) -> bool {
+    !matches!(visible, Ok(true))
 }
 
 /// The window app-level events (menu, dock, forwarded paths) go to: the

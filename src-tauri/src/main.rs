@@ -719,13 +719,11 @@ fn main() {
                     eprintln!("Warning: could not restore window {}: {e}", p.label);
                 }
             }
-            if let Some(w) = plan
-                .iter()
-                .find(|p| p.focus)
-                .and_then(|p| handle.get_webview_window(&p.label))
-            {
-                let _ = w.set_focus();
-                windows::registry().mark_focused(w.label());
+            // Windows start hidden (#214); set_focus here would be lost.
+            // window_ready (or the safety timeout) applies the intent after show.
+            if let Some(p) = plan.iter().find(|p| p.focus) {
+                windows::registry().set_focus_intent(&p.label);
+                windows::registry().mark_focused(&p.label);
             }
             lifecycle::refresh(&handle);
 
