@@ -17,6 +17,7 @@ requests.
 
 - Update checks now go through sparkdown.dev, with a fallback to GitHub, and can be turned off in Settings.
 - **Git**: Pull and Push now ask before running commands set in a repository's own Git settings, instead of refusing.
+- **macOS**: the bundled `sparkdown` command and Install Command in PATH now use `Contents/Resources/resources/bin/sparkdown`, where the app bundle actually keeps the script.
 
 ## [0.4.4] — 2026-11-20
 

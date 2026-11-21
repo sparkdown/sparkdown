@@ -1374,7 +1374,7 @@ mod tests {
         );
         assert!(
             dir.join("resources/bin/sparkdown").is_file(),
-            "macOS launcher must ship as Contents/Resources/bin/sparkdown"
+            "macOS launcher source must be src-tauri/resources/bin/sparkdown (bundled to Contents/Resources/resources/bin/sparkdown)"
         );
         let conf: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("tauri.conf.json")).unwrap())

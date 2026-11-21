@@ -200,6 +200,23 @@ fn replace_link(link: &Path, target: &Path) -> Result<(), String> {
     create_link(link, target)
 }
 
+/// macOS launcher script inside an app bundle: the path Tauri writes,
+/// then the older Contents/Resources/bin location if that is the one
+/// present.
+#[cfg(any(target_os = "macos", test))]
+fn macos_cli_launcher(contents: &Path) -> Option<PathBuf> {
+    let resources = contents.join("Resources");
+    let bundled = resources.join("resources").join("bin").join(COMMAND_NAME);
+    if path_exists(&bundled) {
+        return Some(bundled);
+    }
+    let older = resources.join("bin").join(COMMAND_NAME);
+    if path_exists(&older) {
+        return Some(older);
+    }
+    None
+}
+
 /// The binary / script the PATH link should point at for this running app.
 /// `None` when the platform package already ships `/usr/bin/sparkdown`
 /// (deb/AUR) or when we cannot find a stable path.
@@ -215,12 +232,12 @@ pub fn running_cli_target() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok().map(strip_deleted)?;
     #[cfg(target_os = "macos")]
     {
-        // Prefer Contents/Resources/bin/sparkdown (the launcher script).
-        // exe is Contents/MacOS/sparkdown.
+        // exe is Contents/MacOS/sparkdown. Prefer the bundled launcher
+        // script at Contents/Resources/resources/bin/sparkdown; older
+        // copies used Contents/Resources/bin/sparkdown.
         if let Some(macos_dir) = exe.parent() {
             if let Some(contents) = macos_dir.parent() {
-                let launcher = contents.join("Resources").join("bin").join(COMMAND_NAME);
-                if path_exists(&launcher) {
+                if let Some(launcher) = macos_cli_launcher(contents) {
                     return Some(launcher);
                 }
             }
@@ -310,10 +327,26 @@ mod tests {
     }
 
     #[test]
+    fn macos_cli_launcher_prefers_the_bundled_path() {
+        let root = tmp();
+        let contents = root.join("SparkDown.app/Contents");
+        let bundled = contents.join("Resources/resources/bin").join(COMMAND_NAME);
+        let older = contents.join("Resources/bin").join(COMMAND_NAME);
+        touch(&bundled);
+        touch(&older);
+        assert_eq!(macos_cli_launcher(&contents).as_ref(), Some(&bundled));
+        fs::remove_file(&bundled).unwrap();
+        assert_eq!(macos_cli_launcher(&contents).as_ref(), Some(&older));
+        fs::remove_file(&older).unwrap();
+        assert!(macos_cli_launcher(&contents).is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn install_creates_link_in_local_bin() {
         let root = tmp();
         let home = root.join("home");
-        let target = root.join("SparkDown.app/Contents/Resources/bin/sparkdown");
+        let target = root.join("SparkDown.app/Contents/Resources/resources/bin/sparkdown");
         touch(&target);
         let dirs = candidate_bin_dirs(&home);
         // Drop /usr/local/bin for the test (not writable / not ours).

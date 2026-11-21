@@ -35,7 +35,9 @@ for a in "$@"; do
   esac
 done
 
-# Locate SparkDown.app from this script: Contents/Resources/bin/sparkdown
+# Locate SparkDown.app by walking up from this script. The bundle ships
+# it at Contents/Resources/resources/bin/sparkdown; older copies used
+# Contents/Resources/bin/sparkdown.
 SELF="${BASH_SOURCE[0]}"
 while [[ -L "$SELF" ]]; do
   dir="$(cd "$(dirname "$SELF")" && pwd)"
@@ -43,8 +45,18 @@ while [[ -L "$SELF" ]]; do
   [[ "$SELF" == /* ]] || SELF="$dir/$SELF"
 done
 BIN_DIR="$(cd "$(dirname "$SELF")" && pwd)"
-CONTENTS="$(cd "$BIN_DIR/../.." && pwd)"
-APP="$(cd "$CONTENTS/.." && pwd)"
+APP=""
+dir="$BIN_DIR"
+for _ in 1 2 3 4 5 6; do
+  dir="$(cd "$dir/.." && pwd)" || break
+  case "${dir##*/}" in
+    *.app) APP="$dir"; break ;;
+  esac
+done
+CONTENTS=""
+if [[ -n "$APP" ]]; then
+  CONTENTS="$APP/Contents"
+fi
 
 # Prefer `open -a` with absolute document paths so a running app gets
 # RunEvent::Opened; fall back to exec'ing the bundle binary (dev / odd layouts).

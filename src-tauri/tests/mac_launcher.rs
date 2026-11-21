@@ -8,14 +8,22 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
+fn run_launcher(args: &[&str]) -> Vec<String> {
+    run_launcher_at("Contents/Resources/resources/bin", args)
+}
+
 // An integration test can't reach the crate's `proc::command`.
 #[allow(clippy::disallowed_methods)]
-fn run_launcher(args: &[&str]) -> Vec<String> {
-    let root =
-        std::env::temp_dir().join(format!("sd-launcher-{}-{}", std::process::id(), args.len()));
+fn run_launcher_at(rel_bin_dir: &str, args: &[&str]) -> Vec<String> {
+    let root = std::env::temp_dir().join(format!(
+        "sd-launcher-{}-{}-{}",
+        std::process::id(),
+        rel_bin_dir.len(),
+        args.len()
+    ));
     let _ = fs::remove_dir_all(&root);
     let app = root.join("Other Name.app");
-    let bin_dir = app.join("Contents/Resources/bin");
+    let bin_dir = app.join(rel_bin_dir);
     fs::create_dir_all(&bin_dir).unwrap();
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/bin/sparkdown");
     let launcher = bin_dir.join("sparkdown");
@@ -70,5 +78,13 @@ fn launcher_opens_the_bundle_by_path() {
     assert_eq!(
         run_launcher(&["--new-window", "/tmp/a.md"]),
         ["-a", "<app>", "/tmp/a.md", "--args", "--new-window"]
+    );
+}
+
+#[test]
+fn launcher_opens_the_bundle_from_the_older_bin_path() {
+    assert_eq!(
+        run_launcher_at("Contents/Resources/bin", &[]),
+        ["-a", "<app>"]
     );
 }
