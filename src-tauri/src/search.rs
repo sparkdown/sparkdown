@@ -1,9 +1,9 @@
 //! Search in files: the sidebar's workspace text search.
 //!
-//! A plain, literal (not regex) substring search over the open folder. Local
-//! folders are walked here in Rust; remote folders run one POSIX `find` +
-//! `grep` over the existing ssh helpers. Both return the same shape, so the
-//! frontend does not care where the folder lives.
+//! Literal or regex substring search over the open folder. Local folders are
+//! walked here in Rust; remote folders run one POSIX `find` + `grep` over the
+//! existing ssh helpers. Both return the same shape, so the frontend does not
+//! care where the folder lives.
 //!
 //! The walk skips what the file watcher skips (VCS, dependency and build
 //! directories — see `watcher::IGNORED_DIR_NAMES`), hidden entries unless the
@@ -12,6 +12,7 @@
 //! UI that there is more.
 
 use crate::commands::AppError;
+use regex::Regex;
 use serde::Serialize;
 use std::fs;
 use std::io::Read;
@@ -56,40 +57,65 @@ pub struct SearchResults {
 }
 
 /// Reject queries that can't match a single line or are unreasonably long.
-fn validate_query(query: &str) -> Result<(), AppError> {
+fn validate_query(query: &str, _use_regex: bool) -> Result<(), AppError> {
     if query.is_empty() {
         return Err(AppError::Other("Empty search query".into()));
     }
     if query.chars().count() > MAX_QUERY_CHARS {
         return Err(AppError::Other("Search query is too long".into()));
     }
+    // Single-line rule applies to both modes: local search is per-line, and
+    // remote `grep -e` treats a newline as alternation.
     if query.contains('\n') || query.contains('\r') || query.contains('\0') {
         return Err(AppError::Other("Search query must be a single line".into()));
     }
     Ok(())
 }
 
+/// Compile a regex pattern with safety limits. Returns an error for invalid patterns.
+/// Only supports POSIX ERE syntax that works in both Rust regex and `grep -E`.
+fn compile_regex(pattern: &str, case_sensitive: bool) -> Result<Regex, AppError> {
+    let mut builder = regex::RegexBuilder::new(pattern);
+    builder.case_insensitive(!case_sensitive);
+    // The default 10 MiB size_limit is already set; no need to override.
+    builder
+        .build()
+        .map_err(|e| AppError::Other(format!("Invalid regex pattern: {}", e)))
+}
+
 /// Build a [`SearchMatch`] for `line` if it contains `query`. Case-insensitive
-/// search lowercases both sides; columns are counted in chars of the line.
+/// search lowercases both sides (literal) or uses case-insensitive regex;
+/// columns are counted in chars of the line. For regex, finds the first match.
 pub(crate) fn match_line(
     path: &str,
     line_no: u32,
     line: &str,
     query: &str,
     case_sensitive: bool,
+    regex: Option<&Regex>,
 ) -> Option<SearchMatch> {
-    let (hay, needle) = if case_sensitive {
-        (line.to_string(), query.to_string())
-    } else {
-        (line.to_lowercase(), query.to_lowercase())
-    };
-    let byte_at = hay.find(&needle)?;
-    // Char offsets in the (possibly lowercased) line. Lowercasing keeps the
-    // char count for everything but a few exotic letters; clamp to be safe.
     let line_chars: Vec<char> = line.chars().collect();
-    let start = hay[..byte_at].chars().count().min(line_chars.len());
-    let len = needle.chars().count();
-    let end = (start + len).min(line_chars.len());
+    let (start, end) = if let Some(re) = regex {
+        // Regex mode: find first match in the line
+        let m = re.find(line)?;
+        let start = line[..m.start()].chars().count();
+        let end = line[..m.end()].chars().count();
+        (start, end)
+    } else {
+        // Literal mode: case-insensitive substring search
+        let (hay, needle) = if case_sensitive {
+            (line.to_string(), query.to_string())
+        } else {
+            (line.to_lowercase(), query.to_lowercase())
+        };
+        let byte_at = hay.find(&needle)?;
+        // Char offsets in the (possibly lowercased) line. Lowercasing keeps the
+        // char count for everything but a few exotic letters; clamp to be safe.
+        let start = hay[..byte_at].chars().count().min(line_chars.len());
+        let len = needle.chars().count();
+        let end = (start + len).min(line_chars.len());
+        (start, end)
+    };
 
     // Trim leading whitespace, then keep a window around the match.
     let lead = line_chars.iter().take_while(|c| c.is_whitespace()).count();
@@ -123,6 +149,7 @@ fn search_text(
     text: &str,
     query: &str,
     case_sensitive: bool,
+    regex: Option<&Regex>,
     room: usize,
     out: &mut Vec<SearchMatch>,
 ) {
@@ -130,7 +157,7 @@ fn search_text(
         if out.len() >= room {
             return;
         }
-        if let Some(m) = match_line(path, i as u32 + 1, line, query, case_sensitive) {
+        if let Some(m) = match_line(path, i as u32 + 1, line, query, case_sensitive, regex) {
             out.push(m);
         }
     }
@@ -165,7 +192,8 @@ pub(crate) fn search_local(
     query: &str,
     case_sensitive: bool,
     include_hidden: bool,
-) -> SearchResults {
+    regex: Option<&Regex>,
+) -> Result<SearchResults, AppError> {
     let mut matches = Vec::new();
     let mut truncated = false;
     let mut scanned = 0usize;
@@ -212,6 +240,7 @@ pub(crate) fn search_local(
                 &text,
                 query,
                 case_sensitive,
+                regex,
                 MAX_RESULTS + 1,
                 &mut matches,
             );
@@ -225,21 +254,21 @@ pub(crate) fn search_local(
         stack.extend(subdirs.into_iter().rev());
     }
     matches.truncate(MAX_RESULTS);
-    SearchResults { matches, truncated }
+    Ok(SearchResults { matches, truncated })
 }
 
 /// The remote search script: POSIX `find` prunes the same directories as the
-/// local walk, then `grep -In --null -F` (literal, skip binaries, line
-/// numbers, NUL between file name and `line:text`) runs in batches.
-/// `/dev/null` as an extra file makes grep always print the file name.
-/// `head` caps the output (one extra line tells us it was truncated).
-/// `--null` (GNU and BSD grep) ends the file name with a NUL, so a newline
-/// in a folder name cannot start a new record.
+/// local walk, then `grep -In --null -F` (literal) or `grep -In --null -E`
+/// (regex) runs in batches. `/dev/null` as an extra file makes grep always
+/// print the file name. `head` caps the output (one extra line tells us it
+/// was truncated). `--null` (GNU and BSD grep) ends the file name with a NUL,
+/// so a newline in a folder name cannot start a new record.
 pub(crate) fn remote_search_script(
     root: &str,
     query: &str,
     case_sensitive: bool,
     include_hidden: bool,
+    use_regex: bool,
 ) -> String {
     let q = crate::remote::quote(query);
     let r = crate::remote::quote(root);
@@ -251,10 +280,11 @@ pub(crate) fn remote_search_script(
         prune.push("-name '.*'".to_string());
     }
     let case = if case_sensitive { "" } else { " -i" };
+    let grep_mode = if use_regex { "-E" } else { "-F" };
     // 2048 blocks of 512 bytes = MAX_FILE_BYTES (POSIX `-size` units).
     format!(
         "find -H {r} -mindepth 1 \\( {prune} \\) -prune -o -type f -size -{blocks} \
-         -exec grep -In{case} --null -F -e {q} -- /dev/null {{}} + 2>/dev/null | head -n {limit}",
+         -exec grep -In{case} --null {grep_mode} -e {q} -- /dev/null {{}} + 2>/dev/null | head -n {limit}",
         prune = prune.join(" -o "),
         blocks = MAX_FILE_BYTES / 512 + 1,
         limit = MAX_RESULTS + 1,
@@ -272,7 +302,8 @@ pub(crate) fn parse_remote_output(
     root: &str,
     query: &str,
     case_sensitive: bool,
-) -> SearchResults {
+    regex: Option<&Regex>,
+) -> Result<SearchResults, AppError> {
     let mut matches = Vec::new();
     let prefix = format!("{}/", root.trim_end_matches('/'));
     // Each record is `path NUL line:text \n`: find the NUL, then the
@@ -311,11 +342,11 @@ pub(crate) fn parse_remote_output(
         let Some((line_no, text)) = split_line_text(tail) else {
             continue;
         };
-        if let Some(m) = match_line(path, line_no, text, query, case_sensitive) {
+        if let Some(m) = match_line(path, line_no, text, query, case_sensitive, regex) {
             matches.push(m);
         }
     }
-    SearchResults { matches, truncated }
+    Ok(SearchResults { matches, truncated })
 }
 
 /// True when a path holds an ASCII control character (including newlines
@@ -338,9 +369,9 @@ fn split_line_text(rest: &str) -> Option<(u32, &str)> {
     Some((n, &rest[j + 1..]))
 }
 
-/// Search the open folder for `query` (literal text). Case-insensitive unless
-/// `case_sensitive`. Runs off the main thread; a remote session searches on
-/// the host.
+/// Search the open folder for `query` (literal or regex). Case-insensitive
+/// unless `case_sensitive`. Runs off the main thread; a remote session searches
+/// on the host.
 #[tauri::command]
 pub async fn search_in_files(
     webview_window: tauri::WebviewWindow,
@@ -348,18 +379,27 @@ pub async fn search_in_files(
     query: String,
     case_sensitive: Option<bool>,
     include_hidden: Option<bool>,
+    use_regex: Option<bool>,
 ) -> Result<SearchResults, AppError> {
-    validate_query(&query)?;
+    let use_regex = use_regex.unwrap_or(false);
+    validate_query(&query, use_regex)?;
     let case_sensitive = case_sensitive.unwrap_or(false);
     let include_hidden = include_hidden.unwrap_or(false);
+    // Compile the regex before branching, so an invalid pattern never runs grep.
+    // Both local and remote use the same compiled regex for consistency.
+    let regex = if use_regex {
+        Some(compile_regex(&query, case_sensitive)?)
+    } else {
+        None
+    };
     crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
         if crate::remote::is_active() {
             let raw = crate::remote::search_in_files(
                 &root,
-                &remote_search_script(&root, &query, case_sensitive, include_hidden),
+                &remote_search_script(&root, &query, case_sensitive, include_hidden, use_regex),
             )
             .map_err(AppError::Other)?;
-            return Ok(parse_remote_output(&raw, &root, &query, case_sensitive));
+            return parse_remote_output(&raw, &root, &query, case_sensitive, regex.as_ref());
         }
         let safe_root = crate::commands::validate_path(&root)?;
         if !safe_root.is_dir() {
@@ -368,12 +408,13 @@ pub async fn search_in_files(
                 safe_root.display()
             )));
         }
-        Ok(search_local(
+        search_local(
             &safe_root,
             &query,
             case_sensitive,
             include_hidden,
-        ))
+            regex.as_ref(),
+        )
     })
     .await
     .map_err(|e| AppError::Other(format!("search task failed: {e}")))?
@@ -396,20 +437,40 @@ mod tests {
 
     #[test]
     fn match_line_finds_first_hit_case_insensitive() {
-        let m = match_line("/r/a.md", 3, "  Hello World, world", "WORLD", false).unwrap();
+        let m = match_line("/r/a.md", 3, "  Hello World, world", "WORLD", false, None).unwrap();
         assert_eq!(m.line, 3);
         assert_eq!(m.column, 9);
         assert_eq!(m.preview, "Hello World, world");
         assert_eq!(m.match_start, 6);
         assert_eq!(m.match_end, 11);
-        assert!(match_line("/r/a.md", 1, "Hello", "hello", true).is_none());
-        assert!(match_line("/r/a.md", 1, "Hello", "Hello", true).is_some());
+        assert!(match_line("/r/a.md", 1, "Hello", "hello", true, None).is_none());
+        assert!(match_line("/r/a.md", 1, "Hello", "Hello", true, None).is_some());
+    }
+
+    #[test]
+    fn match_line_supports_regex() {
+        // Use ERE syntax: [a-z]+ instead of \w+
+        let re = compile_regex(r"w[a-z]+d", false).unwrap();
+        let m = match_line(
+            "/r/a.md",
+            1,
+            "Hello World and word",
+            "w[a-z]+d",
+            false,
+            Some(&re),
+        )
+        .unwrap();
+        assert_eq!(m.column, 7);
+        assert_eq!(m.preview, "Hello World and word");
+        assert!(m.preview[m.match_start as usize..m.match_end as usize]
+            .to_lowercase()
+            .contains("world"));
     }
 
     #[test]
     fn match_line_shortens_long_lines_around_the_match() {
         let line = format!("{}needle{}", "x".repeat(300), "y".repeat(300));
-        let m = match_line("/r/a", 1, &line, "needle", true).unwrap();
+        let m = match_line("/r/a", 1, &line, "needle", true, None).unwrap();
         assert!(m.preview.starts_with('…'));
         let chars: Vec<char> = m.preview.chars().collect();
         let hit: String = chars[m.match_start as usize..m.match_end as usize]
@@ -422,7 +483,7 @@ mod tests {
 
     #[test]
     fn match_line_counts_columns_in_chars() {
-        let m = match_line("/r/a", 1, "héllo wörld", "wör", false).unwrap();
+        let m = match_line("/r/a", 1, "héllo wörld", "wör", false, None).unwrap();
         assert_eq!(m.column, 7);
         assert_eq!(m.match_start, 6);
         assert_eq!(m.match_end, 9);
@@ -443,7 +504,7 @@ mod tests {
         let big = format!("find me\n{}", "z".repeat(MAX_FILE_BYTES as usize + 10));
         fs::write(root.join("big.txt"), big).unwrap();
 
-        let res = search_local(&root, "find me", false, false);
+        let res = search_local(&root, "find me", false, false, None).unwrap();
         let hits: Vec<(String, u32)> = res
             .matches
             .iter()
@@ -465,7 +526,7 @@ mod tests {
         assert!(!res.truncated);
 
         // Hidden files are searched when asked for (ignored dirs never are).
-        let res = search_local(&root, "find me", false, true);
+        let res = search_local(&root, "find me", false, true, None).unwrap();
         let names: Vec<String> = res
             .matches
             .iter()
@@ -490,7 +551,7 @@ mod tests {
         fs::write(outside.join("secret.md"), "find me").unwrap();
         std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
         std::os::unix::fs::symlink(outside.join("secret.md"), root.join("s.md")).unwrap();
-        let res = search_local(&root, "find me", false, false);
+        let res = search_local(&root, "find me", false, false, None).unwrap();
         assert!(res.matches.is_empty());
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
@@ -501,32 +562,61 @@ mod tests {
         let root = temp_dir("cap");
         let text = "hit\n".repeat(MAX_RESULTS + 50);
         fs::write(root.join("many.md"), text).unwrap();
-        let res = search_local(&root, "hit", true, false);
+        let res = search_local(&root, "hit", true, false, None).unwrap();
         assert_eq!(res.matches.len(), MAX_RESULTS);
         assert!(res.truncated);
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
+    fn local_search_supports_regex() {
+        let root = temp_dir("regex");
+        fs::write(root.join("test.md"), "hello world\nfoo123bar\ntest").unwrap();
+        // Use ERE syntax ([0-9]+) instead of Rust-specific \d+
+        let re = compile_regex(r"foo[0-9]+bar", true).unwrap();
+        let res = search_local(&root, r"foo[0-9]+bar", true, false, Some(&re)).unwrap();
+        assert_eq!(res.matches.len(), 1);
+        assert_eq!(res.matches[0].line, 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn query_validation() {
-        assert!(validate_query("").is_err());
-        assert!(validate_query("a\nb").is_err());
-        assert!(validate_query(&"x".repeat(MAX_QUERY_CHARS + 1)).is_err());
-        assert!(validate_query("ok").is_ok());
+        assert!(validate_query("", false).is_err());
+        assert!(validate_query("a\nb", false).is_err());
+        assert!(validate_query(&"x".repeat(MAX_QUERY_CHARS + 1), false).is_err());
+        assert!(validate_query("ok", false).is_ok());
+        // Single-line rule applies to both modes (remote grep -e treats \n as alternation)
+        assert!(validate_query("a\nb", true).is_err());
+        assert!(validate_query("a\rb", true).is_err());
+        assert!(validate_query("a\0b", true).is_err());
+    }
+
+    #[test]
+    fn compile_regex_rejects_invalid_patterns() {
+        assert!(compile_regex(r"[unclosed", true).is_err());
+        assert!(compile_regex(r"(?P<)", false).is_err());
+        // Use ERE syntax: [0-9]+ instead of \d+
+        assert!(compile_regex(r"valid[0-9]+pattern", true).is_ok());
     }
 
     #[test]
     fn remote_script_quotes_query_and_root() {
-        let s = remote_search_script("/home/u/it's", "a'b; rm -rf /", false, false);
+        let s = remote_search_script("/home/u/it's", "a'b; rm -rf /", false, false, false);
         assert!(s.contains("find -H '/home/u/it'\\''s' -mindepth 1"));
         assert!(s.contains("-e 'a'\\''b; rm -rf /' -- /dev/null {} +"));
         assert!(s.contains("grep -In -i --null -F"));
         assert!(s.contains("-name 'node_modules'"));
         assert!(s.contains("-name '.*'"));
         assert!(s.contains(&format!("head -n {}", MAX_RESULTS + 1)));
-        let s = remote_search_script("/r", "q", true, true);
+        let s = remote_search_script("/r", "q", true, true, false);
         assert!(s.contains("grep -In --null -F"));
         assert!(!s.contains("-name '.*'"));
+
+        // Regex mode uses grep -E instead of -F
+        let s = remote_search_script("/r", r"test\d+", false, false, true);
+        assert!(s.contains("grep -In -i --null -E"));
+        assert!(!s.contains(" -F"));
     }
 
     #[test]
@@ -534,7 +624,7 @@ mod tests {
         // `grep --null` separates the file name and line:text with a NUL.
         let raw =
             "/r/a.md\x0012:  Find me here\n/r/we:ird:name.md\x003:find ME\n/r/x.md\x00notanumber\n";
-        let res = parse_remote_output(raw, "/r", "find me", false);
+        let res = parse_remote_output(raw, "/r", "find me", false, None).unwrap();
         assert_eq!(res.matches.len(), 2);
         assert_eq!(res.matches[0].path, "/r/a.md");
         assert_eq!(res.matches[0].line, 12);
@@ -547,7 +637,7 @@ mod tests {
         let many: String = (0..MAX_RESULTS + 1)
             .map(|i| format!("/r/a.md\x00{}:hit\n", i + 1))
             .collect();
-        let res = parse_remote_output(&many, "/r", "hit", true);
+        let res = parse_remote_output(&many, "/r", "hit", true, None).unwrap();
         assert_eq!(res.matches.len(), MAX_RESULTS);
         assert!(res.truncated);
     }
@@ -557,12 +647,12 @@ mod tests {
         // A folder name ending in a newline: the second line is part of the
         // same path, which is dropped, not a separate hit.
         let raw = "/r/dir\n/r/notes.md/f.md\x001:FAKE note\n";
-        let res = parse_remote_output(raw, "/r", "FAKE", true);
+        let res = parse_remote_output(raw, "/r", "FAKE", true, None).unwrap();
         assert!(res.matches.is_empty());
 
         // After a normal match: that one is kept, the other is dropped.
         let raw = "/r/a.md\x001:FAKE here\n/r/dir\n/r/notes.md/f.md\x002:FAKE note\n";
-        let res = parse_remote_output(raw, "/r", "FAKE", true);
+        let res = parse_remote_output(raw, "/r", "FAKE", true, None).unwrap();
         assert_eq!(res.matches.len(), 1);
         assert_eq!(res.matches[0].path, "/r/a.md");
         assert_eq!(res.matches[0].line, 1);
@@ -572,7 +662,7 @@ mod tests {
     fn parse_remote_output_rejects_control_chars_in_path() {
         // A path with a bell character is dropped.
         let raw = "/r/a\x07.md\x001:hit here\n";
-        let res = parse_remote_output(raw, "/r", "hit", true);
+        let res = parse_remote_output(raw, "/r", "hit", true, None).unwrap();
         assert!(res.matches.is_empty());
     }
 
@@ -589,11 +679,11 @@ mod tests {
         let root_s = root.to_str().unwrap();
         let out = crate::proc::command("/bin/sh")
             .arg("-c")
-            .arg(remote_search_script(root_s, "hit", true, false))
+            .arg(remote_search_script(root_s, "hit", true, false, false))
             .output()
             .unwrap();
         let raw = String::from_utf8_lossy(&out.stdout);
-        let res = parse_remote_output(&raw, root_s, "hit", true);
+        let res = parse_remote_output(&raw, root_s, "hit", true, None).unwrap();
         let paths: Vec<&str> = res.matches.iter().map(|m| m.path.as_str()).collect();
         assert_eq!(paths, vec![format!("{root_s}/a.md").as_str()]);
         let _ = std::fs::remove_dir_all(&root);

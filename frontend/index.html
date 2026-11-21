@@ -129,7 +129,10 @@
             <h2 class="sidebar-title">Search in files</h2>
           </div>
           <div class="sidebar-field">
-            <input id="search-input" type="search" placeholder="Search" spellcheck="false" autocomplete="off" aria-label="Search in files" />
+            <div class="search-input-row">
+              <input id="search-input" type="search" placeholder="Search" spellcheck="false" autocomplete="off" aria-label="Search in files" />
+              <button id="search-regex-btn" class="search-toggle-btn" type="button" title="Use regular expression" aria-label="Use regular expression" aria-pressed="false">.*</button>
+            </div>
           </div>
           <div id="search-status" class="search-status" role="status" aria-live="polite"></div>
           <div id="search-results" class="search-results" role="tree" aria-label="Search results"></div>

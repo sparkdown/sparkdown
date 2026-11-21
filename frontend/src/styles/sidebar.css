@@ -106,6 +106,51 @@
   display: none;
 }
 
+/* Search input row with regex toggle */
+.search-input-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.search-input-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.search-toggle-btn {
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.search-toggle-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--fg);
+}
+
+.search-toggle-btn.active {
+  background: var(--bg-tertiary);
+  color: var(--preview-link);
+  border-color: var(--preview-link);
+}
+
+.search-toggle-btn:focus-visible {
+  outline: 2px solid var(--preview-link);
+  outline-offset: 1px;
+}
+
 #file-tree {
   flex: 1;
   overflow-y: auto;

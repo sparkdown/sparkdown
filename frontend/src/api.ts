@@ -211,18 +211,20 @@ export const api = {
     await invoke<void>("watch_stop");
   },
   gitStatus: (root: string) => invoke<GitStatus>("git_status", { root }),
-  /** Literal text search under `root` (local walk or remote grep). */
+  /** Text search under `root` (literal or regex; local walk or remote grep). */
   searchInFiles: (
     root: string,
     query: string,
     caseSensitive = false,
     includeHidden = false,
+    useRegex = false,
   ) =>
     invoke<SearchResults>("search_in_files", {
       root,
       query,
       caseSensitive,
       includeHidden,
+      useRegex,
     }),
   /** Branch + ahead/behind its upstream (status bar). */
   gitBranchStatus: (root: string) =>
