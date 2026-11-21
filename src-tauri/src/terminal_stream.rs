@@ -289,15 +289,50 @@ mod tests {
         assert_eq!(String::from_utf8(got).unwrap(), "ok\u{FFFD}go\u{FFFD}");
     }
 
+    /// Feed `chunks` into the queue, then drain with `send_loop` on this
+    /// thread so batch sizes do not depend on a racing reader.
+    fn drain(chunks: Vec<Vec<u8>>, max_batch: usize) -> Vec<Vec<u8>> {
+        let (tx, rx) = queue();
+        for c in chunks {
+            tx.send(c).unwrap();
+        }
+        drop(tx);
+        let flow = OutputFlow::new();
+        let mut got = Vec::new();
+        send_loop(rx, &flow, max_batch, u64::MAX, STALL_TIMEOUT, |b| {
+            got.push(b);
+            true
+        });
+        got
+    }
+
     #[test]
     fn batches_respect_max_unless_one_read_is_bigger() {
-        let data = mixed_payload(300_000);
-        let got = run(data.clone(), 4096, 32 * 1024);
-        assert_eq!(got.concat(), data);
+        let cap = 32 * 1024;
+        let read = 4096;
+
+        // 10 exact-size reads: eight fill the cap, the rest start a new batch.
+        let got = drain((0..10).map(|_| vec![b'x'; read]).collect(), cap);
+        assert_eq!(
+            got.iter().map(|b| b.len()).collect::<Vec<_>>(),
+            vec![cap, 2 * read]
+        );
+
+        // Eight slightly-short reads still sit under the cap, so one more
+        // queued read is taken (the documented "one extra" case).
+        let short = read - 1;
+        let got = drain((0..10).map(|_| vec![b'x'; short]).collect(), cap);
+        assert_eq!(got[0].len(), 9 * short);
+        assert_eq!(got[1].len(), short);
         for b in &got {
-            // A batch only exceeds the cap by at most one queued read.
-            assert!(b.len() < 32 * 1024 + 4096, "{}", b.len());
+            assert!(b.len() <= cap + short, "{}", b.len());
         }
+
+        // A single read larger than the cap is forwarded whole.
+        let big = cap + 5000;
+        let got = drain(vec![vec![b'x'; big], vec![b'y'; 10]], cap);
+        assert_eq!(got[0].len(), big);
+        assert_eq!(got[1].len(), 10);
     }
 
     #[test]
