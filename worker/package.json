@@ -1,0 +1,20 @@
+{
+  "name": "sparkdown-updater",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "esbuild src/index.ts --bundle --format=esm --outfile=dist/worker.js --platform=neutral --legal-comments=none",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "query": "node --experimental-strip-types query-counts.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "wrangler": "^3.87.0"
+  }
+}

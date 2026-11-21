@@ -1,0 +1,13 @@
+name = "sparkdown-updater"
+main = "src/index.ts"
+compatibility_date = "2026-11-20"
+
+# Binding and dataset for the daily update-check counts. The dataset is
+# created on the first write; do not put an account id in this file.
+analytics_engine_datasets = [
+  { binding = "UPDATE_CHECKS", dataset = "UPDATE_CHECKS" }
+]
+
+# Add the route sparkdown.dev/update/* after the first deploy (dashboard
+# or `wrangler deploy` with that route). The worker itself handles
+# /update/{target}/{arch}/{current_version}.

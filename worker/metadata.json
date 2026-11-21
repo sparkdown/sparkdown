@@ -1,0 +1,11 @@
+{
+  "main_module": "worker.js",
+  "compatibility_date": "2026-11-20",
+  "bindings": [
+    {
+      "type": "analytics_engine",
+      "name": "UPDATE_CHECKS",
+      "dataset": "UPDATE_CHECKS"
+    }
+  ]
+}
