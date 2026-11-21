@@ -16,6 +16,7 @@ requests.
 ### Changed
 
 - Update checks now go through sparkdown.dev, with a fallback to GitHub, and can be turned off in Settings.
+- **Git**: Pull and Push now ask before running commands set in a repository's own Git settings, instead of refusing.
 
 ## [0.4.4] — 2026-11-20
 

@@ -1,7 +1,8 @@
-import { api, type GitActionError, type GitActionResult, type GitBranchStatus, type GitChange } from './api';
+import { api, type GitActionError, type GitActionResult, type GitBranchStatus, type GitChange, type RepoCommandKey } from './api';
 import { escapeAttr, escapeHtml } from './utils';
 import type { GitAction, GitReporter } from './git-output';
 import { fetchedAgo } from './git-fetch';
+import { showRepoCommandsDialog } from './git-repo-commands';
 
 /**
  * Commit / Pull / Push for the Changes view (#122, header icons since 0.4.1).
@@ -50,6 +51,12 @@ export interface GitActionsOptions {
   onPushRejected?(): Promise<unknown> | void;
   /** #175: when the last background fetch succeeded (Pull tooltip). */
   lastFetched?(): number | null;
+  /** Remembered "Run anyway" fingerprint for a repo, or undefined. */
+  rememberedRunAnyway?(root: string): string | undefined;
+  /** Persist a "Run anyway" fingerprint until the repo's settings change. */
+  rememberRunAnyway?(root: string, fingerprint: string): void;
+  /** Ask before running the repo's own Git commands (tests inject one). */
+  confirmRepoCommands?(keys: RepoCommandKey[]): Promise<boolean>;
 }
 
 type Busy = GitAction | null;
@@ -164,12 +171,12 @@ export class GitActions {
 
   async pull(): Promise<void> {
     const root = this.opts.repoRoot();
-    if (root && this.canSync()) await this.run('pull', () => api.gitPull(root));
+    if (root && this.canSync()) await this.run('pull', (confirmed) => api.gitPull(root, confirmed));
   }
 
   async push(): Promise<void> {
     const root = this.opts.repoRoot();
-    if (root && this.canSync()) await this.run('push', () => api.gitPush(root));
+    if (root && this.canSync()) await this.run('push', (confirmed) => api.gitPush(root, confirmed));
   }
 
   private canSync(): boolean {
@@ -179,7 +186,7 @@ export class GitActions {
 
   private async run(
     what: Exclude<Busy, null>,
-    call: () => Promise<GitActionResult>,
+    call: (confirmed?: boolean) => Promise<GitActionResult>,
     onOk?: () => void,
   ): Promise<void> {
     if (this.busy) return;
@@ -187,11 +194,33 @@ export class GitActions {
     this.opts.report.start(what);
     this.sync();
     let rejected = false;
+    let ran = false;
     try {
-      const r = await call();
+      let r = await call(false);
+      if (r.needs_confirmation && (what === 'pull' || what === 'push')) {
+        const root = this.opts.repoRoot();
+        const fp = r.needs_confirmation.fingerprint;
+        const remembered = root ? this.opts.rememberedRunAnyway?.(root) : undefined;
+        if (remembered !== fp) {
+          this.opts.report.cancel?.();
+          this.busy = null;
+          this.sync();
+          const ok = await (this.opts.confirmRepoCommands ?? showRepoCommandsDialog)(
+            r.needs_confirmation.keys,
+          );
+          if (!ok) return;
+          if (root) this.opts.rememberRunAnyway?.(root, fp);
+          this.busy = what;
+          this.opts.report.start(what);
+          this.sync();
+        }
+        r = await call(true);
+      }
+      ran = true;
       onOk?.();
       this.opts.report.done(what, r);
     } catch (e) {
+      ran = true;
       const err: GitActionError = isGitActionError(e)
         ? e
         : { kind: 'other', message: 'Git reported an error.', detail: String(e) };
@@ -200,10 +229,12 @@ export class GitActions {
     } finally {
       this.busy = null;
       this.render();
-      try {
-        await this.opts.refresh();
-      } catch {
-        // The refresh shows its own error state.
+      if (ran) {
+        try {
+          await this.opts.refresh();
+        } catch {
+          // The refresh shows its own error state.
+        }
       }
     }
     if (rejected) {

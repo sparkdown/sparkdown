@@ -236,9 +236,11 @@ export const api = {
   gitCommit: (root: string, message: string, paths: string[] | null) =>
     invoke<GitActionResult>("git_commit", { root, message, paths }),
   /** #122: pull the current branch from its upstream (user's own git). */
-  gitPull: (root: string) => invoke<GitActionResult>("git_pull", { root }),
+  gitPull: (root: string, confirmed = false) =>
+    invoke<GitActionResult>("git_pull", { root, confirmed }),
   /** #122: push the current branch to its upstream; never forced. */
-  gitPush: (root: string) => invoke<GitActionResult>("git_push", { root }),
+  gitPush: (root: string, confirmed = false) =>
+    invoke<GitActionResult>("git_push", { root, confirmed }),
   /** #175: quiet background fetch of the upstream remote (local repos
    *  only; never prompts). "busy": this window already has one running.
    *  "skipped": the repo config has keys that can execute commands. */
@@ -428,6 +430,16 @@ export interface GitActionError {
   files?: string[];
 }
 
+export interface RepoCommandKey {
+  key: string;
+  value: string;
+}
+
+export interface RepoCommandConfirm {
+  keys: RepoCommandKey[];
+  fingerprint: string;
+}
+
 export interface GitActionResult {
   /** git's first output line. */
   summary: string;
@@ -437,6 +449,8 @@ export interface GitActionResult {
   commits: number | null;
   /** Pull / push: the upstream, such as `origin/main`. */
   target: string | null;
+  /** When set, Pull or Push has not run: the frontend should ask first. */
+  needs_confirmation?: RepoCommandConfirm;
 }
 
 /** One row of the Discard confirmation (git_write.rs `DiscardItem`). */

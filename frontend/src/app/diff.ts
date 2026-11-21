@@ -192,6 +192,12 @@ export class DiffController {
           report: this.deps.gitReporter,
           onPushRejected: () => this.fetcher?.afterRejectedPush(),
           lastFetched: () => this.fetcher?.lastFetchedAt() ?? null,
+          rememberedRunAnyway: (root) => this.ctx.config.git_run_anyway?.[root],
+          rememberRunAnyway: (root, fingerprint) => {
+            if (!this.ctx.config.git_run_anyway) this.ctx.config.git_run_anyway = {};
+            this.ctx.config.git_run_anyway[root] = fingerprint;
+            this.ctx.saveConfigSoon();
+          },
         },
       );
     }

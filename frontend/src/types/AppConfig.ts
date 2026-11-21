@@ -125,4 +125,11 @@ mcp_external_agents: boolean,
  * push) so the Pull behind count is current (#175). Local repos only;
  * never prompts for credentials. On by default (Settings → Git).
  */
-git_background_fetch: boolean, };
+git_background_fetch: boolean, 
+/**
+ * Pull/Push "Run anyway" choices, keyed by repository path. The value
+ * is a fingerprint of the command-running key=value pairs that were
+ * shown. Asked again when the fingerprint no longer matches. Cancel is
+ * never stored.
+ */
+git_run_anyway: { [key in string]: string }, };

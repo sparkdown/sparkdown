@@ -21,6 +21,7 @@
 //! "sign in failed", "conflicts" or "push rejected" instead of echoing stderr.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -75,9 +76,9 @@ pub enum GitErrorKind {
     Unsupported,
     /// The action took longer than its timeout and was stopped.
     Timeout,
-    /// Pull or Push stopped because the repository's own config (local or
-    /// worktree scope) sets keys that run commands or pick the transport,
-    /// the same keys that turn the background fetch off.
+    /// Kept so older frontends still recognise the tag. Pull and Push now
+    /// return [`GitActionResult::needs_confirmation`] instead of this error.
+    #[allow(dead_code)]
     RepoConfig,
     /// Anything else; `detail` has git's output.
     Other,
@@ -116,6 +117,24 @@ pub struct GitActionResult {
     pub output: String,
     pub commits: Option<u32>,
     pub target: Option<String>,
+    /// When set, Pull or Push has not run: the repository's own settings
+    /// would run these commands, and the frontend should ask first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_confirmation: Option<RepoCommandConfirm>,
+}
+
+/// One repository-local Git setting that would run a command during Pull or Push.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RepoCommandKey {
+    pub key: String,
+    pub value: String,
+}
+
+/// The list the frontend shows, plus a fingerprint used to remember "Run anyway".
+#[derive(Serialize, Clone, Debug)]
+pub struct RepoCommandConfirm {
+    pub keys: Vec<RepoCommandKey>,
+    pub fingerprint: String,
 }
 
 type ActionResult = Result<GitActionResult, GitActionError>;
@@ -129,8 +148,8 @@ pub(crate) type ExtraEnv<'a> = &'a [(&'a str, &'a str)];
 /// [`query`] / [`run_stdout_raw`] (status, ls-files, rev-parse, and the
 /// like). Commit, Pull, Push and Discard keep [`user_git`] as-is, so hooks,
 /// `core.sshCommand` and credential helpers stay those of the user. Pull
-/// and Push still refuse to run when the repository itself sets command
-/// keys (see [`repo_config_has_exec_keys`]).
+/// and Push ask first when the repository itself sets command
+/// keys (see [`repo_config_exec_entries`]).
 const READ_GIT_OVERRIDES: &[&str] = &[
     "-c",
     "core.fsmonitor=false",
@@ -655,6 +674,7 @@ fn summary(out: String) -> GitActionResult {
         output: out,
         commits: None,
         target: None,
+        needs_confirmation: None,
     }
 }
 
@@ -813,9 +833,16 @@ fn conflict_error(root: &Path, extra: ExtraEnv, output: &str) -> GitActionError 
 /// semantics, #174); otherwise the user's merge / rebase / ff-only setting
 /// is used as in their terminal. Conflicts leave the repo mid-merge or
 /// mid-rebase for the user to finish.
+#[cfg(test)]
 pub(crate) fn pull_impl(root: &str, extra: ExtraEnv) -> ActionResult {
+    pull_with(root, extra, false)
+}
+
+pub(crate) fn pull_with(root: &str, extra: ExtraEnv, confirmed: bool) -> ActionResult {
     let root = check_local(root, SYNC_UNSUPPORTED)?;
-    check_repo_config(&root, extra, Action::Pull)?;
+    if let Some(ask) = confirm_gate(&root, extra, confirmed)? {
+        return Ok(ask);
+    }
     let up = upstream(&root, extra)?;
     let cfg = PullConfig::read(&root, extra, &up.branch);
     let before = query(&root, extra, &["rev-parse", "--verify", "-q", "HEAD"]);
@@ -853,9 +880,16 @@ pub(crate) fn pull_impl(root: &str, extra: ExtraEnv) -> ActionResult {
 
 /// Push the current branch to its upstream. Never forced: an explicit
 /// `HEAD:<merge ref>` refspec without `+`, so a non-fast-forward is rejected.
+#[cfg(test)]
 pub(crate) fn push_impl(root: &str, extra: ExtraEnv) -> ActionResult {
+    push_with(root, extra, false)
+}
+
+pub(crate) fn push_with(root: &str, extra: ExtraEnv, confirmed: bool) -> ActionResult {
     let root = check_local(root, SYNC_UNSUPPORTED)?;
-    check_repo_config(&root, extra, Action::Push)?;
+    if let Some(ask) = confirm_gate(&root, extra, confirmed)? {
+        return Ok(ask);
+    }
     let up = upstream(&root, extra)?;
     let refspec = format!("HEAD:{}", up.merge);
     debug_assert!(!refspec.starts_with('+'));
@@ -891,124 +925,127 @@ pub enum FetchOutcome {
 }
 
 fn repo_config_has_exec_keys(root: &Path, extra: ExtraEnv) -> bool {
+    repo_config_exec_entries(root, extra)
+        .map(|keys| !keys.is_empty())
+        .unwrap_or(true)
+}
+
+/// Repository-local (local, worktree, or included) settings that would run
+/// a command, or pick a command or file transport, during Pull or Push.
+fn repo_config_exec_entries(root: &Path, extra: ExtraEnv) -> Result<Vec<RepoCommandKey>, ()> {
     let mut cmd = crate::proc::command(crate::git::git_bin());
     cmd.current_dir(root)
         .env("PATH", crate::context::login_shell_path())
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .arg("config")
-        .arg("--show-scope")
-        .arg("--includes")
-        .arg("--name-only")
-        .arg("--list");
+        .args(READ_GIT_OVERRIDES)
+        .args(["config", "--show-scope", "--includes", "--null", "--list"]);
     for (k, v) in extra {
         cmd.env(k, v);
     }
-    let Ok(output) = cmd.output() else {
-        return true;
-    };
+    let output = cmd.output().map_err(|_| ())?;
     if !output.status.success() {
-        return true;
+        return Err(());
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        let Some((scope, key)) = line.split_once('\t') else {
+    let mut keys = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut parts = output.stdout.split(|b| *b == 0);
+    while let Some(scope_b) = parts.next() {
+        if scope_b.is_empty() {
             continue;
+        }
+        let Some(kv_b) = parts.next() else { break };
+        let scope = String::from_utf8_lossy(scope_b);
+        if !matches!(scope.as_ref(), "local" | "worktree") {
+            continue;
+        }
+        let kv = String::from_utf8_lossy(kv_b);
+        let (key, value) = match kv.split_once('\n') {
+            Some((k, v)) => (k, v),
+            None => (kv.as_ref(), ""),
         };
-        if !matches!(scope, "local" | "worktree") {
+        if !repo_config_key_lists(key, value) {
             continue;
         }
-        if crate::git::repo_config_key_runs_commands(key) {
-            return true;
+        let entry = RepoCommandKey {
+            key: key.to_string(),
+            value: value.to_string(),
+        };
+        if seen.insert((entry.key.clone(), entry.value.clone())) {
+            keys.push(entry);
         }
     }
-
-    // `--null` frames each entry as `key\nvalue\0`, so a value that starts
-    // with a line break cannot hide its scheme on a line of its own.
-    fn check_urls(root: &str, scope: &str, extra: ExtraEnv) -> Result<bool, ()> {
-        let mut url_cmd = crate::proc::command(crate::git::git_bin());
-        url_cmd
-            .current_dir(root)
-            .env("PATH", crate::context::login_shell_path())
-            .env("LC_ALL", "C")
-            .env("LANG", "C")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .args([
-                "config",
-                scope,
-                "--includes",
-                "--null",
-                "--get-regexp",
-                // A branch's `remote` may hold a URL instead of a name, and
-                // `pushurl` is the URL Push uses.
-                r"^(remote\..*\.(url|pushurl)|branch\..*\.remote)$",
-            ]);
-        for (k, v) in extra {
-            url_cmd.env(k, v);
-        }
-        let output = url_cmd.output().map_err(|_| ())?;
-        let code = output.status.code();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !output.status.success() {
-            if code == Some(1) {
-                return Ok(false);
-            }
-            if code == Some(128)
-                && (stderr.contains("cannot be used with multiple working trees")
-                    || stderr.contains("not a git repository")
-                    || stderr.contains("can only be used inside a git repository"))
-            {
-                return Ok(false);
-            }
-            return Err(());
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for record in stdout.split('\0') {
-            let value = record.split_once('\n').map_or("", |(_, v)| v);
-            if fetch_url_needs_skip(value) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    if check_urls(root.as_os_str().to_str().unwrap_or(""), "--local", extra).unwrap_or(true) {
-        return true;
-    }
-    if check_urls(root.as_os_str().to_str().unwrap_or(""), "--worktree", extra).unwrap_or(true) {
-        return true;
-    }
-
-    false
+    keys.sort();
+    Ok(keys)
 }
 
-/// Stop Pull or Push before any network call when the repository's own config
-/// has keys that run commands or pick the transport (see
-/// [`repo_config_has_exec_keys`]). Settings in the user's global config are
-/// not affected.
-fn check_repo_config(root: &Path, extra: ExtraEnv, action: Action) -> Result<(), GitActionError> {
-    if !repo_config_has_exec_keys(root, extra) {
-        return Ok(());
+fn repo_config_key_lists(key: &str, value: &str) -> bool {
+    if crate::git::repo_config_key_runs_commands(key) {
+        return true;
     }
-    let verb = if action == Action::Push {
-        "Push"
-    } else {
-        "Pull"
-    };
-    Err(GitActionError::new(
-        GitErrorKind::RepoConfig,
-        format!(
-            "{verb} stopped: this repository's own .git/config has settings that run \
-             commands or choose how git connects (for example core.fsmonitor, \
-             core.sshCommand, credential.helper, url.*.insteadOf, include.path, or a \
-             remote URL using ext::, fd:: or file://). Check .git/config in a terminal, \
-             then try again."
-        ),
-        "repository config (local or worktree scope)",
-    ))
+    let k = key.to_ascii_lowercase();
+    let url_key = (k.starts_with("remote.") && (k.ends_with(".url") || k.ends_with(".pushurl")))
+        || (k.starts_with("branch.") && k.ends_with(".remote"));
+    url_key && fetch_url_needs_skip(value)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::digest(bytes);
+    let mut s = String::with_capacity(d.len() * 2);
+    for b in d {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Hash of the sorted `key=value` list plus the repository path.
+fn repo_command_fingerprint(root: &Path, keys: &[RepoCommandKey]) -> String {
+    let path = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut data = Vec::new();
+    data.extend_from_slice(path.to_string_lossy().as_bytes());
+    data.push(b'\n');
+    let mut lines: Vec<String> = keys
+        .iter()
+        .map(|k| format!("{}={}", k.key, k.value))
+        .collect();
+    lines.sort();
+    for line in &lines {
+        data.extend_from_slice(line.as_bytes());
+        data.push(b'\n');
+    }
+    sha256_hex(&data)
+}
+
+/// `None` means go ahead and run git. `Some` is the list the frontend shows.
+fn confirm_gate(
+    root: &Path,
+    extra: ExtraEnv,
+    confirmed: bool,
+) -> Result<Option<GitActionResult>, GitActionError> {
+    let keys = repo_config_exec_entries(root, extra).map_err(|_| {
+        GitActionError::new(
+            GitErrorKind::Other,
+            "Couldn't read this repository's Git settings.",
+            "",
+        )
+    })?;
+    if keys.is_empty() || confirmed {
+        return Ok(None);
+    }
+    Ok(Some(GitActionResult {
+        summary: String::new(),
+        output: String::new(),
+        commits: None,
+        target: None,
+        needs_confirmation: Some(RepoCommandConfirm {
+            fingerprint: repo_command_fingerprint(root, &keys),
+            keys,
+        }),
+    }))
 }
 
 /// Should a configured fetch URL (or a branch's `remote` value, which git
@@ -1915,13 +1952,27 @@ pub async fn git_commit(
 }
 
 #[tauri::command]
-pub async fn git_pull(webview_window: tauri::WebviewWindow, root: String) -> ActionResult {
-    spawn(webview_window, move || pull_impl(&root, &[])).await
+pub async fn git_pull(
+    webview_window: tauri::WebviewWindow,
+    root: String,
+    confirmed: Option<bool>,
+) -> ActionResult {
+    spawn(webview_window, move || {
+        pull_with(&root, &[], confirmed.unwrap_or(false))
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn git_push(webview_window: tauri::WebviewWindow, root: String) -> ActionResult {
-    spawn(webview_window, move || push_impl(&root, &[])).await
+pub async fn git_push(
+    webview_window: tauri::WebviewWindow,
+    root: String,
+    confirmed: Option<bool>,
+) -> ActionResult {
+    spawn(webview_window, move || {
+        push_with(&root, &[], confirmed.unwrap_or(false))
+    })
+    .await
 }
 
 async fn spawn(
@@ -2654,34 +2705,54 @@ mod tests {
         sb.git(&sb.work, &["config", "--local", key, value]);
     }
 
+    fn asked(r: &GitActionResult) -> &RepoCommandConfirm {
+        r.needs_confirmation
+            .as_ref()
+            .expect("expected Pull/Push to ask before running")
+    }
+
+    fn key_names(r: &GitActionResult) -> Vec<String> {
+        asked(r)
+            .keys
+            .iter()
+            .map(|k| k.key.to_ascii_lowercase())
+            .collect()
+    }
+
     #[test]
-    fn pull_and_push_stop_on_a_repo_ssh_command() {
+    fn pull_and_push_ask_on_a_repo_ssh_command() {
         let sb = sandbox();
         let env = sb.env();
         set_local(&sb, "core.sshCommand", "ssh -o BatchMode=yes");
-        let e = pull_impl(&root(&sb), &env).unwrap_err();
-        assert_eq!(e.kind, GitErrorKind::RepoConfig, "{e:?}");
-        assert!(e.message.starts_with("Pull stopped"), "{e:?}");
-        let e = push_impl(&root(&sb), &env).unwrap_err();
-        assert_eq!(e.kind, GitErrorKind::RepoConfig, "{e:?}");
-        assert!(e.message.starts_with("Push stopped"), "{e:?}");
+        let r = pull_impl(&root(&sb), &env).unwrap();
+        let names = key_names(&r);
+        assert!(names.iter().any(|k| k == "core.sshcommand"), "{names:?}");
+        let r = push_impl(&root(&sb), &env).unwrap();
+        let names = key_names(&r);
+        assert!(names.iter().any(|k| k == "core.sshcommand"), "{names:?}");
     }
 
     #[test]
-    fn pull_and_push_stop_on_repo_fsmonitor() {
+    fn pull_and_push_ask_on_repo_fsmonitor() {
         let sb = sandbox();
         let env = sb.env();
         set_local(&sb, "core.fsmonitor", "true");
-        let e = pull_impl(&root(&sb), &env).unwrap_err();
-        assert_eq!(e.kind, GitErrorKind::RepoConfig, "{e:?}");
-        assert!(e.message.starts_with("Pull stopped"), "{e:?}");
-        let e = push_impl(&root(&sb), &env).unwrap_err();
-        assert_eq!(e.kind, GitErrorKind::RepoConfig, "{e:?}");
-        assert!(e.message.starts_with("Push stopped"), "{e:?}");
+        let r = pull_impl(&root(&sb), &env).unwrap();
+        assert!(
+            key_names(&r).iter().any(|k| k == "core.fsmonitor"),
+            "{:?}",
+            key_names(&r)
+        );
+        let r = push_impl(&root(&sb), &env).unwrap();
+        assert!(
+            key_names(&r).iter().any(|k| k == "core.fsmonitor"),
+            "{:?}",
+            key_names(&r)
+        );
     }
 
     #[test]
-    fn pull_and_push_stop_on_repo_filter_or_diff_command() {
+    fn pull_and_push_ask_on_repo_filter_or_diff_command() {
         for (key, value) in [
             ("filter.demo.clean", "cat"),
             ("filter.demo.smudge", "cat"),
@@ -2693,21 +2764,51 @@ mod tests {
             let sb = sandbox();
             let env = sb.env();
             set_local(&sb, key, value);
-            assert_eq!(
-                pull_impl(&root(&sb), &env).unwrap_err().kind,
-                GitErrorKind::RepoConfig,
-                "{key}"
+            let names = key_names(&pull_impl(&root(&sb), &env).unwrap());
+            assert!(
+                names.iter().any(|k| k == &key.to_ascii_lowercase()),
+                "{key}: {names:?}"
             );
-            assert_eq!(
-                push_impl(&root(&sb), &env).unwrap_err().kind,
-                GitErrorKind::RepoConfig,
-                "{key}"
+            let names = key_names(&push_impl(&root(&sb), &env).unwrap());
+            assert!(
+                names.iter().any(|k| k == &key.to_ascii_lowercase()),
+                "{key}: {names:?}"
             );
         }
     }
 
     #[test]
-    fn pull_and_push_stop_on_repo_helper_or_url_rewrite() {
+    fn pull_and_push_list_lfs_filter_keys() {
+        let sb = sandbox();
+        let env = sb.env();
+        set_local(&sb, "filter.lfs.clean", "git-lfs clean -- %f");
+        set_local(&sb, "filter.lfs.smudge", "git-lfs smudge -- %f");
+        set_local(&sb, "filter.lfs.process", "git-lfs filter-process");
+        let r = pull_impl(&root(&sb), &env).unwrap();
+        let names = key_names(&r);
+        for key in [
+            "filter.lfs.clean",
+            "filter.lfs.smudge",
+            "filter.lfs.process",
+        ] {
+            assert!(
+                names.iter().any(|k| k == key),
+                "{key} missing from {names:?}"
+            );
+            let val = asked(&r)
+                .keys
+                .iter()
+                .find(|k| k.key.eq_ignore_ascii_case(key))
+                .map(|k| k.value.as_str())
+                .unwrap();
+            assert!(val.contains("git-lfs"), "{key}={val}");
+        }
+        let names = key_names(&push_impl(&root(&sb), &env).unwrap());
+        assert!(names.iter().any(|k| k == "filter.lfs.clean"), "{names:?}");
+    }
+
+    #[test]
+    fn pull_and_push_ask_on_repo_helper_or_url_rewrite() {
         for (key, value) in [
             ("credential.helper", "store"),
             (
@@ -2718,52 +2819,172 @@ mod tests {
             let sb = sandbox();
             let env = sb.env();
             set_local(&sb, key, value);
-            assert_eq!(
-                pull_impl(&root(&sb), &env).unwrap_err().kind,
-                GitErrorKind::RepoConfig,
-                "{key}"
+            let names = key_names(&pull_impl(&root(&sb), &env).unwrap());
+            assert!(
+                names.iter().any(|k| k == &key.to_ascii_lowercase()),
+                "{key}: {names:?}"
             );
-            assert_eq!(
-                push_impl(&root(&sb), &env).unwrap_err().kind,
-                GitErrorKind::RepoConfig,
-                "{key}"
+            let names = key_names(&push_impl(&root(&sb), &env).unwrap());
+            assert!(
+                names.iter().any(|k| k == &key.to_ascii_lowercase()),
+                "{key}: {names:?}"
             );
         }
     }
 
     #[test]
-    fn push_stops_on_a_command_transport_push_url() {
+    fn push_asks_on_a_command_transport_push_url() {
         let sb = sandbox();
         let env = sb.env();
         set_local(&sb, "remote.origin.pushurl", "ext::git %s /dev/null");
-        assert_eq!(
-            push_impl(&root(&sb), &env).unwrap_err().kind,
-            GitErrorKind::RepoConfig
+        let r = push_impl(&root(&sb), &env).unwrap();
+        let keys = &asked(&r).keys;
+        assert!(
+            keys.iter()
+                .any(|k| k.key.eq_ignore_ascii_case("remote.origin.pushurl")
+                    && k.value.starts_with("ext::")),
+            "{keys:?}"
         );
     }
 
     #[test]
-    fn pull_stops_on_a_branch_remote_given_as_a_file_url() {
+    fn pull_asks_on_a_branch_remote_given_as_a_file_url() {
         let sb = sandbox();
         let env = sb.env();
         let url = format!("file://{}", sb.bare.display());
         set_local(&sb, "branch.main.remote", &url);
-        assert_eq!(
-            pull_impl(&root(&sb), &env).unwrap_err().kind,
-            GitErrorKind::RepoConfig
+        let r = pull_impl(&root(&sb), &env).unwrap();
+        let keys = &asked(&r).keys;
+        assert!(
+            keys.iter()
+                .any(|k| k.key.eq_ignore_ascii_case("branch.main.remote")
+                    && k.value.starts_with("file://")),
+            "{keys:?}"
         );
     }
 
     #[test]
     fn push_and_pull_still_run_with_plain_repo_config() {
-        // Ordinary local settings (hooks path, a user name) do not stop them.
+        // Ordinary local settings (hooks path, a user name) do not ask.
         let sb = sandbox();
         let env = sb.env();
         set_local(&sb, "core.hooksPath", ".githooks");
         set_local(&sb, "user.name", "Someone");
         sb.commit_in(&sb.work, "n.md", "n\n", "n");
-        assert!(push_impl(&root(&sb), &env).is_ok());
-        assert!(pull_impl(&root(&sb), &env).is_ok());
+        let r = push_impl(&root(&sb), &env).unwrap();
+        assert!(r.needs_confirmation.is_none(), "{r:?}");
+        let r = pull_impl(&root(&sb), &env).unwrap();
+        assert!(r.needs_confirmation.is_none(), "{r:?}");
+    }
+
+    #[test]
+    fn unconfirmed_pull_does_not_change_head() {
+        let sb = sandbox();
+        let env = sb.env();
+        set_local(&sb, "core.fsmonitor", "true");
+        let other = sb.other();
+        sb.commit_in(&other, "up.md", "up\n", "upstream");
+        sb.git(&other, &["push", "-q"]);
+        let before = sb.git(&sb.work, &["rev-parse", "HEAD"]);
+        let r = pull_impl(&root(&sb), &env).unwrap();
+        assert!(r.needs_confirmation.is_some());
+        let after = sb.git(&sb.work, &["rev-parse", "HEAD"]);
+        assert_eq!(before, after, "unconfirmed pull must not run git pull");
+        let r = pull_with(&root(&sb), &env, true).unwrap();
+        assert!(r.needs_confirmation.is_none(), "{r:?}");
+        let after = sb.git(&sb.work, &["rev-parse", "HEAD"]);
+        assert_ne!(
+            before, after,
+            "confirmed pull should bring in the upstream commit"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confirmed_run_executes_a_repo_command_and_unconfirmed_does_not() {
+        let sb = sandbox();
+        let env = sb.env();
+        let marker = sb.work.join("CMD_RAN");
+        let touch = format!("touch {}", marker.display());
+        set_local(&sb, "core.fsmonitor", &touch);
+        let other = sb.other();
+        sb.commit_in(&other, "up.md", "up\n", "upstream");
+        sb.git(&other, &["push", "-q"]);
+        let r = pull_impl(&root(&sb), &env).unwrap();
+        assert!(
+            asked(&r)
+                .keys
+                .iter()
+                .any(|k| k.key.eq_ignore_ascii_case("core.fsmonitor") && k.value == touch),
+            "{:?}",
+            asked(&r).keys
+        );
+        assert!(
+            !marker.exists(),
+            "unconfirmed pull must not run the repository's command"
+        );
+        let r = pull_with(&root(&sb), &env, true).unwrap();
+        assert!(r.needs_confirmation.is_none(), "{r:?}");
+        assert!(
+            marker.exists(),
+            "confirmed pull should run the repository's command"
+        );
+
+        let _ = fs::remove_file(&marker);
+        let helper = sb.work.join("receive-and-mark");
+        fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\ntouch {}\nexec git-receive-pack \"$@\"\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = fs::metadata(&helper).unwrap().permissions();
+        perm.set_mode(0o755);
+        fs::set_permissions(&helper, perm).unwrap();
+        set_local(&sb, "remote.origin.receivepack", &helper.to_string_lossy());
+        sb.commit_in(&sb.work, "p.md", "p\n", "local");
+        let _ = fs::remove_file(&marker);
+        let r = push_impl(&root(&sb), &env).unwrap();
+        assert!(r.needs_confirmation.is_some());
+        assert!(
+            !marker.exists(),
+            "unconfirmed push must not run the repository's command"
+        );
+        let r = push_with(&root(&sb), &env, true).unwrap();
+        assert!(r.needs_confirmation.is_none(), "{r:?}");
+        assert!(
+            marker.exists(),
+            "confirmed push should run the repository's command"
+        );
+    }
+
+    #[test]
+    fn fingerprint_changes_when_the_config_or_path_changes() {
+        let sb = sandbox();
+        let env = sb.env();
+        set_local(&sb, "core.fsmonitor", "true");
+        let a = asked(&pull_impl(&root(&sb), &env).unwrap())
+            .fingerprint
+            .clone();
+        let again = asked(&pull_impl(&root(&sb), &env).unwrap())
+            .fingerprint
+            .clone();
+        assert_eq!(a, again);
+        set_local(&sb, "core.fsmonitor", "false");
+        let b = asked(&pull_impl(&root(&sb), &env).unwrap())
+            .fingerprint
+            .clone();
+        assert_ne!(a, b, "a changed setting should change the fingerprint");
+        let sb2 = sandbox();
+        let env2 = sb2.env();
+        set_local(&sb2, "core.fsmonitor", "true");
+        let c = asked(&pull_impl(&root(&sb2), &env2).unwrap())
+            .fingerprint
+            .clone();
+        assert_ne!(a, c, "the same settings in another repo should differ");
     }
 
     // --- Discard (#172) ---

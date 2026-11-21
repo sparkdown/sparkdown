@@ -100,6 +100,12 @@ export class GitOutputLog {
     this.render();
   }
 
+  /** Remove an in-progress entry (Pull/Push paused to ask first). */
+  drop(e: GitLogEntry): void {
+    this.entries = this.entries.filter((x) => x.id !== e.id);
+    this.render();
+  }
+
   /** Scroll the newest entry into view (on opening the tab). */
   scrollToEnd(): void {
     if (this.el) this.el.scrollTop = this.el.scrollHeight;
@@ -198,6 +204,8 @@ export interface GitReporter {
   start(what: GitAction): void;
   done(what: GitAction, r: GitActionResult): void;
   fail(what: GitAction, e: GitActionError): void;
+  /** Drop an in-progress start (Pull/Push first asks for confirmation). */
+  cancel?(): void;
 }
 
 /** Ties the status-bar item and the Git tab log together. */
@@ -228,6 +236,14 @@ export class GitFeedback implements GitReporter {
   fail(what: GitAction, e: GitActionError): void {
     this.finish(what, 'error', e.message, e.detail);
     this.status.error(e.message);
+  }
+
+  cancel(): void {
+    if (this.current?.state === 'running') {
+      this.log.drop(this.current);
+      this.current = null;
+    }
+    this.status.clear();
   }
 
   private finish(what: GitAction, state: 'ok' | 'error', msg: string, output: string): void {

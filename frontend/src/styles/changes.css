@@ -752,3 +752,48 @@
   border-color: var(--danger, #d64545);
   color: #fff;
 }
+
+.repo-cmd-dialog {
+  max-width: 560px;
+}
+.repo-cmd-title {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+.repo-cmd-body {
+  margin: 0 0 12px;
+}
+.repo-cmd-list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.repo-cmd-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.repo-cmd-key,
+.repo-cmd-value {
+  overflow-wrap: anywhere;
+}
+.repo-cmd-value {
+  color: var(--text-subtle);
+}
+.repo-cmd-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.repo-cmd-buttons button {
+  padding: 5px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}

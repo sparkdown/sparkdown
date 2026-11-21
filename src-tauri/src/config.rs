@@ -158,6 +158,13 @@ pub struct AppConfig {
     /// never prompts for credentials. On by default (Settings → Git).
     #[serde(default = "default_true")]
     pub git_background_fetch: bool,
+
+    /// Pull/Push "Run anyway" choices, keyed by repository path. The value
+    /// is a fingerprint of the command-running key=value pairs that were
+    /// shown. Asked again when the fingerprint no longer matches. Cancel is
+    /// never stored.
+    #[serde(default)]
+    pub git_run_anyway: std::collections::HashMap<String, String>,
 }
 
 /// One node of a persisted terminal split layout (see
@@ -309,6 +316,7 @@ impl Default for AppConfig {
             mcp_install_prompt_dismissed: vec![],
             mcp_external_agents: false,
             git_background_fetch: true,
+            git_run_anyway: std::collections::HashMap::new(),
         }
     }
 }

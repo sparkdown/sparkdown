@@ -243,9 +243,10 @@ pub(crate) fn local_exec_neutralisers(root: &Path) -> Result<Vec<(String, String
 }
 
 /// Whether a repository-local (or worktree, or included) config key names a
-/// command or a transport that SparkDown will not run for Pull, Push or the
-/// background fetch. Compared in lowercase. `core.hooksPath` is not included:
-/// Pull and Push still run the user's hooks, as they do in a terminal.
+/// command or a transport that the background fetch skips and that Pull and
+/// Push ask about before running. Compared in lowercase. `core.hooksPath` is
+/// not included: Pull and Push still run the user's hooks, as they do in a
+/// terminal.
 pub(crate) fn repo_config_key_runs_commands(key: &str) -> bool {
     let k = key.to_ascii_lowercase();
     if k.starts_with("remote.")
@@ -2013,7 +2014,7 @@ mod tests {
         ] {
             assert!(
                 !repo_config_key_runs_commands(key),
-                "{key} should not stop Pull or Push"
+                "{key} should not be treated as a command-running setting"
             );
         }
     }

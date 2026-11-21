@@ -244,7 +244,7 @@ describe('GitActions header + commit panel (0.4.1)', () => {
     expect(gitPull).not.toHaveBeenCalled();
     ga.setBranch(branch({ behind: 1 }));
     await ga.pull();
-    expect(gitPull).toHaveBeenCalledWith('/repo');
+    expect(gitPull).toHaveBeenCalledWith('/repo', false);
     expect(refresh).toHaveBeenCalled();
   });
 
@@ -314,5 +314,96 @@ describe('GitActions: diverged pull and background fetch (#174, #175)', () => {
     const { ga, $ } = make('/repo', { lastFetched: () => at });
     ga.setBranch(branch({ behind: 2 }));
     expect($('pull').title).toBe('Pull main from its upstream (2 behind), last fetched 3 min ago');
+  });
+});
+
+describe('GitActions: Pull/Push ask before running repo commands', () => {
+  const confirm = {
+    keys: [
+      { key: 'core.fsmonitor', value: 'touch /tmp/x' },
+      { key: 'filter.lfs.clean', value: 'git-lfs clean -- %f' },
+    ],
+    fingerprint: 'fp-1',
+  };
+  const done = { summary: 'Already up to date', output: 'Already up to date', commits: 0, target: 'origin/main' };
+
+  beforeEach(() => {
+    gitPull.mockReset();
+    gitPush.mockReset();
+  });
+
+  it('shows the dialog, defaulting to Cancel, and Run anyway re-invokes with confirmation', async () => {
+    const confirmRepoCommands = vi.fn(async () => true);
+    gitPull.mockResolvedValueOnce({ summary: '', output: '', commits: null, target: null, needs_confirmation: confirm }).mockResolvedValueOnce(done);
+    const remembered = vi.fn(() => undefined);
+    const remember = vi.fn();
+    const { ga, refresh, $ } = make('/repo', { confirmRepoCommands, rememberedRunAnyway: remembered, rememberRunAnyway: remember });
+    ga.setBranch(branch());
+    await ga.pull();
+    expect(confirmRepoCommands).toHaveBeenCalledTimes(1);
+    expect(confirmRepoCommands).toHaveBeenCalledWith(confirm.keys);
+    expect(remember).toHaveBeenCalledWith('/repo', 'fp-1');
+    expect(gitPull).toHaveBeenNthCalledWith(1, '/repo', false);
+    expect(gitPull).toHaveBeenNthCalledWith(2, '/repo', true);
+    expect(refresh).toHaveBeenCalled();
+    expect($('st').textContent).toBe('Already up to date from origin/main');
+  });
+
+  it('does not remember Cancel and does not run the confirmed call', async () => {
+    const confirmRepoCommands = vi.fn(async () => false);
+    const remember = vi.fn();
+    gitPull.mockResolvedValue({ summary: '', output: '', commits: null, target: null, needs_confirmation: confirm });
+    const { ga, refresh } = make('/repo', { confirmRepoCommands, rememberRunAnyway: remember });
+    ga.setBranch(branch());
+    await ga.pull();
+    expect(confirmRepoCommands).toHaveBeenCalledTimes(1);
+    expect(remember).not.toHaveBeenCalled();
+    expect(gitPull).toHaveBeenCalledTimes(1);
+    expect(gitPull).toHaveBeenCalledWith('/repo', false);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('remembers Run anyway and asks again when the fingerprint changes', async () => {
+    const confirmRepoCommands = vi.fn(async () => true);
+    const store: Record<string, string> = {};
+    gitPull
+      .mockResolvedValueOnce({ summary: '', output: '', commits: null, target: null, needs_confirmation: confirm })
+      .mockResolvedValueOnce(done)
+      .mockResolvedValueOnce({ summary: '', output: '', commits: null, target: null, needs_confirmation: confirm })
+      .mockResolvedValueOnce(done)
+      .mockResolvedValueOnce({
+        summary: '',
+        output: '',
+        commits: null,
+        target: null,
+        needs_confirmation: { keys: confirm.keys, fingerprint: 'fp-2' },
+      })
+      .mockResolvedValueOnce(done);
+    const { ga } = make('/repo', {
+      confirmRepoCommands,
+      rememberedRunAnyway: (root) => store[root],
+      rememberRunAnyway: (root, fp) => {
+        store[root] = fp;
+      },
+    });
+    ga.setBranch(branch());
+    await ga.pull();
+    await ga.pull();
+    expect(confirmRepoCommands).toHaveBeenCalledTimes(1);
+    expect(gitPull.mock.calls.map((c) => c[1])).toEqual([false, true, false, true]);
+    await ga.pull();
+    expect(confirmRepoCommands).toHaveBeenCalledTimes(2);
+    expect(store['/repo']).toBe('fp-2');
+  });
+
+  it('Push also asks and runs anyway when confirmed', async () => {
+    const confirmRepoCommands = vi.fn(async () => true);
+    gitPush.mockResolvedValueOnce({ summary: '', output: '', commits: null, target: null, needs_confirmation: confirm }).mockResolvedValueOnce(done);
+    const { ga } = make('/repo', { confirmRepoCommands });
+    ga.setBranch(branch({ ahead: 1 }));
+    await ga.push();
+    expect(confirmRepoCommands).toHaveBeenCalledTimes(1);
+    expect(gitPush).toHaveBeenNthCalledWith(1, '/repo', false);
+    expect(gitPush).toHaveBeenNthCalledWith(2, '/repo', true);
   });
 });
