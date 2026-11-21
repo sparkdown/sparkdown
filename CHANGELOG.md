@@ -13,6 +13,10 @@ requests.
 - **GitHub issue templates:** Feedback / idea and Bug report forms replace the old markdown templates.
 - **Send feedback** link on the sparkdown.dev website footer.
 
+### Changed
+
+- Update checks now go through sparkdown.dev, with a fallback to GitHub, and can be turned off in Settings.
+
 ## [0.4.4] — 2026-11-20
 
 ### Improved

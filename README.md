@@ -6,7 +6,7 @@ A small markdown editor for you and your coding agents.
 
 Open the folder an agent works in, run the agent in the built-in terminal, and review what it changes: files update live, and the Changes view is a review queue with a diff that hides the noise. Built with [Tauri 2](https://tauri.app/) (Rust backend, the OS webview, no Electron). The macOS DMG is about 3.7 MB, for Apple Silicon.
 
-SparkDown is local-first and works with any agent CLI. It never hosts your files and never calls a vendor API: it watches the filesystem and runs `git`. No account, no telemetry: the only request it makes on its own is an update check on GitHub, at most once a day, with no identifier (see [Updates](#updates) to turn it off).
+SparkDown is local-first and works with any agent CLI. It never hosts your files and never calls a vendor API: it watches the filesystem and runs `git`. No accounts, no analytics, and your files are never sent to us. The only thing SparkDown counts is its update check, anonymously, and you can turn it off in Settings.
 
 ## Features
 
@@ -124,13 +124,15 @@ An AUR `sparkdown-bin` PKGBUILD is in `packaging/aur/sparkdown-bin/` (not submit
 
 ## Updates
 
-- **macOS app and Linux AppImage** update themselves. Shortly after launch (at most once a day) SparkDown checks GitHub Releases. If there is a new version, the status bar shows **Install & Restart** or **Later**. Install downloads the update, verifies its signature, asks about unsaved changes (Cancel keeps the app running), and relaunches.
+- **macOS app and Linux AppImage** update themselves. Shortly after launch (at most once a day) SparkDown checks sparkdown.dev for a newer version, and falls back to GitHub Releases if that is unavailable. If there is a new version, the status bar shows **Install & Restart** or **Later**. Install downloads the update, verifies its signature, asks about unsaved changes (Cancel keeps the app running), and relaunches.
 - **`.deb`, AUR and other package installs** only show that an update exists. Update with your package manager, or install the new `.deb`.
 - **If SparkDown can't write to its own folder** (for example a root-owned `/Applications`, or the app runs from the DMG), and on Windows, the notice offers **Download**, which opens the release page.
 - **Check now**: SparkDown → Check for Updates... (macOS), or Help → Check for Updates... (Linux/Windows).
-- **Turn off the daily check**: Settings → Updates → *Check for updates automatically*.
+- **Turn off update checks**: Settings → Updates → *Check for updates*. When this is off, SparkDown makes no update check, including **Check for Updates...** in the menu.
 
-Updates are signed; the app rejects an update that its built-in public key does not verify (see [SECURITY.md](SECURITY.md#auto-update)). The updater adds no network library: it uses the system `curl`. The check needs public Releases; if the manifest URL is unreachable the check fails quietly and nothing changes.
+Updates are signed; the app rejects an update that its built-in public key does not verify (see [SECURITY.md](SECURITY.md#auto-update)). The updater adds no network library: it uses the system `curl`. If both sparkdown.dev and the GitHub manifest are unreachable the check fails quietly and nothing changes.
+
+**Privacy.** When SparkDown checks for updates, it asks sparkdown.dev whether a newer version is out. That request includes your platform, processor type and SparkDown version so we can offer the right download. We count these checks per day by platform, version and country, which tells us roughly how many people use SparkDown and which versions they run. We never store or look at your IP address, and there's no install ID, account or tracking cookie. Your documents never leave your machine unless you push them to a Git remote yourself. To stop update checks, turn off Check for updates in Settings.
 
 ## Build from source
 
@@ -250,7 +252,7 @@ SparkDown's figure is the published Apple Silicon DMG on GitHub Releases (about 
 
 ## Security and privacy
 
-See [SECURITY.md](SECURITY.md). In short: the preview runs untrusted documents in a sandboxed iframe with scripts off by default; remote sessions use only your existing SSH keys; the MCP server listens only on a per-user socket; the agent context bridge writes to an owner-only temp folder, only while a terminal is open, and can be turned off. There is no telemetry. The update check (at most once a day) is one HTTPS request to GitHub Releases that sends only a `SparkDown/<version>` user agent; turn it off in Settings → Updates.
+See [SECURITY.md](SECURITY.md). In short: the preview runs untrusted documents in a sandboxed iframe with scripts off by default; remote sessions use only your existing SSH keys; the MCP server listens only on a per-user socket; the agent context bridge writes to an owner-only temp folder, only while a terminal is open, and can be turned off. No accounts, no analytics, and your files are never sent to us. The only thing SparkDown counts is its update check, anonymously, and you can turn it off in Settings.
 
 ## Contributing
 

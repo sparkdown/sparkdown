@@ -208,12 +208,16 @@ document's or a stranger's reach.
 ## Auto-update
 
 SparkDown has a small built-in updater (`src-tauri/src/updates.rs`, UI in
-`frontend/src/updater.ts`). This is the only outbound HTTPS the app makes on
-its own: one GET of
-`https://github.com/sparkdown/sparkdown/releases/latest/download/latest.json`
-shortly after launch, at most once per 24 h (Settings → Updates turns it off),
-plus the manual "Check for Updates...". No identifier or telemetry is sent
-beyond a `SparkDown/<version>` user agent and the HTTP request itself.
+`frontend/src/updater.ts`). Shortly after launch, at most once per 24 h, it
+GETs `https://sparkdown.dev/update/{target}/{arch}/{version}`. If that is
+unreachable it falls back to
+`https://github.com/sparkdown/sparkdown/releases/latest/download/latest.json`.
+Settings → Updates → Check for updates turns this off, including the manual
+"Check for Updates..." menu item. The request sends nothing beyond the URL
+path (platform, processor type, and app version). sparkdown.dev counts
+checks per day by platform, version, and country. It does not store or look
+at an IP address, and there is no install ID. See the Privacy note in the
+[README](README.md#updates).
 
 - **Transport.** The app has no HTTP/TLS library. It runs the system `curl`
   (`/usr/bin/curl` when present) with `--proto =https --proto-redir =https
