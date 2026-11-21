@@ -2,16 +2,6 @@ import { marked, type Tokens, type RendererObject } from 'marked';
 import DOMPurify from 'dompurify';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import hljs from 'highlight.js/lib/core';
-import javascript from 'highlight.js/lib/languages/javascript';
-import typescript from 'highlight.js/lib/languages/typescript';
-import python from 'highlight.js/lib/languages/python';
-import rust from 'highlight.js/lib/languages/rust';
-import xml from 'highlight.js/lib/languages/xml';
-import css from 'highlight.js/lib/languages/css';
-import json from 'highlight.js/lib/languages/json';
-import yaml from 'highlight.js/lib/languages/yaml';
-import sql from 'highlight.js/lib/languages/sql';
-import bash from 'highlight.js/lib/languages/bash';
 import { MermaidLoader } from './mermaid-loader';
 import { EventBus } from './events';
 import { api } from './api';
@@ -32,21 +22,119 @@ import { EVENTS } from './event-names';
 import { isTextFile } from './file-types';
 import { PreviewImageResolver, resolveAgainst, resolveImagePath } from './preview-images';
 
-hljs.registerLanguage('javascript', javascript);
-hljs.registerLanguage('js', javascript);
-hljs.registerLanguage('typescript', typescript);
-hljs.registerLanguage('ts', typescript);
-hljs.registerLanguage('python', python);
-hljs.registerLanguage('rust', rust);
-hljs.registerLanguage('html', xml);
-hljs.registerLanguage('xml', xml);
-hljs.registerLanguage('css', css);
-hljs.registerLanguage('json', json);
-hljs.registerLanguage('yaml', yaml);
-hljs.registerLanguage('yml', yaml);
-hljs.registerLanguage('sql', sql);
-hljs.registerLanguage('bash', bash);
-hljs.registerLanguage('sh', bash);
+/**
+ * Lazy-loaded highlight.js language modules. Languages are imported on first
+ * use of a fenced code block in that language, reducing the initial preview
+ * bundle size. The language module -> alias mapping is maintained here.
+ */
+const languageAliases: Record<string, string> = {
+  javascript: 'javascript',
+  js: 'javascript',
+  typescript: 'typescript',
+  ts: 'typescript',
+  python: 'python',
+  py: 'python',
+  rust: 'rust',
+  rs: 'rust',
+  html: 'xml',
+  xml: 'xml',
+  css: 'css',
+  json: 'json',
+  yaml: 'yaml',
+  yml: 'yaml',
+  sql: 'sql',
+  bash: 'bash',
+  sh: 'bash',
+};
+
+const loadingLanguages = new Map<string, Promise<void>>();
+
+async function loadLanguage(lang: string): Promise<void> {
+  if (hljs.getLanguage(lang)) return;
+  
+  const canonical = languageAliases[lang.toLowerCase()] || lang;
+  const canonicalLang = hljs.getLanguage(canonical);
+  if (canonicalLang) {
+    if (canonical !== lang) {
+      hljs.registerLanguage(lang, () => canonicalLang);
+    }
+    return;
+  }
+  
+  const existing = loadingLanguages.get(canonical);
+  if (existing) return existing;
+  
+  const loadPromise = (async () => {
+    try {
+      let module;
+      switch (canonical) {
+        case 'javascript':
+          module = await import('highlight.js/lib/languages/javascript');
+          break;
+        case 'typescript':
+          module = await import('highlight.js/lib/languages/typescript');
+          break;
+        case 'python':
+          module = await import('highlight.js/lib/languages/python');
+          break;
+        case 'rust':
+          module = await import('highlight.js/lib/languages/rust');
+          break;
+        case 'xml':
+          module = await import('highlight.js/lib/languages/xml');
+          break;
+        case 'css':
+          module = await import('highlight.js/lib/languages/css');
+          break;
+        case 'json':
+          module = await import('highlight.js/lib/languages/json');
+          break;
+        case 'yaml':
+          module = await import('highlight.js/lib/languages/yaml');
+          break;
+        case 'sql':
+          module = await import('highlight.js/lib/languages/sql');
+          break;
+        case 'bash':
+          module = await import('highlight.js/lib/languages/bash');
+          break;
+        default:
+          return;
+      }
+      const langDef = module.default;
+      hljs.registerLanguage(canonical, langDef);
+      if (canonical !== lang.toLowerCase()) {
+        hljs.registerLanguage(lang.toLowerCase(), langDef);
+      }
+    } catch (err) {
+      // Failed load: log but don't crash. The code block will render unhighlighted.
+      console.warn(`Failed to load highlight.js language: ${canonical}`, err);
+    } finally {
+      loadingLanguages.delete(canonical);
+    }
+  })();
+  
+  loadingLanguages.set(canonical, loadPromise);
+  return loadPromise;
+}
+
+/**
+ * Scan markdown content for fenced code block languages. Returns the set of
+ * language names found (not including 'mermaid', which is handled separately).
+ */
+function scanFenceLanguages(content: string): Set<string> {
+  const languages = new Set<string>();
+  // Match ``` or ~~~ followed by optional language name
+  const fencePattern = /^(?:```|~~~)(\w+)?/gm;
+  let match;
+  while ((match = fencePattern.exec(content)) !== null) {
+    const lang = match[1];
+    if (lang && lang !== 'mermaid') {
+      languages.add(lang);
+    }
+  }
+  return languages;
+}
 
 /**
  * Comment marker joined between per-block HTML strings so block boundaries
@@ -387,6 +475,25 @@ export class PreviewPane {
     };
     marked.use({ renderer, gfm: true, breaks: false });
   }
+  
+  /**
+   * Load highlight.js languages that the content uses but aren't registered yet.
+   * Must be called before rendering to ensure code blocks highlight correctly.
+   */
+  private async loadLanguagesFor(content: string): Promise<void> {
+    const languages = scanFenceLanguages(content);
+    const toLoad: Promise<void>[] = [];
+    for (const lang of languages) {
+      if (!hljs.getLanguage(lang)) {
+        toLoad.push(loadLanguage(lang));
+      }
+    }
+    if (toLoad.length > 0) {
+      await Promise.all(toLoad);
+      // Clear chunkCache so the newly highlighted code renders
+      this.chunkCache.clear();
+    }
+  }
 
   render(markdownContent: string): void {
     this.renderDebounced.cancel();
@@ -472,6 +579,10 @@ export class PreviewPane {
     if (!this.visible) return;
     const origin = this.originResolver();
     if (content === this.lastRendered && origin === this.renderedOrigin) return;
+    
+    // Load any highlight.js languages the content uses before rendering
+    await this.loadLanguagesFor(content);
+    
     if (origin !== this.renderedOrigin) {
       // Same text on another machine: reused DOM nodes hold images resolved
       // against the old machine. Force a full rebuild.
