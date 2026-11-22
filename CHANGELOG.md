@@ -5,6 +5,12 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
+## [Unreleased]
+
+### Changed
+
+- **Search in files** uses a smaller regex engine, which makes the Linux download about 1 MB smaller. Case-insensitive search still matches accented letters (`são` finds `SÃO` and `São`, but not `sao`), and `\w`, `\d`, `\s` still cover non-ASCII text. `\p{…}` classes are no longer supported in regex mode, and `\b` treats only ASCII letters as word characters.
+
 ## [0.4.5] — 2026-11-21
 
 ### New
