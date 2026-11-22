@@ -12,11 +12,15 @@
 //! UI that there is more.
 
 use crate::commands::AppError;
-use regex::Regex;
+use regex_lite::Regex;
 use serde::Serialize;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+
+mod case_tables;
+mod pattern;
+mod perl_tables;
 
 /// Stop after this many matching lines (the UI says "more results …").
 pub const MAX_RESULTS: usize = 500;
@@ -72,50 +76,91 @@ fn validate_query(query: &str, _use_regex: bool) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Compile a regex pattern with safety limits. Returns an error for invalid patterns.
-/// Only supports POSIX ERE syntax that works in both Rust regex and `grep -E`.
+/// Compile a regex pattern. `regex-lite` runs in linear time and has no
+/// look-around or back-references, so a pattern cannot make it run away.
+/// [`pattern::translate`] first gives it grep's Unicode case folding and
+/// `\w \d \s`. Returns an error for invalid patterns.
 fn compile_regex(pattern: &str, case_sensitive: bool) -> Result<Regex, AppError> {
-    let mut builder = regex::RegexBuilder::new(pattern);
-    builder.case_insensitive(!case_sensitive);
-    // The default 10 MiB size_limit is already set; no need to override.
-    builder
+    regex_lite::RegexBuilder::new(&pattern::translate(pattern, !case_sensitive))
+        .case_insensitive(!case_sensitive)
         .build()
         .map_err(|e| AppError::Other(format!("Invalid regex pattern: {}", e)))
 }
 
-/// Build a [`SearchMatch`] for `line` if it contains `query`. Case-insensitive
-/// search lowercases both sides (literal) or uses case-insensitive regex;
-/// columns are counted in chars of the line. For regex, finds the first match.
+/// What finds the matches on a line.
+pub(crate) enum Matcher {
+    /// Case-sensitive literal: plain substring search.
+    Exact(String),
+    /// Case-insensitive literal: for each query char, the chars it stands for
+    /// (its case forms). Exact, and much faster than a regex on big folders.
+    Folded(Vec<Vec<char>>),
+    /// A regex pattern, translated by [`pattern::translate`].
+    Regex(Regex),
+}
+
+impl Matcher {
+    /// Byte range of the first match in `line`. Offsets are those of `line`
+    /// itself (lowercasing the line would shift them for letters such as
+    /// `İ`, which lowercases to two characters).
+    fn find(&self, line: &str) -> Option<(usize, usize)> {
+        match self {
+            Matcher::Exact(q) => line.find(q.as_str()).map(|i| (i, i + q.len())),
+            Matcher::Regex(re) => re.find(line).map(|m| (m.start(), m.end())),
+            Matcher::Folded(units) => {
+                let first = units.first()?;
+                for (i, c) in line.char_indices() {
+                    if !first.contains(&c) {
+                        continue;
+                    }
+                    let mut end = i;
+                    let mut rest = line[i..].chars();
+                    if units.iter().all(|u| match rest.next() {
+                        Some(ch) if u.contains(&ch) => {
+                            end += ch.len_utf8();
+                            true
+                        }
+                        _ => false,
+                    }) {
+                        return Some((i, end));
+                    }
+                }
+                None
+            }
+        }
+    }
+}
+
+/// The matcher for a query: a case-sensitive literal is searched as is, a
+/// case-insensitive one char by char with case folding, a regex is compiled.
+pub(crate) fn compile_matcher(
+    query: &str,
+    use_regex: bool,
+    case_sensitive: bool,
+) -> Result<Matcher, AppError> {
+    if use_regex {
+        return compile_regex(query, case_sensitive).map(Matcher::Regex);
+    }
+    if case_sensitive {
+        return Ok(Matcher::Exact(query.to_owned()));
+    }
+    Ok(Matcher::Folded(
+        query.chars().map(pattern::fold_class).collect(),
+    ))
+}
+
+/// Build a [`SearchMatch`] for `line` if `matcher` finds something in it.
+/// Columns are counted in chars of the line (1-based); the first match on
+/// the line is reported.
 pub(crate) fn match_line(
     path: &str,
     line_no: u32,
     line: &str,
-    query: &str,
-    case_sensitive: bool,
-    regex: Option<&Regex>,
+    matcher: &Matcher,
 ) -> Option<SearchMatch> {
     let line_chars: Vec<char> = line.chars().collect();
-    let (start, end) = if let Some(re) = regex {
-        // Regex mode: find first match in the line
-        let m = re.find(line)?;
-        let start = line[..m.start()].chars().count();
-        let end = line[..m.end()].chars().count();
-        (start, end)
-    } else {
-        // Literal mode: case-insensitive substring search
-        let (hay, needle) = if case_sensitive {
-            (line.to_string(), query.to_string())
-        } else {
-            (line.to_lowercase(), query.to_lowercase())
-        };
-        let byte_at = hay.find(&needle)?;
-        // Char offsets in the (possibly lowercased) line. Lowercasing keeps the
-        // char count for everything but a few exotic letters; clamp to be safe.
-        let start = hay[..byte_at].chars().count().min(line_chars.len());
-        let len = needle.chars().count();
-        let end = (start + len).min(line_chars.len());
-        (start, end)
-    };
+    let (from_byte, to_byte) = matcher.find(line)?;
+    let start = line[..from_byte].chars().count();
+    let end = line[..to_byte].chars().count();
 
     // Trim leading whitespace, then keep a window around the match.
     let lead = line_chars.iter().take_while(|c| c.is_whitespace()).count();
@@ -144,20 +189,12 @@ pub(crate) fn match_line(
 }
 
 /// Search one file's text, appending at most `room` matches.
-fn search_text(
-    path: &str,
-    text: &str,
-    query: &str,
-    case_sensitive: bool,
-    regex: Option<&Regex>,
-    room: usize,
-    out: &mut Vec<SearchMatch>,
-) {
+fn search_text(path: &str, text: &str, matcher: &Matcher, room: usize, out: &mut Vec<SearchMatch>) {
     for (i, line) in text.lines().enumerate() {
         if out.len() >= room {
             return;
         }
-        if let Some(m) = match_line(path, i as u32 + 1, line, query, case_sensitive, regex) {
+        if let Some(m) = match_line(path, i as u32 + 1, line, matcher) {
             out.push(m);
         }
     }
@@ -189,10 +226,8 @@ fn read_searchable(path: &Path) -> Option<String> {
 /// text file. Does not follow symlinks and never enters ignored directories.
 pub(crate) fn search_local(
     root: &Path,
-    query: &str,
-    case_sensitive: bool,
     include_hidden: bool,
-    regex: Option<&Regex>,
+    matcher: &Matcher,
 ) -> Result<SearchResults, AppError> {
     let mut matches = Vec::new();
     let mut truncated = false;
@@ -238,9 +273,7 @@ pub(crate) fn search_local(
             search_text(
                 &path.to_string_lossy(),
                 &text,
-                query,
-                case_sensitive,
-                regex,
+                matcher,
                 MAX_RESULTS + 1,
                 &mut matches,
             );
@@ -300,9 +333,7 @@ pub(crate) fn remote_search_script(
 pub(crate) fn parse_remote_output(
     raw: &str,
     root: &str,
-    query: &str,
-    case_sensitive: bool,
-    regex: Option<&Regex>,
+    matcher: &Matcher,
 ) -> Result<SearchResults, AppError> {
     let mut matches = Vec::new();
     let prefix = format!("{}/", root.trim_end_matches('/'));
@@ -342,7 +373,7 @@ pub(crate) fn parse_remote_output(
         let Some((line_no, text)) = split_line_text(tail) else {
             continue;
         };
-        if let Some(m) = match_line(path, line_no, text, query, case_sensitive, regex) {
+        if let Some(m) = match_line(path, line_no, text, matcher) {
             matches.push(m);
         }
     }
@@ -385,13 +416,10 @@ pub async fn search_in_files(
     validate_query(&query, use_regex)?;
     let case_sensitive = case_sensitive.unwrap_or(false);
     let include_hidden = include_hidden.unwrap_or(false);
-    // Compile the regex before branching, so an invalid pattern never runs grep.
-    // Both local and remote use the same compiled regex for consistency.
-    let regex = if use_regex {
-        Some(compile_regex(&query, case_sensitive)?)
-    } else {
-        None
-    };
+    // Compile before branching, so an invalid pattern never runs grep. Local
+    // and remote use the same matcher: remote grep only picks the lines, the
+    // columns come from here.
+    let matcher = compile_matcher(&query, use_regex, case_sensitive)?;
     crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
         if crate::remote::is_active() {
             let raw = crate::remote::search_in_files(
@@ -399,7 +427,7 @@ pub async fn search_in_files(
                 &remote_search_script(&root, &query, case_sensitive, include_hidden, use_regex),
             )
             .map_err(AppError::Other)?;
-            return parse_remote_output(&raw, &root, &query, case_sensitive, regex.as_ref());
+            return parse_remote_output(&raw, &root, &matcher);
         }
         let safe_root = crate::commands::validate_path(&root)?;
         if !safe_root.is_dir() {
@@ -408,13 +436,7 @@ pub async fn search_in_files(
                 safe_root.display()
             )));
         }
-        search_local(
-            &safe_root,
-            &query,
-            case_sensitive,
-            include_hidden,
-            regex.as_ref(),
-        )
+        search_local(&safe_root, include_hidden, &matcher)
     })
     .await
     .map_err(|e| AppError::Other(format!("search task failed: {e}")))?
@@ -435,31 +457,28 @@ mod tests {
         dir.canonicalize().unwrap()
     }
 
+    fn exact(q: &str) -> Matcher {
+        Matcher::Exact(q.to_owned())
+    }
+
     #[test]
     fn match_line_finds_first_hit_case_insensitive() {
-        let m = match_line("/r/a.md", 3, "  Hello World, world", "WORLD", false, None).unwrap();
+        let re = compile_matcher("WORLD", false, false).unwrap();
+        let m = match_line("/r/a.md", 3, "  Hello World, world", &re).unwrap();
         assert_eq!(m.line, 3);
         assert_eq!(m.column, 9);
         assert_eq!(m.preview, "Hello World, world");
         assert_eq!(m.match_start, 6);
         assert_eq!(m.match_end, 11);
-        assert!(match_line("/r/a.md", 1, "Hello", "hello", true, None).is_none());
-        assert!(match_line("/r/a.md", 1, "Hello", "Hello", true, None).is_some());
+        assert!(match_line("/r/a.md", 1, "Hello", &exact("hello")).is_none());
+        assert!(match_line("/r/a.md", 1, "Hello", &exact("Hello")).is_some());
     }
 
     #[test]
     fn match_line_supports_regex() {
         // Use ERE syntax: [a-z]+ instead of \w+
-        let re = compile_regex(r"w[a-z]+d", false).unwrap();
-        let m = match_line(
-            "/r/a.md",
-            1,
-            "Hello World and word",
-            "w[a-z]+d",
-            false,
-            Some(&re),
-        )
-        .unwrap();
+        let re = compile_matcher("w[a-z]+d", true, false).unwrap();
+        let m = match_line("/r/a.md", 1, "Hello World and word", &re).unwrap();
         assert_eq!(m.column, 7);
         assert_eq!(m.preview, "Hello World and word");
         assert!(m.preview[m.match_start as usize..m.match_end as usize]
@@ -470,7 +489,7 @@ mod tests {
     #[test]
     fn match_line_shortens_long_lines_around_the_match() {
         let line = format!("{}needle{}", "x".repeat(300), "y".repeat(300));
-        let m = match_line("/r/a", 1, &line, "needle", true, None).unwrap();
+        let m = match_line("/r/a", 1, &line, &exact("needle")).unwrap();
         assert!(m.preview.starts_with('…'));
         let chars: Vec<char> = m.preview.chars().collect();
         let hit: String = chars[m.match_start as usize..m.match_end as usize]
@@ -483,7 +502,8 @@ mod tests {
 
     #[test]
     fn match_line_counts_columns_in_chars() {
-        let m = match_line("/r/a", 1, "héllo wörld", "wör", false, None).unwrap();
+        let re = compile_matcher("wör", false, false).unwrap();
+        let m = match_line("/r/a", 1, "héllo wörld", &re).unwrap();
         assert_eq!(m.column, 7);
         assert_eq!(m.match_start, 6);
         assert_eq!(m.match_end, 9);
@@ -504,7 +524,8 @@ mod tests {
         let big = format!("find me\n{}", "z".repeat(MAX_FILE_BYTES as usize + 10));
         fs::write(root.join("big.txt"), big).unwrap();
 
-        let res = search_local(&root, "find me", false, false, None).unwrap();
+        let re = compile_matcher("find me", false, false).unwrap();
+        let res = search_local(&root, false, &re).unwrap();
         let hits: Vec<(String, u32)> = res
             .matches
             .iter()
@@ -526,7 +547,7 @@ mod tests {
         assert!(!res.truncated);
 
         // Hidden files are searched when asked for (ignored dirs never are).
-        let res = search_local(&root, "find me", false, true, None).unwrap();
+        let res = search_local(&root, true, &re).unwrap();
         let names: Vec<String> = res
             .matches
             .iter()
@@ -551,7 +572,8 @@ mod tests {
         fs::write(outside.join("secret.md"), "find me").unwrap();
         std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
         std::os::unix::fs::symlink(outside.join("secret.md"), root.join("s.md")).unwrap();
-        let res = search_local(&root, "find me", false, false, None).unwrap();
+        let re = compile_matcher("find me", false, false).unwrap();
+        let res = search_local(&root, false, &re).unwrap();
         assert!(res.matches.is_empty());
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside);
@@ -562,7 +584,7 @@ mod tests {
         let root = temp_dir("cap");
         let text = "hit\n".repeat(MAX_RESULTS + 50);
         fs::write(root.join("many.md"), text).unwrap();
-        let res = search_local(&root, "hit", true, false, None).unwrap();
+        let res = search_local(&root, false, &exact("hit")).unwrap();
         assert_eq!(res.matches.len(), MAX_RESULTS);
         assert!(res.truncated);
         let _ = fs::remove_dir_all(&root);
@@ -573,8 +595,8 @@ mod tests {
         let root = temp_dir("regex");
         fs::write(root.join("test.md"), "hello world\nfoo123bar\ntest").unwrap();
         // Use ERE syntax ([0-9]+) instead of Rust-specific \d+
-        let re = compile_regex(r"foo[0-9]+bar", true).unwrap();
-        let res = search_local(&root, r"foo[0-9]+bar", true, false, Some(&re)).unwrap();
+        let re = compile_matcher(r"foo[0-9]+bar", true, true).unwrap();
+        let res = search_local(&root, false, &re).unwrap();
         assert_eq!(res.matches.len(), 1);
         assert_eq!(res.matches[0].line, 2);
         let _ = fs::remove_dir_all(&root);
@@ -624,7 +646,8 @@ mod tests {
         // `grep --null` separates the file name and line:text with a NUL.
         let raw =
             "/r/a.md\x0012:  Find me here\n/r/we:ird:name.md\x003:find ME\n/r/x.md\x00notanumber\n";
-        let res = parse_remote_output(raw, "/r", "find me", false, None).unwrap();
+        let re = compile_matcher("find me", false, false).unwrap();
+        let res = parse_remote_output(raw, "/r", &re).unwrap();
         assert_eq!(res.matches.len(), 2);
         assert_eq!(res.matches[0].path, "/r/a.md");
         assert_eq!(res.matches[0].line, 12);
@@ -637,7 +660,7 @@ mod tests {
         let many: String = (0..MAX_RESULTS + 1)
             .map(|i| format!("/r/a.md\x00{}:hit\n", i + 1))
             .collect();
-        let res = parse_remote_output(&many, "/r", "hit", true, None).unwrap();
+        let res = parse_remote_output(&many, "/r", &exact("hit")).unwrap();
         assert_eq!(res.matches.len(), MAX_RESULTS);
         assert!(res.truncated);
     }
@@ -647,12 +670,12 @@ mod tests {
         // A folder name ending in a newline: the second line is part of the
         // same path, which is dropped, not a separate hit.
         let raw = "/r/dir\n/r/notes.md/f.md\x001:FAKE note\n";
-        let res = parse_remote_output(raw, "/r", "FAKE", true, None).unwrap();
+        let res = parse_remote_output(raw, "/r", &exact("FAKE")).unwrap();
         assert!(res.matches.is_empty());
 
         // After a normal match: that one is kept, the other is dropped.
         let raw = "/r/a.md\x001:FAKE here\n/r/dir\n/r/notes.md/f.md\x002:FAKE note\n";
-        let res = parse_remote_output(raw, "/r", "FAKE", true, None).unwrap();
+        let res = parse_remote_output(raw, "/r", &exact("FAKE")).unwrap();
         assert_eq!(res.matches.len(), 1);
         assert_eq!(res.matches[0].path, "/r/a.md");
         assert_eq!(res.matches[0].line, 1);
@@ -662,7 +685,7 @@ mod tests {
     fn parse_remote_output_rejects_control_chars_in_path() {
         // A path with a bell character is dropped.
         let raw = "/r/a\x07.md\x001:hit here\n";
-        let res = parse_remote_output(raw, "/r", "hit", true, None).unwrap();
+        let res = parse_remote_output(raw, "/r", &exact("hit")).unwrap();
         assert!(res.matches.is_empty());
     }
 
@@ -683,9 +706,226 @@ mod tests {
             .output()
             .unwrap();
         let raw = String::from_utf8_lossy(&out.stdout);
-        let res = parse_remote_output(&raw, root_s, "hit", true, None).unwrap();
+        let res = parse_remote_output(&raw, root_s, &exact("hit")).unwrap();
         let paths: Vec<&str> = res.matches.iter().map(|m| m.path.as_str()).collect();
         assert_eq!(paths, vec![format!("{root_s}/a.md").as_str()]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `(column, match_start, match_end)` of the first hit of `query` in
+    /// `line`, case-insensitive, in literal mode and in regex mode: both must
+    /// agree.
+    fn first_hit(query: &str, line: &str) -> Option<(u32, u32, u32)> {
+        let literal = compile_matcher(query, false, false).unwrap();
+        let regex = compile_matcher(&regex_lite::escape(query), true, false).unwrap();
+        let a = match_line("/r/a", 1, line, &literal);
+        let b = match_line("/r/a", 1, line, &regex);
+        assert_eq!(
+            a, b,
+            "literal and regex mode differ for {query:?} in {line:?}"
+        );
+        a.map(|m| (m.column, m.match_start, m.match_end))
+    }
+
+    /// Portuguese: case-insensitive search folds accented letters (as
+    /// `grep -i` does in a UTF-8 locale) but does not drop the accent.
+    #[test]
+    fn case_insensitive_search_folds_non_ascii_letters_without_dropping_accents() {
+        assert_eq!(first_hit("são", "SÃO"), Some((1, 0, 3)));
+        assert_eq!(first_hit("são", "São"), Some((1, 0, 3)));
+        assert_eq!(first_hit("SÃO", "são"), Some((1, 0, 3)));
+        assert_eq!(first_hit("ção", "AÇÃO"), Some((2, 1, 4)));
+        assert_eq!(first_hit("ação", "AÇÃO"), Some((1, 0, 4)));
+        assert_eq!(first_hit("ção", "ação"), Some((2, 1, 4)));
+        assert_eq!(first_hit("ÉPOCA", "a época"), Some((3, 2, 7)));
+        // No accent folding.
+        assert_eq!(first_hit("ACAO", "ção"), None);
+        assert_eq!(first_hit("ção", "ACAO"), None);
+        assert_eq!(first_hit("ção", "acao"), None);
+        assert_eq!(first_hit("sao", "SÃO"), None);
+        assert_eq!(first_hit("são", "SAO"), None);
+        // Case-sensitive search is exact.
+        for use_regex in [false, true] {
+            let m = compile_matcher("são", use_regex, true).unwrap();
+            assert!(match_line("/r/a", 1, "SÃO", &m).is_none());
+            assert!(match_line("/r/a", 1, "São", &m).is_none());
+            assert!(match_line("/r/a", 1, "são", &m).is_some());
+        }
+        assert!(match_line("/r/a", 1, "SÃO", &exact("SÃO")).is_some());
+        assert!(match_line("/r/a", 1, "São", &exact("SÃO")).is_none());
+    }
+
+    /// The folded literal and the regex path find the same span, for every
+    /// short query over an alphabet of the tricky letters.
+    #[test]
+    fn folded_literal_equals_the_regex_path() {
+        let alphabet: Vec<char> = "aAãÃçÇéÉkKK\u{212A}sSſßẞİiıσςΣ -é.*(".chars().collect();
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move |n: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % n as u64) as usize
+        };
+        for _ in 0..20_000 {
+            let q: String = (0..1 + next(3))
+                .map(|_| alphabet[next(alphabet.len())])
+                .collect();
+            let line: String = (0..next(12))
+                .map(|_| alphabet[next(alphabet.len())])
+                .collect();
+            let folded = compile_matcher(&q, false, false).unwrap();
+            let regex = compile_matcher(&regex_lite::escape(&q), true, false).unwrap();
+            assert_eq!(folded.find(&line), regex.find(&line), "{q:?} in {line:?}");
+        }
+    }
+
+    #[test]
+    fn a_line_with_several_matches_reports_the_first_in_chars() {
+        let line = "São Paulo, SÃO, são e sÃo";
+        assert_eq!(first_hit("são", line), Some((1, 0, 3)));
+        assert_eq!(first_hit("paulo", line), Some((5, 4, 9)));
+        // Every hit of the pattern, as char columns of the line.
+        let re = compile_regex(&regex_lite::escape("são"), false).unwrap();
+        let cols: Vec<usize> = re
+            .find_iter(line)
+            .map(|m| line[..m.start()].chars().count() + 1)
+            .collect();
+        assert_eq!(cols, vec![1, 12, 17, 23]);
+        // The same hits, one line at a time, through the folded literal.
+        let folded = compile_matcher("são", false, false).unwrap();
+        let mut at = 0;
+        let mut starts = vec![];
+        while let Some((a, b)) = folded.find(&line[at..]) {
+            starts.push(line[..at + a].chars().count() + 1);
+            at += b;
+        }
+        assert_eq!(starts, cols);
+        // The second hit alone, after the first is cut off.
+        assert_eq!(first_hit("são", "Paulo, SÃO"), Some((8, 7, 10)));
+    }
+
+    /// Lowercasing the line made columns drift: `İ` lowercases to two chars.
+    #[test]
+    fn columns_stay_on_the_original_line_for_letters_that_change_length_when_lowercased() {
+        assert_eq!(first_hit("são", "İstanbul São Paulo"), Some((10, 9, 12)));
+        assert_eq!(first_hit("são", "İİİ SÃO"), Some((5, 4, 7)));
+        assert_eq!(first_hit("STRAẞE", "Straße"), Some((1, 0, 6)));
+        assert_eq!(first_hit("straße", "STRAẞE"), Some((1, 0, 6)));
+        assert_eq!(first_hit("o", "ẞẞẞ o"), Some((5, 4, 5)));
+        // grep -i does not fold ß to ss, nor i to İ.
+        assert_eq!(first_hit("strasse", "Straße"), None);
+        assert_eq!(first_hit("i", "İ"), None);
+        assert_eq!(first_hit("σ", "ς"), Some((1, 0, 1)));
+    }
+
+    #[test]
+    fn regex_mode_word_classes_cover_accented_letters() {
+        let re = compile_matcher(r"\w+", true, false).unwrap();
+        let m = match_line("/r/a", 1, "-- ação!", &re).unwrap();
+        assert_eq!((m.column, m.match_start, m.match_end), (4, 3, 7));
+        let re = compile_matcher(r"[^ã]+", true, false).unwrap();
+        let m = match_line("/r/a", 1, "ÃãÃxy", &re).unwrap();
+        assert_eq!((m.column, m.match_start, m.match_end), (4, 3, 5));
+        // Inline flags are honoured.
+        let re = compile_matcher(r"(?-i)são", true, false).unwrap();
+        assert!(match_line("/r/a", 1, "SÃO", &re).is_none());
+        let re = compile_matcher(r"(?i)são", true, true).unwrap();
+        assert!(match_line("/r/a", 1, "SÃO", &re).is_some());
+    }
+
+    /// The real `grep -i` next to ours, on a UTF-8 locale of this machine:
+    /// grep picks the same lines (for `-F` and `-E`) and our columns for
+    /// those lines are the ones the frontend expects.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn grep_and_the_local_search_agree_on_non_ascii_case() {
+        let Some(locale) = ["C.UTF-8", "C.utf8", "en_US.UTF-8", "en_US.utf8"]
+            .into_iter()
+            .find(|loc| {
+                let out = crate::proc::command("/bin/sh")
+                    .arg("-c")
+                    .arg("printf '\\303\\203\\n' | grep -qi \"$(printf '\\303\\243')\"")
+                    .env("LC_ALL", loc)
+                    .status();
+                matches!(out, Ok(st) if st.success())
+            })
+        else {
+            eprintln!("no UTF-8 locale with a GNU grep here; skipping");
+            return;
+        };
+        let root = temp_dir("grep-agree");
+        let fixture = [
+            "SÃO Paulo",
+            "São Paulo",
+            "são",
+            "AÇÃO e ação",
+            "ACAO",
+            "acao",
+            "İstanbul São",
+            "Straße STRASSE STRAẞE",
+            "São, SÃO, são e sÃo",
+            "Σίσυφος ΣΊΣΥΦΟΣ ς",
+            "nothing here",
+        ];
+        fs::write(root.join("a.md"), fixture.join("\n") + "\n").unwrap();
+        let root_s = root.to_str().unwrap();
+        for query in [
+            "são", "ção", "ACAO", "ação", "straße", "STRAẞE", "σ", "paulo",
+        ] {
+            for use_regex in [false, true] {
+                let script = remote_search_script(root_s, query, false, false, use_regex);
+                let out = crate::proc::command("/bin/sh")
+                    .arg("-c")
+                    .arg(&script)
+                    .env("LC_ALL", locale)
+                    .output()
+                    .unwrap();
+                let raw = String::from_utf8_lossy(&out.stdout).into_owned();
+                let grep_lines: Vec<u32> = raw
+                    .split('\n')
+                    .filter_map(|rec| rec.split_once('\0'))
+                    .filter_map(|(_, tail)| split_line_text(tail).map(|(n, _)| n))
+                    .collect();
+                let re = compile_matcher(query, use_regex, false).unwrap();
+                let ours = search_local(&root, false, &re).unwrap();
+                let our_lines: Vec<u32> = ours.matches.iter().map(|m| m.line).collect();
+                assert_eq!(
+                    our_lines, grep_lines,
+                    "{query:?} regex={use_regex}: lines (ours vs grep -i)"
+                );
+                // The columns of the remote path are ours, on grep's lines.
+                let remote = parse_remote_output(&raw, root_s, &re).unwrap();
+                assert_eq!(remote.matches, ours.matches, "{query:?} regex={use_regex}");
+                for m in &ours.matches {
+                    let line = fixture[m.line as usize - 1];
+                    let chars: Vec<char> = line.chars().collect();
+                    let hit: String = chars[m.column as usize - 1..]
+                        .iter()
+                        .take(query.chars().count())
+                        .collect();
+                    assert_eq!(
+                        hit.to_lowercase().replace('ẞ', "ß"),
+                        query.to_lowercase().replace('ẞ', "ß"),
+                        "{query:?} column {} in {line:?}",
+                        m.column
+                    );
+                }
+            }
+        }
+        // Spelled out for the Portuguese cases (line numbers of the fixture).
+        let lines_of = |query: &str| -> Vec<u32> {
+            let re = compile_matcher(query, false, false).unwrap();
+            search_local(&root, false, &re)
+                .unwrap()
+                .matches
+                .iter()
+                .map(|m| m.line)
+                .collect()
+        };
+        assert_eq!(lines_of("são"), vec![1, 2, 3, 7, 9]);
+        assert_eq!(lines_of("ção"), vec![4]);
+        assert_eq!(lines_of("ACAO"), vec![5, 6]);
+        let _ = fs::remove_dir_all(&root);
     }
 }
