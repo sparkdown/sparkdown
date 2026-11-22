@@ -11,10 +11,10 @@
     "query": "node --experimental-strip-types query-counts.ts"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20241127.0",
+    "@cloudflare/workers-types": "^5.20261121.1",
     "esbuild": "^0.25.0",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8",
-    "wrangler": "^3.87.0"
+    "vitest": "^4.1.12",
+    "wrangler": "^4.166.0"
   }
 }
