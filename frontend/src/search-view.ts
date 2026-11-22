@@ -1,6 +1,10 @@
 import { api, type SearchMatch, type SearchResults } from './api';
 import { debounce, toRelativePath, basename } from './utils';
 
+/** Start of the message search.rs returns for `\p{..}` / `\P{..}` classes
+ *  (the regex engine has no Unicode property tables). Shown as it is. */
+const UNICODE_CLASS_MESSAGE = 'Unicode classes like';
+
 /** Wait this long after the last keystroke before searching. */
 const SEARCH_DEBOUNCE_MS = 250;
 
@@ -116,7 +120,7 @@ export class SearchView {
       // Show friendly error for invalid regex patterns (first line only)
       const errMsg = String(err);
       const firstLine = errMsg.split('\n')[0];
-      if (firstLine.includes('Invalid regex pattern')) {
+      if (firstLine.includes('Invalid regex pattern') || firstLine.includes(UNICODE_CLASS_MESSAGE)) {
         this.renderStatus(firstLine.replace('Search failed: ', ''));
       } else {
         this.renderStatus(`Search failed: ${firstLine}`);
