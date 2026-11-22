@@ -80,10 +80,18 @@ fn validate_query(query: &str, _use_regex: bool) -> Result<(), AppError> {
 /// look-around or back-references, so a pattern cannot make it run away.
 /// [`pattern::translate`] first gives it grep's Unicode case folding and
 /// `\w \d \s`. Returns an error for invalid patterns.
-fn compile_regex(pattern: &str, case_sensitive: bool) -> Result<Regex, AppError> {
-    regex_lite::RegexBuilder::new(&pattern::translate(pattern, !case_sensitive))
+fn compile_regex(pattern: &str, case_sensitive: bool) -> Result<Matcher, AppError> {
+    if pattern::uses_unicode_class(pattern) {
+        return Err(AppError::Other(pattern::UNICODE_CLASS_MESSAGE.into()));
+    }
+    let translated = pattern::translate(pattern, !case_sensitive);
+    regex_lite::RegexBuilder::new(&translated.pattern)
         .case_insensitive(!case_sensitive)
         .build()
+        .map(|re| Matcher::Regex {
+            re,
+            bounded: translated.bounded,
+        })
         .map_err(|e| AppError::Other(format!("Invalid regex pattern: {}", e)))
 }
 
@@ -94,8 +102,9 @@ pub(crate) enum Matcher {
     /// Case-insensitive literal: for each query char, the chars it stands for
     /// (its case forms). Exact, and much faster than a regex on big folders.
     Folded(Vec<Vec<char>>),
-    /// A regex pattern, translated by [`pattern::translate`].
-    Regex(Regex),
+    /// A regex pattern, translated by [`pattern::translate`]. `bounded`: the
+    /// hit is the [`pattern::MATCH_GROUP`] capture (see [`pattern::Translated`]).
+    Regex { re: Regex, bounded: bool },
 }
 
 impl Matcher {
@@ -103,15 +112,30 @@ impl Matcher {
     /// itself (lowercasing the line would shift them for letters such as
     /// `İ`, which lowercases to two characters).
     fn find(&self, line: &str) -> Option<(usize, usize)> {
+        self.find_at(line, 0)
+    }
+
+    /// The first match that starts at or after byte `from` (a char boundary).
+    /// To list every hit, call again with `from` = the end of the last hit.
+    fn find_at(&self, line: &str, from: usize) -> Option<(usize, usize)> {
         match self {
-            Matcher::Exact(q) => line.find(q.as_str()).map(|i| (i, i + q.len())),
-            Matcher::Regex(re) => re.find(line).map(|m| (m.start(), m.end())),
+            Matcher::Exact(q) => line[from..]
+                .find(q.as_str())
+                .map(|i| (from + i, from + i + q.len())),
+            Matcher::Regex { re, bounded: false } => {
+                re.find_at(line, from).map(|m| (m.start(), m.end()))
+            }
+            Matcher::Regex { re, bounded: true } => re
+                .captures_at(line, from)
+                .and_then(|c| c.name(pattern::MATCH_GROUP))
+                .map(|m| (m.start(), m.end())),
             Matcher::Folded(units) => {
                 let first = units.first()?;
-                for (i, c) in line.char_indices() {
+                for (i, c) in line[from..].char_indices() {
                     if !first.contains(&c) {
                         continue;
                     }
+                    let i = from + i;
                     let mut end = i;
                     let mut rest = line[i..].chars();
                     if units.iter().all(|u| match rest.next() {
@@ -128,6 +152,24 @@ impl Matcher {
             }
         }
     }
+
+    /// Every hit in `line`, restarting at the end of each one.
+    #[cfg(test)]
+    fn find_all(&self, line: &str) -> Vec<(usize, usize)> {
+        let mut hits = Vec::new();
+        let mut from = 0;
+        while let Some((a, b)) = self.find_at(line, from) {
+            hits.push((a, b));
+            from = b.max(a + 1);
+            while !line.is_char_boundary(from) {
+                from += 1;
+            }
+            if from > line.len() {
+                break;
+            }
+        }
+        hits
+    }
 }
 
 /// The matcher for a query: a case-sensitive literal is searched as is, a
@@ -138,7 +180,7 @@ pub(crate) fn compile_matcher(
     case_sensitive: bool,
 ) -> Result<Matcher, AppError> {
     if use_regex {
-        return compile_regex(query, case_sensitive).map(Matcher::Regex);
+        return compile_regex(query, case_sensitive);
     }
     if case_sensitive {
         return Ok(Matcher::Exact(query.to_owned()));
@@ -788,8 +830,9 @@ mod tests {
         // Every hit of the pattern, as char columns of the line.
         let re = compile_regex(&regex_lite::escape("são"), false).unwrap();
         let cols: Vec<usize> = re
-            .find_iter(line)
-            .map(|m| line[..m.start()].chars().count() + 1)
+            .find_all(line)
+            .into_iter()
+            .map(|(a, _)| line[..a].chars().count() + 1)
             .collect();
         assert_eq!(cols, vec![1, 12, 17, 23]);
         // The same hits, one line at a time, through the folded literal.
@@ -840,17 +883,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn grep_and_the_local_search_agree_on_non_ascii_case() {
-        let Some(locale) = ["C.UTF-8", "C.utf8", "en_US.UTF-8", "en_US.utf8"]
-            .into_iter()
-            .find(|loc| {
-                let out = crate::proc::command("/bin/sh")
-                    .arg("-c")
-                    .arg("printf '\\303\\203\\n' | grep -qi \"$(printf '\\303\\243')\"")
-                    .env("LC_ALL", loc)
-                    .status();
-                matches!(out, Ok(st) if st.success())
-            })
-        else {
+        let Some(locale) = utf8_locale() else {
             eprintln!("no UTF-8 locale with a GNU grep here; skipping");
             return;
         };
@@ -927,5 +960,152 @@ mod tests {
         assert_eq!(lines_of("ção"), vec![4]);
         assert_eq!(lines_of("ACAO"), vec![5, 6]);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `\b` at the very start or end of a pattern, next to a word character,
+    /// knows accented letters; columns and text stay those of the line.
+    #[test]
+    fn word_boundaries_at_the_ends_of_a_pattern_know_accented_letters() {
+        let cols = |p: &str, line: &str| -> Vec<usize> {
+            let m = compile_matcher(p, true, false).unwrap();
+            m.find_all(line)
+                .into_iter()
+                .map(|(a, _)| line[..a].chars().count() + 1)
+                .collect()
+        };
+        let none = Vec::<usize>::new();
+        // A leading \b: "ação" has no boundary before "ção".
+        assert_eq!(cols(r"\bção", "ação"), none);
+        assert_eq!(cols(r"\bção", "a ção"), vec![3]);
+        assert_eq!(cols(r"\bção", "ção"), vec![1]);
+        assert_eq!(cols(r"\bção", "ÇÃO e ação e ção"), vec![1, 14]);
+        // Both ends: the separator one hit eats is the start of the next.
+        assert_eq!(cols(r"\bsão\b", "são são"), vec![1, 5]);
+        assert_eq!(cols(r"\bsão\b", "são  são   são"), vec![1, 6, 12]);
+        assert_eq!(cols(r"\bsão\b", "são,são;são"), vec![1, 5, 9]);
+        assert_eq!(cols(r"\bsão\b", "são"), vec![1]);
+        assert_eq!(cols(r"\bsão\b", "x são"), vec![3]);
+        assert_eq!(cols(r"\bsão\b", "são x"), vec![1]);
+        assert_eq!(cols(r"\bsão\b", "sãos são_ _são são1 1são"), none);
+        assert_eq!(cols(r"\bsão\b", "ásão são"), vec![6]);
+        // A trailing \b alone.
+        assert_eq!(cols(r"são\b", "são sãos"), vec![1]);
+        assert_eq!(cols(r"são\b", "sãoá"), none);
+        // The reported text is the hit, not the separators around it.
+        let m = compile_matcher(r"\bsão\b", true, false).unwrap();
+        let hit = match_line("/r/a", 3, "é São.", &m).unwrap();
+        assert_eq!(
+            (hit.column, hit.match_start, hit.match_end),
+            (3, 2, 5),
+            "{hit:?}"
+        );
+        // In the middle of a pattern \b keeps the ASCII rule (a known limit):
+        // "s" and "ã" count as a word / non-word pair there.
+        assert_eq!(cols(r"s\bã", "sã"), vec![1]);
+    }
+
+    #[test]
+    fn unicode_classes_get_a_clear_message_instead_of_the_parser_error() {
+        for p in [r"\p{L}+", r"\P{Lu}", r"\pL", r"[\p{Greek}x]", r"são \p{N}"] {
+            for cs in [false, true] {
+                let err = compile_matcher(p, true, cs).err().expect(p).to_string();
+                assert_eq!(err, r"Unicode classes like \p{..} aren't supported", "{p}");
+            }
+        }
+        // An escaped backslash followed by p is plain text.
+        assert!(compile_matcher(r"\\p{2}", true, false).is_ok());
+        // Other invalid patterns keep the parser's message.
+        let err = compile_matcher(r"(?P<", true, false).err().unwrap();
+        assert!(err.to_string().starts_with("Invalid regex pattern: "));
+        // Literal mode never looks at the pattern.
+        assert!(compile_matcher(r"\p{L}", false, false).is_ok());
+    }
+
+    /// The first UTF-8 locale GNU grep understands here, if any.
+    #[cfg(target_os = "linux")]
+    fn utf8_locale() -> Option<&'static str> {
+        ["C.UTF-8", "C.utf8", "en_US.UTF-8", "en_US.utf8"]
+            .into_iter()
+            .find(|loc| {
+                let out = crate::proc::command("/bin/sh")
+                    .arg("-c")
+                    .arg("printf '\\303\\203\\n' | grep -qi \"$(printf '\\303\\243')\"")
+                    .env("LC_ALL", loc)
+                    .status();
+                matches!(out, Ok(st) if st.success())
+            })
+    }
+
+    /// `grep -iobE` lists every hit of a `\b` pattern with its byte offset
+    /// and text; the rewritten pattern finds the same ones.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn grep_and_the_local_search_agree_on_word_boundaries() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let Some(locale) = utf8_locale() else {
+            eprintln!("no UTF-8 locale with a GNU grep here; skipping");
+            return;
+        };
+        let lines = [
+            "são são",
+            "ação",
+            "a ção",
+            "SÃO São",
+            "são_x _são",
+            "x são",
+            "são x",
+            "ásão são",
+            "são-paulo São.Paulo",
+            "AÇÃO ação ção",
+            "é são, é",
+            "sãos são1 1são",
+            "são,são;são",
+            "são",
+            "ção",
+            "",
+        ];
+        let mut rows = 0;
+        for pattern in [
+            r"\bção",
+            r"\bsão\b",
+            r"são\b",
+            r"\bSÃO",
+            r"\bs+ão\b",
+            r"\b\w+o\b",
+            r"\bpaulo",
+        ] {
+            for line in lines {
+                let mut child = crate::proc::command("grep")
+                    .args(["-iobE", "-e", pattern])
+                    .env("LC_ALL", locale)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(format!("{line}\n").as_bytes())
+                    .unwrap();
+                let out = child.wait_with_output().unwrap();
+                let theirs: Vec<(usize, String)> = String::from_utf8(out.stdout)
+                    .unwrap()
+                    .lines()
+                    .filter_map(|l| l.split_once(':'))
+                    .map(|(off, text)| (off.parse().unwrap(), text.to_owned()))
+                    .collect();
+                let ours: Vec<(usize, String)> = compile_matcher(pattern, true, false)
+                    .unwrap()
+                    .find_all(line)
+                    .into_iter()
+                    .map(|(a, b)| (a, line[a..b].to_owned()))
+                    .collect();
+                assert_eq!(ours, theirs, "{pattern:?} on {line:?} (ours vs grep -iobE)");
+                rows += 1;
+            }
+        }
+        assert_eq!(rows, 7 * lines.len());
     }
 }
