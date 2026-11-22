@@ -41,8 +41,12 @@ zeroize = "1"
 tauri-plugin-single-instance = "2"
 trash = "5"
 
-# #200: regex search in files. Adds ~300KB to the release binary.
-regex = { version = "1", default-features = false, features = ["std", "perf"] }
+# #200: regex search in files. regex-lite, not regex: tauri-utils and
+# urlpattern pull in `regex` with every Unicode table, which cannot be turned
+# off from here, and using it ourselves keeps ~1.1 MB of tables and engines in
+# the release binary. regex-lite folds ASCII case only, so src/search/pattern.rs
+# rewrites patterns to cover non-ASCII case and \w \d \s.
+regex-lite = "0.1"
 
 # macOS: install an applicationShouldTerminate: delegate hook so dock/menu
 # Quit can be intercepted (tao doesn't implement it). objc2 is already in the
@@ -88,6 +92,8 @@ minisign = "0.10"
 ts-rs = "12"
 serial_test = "3"
 tempfile = "3"
+# Tests only: the reference the search pattern rewrite is checked against.
+regex = "1"
 
 [features]
 # Test-only (E2E on Windows): let WebDriver attach to WebView2 by passing
