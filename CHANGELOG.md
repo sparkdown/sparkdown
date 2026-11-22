@@ -9,7 +9,7 @@ requests.
 
 ### Changed
 
-- **Search in files** uses a smaller regex engine, which makes the Linux download about 1 MB smaller. Case-insensitive search still matches accented letters (`são` finds `SÃO` and `São`, but not `sao`), and `\w`, `\d`, `\s` still cover non-ASCII text. `\p{…}` classes are no longer supported in regex mode, and `\b` treats only ASCII letters as word characters.
+- **Search in files** uses a smaller regex engine, which makes the Linux download about 1 MB smaller. Case-insensitive search still matches accented letters (`são` finds `SÃO` and `São`, but not `sao`), and `\w`, `\d`, `\s` still cover non-ASCII text. A `\b` at the very start or end of a pattern, next to a letter, also knows accented letters (`\bção` does not match inside `ação`). In regex mode, `\p{…}` classes are no longer supported (the search shows "Unicode classes like \p{..} aren't supported"), and a `\b` or `\B` anywhere else in a pattern treats only ASCII letters as word characters.
 
 ## [0.4.5] — 2026-11-21
 
