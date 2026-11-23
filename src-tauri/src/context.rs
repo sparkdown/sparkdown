@@ -136,16 +136,27 @@ fn remove_context_dirs_in(base: &Path, keep: &HashSet<String>) {
 /// from a run that ended without its own clear), at exit, and when
 /// "Share editor context with agents" is switched off, since one window's
 /// clear only covers the folders that window wrote.
+///
+/// Also wipes the per-client cache dir on every remote host any window has
+/// published context to (see `crate::remote::clear_all_published_contexts`),
+/// so a pref flip in one window erases unsaved-buffer residue in sibling
+/// windows' SSH workspaces without needing their pages to cooperate.
 pub fn remove_all_context_dirs() {
     written_dirs().clear();
     if let Some(base) = context_root() {
         remove_context_dirs_in(&base, &HashSet::new());
     }
+    crate::remote::clear_all_published_contexts();
 }
 
 /// A window closed: remove the context dirs it wrote that no other open
 /// window has written too.
 pub fn release_window(label: &str) {
+    // Drop the window's remote-published entry too: the matching SSH-side
+    // wipe is `remote::release_window`'s job (it owns the session), this
+    // just stops the tracker from carrying a stale entry for a window
+    // that is on its way out.
+    crate::remote::forget_published(label);
     let Some(base) = context_root() else { return };
     for key in release_keys(&mut written_dirs(), label) {
         let _ = std::fs::remove_dir_all(base.join(key));
@@ -720,6 +731,90 @@ mod tests {
         assert!(!map.contains_key("w-a"));
         assert_eq!(release_keys(&mut map, "w-b"), vec!["k2".to_string()]);
         assert!(release_keys(&mut map, "w-c").is_empty());
+    }
+
+    /// Switching context sharing off (`remove_all_context_dirs`) also drains
+    /// the published-remote tracker, running the SSH-side wipe for every
+    /// tracked session, so a sibling window's
+    /// `<remote $HOME>/.cache/sparkdown/<client-id>/<key>/buffers/*` does not
+    /// stay behind. The primed entries have an empty `$HOME`, so
+    /// `clear_all_context` returns before any real ssh. The local-tree
+    /// purge is checked alongside.
+    #[test]
+    #[serial_test::serial(session)]
+    fn pref_off_drains_remote_tracker_and_still_purges_local_tree() {
+        // Seed the remote tracker as if two sibling windows had published
+        // context on two hosts (page reloaded / sibling window).
+        crate::remote::test_published_remote_clear();
+        crate::remote::test_insert_published_remote("w-a", "hostA");
+        crate::remote::test_insert_published_remote("w-b", "hostB");
+        assert_eq!(crate::remote::test_published_remote_len(), 2);
+
+        // Valid-input side: a key-shaped local dir must still be removed,
+        // a non-key entry and the mcp.sock-style sibling must be kept.
+        // (Covers the existing local semantics.)
+        let base = std::env::temp_dir().join(format!(
+            "sd-ctx-prefoff-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let gone = workspace_key("/ctx-gone");
+        std::fs::create_dir_all(base.join(&gone).join("buffers")).unwrap();
+        std::fs::write(
+            base.join(&gone).join("buffers").join("secret.md"),
+            "unsaved",
+        )
+        .unwrap();
+        std::fs::create_dir_all(base.join("notakey")).unwrap();
+        std::fs::write(base.join("mcp.sock"), "").unwrap();
+        remove_context_dirs_in(&base, &HashSet::new());
+        assert!(!base.join(&gone).exists(), "local key dir must be gone");
+        assert!(base.join("notakey").exists());
+        assert!(base.join("mcp.sock").exists());
+        let _ = std::fs::remove_dir_all(&base);
+
+        // The real pref-off entry point: what `save_config` calls when
+        // "Share editor context with agents" is switched off.
+        remove_all_context_dirs();
+
+        // The tracker is drained (an SSH-side wipe was attempted for every
+        // tracked session).
+        assert_eq!(
+            crate::remote::test_published_remote_len(),
+            0,
+            "remove_all_context_dirs must drain the published-remote tracker",
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(session)]
+    fn pref_off_without_any_remote_published_is_still_a_valid_local_purge() {
+        // Valid-input regression: with no remote-published entries,
+        // `remove_all_context_dirs` behaves exactly like before: it clears
+        // the local written-dirs map and purges the local tree. No ssh
+        // call fires because the tracker is empty.
+        crate::remote::test_published_remote_clear();
+        written_dirs()
+            .entry("w-local".into())
+            .or_default()
+            .insert("somekey".into());
+        remove_all_context_dirs();
+        assert!(written_dirs().is_empty());
+        assert_eq!(crate::remote::test_published_remote_len(), 0);
+    }
+
+    #[test]
+    #[serial_test::serial(session)]
+    fn release_window_drops_the_windows_remote_tracker_entry() {
+        // Closing one window must drop its remote-tracker entry so a
+        // later wholesale clear does not retry an SSH wipe for a dead
+        // window label. Other windows' entries stay.
+        crate::remote::test_published_remote_clear();
+        crate::remote::test_insert_published_remote("w-close", "h1");
+        crate::remote::test_insert_published_remote("w-keep", "h2");
+        release_window("w-close");
+        assert_eq!(crate::remote::test_published_remote_len(), 1);
+        crate::remote::test_published_remote_clear();
     }
 
     #[test]
