@@ -119,7 +119,9 @@ fn session_labels() -> Vec<String> {
 /// Whether a window other than the current one has a session on `host`.
 fn host_shared_with_other_window(host: &str) -> bool {
     let me = crate::windows::current_label();
-    sessions().iter().any(|(label, s)| *label != me && s.host == host)
+    sessions()
+        .iter()
+        .any(|(label, s)| *label != me && s.host == host)
 }
 
 /// Preflight + store. `probe` is `ssh host 'cd path && pwd -P'` in production.
@@ -4539,9 +4541,7 @@ Host *.example.com
     #[test]
     #[serial_test::serial(session)]
     fn pref_off_drains_remote_published_tracker_for_every_window() {
-        let _guard = TEST_SESSION_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_SESSION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Start clean: labels from earlier tests must not carry over.
         published_remote().clear();
         let sess_a = RemoteSession {
@@ -4573,9 +4573,7 @@ Host *.example.com
     #[test]
     #[serial_test::serial(session)]
     fn pref_off_without_any_remote_session_is_a_noop() {
-        let _guard = TEST_SESSION_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_SESSION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         published_remote().clear();
         clear_all_published_contexts();
         assert!(published_remote().is_empty());
@@ -4587,9 +4585,7 @@ Host *.example.com
     #[test]
     #[serial_test::serial(session)]
     fn forget_published_removes_only_the_named_label() {
-        let _guard = TEST_SESSION_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = TEST_SESSION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         published_remote().clear();
         let sess = RemoteSession {
             host: "hostA".into(),

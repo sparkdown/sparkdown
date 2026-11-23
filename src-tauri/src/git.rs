@@ -2077,7 +2077,13 @@ mod tests {
 
     #[test]
     fn rebase_value_is_interactive_covers_the_spellings() {
-        for v in ["interactive", "i", "true-interactive", " Interactive ", "TRUE-INTERACTIVE"] {
+        for v in [
+            "interactive",
+            "i",
+            "true-interactive",
+            " Interactive ",
+            "TRUE-INTERACTIVE",
+        ] {
             assert!(rebase_value_is_interactive(v), "{v}");
         }
         for v in ["", "true", "false", "merges", "preserve"] {

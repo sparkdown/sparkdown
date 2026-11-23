@@ -388,8 +388,7 @@ fn import_span_lines(hunk: &Hunk) -> Vec<bool> {
     for (i, line) in hunk.lines.iter().enumerate() {
         let body = line.get(1..).unwrap_or("");
         let stripped = strip_comments_and_strings(body);
-        let balance =
-            stripped.matches('{').count() as i64 - stripped.matches('}').count() as i64;
+        let balance = stripped.matches('{').count() as i64 - stripped.matches('}').count() as i64;
         if depth == 0 {
             if opens_import_span(body) && balance > 0 && is_import_shaped(&stripped) {
                 depth = balance;

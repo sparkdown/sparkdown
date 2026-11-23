@@ -637,10 +637,7 @@ impl Broker {
     /// any other path is declined: an ssh started by ProxyJump/ProxyCommand
     /// inherits the ticket but not SparkDown's `-o` options, and its prompt
     /// text can come from a server.
-    pub fn ssh_env(
-        &self,
-        allowed_keys: &[PathBuf],
-    ) -> Vec<(&'static str, std::ffi::OsString)> {
+    pub fn ssh_env(&self, allowed_keys: &[PathBuf]) -> Vec<(&'static str, std::ffi::OsString)> {
         let ticket = self.mint_ticket(allowed_keys);
         let mut env = vec![
             ("SSH_ASKPASS", self.helper_exe.clone().into_os_string()),
@@ -1542,7 +1539,10 @@ mod tests {
         let _g = HelperEnvGuard::new();
         std::env::set_var(ENV_IPC, "/tmp/sparkdown-askpass-test.sock");
         std::env::set_var(ENV_TOKEN, "deadbeef");
-        assert!(is_helper_invocation(), "both env vars present => helper mode");
+        assert!(
+            is_helper_invocation(),
+            "both env vars present => helper mode"
+        );
         // The prompts themselves are what classify_prompt refuses; verify.
         assert_eq!(classify_prompt("--mcp-stdio"), None);
         assert_eq!(classify_prompt("--new-window"), None);
@@ -1560,8 +1560,7 @@ mod tests {
         std::env::set_var(ENV_TOKEN, "deadbeef");
         assert!(is_helper_invocation());
         assert_eq!(
-            classify_prompt("Enter passphrase for key '/home/u/.ssh/id_ed25519': ")
-                .as_deref(),
+            classify_prompt("Enter passphrase for key '/home/u/.ssh/id_ed25519': ").as_deref(),
             Some("/home/u/.ssh/id_ed25519"),
         );
     }

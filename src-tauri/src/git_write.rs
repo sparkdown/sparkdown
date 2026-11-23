@@ -1062,8 +1062,7 @@ fn repo_config_key_lists(key: &str, value: &str) -> bool {
     // interactive rebase that runs the sequence/core editor on the
     // repo-controlled todo list. The key itself is harmless; the value is
     // what makes it execute code.
-    let rebase_key = k == "pull.rebase"
-        || (k.starts_with("branch.") && k.ends_with(".rebase"));
+    let rebase_key = k == "pull.rebase" || (k.starts_with("branch.") && k.ends_with(".rebase"));
     if rebase_key && crate::git::rebase_value_is_interactive(value) {
         return true;
     }
@@ -3983,12 +3982,7 @@ mod tests {
         sb.commit_in(&sb.work, "a.txt", "original\n", "add a");
         let marker_clean = sb._dir.path().join("RAN_CLEAN");
         let marker_smudge = sb._dir.path().join("RAN_SMUDGE");
-        let shell = |marker: &Path| {
-            format!(
-                "sh -c 'touch {}; cat'",
-                marker.to_string_lossy()
-            )
-        };
+        let shell = |marker: &Path| format!("sh -c 'touch {}; cat'", marker.to_string_lossy());
         set_config(&sb, "filter.demo.clean", &shell(&marker_clean));
         set_config(&sb, "filter.demo.smudge", &shell(&marker_smudge));
         // The commit above ran the filters when they did not exist yet;

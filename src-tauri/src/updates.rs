@@ -3003,13 +3003,25 @@ mod tests {
         assert!(next_version_floor("0.5.0", "0.4.5", "0.3.0").is_err());
         // At or above the floor passes; the floor rises to the highest of
         // floor, running version and manifest.
-        assert_eq!(next_version_floor("0.5.0", "0.4.5", "0.5.0").unwrap(), "0.5.0");
-        assert_eq!(next_version_floor("0.5.0", "0.4.5", "0.6.0").unwrap(), "0.6.0");
-        assert_eq!(next_version_floor("0.5.0", "0.7.0", "0.6.0").unwrap(), "0.7.0");
+        assert_eq!(
+            next_version_floor("0.5.0", "0.4.5", "0.5.0").unwrap(),
+            "0.5.0"
+        );
+        assert_eq!(
+            next_version_floor("0.5.0", "0.4.5", "0.6.0").unwrap(),
+            "0.6.0"
+        );
+        assert_eq!(
+            next_version_floor("0.5.0", "0.7.0", "0.6.0").unwrap(),
+            "0.7.0"
+        );
         // Fresh install (empty floor): anything is accepted.
         assert_eq!(next_version_floor("", "0.4.5", "0.0.1").unwrap(), "0.4.5");
         assert_eq!(next_version_floor("", "0.4.5", "0.4.6").unwrap(), "0.4.6");
         // An unparseable stored floor is replaced, not used to refuse.
-        assert_eq!(next_version_floor("junk", "0.4.5", "0.4.6").unwrap(), "0.4.6");
+        assert_eq!(
+            next_version_floor("junk", "0.4.5", "0.4.6").unwrap(),
+            "0.4.6"
+        );
     }
 }

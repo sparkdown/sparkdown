@@ -1650,7 +1650,9 @@ mod exec_tests {
         assert_eq!(
             proxy_jump_hops("proxyjump ssh://ops@jump1:2222,jump2,[fe80::1]:22\n"),
             vec![
-                ["-p", "2222", "-l", "ops", "--", "jump1"].map(String::from).to_vec(),
+                ["-p", "2222", "-l", "ops", "--", "jump1"]
+                    .map(String::from)
+                    .to_vec(),
                 ["--", "jump2"].map(String::from).to_vec(),
                 ["-p", "22", "--", "fe80::1"].map(String::from).to_vec(),
             ]
