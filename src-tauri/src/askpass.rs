@@ -387,12 +387,14 @@ fn request<S: Read + Write>(
 // --- Helper (askpass mode of the SparkDown binary) ----------------------------
 
 /// Whether this process was started by ssh as SparkDown's askpass helper.
+///
+/// Both askpass env vars present means helper mode, whatever `argv[1]` is:
+/// `helper_main` / `classify_prompt` then decline anything that is not a
+/// key-passphrase prompt (exit 1). `argv[1]` is the prompt text, which can
+/// come from the server (keyboard-interactive, a ProxyJump host), so a
+/// prompt starting with `--` must not be read as a SparkDown command line.
 pub fn is_helper_invocation() -> bool {
-    std::env::var_os(ENV_IPC).is_some()
-        && std::env::var_os(ENV_TOKEN).is_some()
-        && std::env::args()
-            .nth(1)
-            .is_some_and(|a| !a.starts_with("--"))
+    std::env::var_os(ENV_IPC).is_some() && std::env::var_os(ENV_TOKEN).is_some()
 }
 
 /// Entry point of askpass mode: print the passphrase for argv[1]'s prompt to
@@ -1368,5 +1370,84 @@ mod tests {
         );
         assert!(start.elapsed() < SERVE_TIMEOUT / 2);
         drop(idle);
+    }
+
+    // Guards IPC/TOKEN env vars so other tests are unaffected.
+    struct HelperEnvGuard {
+        ipc: Option<std::ffi::OsString>,
+        token: Option<std::ffi::OsString>,
+    }
+    impl HelperEnvGuard {
+        fn new() -> Self {
+            Self {
+                ipc: std::env::var_os(ENV_IPC),
+                token: std::env::var_os(ENV_TOKEN),
+            }
+        }
+    }
+    impl Drop for HelperEnvGuard {
+        fn drop(&mut self) {
+            match self.ipc.take() {
+                Some(v) => std::env::set_var(ENV_IPC, v),
+                None => std::env::remove_var(ENV_IPC),
+            }
+            match self.token.take() {
+                Some(v) => std::env::set_var(ENV_TOKEN, v),
+                None => std::env::remove_var(ENV_TOKEN),
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(sparkdown_askpass_env)]
+    fn helper_mode_is_entered_for_prompt_starting_with_dashes() {
+        // A server-side keyboard-interactive prompt such as `--mcp-stdio` /
+        // `--new-window` / `--version` reaches the binary as argv[1]. With
+        // the askpass env set, main() must still go to helper_main, which
+        // declines the non-passphrase prompt (exit 1), instead of the CLI /
+        // MCP shim / single-instance code.
+        let _g = HelperEnvGuard::new();
+        std::env::set_var(ENV_IPC, "/tmp/sparkdown-askpass-test.sock");
+        std::env::set_var(ENV_TOKEN, "deadbeef");
+        assert!(is_helper_invocation(), "both env vars present => helper mode");
+        // The prompts themselves are what classify_prompt refuses; verify.
+        assert_eq!(classify_prompt("--mcp-stdio"), None);
+        assert_eq!(classify_prompt("--new-window"), None);
+        assert_eq!(classify_prompt("--version"), None);
+    }
+
+    #[test]
+    #[serial_test::serial(sparkdown_askpass_env)]
+    fn helper_mode_passes_valid_passphrase_prompt_through() {
+        // Valid case: a real ssh key-passphrase prompt still enters helper
+        // mode and is accepted by classify_prompt (so helper_main proceeds
+        // to answer over the private IPC as before).
+        let _g = HelperEnvGuard::new();
+        std::env::set_var(ENV_IPC, "/tmp/sparkdown-askpass-test.sock");
+        std::env::set_var(ENV_TOKEN, "deadbeef");
+        assert!(is_helper_invocation());
+        assert_eq!(
+            classify_prompt("Enter passphrase for key '/home/u/.ssh/id_ed25519': ")
+                .as_deref(),
+            Some("/home/u/.ssh/id_ed25519"),
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(sparkdown_askpass_env)]
+    fn helper_mode_is_not_entered_without_the_askpass_env() {
+        // Compatibility: a normal CLI invocation (no askpass env) is not
+        // treated as a helper invocation, so `--version` / `--help` / the
+        // GUI startup paths are unaffected.
+        let _g = HelperEnvGuard::new();
+        std::env::remove_var(ENV_IPC);
+        std::env::remove_var(ENV_TOKEN);
+        assert!(!is_helper_invocation());
+        std::env::set_var(ENV_IPC, "/tmp/x");
+        std::env::remove_var(ENV_TOKEN);
+        assert!(!is_helper_invocation(), "ipc alone is not enough");
+        std::env::remove_var(ENV_IPC);
+        std::env::set_var(ENV_TOKEN, "tok");
+        assert!(!is_helper_invocation(), "token alone is not enough");
     }
 }
