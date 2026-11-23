@@ -235,7 +235,9 @@ export function classifyPreviewLink(
   if (scheme && scheme[1].length > 1) {
     if (scheme[1].toLowerCase() !== 'file') return { kind: 'ignore' };
     try {
-      path = safeDecode(new URL(href).pathname);
+      // Percent-decoding can re-introduce '..' segments that URL parsing
+      // already collapsed, so always resolve against '/' afterwards.
+      path = resolveAgainst('/', safeDecode(new URL(href).pathname));
     } catch {
       return { kind: 'ignore' };
     }
@@ -244,15 +246,24 @@ export function classifyPreviewLink(
     // Drop ?query / #fragment; decode %20 etc. into a filesystem path.
     path = safeDecode(href.replace(/[?#].*$/, ''));
     if (path === '') return { kind: 'ignore' };
-    const isAbsolute = path.startsWith('/') || /^[a-z]:[\\/]/i.test(path);
-    if (!isAbsolute) {
+    const winDrive = /^([a-z]:)[\\/]/i.exec(path);
+    if (path.startsWith('/')) {
+      // Absolute POSIX path: collapse '.'/'..' anchored at the filesystem
+      // root so no traversal segment survives into isUnderRoot below.
+      path = resolveAgainst('/', path);
+    } else if (winDrive) {
+      // Windows-drive path: collapse against the drive root, preserving the
+      // drive's backslash separator style.
+      const rest = path.slice(winDrive[0].length);
+      path = resolveAgainst(`${winDrive[1]}\\`, rest);
+    } else {
       if (!baseDir) return { kind: 'ignore' };
       path = resolveAgainst(baseDir, path);
     }
   }
   if (!isTextFile(path)) return { kind: 'ignore' };
-  // `resolveAgainst` only stops `..` at the filesystem root, so check the
-  // final path against the open folder.
+  // Every branch above resolved '.'/'..' already; the remaining check is
+  // that the final path lies inside the open folder.
   if (workspaceRoot && !isUnderRoot(path, workspaceRoot)) return { kind: 'ignore' };
   return { kind: 'file', path };
 }

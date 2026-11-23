@@ -128,10 +128,15 @@ export function joinPath(root: string, rel: string): string {
 
 /** True if `path` is `root` itself or a nested path under it. Separator- and
  *  drive-case-insensitive so a Windows tab switch into a subdir doesn't look
- *  like a new root (which would needlessly restart the watcher). */
+ *  like a new root (which would needlessly restart the watcher).
+ *
+ *  A path that still has a `.` or `..` segment is never under the root:
+ *  callers resolve those first. A plain prefix test would say yes for
+ *  `/ws/docs/../../../etc/hosts.conf` under `/ws`. */
 export function isUnderRoot(path: string, root: string): boolean {
   const p = normalizePathForCompare(path);
   const r = normalizePathForCompare(root);
+  if (p.split('/').some((seg) => seg === '.' || seg === '..')) return false;
   if (p === r) return true;
   const prefix = r.endsWith('/') ? r : `${r}/`;
   return p.startsWith(prefix);
