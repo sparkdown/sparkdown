@@ -117,6 +117,19 @@ describe('preview link interception', () => {
     expect(ev.defaultPrevented).toBe(true);
     expect(opened).toEqual([]);
   });
+
+  it("does not open an absolute path that textually starts with the root but '..'-escapes it", async () => {
+    // Open folder /docs: /docs/sub/../../../etc/hosts.conf would pass a
+    // pure string-prefix containment check (it starts with '/docs/'), but
+    // collapses to /etc/hosts.conf which is outside the folder.
+    const { container, opened } = await setup(
+      '[release](/docs/sub/../../../etc/hosts.conf)',
+    );
+    const ev = clickLink(container);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(opened).toEqual([]);
+    expect(openExternalCalls()).toEqual([]);
+  });
   it('with no folder open, opens links only inside the previewed file directory', async () => {
     const inDir = await setup('[n](sub/notes.md)', null);
     clickLink(inDir.container);
@@ -208,6 +221,23 @@ describe('classifyPreviewLink', () => {
     it("ignores '../'-escaping relative paths that leave the workspace", () => {
       expect(
         classifyPreviewLink('../../../../etc/hosts.conf', '/ws/docs', '/ws'),
+      ).toEqual({ kind: 'ignore' });
+    });
+
+    it("ignores an absolute path that textually starts with the root but '..'-escapes it", () => {
+      // A plain string-prefix check would accept this path because it starts with '/ws/', but after collapsing
+      // '..' segments it resolves to /etc/hosts.conf, outside the workspace.
+      expect(
+        classifyPreviewLink('/ws/docs/../../../etc/hosts.conf', '/ws/docs', '/ws'),
+      ).toEqual({ kind: 'ignore' });
+      expect(
+        classifyPreviewLink('/ws/../.config/gh/hosts.yml', '/ws/docs', '/ws'),
+      ).toEqual({ kind: 'ignore' });
+    });
+
+    it("ignores a file:// URL whose percent-decoded path '..'-escapes the workspace", () => {
+      expect(
+        classifyPreviewLink('file:///ws/..%2fetc/hosts.conf', '/ws/docs', '/ws'),
       ).toEqual({ kind: 'ignore' });
     });
 

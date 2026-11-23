@@ -15,4 +15,12 @@ describe('isUnderRoot', () => {
     expect(isUnderRoot('/proj-old/a.md', '/proj')).toBe(false);
     expect(isUnderRoot('/other/a.md', '/proj')).toBe(false);
   });
+
+  it("rejects any input still containing a '.' or '..' segment", () => {
+    // Regression: a string-prefix check would accept this path because it
+    // starts with '/proj/', but the '..' escapes the root.
+    expect(isUnderRoot('/proj/sub/../../etc/hosts', '/proj')).toBe(false);
+    expect(isUnderRoot('/proj/./a.md', '/proj')).toBe(false);
+    expect(isUnderRoot('/proj/..', '/proj')).toBe(false);
+  });
 });
