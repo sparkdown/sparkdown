@@ -672,6 +672,121 @@ pub(crate) fn identity_files(ssh_g: &str, home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Identity files ssh may ask a passphrase for when connecting to `dest`:
+/// the `identityfile` entries of `ssh -G` that exist locally, for the
+/// destination and for every ProxyJump hop (a hop's own ssh asks for its
+/// key through the same askpass ticket). Each askpass ticket is bound to
+/// this list; a prompt naming another key is declined. The result is kept
+/// for [`IDENTITY_CACHE_TTL`] so a burst of remote calls runs `ssh -G` once.
+pub(crate) fn identity_files_for_dest(dest: &[String]) -> Vec<PathBuf> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    type Cache = Mutex<HashMap<Vec<String>, (Instant, Vec<PathBuf>)>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Ok(g) = cache.lock() {
+        if let Some((at, files)) = g.get(dest) {
+            if at.elapsed() < IDENTITY_CACHE_TTL {
+                return files.clone();
+            }
+        }
+    }
+    let home = home_dir();
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut seen_hops = BTreeSet::new();
+    let mut queue = vec![dest.to_vec()];
+    while let Some(args) = queue.pop() {
+        let Ok(out) = crate::proc::command("ssh")
+            .arg("-G")
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+        else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        for key in identity_files(&text, &home) {
+            if key.is_file() && !files.contains(&key) {
+                files.push(key);
+            }
+        }
+        for hop in proxy_jump_hops(&text) {
+            if seen_hops.len() < MAX_JUMP_HOPS && seen_hops.insert(hop.clone()) {
+                queue.push(hop);
+            }
+        }
+    }
+    if let Ok(mut g) = cache.lock() {
+        g.retain(|_, (at, _)| at.elapsed() < IDENTITY_CACHE_TTL);
+        g.insert(dest.to_vec(), (Instant::now(), files.clone()));
+    }
+    files
+}
+
+/// How long [`identity_files_for_dest`] reuses its `ssh -G` answer.
+const IDENTITY_CACHE_TTL: Duration = Duration::from_secs(30);
+/// At most this many ProxyJump hosts are looked up for one destination.
+const MAX_JUMP_HOPS: usize = 8;
+
+/// The `ssh -G` arguments for each host in the `proxyjump` line of an
+/// `ssh -G` output (`[user@]host[:port]` or `ssh://[user@]host[:port]`,
+/// comma separated). Empty for `none` or no line.
+pub(crate) fn proxy_jump_hops(ssh_g: &str) -> Vec<Vec<String>> {
+    let Some(value) = ssh_g.lines().find_map(|l| {
+        let (k, v) = l.trim().split_once(' ')?;
+        k.eq_ignore_ascii_case("proxyjump").then(|| v.trim())
+    }) else {
+        return Vec::new();
+    };
+    if value.eq_ignore_ascii_case("none") {
+        return Vec::new();
+    }
+    value
+        .split(',')
+        .filter_map(|hop| {
+            let hop = hop.trim();
+            let hop = hop.strip_prefix("ssh://").unwrap_or(hop);
+            let (user, host_port) = match hop.rsplit_once('@') {
+                Some((u, h)) => (Some(u), h),
+                None => (None, hop),
+            };
+            // `[v6]:port`, `host:port` or a bare host.
+            let (host, port) = if let Some(rest) = host_port.strip_prefix('[') {
+                let (h, tail) = rest.split_once(']')?;
+                (h, tail.strip_prefix(':'))
+            } else {
+                match host_port.rsplit_once(':') {
+                    Some((h, p)) if !h.contains(':') => (h, Some(p)),
+                    _ => (host_port, None),
+                }
+            };
+            // Only plain names reach ssh's argv (no option-looking hosts).
+            let plain = |s: &str| {
+                !s.is_empty()
+                    && !s.starts_with('-')
+                    && s.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "._-:%".contains(c))
+            };
+            if !plain(host) || user.is_some_and(|u| !plain(u)) {
+                return None;
+            }
+            let mut args = Vec::new();
+            if let Some(p) = port {
+                if p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) {
+                    return None;
+                }
+                args.extend(["-p".to_string(), p.to_string()]);
+            }
+            if let Some(u) = user {
+                args.extend(["-l".to_string(), u.to_string()]);
+            }
+            args.push("--".to_string());
+            args.push(host.to_string());
+            Some(args)
+        })
+        .collect()
+}
+
 /// `SHA256:…` of a `.pub` file's key.
 pub(crate) fn pub_fingerprint(pub_text: &str) -> Option<String> {
     use base64::Engine as _;
@@ -1118,7 +1233,13 @@ fn ssh_exec_command(dest: &[String], sh_arg: &str) -> std::process::Command {
     // off and only publickey is tried. Without a broker, BatchMode as before.
     match crate::askpass::current() {
         Some(broker) => {
-            cmd.envs(broker.ssh_env());
+            // Bind the ticket to the identity files ssh would try for this
+            // destination and its ProxyJump hops (`ssh -G`, files that exist
+            // locally). The broker declines a prompt that names another key:
+            // a ProxyJump / ProxyCommand ssh inherits this env but not the
+            // `-o` options below, and its prompt text can come from a server.
+            let allowed = identity_files_for_dest(dest);
+            cmd.envs(broker.ssh_env(&allowed));
             cmd.args([
                 "-o",
                 "BatchMode=no",
@@ -1506,6 +1627,28 @@ pub fn classify_remote_watch_delta(prev: &str, next: &str) -> Option<&'static st
 #[cfg(all(test, unix))]
 mod exec_tests {
     use super::*;
+
+    #[test]
+    fn proxy_jump_hops_become_ssh_g_arguments() {
+        assert!(proxy_jump_hops("hostname h\nproxyjump none\n").is_empty());
+        assert!(proxy_jump_hops("hostname h\n").is_empty());
+        assert_eq!(
+            proxy_jump_hops("hostname h\nproxyjump bastion\n"),
+            vec![vec!["--".to_string(), "bastion".to_string()]]
+        );
+        assert_eq!(
+            proxy_jump_hops("proxyjump ssh://ops@jump1:2222,jump2,[fe80::1]:22\n"),
+            vec![
+                ["-p", "2222", "-l", "ops", "--", "jump1"].map(String::from).to_vec(),
+                ["--", "jump2"].map(String::from).to_vec(),
+                ["-p", "22", "--", "fe80::1"].map(String::from).to_vec(),
+            ]
+        );
+        // Option-looking or odd hosts are left out rather than passed on.
+        assert!(proxy_jump_hops("proxyjump -oProxyCommand=x\n").is_empty());
+        assert!(proxy_jump_hops("proxyjump a b\n").is_empty());
+        assert!(proxy_jump_hops("proxyjump host:12x\n").is_empty());
+    }
 
     /// A child that never reads stdin (a half-open link) with a payload far
     /// larger than any pipe/channel buffer: the deadline must still fire.

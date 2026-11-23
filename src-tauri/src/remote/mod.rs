@@ -502,6 +502,9 @@ pub(crate) fn passphrase_outcome_message(
     if !ssh::is_key_refusal(host, &err) {
         return err;
     }
+    if let Some(key) = &outcome.refused_key {
+        return refused_key_message(host, key);
+    }
     if outcome.answered {
         return format!(
             "Not connected to '{host}': the key passphrase was wrong, or the server did not accept the key."
@@ -516,6 +519,15 @@ pub(crate) fn passphrase_outcome_message(
         }
     }
     ssh::key_rejected_message(host, &tried())
+}
+
+/// ssh asked for the passphrase of a key that is not one of the key files it
+/// uses for this host, so SparkDown did not answer. Names the key and points
+/// to the terminal.
+fn refused_key_message(host: &str, key: &str) -> String {
+    format!(
+        "Not connected to '{host}': ssh asked for the passphrase of {key}, which is not one of the key files ssh lists for this host, so SparkDown did not answer. Run the command in the terminal instead: `ssh {host}`, enter the passphrase there (or `ssh-add {key}` first), then connect again."
+    )
 }
 
 /// Tear down the active session synchronously. Serialized against connect via
@@ -2795,7 +2807,7 @@ Host *.example.com
             refused.clone(),
             Outcome {
                 cancelled: true,
-                ..ready
+                ..ready.clone()
             },
             locked,
             keys,
@@ -2806,7 +2818,7 @@ Host *.example.com
             refused.clone(),
             Outcome {
                 answered: true,
-                ..ready
+                ..ready.clone()
             },
             locked,
             keys,
@@ -2814,7 +2826,7 @@ Host *.example.com
         assert!(m.contains("passphrase was wrong"), "{m}");
         // #50: askpass was up and never asked: the server rejected the key
         // outright (a locked key is NOT an agent problem then).
-        let m = passphrase_outcome_message("h", refused.clone(), ready, locked, keys);
+        let m = passphrase_outcome_message("h", refused.clone(), ready.clone(), locked, keys);
         assert!(!m.contains("SSH agent"), "{m}");
         assert!(m.contains("the server rejected your SSH key"), "{m}");
         assert!(
@@ -2830,7 +2842,7 @@ Host *.example.com
             refused.clone(),
             Outcome {
                 refused: true,
-                ..ready
+                ..ready.clone()
             },
             locked,
             keys,
@@ -2840,8 +2852,24 @@ Host *.example.com
         let m = passphrase_outcome_message("h", refused.clone(), Outcome::default(), || None, keys);
         assert!(m.contains("the server rejected your SSH key"), "{m}");
         // Nothing to offer.
-        let m = passphrase_outcome_message("h", refused, ready, || None, Vec::new);
+        let m = passphrase_outcome_message("h", refused.clone(), ready.clone(), || None, Vec::new);
         assert!(m.contains("no key was found"), "{m}");
+        // A passphrase prompt for a key outside the host's key files: name
+        // the key and point to the terminal.
+        let m = passphrase_outcome_message(
+            "h",
+            refused,
+            Outcome {
+                refused: true,
+                refused_key: Some("/home/u/.ssh/other_key".into()),
+                ..ready.clone()
+            },
+            locked,
+            keys,
+        );
+        assert!(m.contains("/home/u/.ssh/other_key"), "{m}");
+        assert!(m.contains("Run the command in the terminal"), "{m}");
+        assert!(m.contains("'h'"), "{m}");
         // Other failures pass through untouched, without probing.
         let m = passphrase_outcome_message(
             "h",

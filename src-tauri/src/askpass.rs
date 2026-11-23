@@ -43,7 +43,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -328,16 +328,16 @@ fn serve_request<S: Read + Write>(stream: &mut S, broker: &Weak<Broker>) {
                 return None;
             }
             // A ticket is valid for one session. `take_ticket` validates the
-            // ticket and enforces the attempt cap.
-            if !b.take_ticket(token) {
-                return None;
-            }
+            // ticket, enforces the attempt cap, and returns the allowlist of
+            // local identity files its ssh child may ask for.
+            let allowed = b.take_ticket(token)?;
             drop(b);
             let len = len.parse::<usize>().ok()?;
-            read_exact_vec(&mut incoming, len)
+            let prompt = read_exact_vec(&mut incoming, len)?;
+            Some((allowed, prompt))
         })()
     };
-    let Some(prompt) = request else {
+    let Some((allowed, prompt)) = request else {
         return reply_no(stream);
     };
     let Ok(prompt) = std::str::from_utf8(&prompt) else {
@@ -351,6 +351,20 @@ fn serve_request<S: Read + Write>(stream: &mut S, broker: &Weak<Broker>) {
         b.refused.store(true, std::sync::atomic::Ordering::SeqCst);
         return reply_no(stream);
     };
+    // Require the prompt-named path to be one of the identity files this
+    // ssh child was authorised for at mint time. The prompt text is
+    // server-chosen (sshd sets it for SSH_MSG_USERAUTH_INFO_REQUEST), so
+    // this is the only place the request is tied back to a local key file.
+    // Canonicalising both sides defeats `..`/symlink/whitespace tricks and
+    // requires the file to exist locally.
+    let Some(requested) = canonical_key(Path::new(&key)) else {
+        b.note_refused_key(&key);
+        return reply_no(stream);
+    };
+    if !allowed.contains(&requested) {
+        b.note_refused_key(&key);
+        return reply_no(stream);
+    }
     // Connections are served side by side; the passphrase prompt is shown
     // for one at a time.
     let answer = {
@@ -446,8 +460,28 @@ pub type Provider = Arc<dyn Fn(&str, bool) -> Option<Zeroizing<String>> + Send +
 /// time it was handed out (inside the retry window a re-ask means "wrong").
 type CachedPass = (Zeroizing<String>, Option<Instant>);
 
+/// A minted ticket's state: when it was issued, how many times it was used,
+/// and the canonicalised set of local identity files its ssh child may ask
+/// for. An empty list means the ticket accepts no key path; callers pass
+/// the destination's identity files.
+struct Ticket {
+    issued: Instant,
+    attempts: usize,
+    /// Canonicalised paths of the identity files ssh would try for this
+    /// destination. Only files that existed locally at mint time are kept;
+    /// anything else is dropped.
+    allowed_keys: Vec<PathBuf>,
+}
+
+/// Canonicalise `p` for comparison, following symlinks. Returns `None` when
+/// the file does not exist locally: a path the local filesystem cannot
+/// resolve is never an allowed key.
+fn canonical_key(p: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(p).ok()
+}
+
 /// What happened with askpass during one connect attempt (#50).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
     /// An askpass endpoint was up, so ssh could ask for a key passphrase.
     pub ready: bool,
@@ -457,6 +491,9 @@ pub struct Outcome {
     pub answered: bool,
     /// ssh's askpass request was refused (not a key passphrase prompt).
     pub refused: bool,
+    /// The key file a refused request named, when it was a passphrase
+    /// prompt for a key that is not one of the destination's identity files.
+    pub refused_key: Option<String>,
 }
 
 /// Keeps the broker answering helper requests while an ssh call runs; see
@@ -482,11 +519,14 @@ pub struct Broker {
     provider: Provider,
     cache: Mutex<HashMap<String, CachedPass>>,
     /// Outstanding tickets minted by `ssh_env` (visible in the environment of
-    /// exactly one ssh child), with (mint time, attempt count). A ticket stays
-    /// valid for the ssh child's lifetime with a small attempt cap, so a
-    /// wrong-passphrase retry works. Expired entries and those over the cap
-    /// are discarded.
-    tickets: Mutex<HashMap<String, (Instant, usize)>>,
+    /// exactly one ssh child), with (mint time, attempt count, allowed key
+    /// paths). A ticket stays valid for the ssh child's lifetime with a small
+    /// attempt cap, so a wrong-passphrase retry works. Expired entries and
+    /// those over the cap are discarded. The allowed-key list binds the
+    /// ticket to the destination's local identity files: a request whose
+    /// prompt names a different key is declined, so a prompt from a jump
+    /// host's ssh cannot get the passphrase of an unrelated key.
+    tickets: Mutex<HashMap<String, Ticket>>,
     /// Number of SparkDown-started ssh calls running now. The broker refuses
     /// every helper request while this is zero. A counter lets overlapping
     /// calls open and close their windows independently.
@@ -503,6 +543,8 @@ pub struct Broker {
     answered: std::sync::atomic::AtomicBool,
     /// A helper request with a valid token was refused (not a key prompt).
     refused: std::sync::atomic::AtomicBool,
+    /// The key a refused passphrase prompt named (see `Outcome::refused_key`).
+    refused_key: Mutex<Option<String>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(unix)]
     dir: PathBuf,
@@ -548,6 +590,7 @@ impl Broker {
             cancelled: std::sync::atomic::AtomicBool::new(false),
             answered: std::sync::atomic::AtomicBool::new(false),
             refused: std::sync::atomic::AtomicBool::new(false),
+            refused_key: Mutex::new(None),
             stop: stop.clone(),
             #[cfg(unix)]
             dir,
@@ -601,9 +644,17 @@ impl Broker {
     ///
     /// Mints a fresh ticket for this ssh invocation and stores it in the
     /// broker's accept-set. The ticket is valid for one session with a
-    /// small attempt cap.
-    pub fn ssh_env(&self) -> Vec<(&'static str, std::ffi::OsString)> {
-        let ticket = self.mint_ticket();
+    /// small attempt cap, and is bound to `allowed_keys` — the local
+    /// identity files ssh would try for this destination (the list the app
+    /// builds with `identity_files_for_dest`). A request whose prompt names
+    /// any other path is declined: an ssh started by ProxyJump/ProxyCommand
+    /// inherits the ticket but not SparkDown's `-o` options, and its prompt
+    /// text can come from a server.
+    pub fn ssh_env(
+        &self,
+        allowed_keys: &[PathBuf],
+    ) -> Vec<(&'static str, std::ffi::OsString)> {
+        let ticket = self.mint_ticket(allowed_keys);
         let mut env = vec![
             ("SSH_ASKPASS", self.helper_exe.clone().into_os_string()),
             ("SSH_ASKPASS_REQUIRE", "force".into()),
@@ -621,21 +672,31 @@ impl Broker {
         env
     }
 
-    /// Mint a fresh ticket and record it in the accept-set with zero attempts.
+    /// Mint a fresh ticket and record it in the accept-set with zero
+    /// attempts and the list of key paths this ssh child is allowed to ask
+    /// for (the destination's local identity files, canonicalised).
     ///
     /// Also GCs expired entries and enforces `MAX_TICKETS` by dropping the
     /// oldest.
-    fn mint_ticket(&self) -> String {
+    fn mint_ticket(&self, allowed_keys: &[PathBuf]) -> String {
+        // Canonicalise once at mint time so later comparisons are cheap and
+        // `..`, extra slashes or a symlink name the same file. Paths that do not exist locally are
+        // dropped: an identity file that is not on this machine cannot be
+        // the subject of a legitimate key-unlock request.
+        let allowed: Vec<PathBuf> = allowed_keys
+            .iter()
+            .filter_map(|p| canonical_key(p))
+            .collect();
         let fresh = new_token();
         if let Ok(mut g) = self.tickets.lock() {
             let now = Instant::now();
-            g.retain(|_, (t, _)| now.duration_since(*t) < TICKET_TTL);
+            g.retain(|_, t| now.duration_since(t.issued) < TICKET_TTL);
             while g.len() >= MAX_TICKETS {
                 // Drop the oldest entry; HashMap has no ordering so pick
                 // the min by mint time explicitly.
                 let oldest = g
                     .iter()
-                    .min_by_key(|(_, (t, _))| *t)
+                    .min_by_key(|(_, t)| t.issued)
                     .map(|(k, _)| k.clone());
                 match oldest {
                     Some(k) => {
@@ -644,42 +705,43 @@ impl Broker {
                     None => break,
                 }
             }
-            g.insert(fresh.clone(), (now, 0));
+            g.insert(
+                fresh.clone(),
+                Ticket {
+                    issued: now,
+                    attempts: 0,
+                    allowed_keys: allowed,
+                },
+            );
         }
         fresh
     }
 
     /// Check and increment the attempt count for `got` if it is a known,
-    /// unexpired ticket under the attempt cap.
+    /// unexpired ticket under the attempt cap, and return the allowed-key
+    /// list bound to it.
     ///
     /// Comparison is constant-time against each candidate (the live set is
-    /// at most `MAX_TICKETS`, with ~typical size 1–2). Returns true and
-    /// increments the attempt count on match; removes the ticket when the cap
-    /// is reached. A given ssh child's ticket stays valid for retry (OpenSSH
-    /// invokes the helper again after a wrong passphrase).
-    fn take_ticket(&self, got: &str) -> bool {
-        let Ok(mut g) = self.tickets.lock() else {
-            return false;
-        };
+    /// at most `MAX_TICKETS`, with ~typical size 1–2). Returns the allowed
+    /// keys and increments the attempt count on match; removes the ticket
+    /// when the cap is reached. A given ssh child's ticket stays valid for
+    /// retry (OpenSSH invokes the helper again after a wrong passphrase).
+    fn take_ticket(&self, got: &str) -> Option<Vec<PathBuf>> {
+        let mut g = self.tickets.lock().ok()?;
         let now = Instant::now();
         // Expire first so a stale match cannot succeed.
-        g.retain(|_, (t, _)| now.duration_since(*t) < TICKET_TTL);
+        g.retain(|_, t| now.duration_since(t.issued) < TICKET_TTL);
         let hit = g
             .keys()
             .find(|k| tokens_match(k.as_bytes(), got.as_bytes()))
-            .cloned();
-        if let Some(k) = hit {
-            let (mint_time, attempts) = g.get(&k).copied().unwrap();
-            let new_attempts = attempts + 1;
-            if new_attempts >= MAX_TICKET_ATTEMPTS {
-                g.remove(&k);
-            } else {
-                g.insert(k, (mint_time, new_attempts));
-            }
-            true
-        } else {
-            false
+            .cloned()?;
+        let entry = g.get_mut(&hit)?;
+        entry.attempts += 1;
+        let allowed = entry.allowed_keys.clone();
+        if entry.attempts >= MAX_TICKET_ATTEMPTS {
+            g.remove(&hit);
         }
+        Some(allowed)
     }
 
     /// Open a window in which the broker answers helper requests: hold the
@@ -740,7 +802,22 @@ impl Broker {
             cancelled: self.take_cancelled(),
             answered: self.take_answered(),
             refused: self.take_refused(),
+            refused_key: self
+                .refused_key
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take(),
         }
+    }
+
+    /// A passphrase prompt named `key`, which this ssh call may not ask for.
+    /// Remembered for the connect error; the text is shown to the user, so
+    /// control characters are dropped and the length capped.
+    fn note_refused_key(&self, key: &str) {
+        self.refused
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let shown: String = key.chars().filter(|c| !c.is_control()).take(200).collect();
+        *self.refused_key.lock().unwrap_or_else(|e| e.into_inner()) = Some(shown);
     }
 
     fn passphrase_for(&self, key: &str) -> Option<Zeroizing<String>> {
@@ -1050,21 +1127,40 @@ mod tests {
         std::os::unix::net::UnixStream::connect(&b.endpoint).unwrap()
     }
 
+    /// A real file on disk the broker can canonicalise as an allowed key,
+    /// and the OpenSSH-style prompt that names it. Tests must keep the
+    /// returned `TempDir` alive for as long as the file must exist.
+    #[cfg(unix)]
+    fn test_key() -> (tempfile::TempDir, PathBuf, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("id");
+        std::fs::write(&key, b"not-a-real-key").unwrap();
+        let canon = std::fs::canonicalize(&key).unwrap();
+        let prompt = format!("Enter passphrase for key '{}': ", canon.display());
+        (dir, canon, prompt)
+    }
+
+    /// Mint a ticket bound to a single on-disk identity file.
+    #[cfg(unix)]
+    fn mint_for(b: &Broker, key: &Path) -> String {
+        b.mint_ticket(&[key.to_path_buf()])
+    }
+
     #[cfg(unix)]
     #[test]
     fn broker_answers_with_the_right_token_only() {
         let (b, asked) = test_broker(Some("s3cret pass"));
-        let prompt = "Enter passphrase for key '/k/id': ";
-        let got = request(&mut connect(&b), &b.mint_ticket(), prompt).unwrap();
+        let (_tmp, key, prompt) = test_key();
+        let got = request(&mut connect(&b), &mint_for(&b, &key), &prompt).unwrap();
         assert_eq!(&got[..], b"s3cret pass");
-        assert_eq!(*asked.lock().unwrap(), vec!["/k/id".to_string()]);
+        assert_eq!(*asked.lock().unwrap(), vec![key.display().to_string()]);
         // Wrong token: refused, and the user is not asked.
         let bad = "0".repeat(64);
-        assert!(request(&mut connect(&b), &bad, prompt).is_none());
-        assert!(request(&mut connect(&b), "", prompt).is_none());
+        assert!(request(&mut connect(&b), &bad, &prompt).is_none());
+        assert!(request(&mut connect(&b), "", &prompt).is_none());
         // The static session token (used only to name the private endpoint
         // dir) must not itself be accepted as a wire token.
-        assert!(request(&mut connect(&b), &b.token, prompt).is_none());
+        assert!(request(&mut connect(&b), &b.token, &prompt).is_none());
         assert_eq!(asked.lock().unwrap().len(), 1);
     }
 
@@ -1072,12 +1168,13 @@ mod tests {
     #[test]
     fn broker_refuses_non_passphrase_prompts_even_from_a_valid_helper() {
         let (b, asked) = test_broker(Some("pw"));
+        let (_tmp, key, _) = test_key();
         for prompt in [
             "me@host's password: ",
             "Are you sure you want to continue connecting (yes/no)? ",
         ] {
             assert!(
-                request(&mut connect(&b), &b.mint_ticket(), prompt).is_none(),
+                request(&mut connect(&b), &mint_for(&b, &key), prompt).is_none(),
                 "{prompt}"
             );
         }
@@ -1090,22 +1187,68 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn broker_refuses_a_key_path_not_in_the_ticket_allowlist() {
+        // A key-passphrase prompt can name any path (the text may come from
+        // a jump host's server). The broker must refuse a path
+        // outside the ticket's allowed identity files, even with a valid
+        // ticket and inside a pending window.
+        let (b, asked) = test_broker(Some("pw"));
+        let (_tmp_allowed, allowed_key, _) = test_key();
+        let (_tmp_other, _other_key, other_prompt) = test_key();
+        let ticket = mint_for(&b, &allowed_key);
+        assert!(
+            request(&mut connect(&b), &ticket, &other_prompt).is_none(),
+            "a request for a key the ticket is not bound to must be refused"
+        );
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "the user is never asked for an un-allowlisted key"
+        );
+        // Refusal is recorded so the connect error can mention it.
+        let o = b.take_outcome();
+        assert!(o.refused, "{o:?}");
+        assert_eq!(
+            o.refused_key.as_deref(),
+            Some(_other_key.display().to_string().as_str())
+        );
+        assert!(b.take_outcome().refused_key.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broker_refuses_a_path_that_does_not_exist_locally() {
+        // A ticket can only bind to files that are on this machine. A
+        // prompt that names a path which does not exist cannot name a
+        // legitimate local key, so it is refused.
+        let (b, _) = test_broker(Some("pw"));
+        let (_tmp, key, _) = test_key();
+        let ticket = mint_for(&b, &key);
+        let nowhere = "Enter passphrase for key '/does-not-exist-on-this-host/id': ";
+        assert!(
+            request(&mut connect(&b), &ticket, nowhere).is_none(),
+            "a request whose named path does not exist must be refused"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn broker_caches_for_the_session_but_re_asks_after_a_wrong_passphrase() {
         let (b, asked) = test_broker(Some("pw"));
-        let prompt = "Enter passphrase for key '/k/id': ";
-        request(&mut connect(&b), &b.mint_ticket(), prompt).unwrap();
+        let (_tmp, key, prompt) = test_key();
+        let key_str = key.display().to_string();
+        request(&mut connect(&b), &mint_for(&b, &key), &prompt).unwrap();
         // An immediate repeat is ssh retrying: ask the user again.
-        request(&mut connect(&b), &b.mint_ticket(), prompt).unwrap();
+        request(&mut connect(&b), &mint_for(&b, &key), &prompt).unwrap();
         // #52: the second prompt is flagged so the dialog says "incorrect".
         assert_eq!(
             *asked.lock().unwrap(),
-            vec!["/k/id".to_string(), "/k/id (retry)".to_string()]
+            vec![key_str.clone(), format!("{key_str} (retry)")]
         );
         // Later (a reconnect), the cached passphrase answers silently.
         if let Ok(mut c) = b.cache.lock() {
-            c.get_mut("/k/id").unwrap().1 = None;
+            c.get_mut(&key_str).unwrap().1 = None;
         }
-        request(&mut connect(&b), &b.mint_ticket(), prompt).unwrap();
+        request(&mut connect(&b), &mint_for(&b, &key), &prompt).unwrap();
         assert_eq!(asked.lock().unwrap().len(), 2);
     }
 
@@ -1117,16 +1260,12 @@ mod tests {
         // would never be dropped either.
         let (b, _) = test_broker_closed(None);
         let open = b.pending_guard();
+        let (_tmp, key, prompt) = test_key();
         let dir_mode = std::fs::metadata(&b.dir).unwrap().permissions().mode();
         let sock_mode = std::fs::metadata(&b.endpoint).unwrap().permissions().mode();
         assert_eq!(dir_mode & 0o777, 0o700);
         assert_eq!(sock_mode & 0o777, 0o600);
-        assert!(request(
-            &mut connect(&b),
-            &b.mint_ticket(),
-            "Enter passphrase for /k: "
-        )
-        .is_none());
+        assert!(request(&mut connect(&b), &mint_for(&b, &key), &prompt).is_none());
         assert!(b.take_cancelled());
         assert!(!b.take_cancelled());
         let dir = b.dir.clone();
@@ -1144,8 +1283,8 @@ mod tests {
     #[test]
     fn ssh_env_mints_a_fresh_per_connection_ticket() {
         let (b, _) = test_broker(Some("never-in-env"));
-        let env1 = b.ssh_env();
-        let env2 = b.ssh_env();
+        let env1 = b.ssh_env(&[]);
+        let env2 = b.ssh_env(&[]);
         // Each spawn gets a distinct ticket.
         let n1 = env1
             .iter()
@@ -1168,7 +1307,7 @@ mod tests {
     #[test]
     fn ssh_env_carries_no_passphrase() {
         let (b, _) = test_broker(Some("never-in-env"));
-        let env = b.ssh_env();
+        let env = b.ssh_env(&[]);
         let keys: Vec<_> = env.iter().map(|(k, _)| *k).collect();
         assert_eq!(
             keys[..4],
@@ -1189,12 +1328,12 @@ mod tests {
         // invokes the askpass helper again in the same process after a wrong
         // passphrase; the second request must succeed with the same ticket.
         let (b, _) = test_broker(Some("pw"));
-        let ticket = b.mint_ticket();
-        let prompt = "Enter passphrase for key '/k/id': ";
+        let (_tmp, key, prompt) = test_key();
+        let ticket = mint_for(&b, &key);
         // First request succeeds.
-        request(&mut connect(&b), &ticket, prompt).unwrap();
+        request(&mut connect(&b), &ticket, &prompt).unwrap();
         // Second request with the same ticket also succeeds (retry).
-        request(&mut connect(&b), &ticket, prompt).unwrap();
+        request(&mut connect(&b), &ticket, &prompt).unwrap();
     }
 
     #[cfg(unix)]
@@ -1202,18 +1341,18 @@ mod tests {
     fn ticket_is_refused_after_attempt_cap() {
         // A ticket is accepted at most MAX_TICKET_ATTEMPTS times.
         let (b, _) = test_broker(Some("pw"));
-        let ticket = b.mint_ticket();
-        let prompt = "Enter passphrase for key '/k/id': ";
+        let (_tmp, key, prompt) = test_key();
+        let ticket = mint_for(&b, &key);
         // Use up the cap.
         for _ in 0..MAX_TICKET_ATTEMPTS {
             assert!(
-                request(&mut connect(&b), &ticket, prompt).is_some(),
+                request(&mut connect(&b), &ticket, &prompt).is_some(),
                 "within cap"
             );
         }
         // The next attempt is refused.
         assert!(
-            request(&mut connect(&b), &ticket, prompt).is_none(),
+            request(&mut connect(&b), &ticket, &prompt).is_none(),
             "over cap"
         );
     }
@@ -1222,14 +1361,18 @@ mod tests {
     #[test]
     fn an_expired_ticket_is_refused() {
         let (b, _) = test_broker(Some("pw"));
-        let prompt = "Enter passphrase for key '/k/id': ";
-        let ticket = b.mint_ticket();
+        let (_tmp, key, prompt) = test_key();
+        let ticket = mint_for(&b, &key);
         let Some(old) = Instant::now().checked_sub(TICKET_TTL + Duration::from_secs(1)) else {
             return;
         };
-        b.tickets.lock().unwrap().insert(ticket.clone(), (old, 0));
+        {
+            let mut g = b.tickets.lock().unwrap();
+            let entry = g.get_mut(&ticket).unwrap();
+            entry.issued = old;
+        }
         assert!(
-            request(&mut connect(&b), &ticket, prompt).is_none(),
+            request(&mut connect(&b), &ticket, &prompt).is_none(),
             "a ticket older than the lifetime must be refused"
         );
         assert!(b.tickets.lock().unwrap().get(&ticket).is_none());
@@ -1239,21 +1382,24 @@ mod tests {
     #[test]
     fn minting_past_the_cap_drops_the_oldest_ticket() {
         let (b, _) = test_broker(Some("pw"));
-        let prompt = "Enter passphrase for key '/k/id': ";
-        let first = b.mint_ticket();
+        let (_tmp, key, prompt) = test_key();
+        let first = mint_for(&b, &key);
         if let Some(t) = Instant::now().checked_sub(Duration::from_secs(10)) {
-            b.tickets.lock().unwrap().insert(first.clone(), (t, 0));
+            let mut g = b.tickets.lock().unwrap();
+            if let Some(entry) = g.get_mut(&first) {
+                entry.issued = t;
+            }
         }
         let mut last = String::new();
         for _ in 0..MAX_TICKETS {
-            last = b.mint_ticket();
+            last = mint_for(&b, &key);
         }
         assert!(b.tickets.lock().unwrap().len() <= MAX_TICKETS);
         assert!(
-            request(&mut connect(&b), &first, prompt).is_none(),
+            request(&mut connect(&b), &first, &prompt).is_none(),
             "the oldest ticket is dropped once the cap is reached"
         );
-        assert!(request(&mut connect(&b), &last, prompt).is_some());
+        assert!(request(&mut connect(&b), &last, &prompt).is_some());
     }
 
     #[cfg(unix)]
@@ -1279,13 +1425,13 @@ mod tests {
     #[test]
     fn listener_answers_no_when_the_peer_check_refuses() {
         let (b, _) = test_broker(Some("pw"));
-        let prompt = "Enter passphrase for key '/k/id': ";
-        let ticket = b.mint_ticket();
-        assert!(request(&mut connect(&b), &ticket, prompt).is_some());
+        let (_tmp, key, prompt) = test_key();
+        let ticket = mint_for(&b, &key);
+        assert!(request(&mut connect(&b), &ticket, &prompt).is_some());
         b.refuse_peers
             .store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(
-            request(&mut connect(&b), &ticket, prompt).is_none(),
+            request(&mut connect(&b), &ticket, &prompt).is_none(),
             "a refused peer must not get an answer even with a valid ticket"
         );
     }
@@ -1294,20 +1440,20 @@ mod tests {
     #[test]
     fn requests_are_refused_unless_an_ssh_call_is_running() {
         let (b, asked) = test_broker_closed(Some("pw"));
-        let prompt = "Enter passphrase for key '/k/id': ";
-        let ticket = b.mint_ticket();
+        let (_tmp, key, prompt) = test_key();
+        let ticket = mint_for(&b, &key);
         assert!(
-            request(&mut connect(&b), &ticket, prompt).is_none(),
+            request(&mut connect(&b), &ticket, &prompt).is_none(),
             "no ssh call is running"
         );
         assert!(asked.lock().unwrap().is_empty(), "the user is not asked");
         let guard = b.pending_guard();
-        let ticket = b.mint_ticket();
-        assert!(request(&mut connect(&b), &ticket, prompt).is_some());
+        let ticket = mint_for(&b, &key);
+        assert!(request(&mut connect(&b), &ticket, &prompt).is_some());
         drop(guard);
-        let ticket = b.mint_ticket();
+        let ticket = mint_for(&b, &key);
         assert!(
-            request(&mut connect(&b), &ticket, prompt).is_none(),
+            request(&mut connect(&b), &ticket, &prompt).is_none(),
             "the window closed with the call"
         );
     }
@@ -1316,18 +1462,18 @@ mod tests {
     #[test]
     fn the_last_ssh_call_to_end_drops_every_ticket() {
         let (b, _) = test_broker_closed(Some("pw"));
-        let prompt = "Enter passphrase for key '/k/id': ";
+        let (_tmp, key, prompt) = test_key();
         let first = b.pending_guard();
         let second = b.pending_guard();
-        let ticket = b.mint_ticket();
+        let ticket = mint_for(&b, &key);
         drop(first);
         // One call is still running: its ticket still works.
-        assert!(request(&mut connect(&b), &ticket, prompt).is_some());
+        assert!(request(&mut connect(&b), &ticket, &prompt).is_some());
         drop(second);
         // Re-open a window: the ticket from before is gone.
         let _again = b.pending_guard();
         assert!(
-            request(&mut connect(&b), &ticket, prompt).is_none(),
+            request(&mut connect(&b), &ticket, &prompt).is_none(),
             "a ticket does not outlive the calls it was minted for"
         );
     }
@@ -1336,12 +1482,12 @@ mod tests {
     #[test]
     fn a_peer_that_stops_talking_does_not_block_the_next_request() {
         let (b, _) = test_broker(Some("pw"));
-        let prompt = "Enter passphrase for key '/k/id': ";
+        let (_tmp, key, prompt) = test_key();
         // Connects, sends half a header, then goes quiet.
         let mut idle = connect(&b);
         idle.write_all(b"SDASK1 ").unwrap();
         let start = Instant::now();
-        let got = request(&mut connect(&b), &b.mint_ticket(), prompt);
+        let got = request(&mut connect(&b), &mint_for(&b, &key), &prompt);
         assert!(got.is_some(), "the next request is served");
         assert!(
             start.elapsed() < SERVE_TIMEOUT / 2,
