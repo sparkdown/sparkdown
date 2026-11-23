@@ -1,5 +1,5 @@
 import { api, type GitActionError, type GitActionResult, type GitBranchStatus, type GitChange, type RepoCommandKey } from './api';
-import { escapeAttr, escapeHtml } from './utils';
+import { escapeAttr, escapeReviewText, hasUnicodeControls } from './utils';
 import type { GitAction, GitReporter } from './git-output';
 import { fetchedAgo } from './git-fetch';
 import { confirmRepoCommandsFor } from './git-repo-commands';
@@ -295,10 +295,19 @@ export class GitActions {
 
   private renderFiles(): void {
     this.dom.files.innerHTML = this.changes
-      .map(
-        (c) =>
-          `<label class="git-file" title="${escapeHtml(c.path)}"><input type="checkbox" data-path="${escapeAttr(c.path)}"${this.excluded.has(c.path) ? '' : ' checked'} /> <span>${escapeHtml(c.path)}</span></label>`,
-      )
+      .map((c) => {
+        // `data-path` must stay the real repo-relative path so the checkbox
+        // acts on the file git reported; the visible name and tooltip are
+        // rendered through `escapeReviewText` so a U+202E in the name cannot
+        // show one extension while the checkbox commits another. Flag the
+        // row with `change-row-bidi` when the name contains bidi/invisible
+        // characters, matching the other review surfaces.
+        const bidi = hasUnicodeControls(c.path) ? ' change-row-bidi' : '';
+        const shown = escapeReviewText(c.path);
+        return (
+          `<label class="git-file${bidi}" title="${shown}"><input type="checkbox" data-path="${escapeAttr(c.path)}"${this.excluded.has(c.path) ? '' : ' checked'} /> <span>${shown}</span></label>`
+        );
+      })
       .join('');
   }
 
