@@ -908,9 +908,12 @@ fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    // Per-user `%LOCALAPPDATA%\\Temp` already has a per-user ACL that the new
-    // directory inherits; nothing else to do.
-    std::fs::create_dir(dir)
+    // Windows: `GetTempPath()` can be a shared location (machine-wide
+    // `TMP`/`TEMP`), so don't rely on the parent's inherited ACL. Create the
+    // directory (fails if the name exists, like the Unix 0700 create) and
+    // give it a DACL granting only the current user and SYSTEM.
+    std::fs::create_dir(dir)?;
+    crate::context::windows_acl::set_owner_only_dacl(dir, true)
 }
 
 /// Ensure the base dir exists, is a real directory (not a symlink) we own,
@@ -952,7 +955,10 @@ fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)
+    // Windows twin of `create_private_dir` above, but idempotent: an
+    // existing directory is accepted once its owner is checked and its DACL
+    // reapplied. See the Unix block for the behaviour this mirrors.
+    crate::context::ensure_owned_dir(dir)
 }
 
 /// A private per-call working directory. Tries `<root>/sparkdown/…` first;
@@ -2143,15 +2149,17 @@ pub(crate) fn secret_matches(got: Option<&str>, want: &str) -> bool {
     diff == 0
 }
 
-/// The current process user's SID as a string (`S-1-5-21-...`), read from
-/// the process token (`TokenUser`), not from the environment. Visible to
-/// the shim module as well so it can verify the external-agent pipe's
-/// server end.
+/// SID string from the current process token for `class`. `extract` reads
+/// the SID pointer from the `GetTokenInformation` buffer (`TOKEN_USER` or
+/// `TOKEN_OWNER`).
 #[cfg(windows)]
-pub(crate) fn current_user_sid() -> std::io::Result<String> {
+fn sid_string_from_current_token<T>(
+    class: windows_sys::Win32::Security::TOKEN_INFORMATION_CLASS,
+    extract: impl FnOnce(*const T) -> windows_sys::Win32::Security::PSID,
+) -> std::io::Result<String> {
     use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
     use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
-    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     struct Token(HANDLE);
@@ -2174,21 +2182,21 @@ pub(crate) fn current_user_sid() -> std::io::Result<String> {
     // First call: size query (fails with ERROR_INSUFFICIENT_BUFFER).
     let mut len = 0u32;
     // SAFETY: a null buffer with length 0 is the documented size query.
-    unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+    unsafe { GetTokenInformation(token.0, class, std::ptr::null_mut(), 0, &mut len) };
     if len == 0 {
         return Err(std::io::Error::last_os_error());
     }
-    // u64 storage keeps the buffer aligned for TOKEN_USER (pointer-sized).
+    // u64 storage keeps the buffer aligned for TOKEN_* (pointer-sized).
     let mut buf = vec![0u64; (len as usize).div_ceil(8)];
     // SAFETY: `buf` holds at least `len` writable bytes.
-    let ok =
-        unsafe { GetTokenInformation(token.0, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) };
+    let ok = unsafe { GetTokenInformation(token.0, class, buf.as_mut_ptr().cast(), len, &mut len) };
     if ok == 0 {
         return Err(std::io::Error::last_os_error());
     }
-    // SAFETY: on success the buffer starts with a TOKEN_USER whose SID
-    // pointer points into the same buffer (alive until the end of scope).
-    let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    // SAFETY: on success the buffer starts with `T`, and the SID pointer
+    // `extract` returns points into the same buffer (alive until the end
+    // of scope).
+    let sid = extract(buf.as_ptr().cast::<T>());
 
     let mut wide: *mut u16 = std::ptr::null_mut();
     // SAFETY: `sid` is a valid SID; `wide` is a valid out-pointer.
@@ -2204,6 +2212,27 @@ pub(crate) fn current_user_sid() -> std::io::Result<String> {
         s
     };
     Ok(s)
+}
+
+/// The current process user's SID as a string (`S-1-5-21-...`), read from
+/// the process token (`TokenUser`), not from the environment. Visible to
+/// the shim module as well so it can verify the external-agent pipe's
+/// server end.
+#[cfg(windows)]
+pub(crate) fn current_user_sid() -> std::io::Result<String> {
+    use windows_sys::Win32::Security::{TokenUser, TOKEN_USER};
+    // SAFETY: on success the buffer is a TOKEN_USER; User.Sid points into it.
+    sid_string_from_current_token::<TOKEN_USER>(TokenUser, |p| unsafe { (*p).User.Sid })
+}
+
+/// The token's default owner SID (`TokenOwner`): the SID Windows assigns
+/// to objects this process creates. For an elevated Administrators member
+/// this is the Administrators group (`S-1-5-32-544`), not the user SID.
+#[cfg(windows)]
+pub(crate) fn current_token_owner_sid() -> std::io::Result<String> {
+    use windows_sys::Win32::Security::{TokenOwner, TOKEN_OWNER};
+    // SAFETY: on success the buffer is a TOKEN_OWNER; Owner points into it.
+    sid_string_from_current_token::<TOKEN_OWNER>(TokenOwner, |p| unsafe { (*p).Owner })
 }
 
 /// SID (as a string) of the user that owns the process with pid `pid`.
