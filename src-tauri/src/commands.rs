@@ -231,7 +231,7 @@ pub async fn read_file(
     let label = webview_window.label().to_string();
     crate::windows::spawn_scoped(label.clone(), move || {
         if crate::remote::is_active() {
-            return crate::remote::read_file(&path);
+            return crate::remote::read_file(&path, folder_only.unwrap_or(false));
         }
         // Paths from a document link, terminal output or an agent must be
         // inside this window's folder; paths the user picked are not checked.
