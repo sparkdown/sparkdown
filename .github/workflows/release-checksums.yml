@@ -1,0 +1,77 @@
+name: Release checksums
+
+# Writes a SHA256SUMS asset on a v* Release, covering every release artifact
+# (AppImage, .deb, .dmg, updater tarball, Windows installer and their .sig
+# files). It runs after each package workflow finishes on a tag push and
+# rebuilds the file from whatever is attached at that moment, so the last
+# run lists everything. latest.json and SHA256SUMS itself are not listed.
+# scripts/install-linux.sh checks the .deb against this file when it is on
+# the Release. Run it by hand (Actions -> Release checksums -> Run workflow)
+# to refresh the file for a tag, for example after a package was rebuilt.
+on:
+  workflow_run:
+    workflows: ["Linux package", "Windows package", "macOS package"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.4.6)"
+        required: true
+        type: string
+
+# Default to read-only. Only the job below is granted contents:write. It does
+# not check out the repo or run any build step.
+permissions:
+  contents: read
+
+# One run at a time per tag, so a slow run can't upload an older list after a
+# newer one.
+concurrency:
+  group: release-checksums-${{ github.event.workflow_run.head_branch || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  checksums:
+    name: Write SHA256SUMS
+    # From a package workflow: only tag pushes that succeeded (head_branch is
+    # the tag name for those). A manual run always goes ahead.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event.workflow_run.head_branch || inputs.tag }}
+    steps:
+      - name: Write SHA256SUMS from the Release's artifacts
+        run: |
+          set -euo pipefail
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$TAG' is not a release tag like v0.4.6"
+            exit 1
+          fi
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::notice::No Release for $TAG yet; the next package workflow run will write SHA256SUMS."
+            exit 0
+          fi
+          dir=$(mktemp -d)
+          cd "$dir"
+          gh release download "$TAG" \
+            --pattern '*.AppImage' --pattern '*.AppImage.sig' \
+            --pattern '*.deb' \
+            --pattern '*.dmg' \
+            --pattern '*.app.tar.gz' --pattern '*.app.tar.gz.sig' \
+            --pattern '*-setup.exe' --pattern '*-setup.exe.sig' \
+            || true
+          if [ -z "$(ls -A)" ]; then
+            echo "::notice::No artifacts on $TAG yet; nothing to list."
+            exit 0
+          fi
+          LC_ALL=C sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$TAG" SHA256SUMS --clobber
