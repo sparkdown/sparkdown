@@ -989,7 +989,19 @@ fn repo_config_key_lists(key: &str, value: &str) -> bool {
     let k = key.to_ascii_lowercase();
     let url_key = (k.starts_with("remote.") && (k.ends_with(".url") || k.ends_with(".pushurl")))
         || (k.starts_with("branch.") && k.ends_with(".remote"));
-    url_key && fetch_url_needs_skip(value)
+    if url_key && fetch_url_needs_skip(value) {
+        return true;
+    }
+    // `pull.rebase` / `branch.<n>.rebase = interactive` turns Pull into an
+    // interactive rebase that runs the sequence/core editor on the
+    // repo-controlled todo list. The key itself is harmless; the value is
+    // what makes it execute code.
+    let rebase_key = k == "pull.rebase"
+        || (k.starts_with("branch.") && k.ends_with(".rebase"));
+    if rebase_key && crate::git::rebase_value_is_interactive(value) {
+        return true;
+    }
+    false
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -2873,6 +2885,63 @@ mod tests {
         sb.commit_in(&sb.work, "n.md", "n\n", "n");
         let r = push_impl(&root(&sb), &env).unwrap();
         assert!(r.needs_confirmation.is_none(), "{r:?}");
+        let r = pull_impl(&root(&sb), &env).unwrap();
+        assert!(r.needs_confirmation.is_none(), "{r:?}");
+    }
+
+    #[test]
+    fn pull_and_push_ask_on_additional_command_keys() {
+        // The repo-command gate must fire for merge drivers, editor commands
+        // reachable through interactive rebase, signing programs, trailer
+        // commands, and pack-objects hook — all repo-local keys that make
+        // `git pull` / `git push` run a repo-supplied command.
+        for (key, value) in [
+            ("merge.demo.driver", "sh -c 'echo hi'"),
+            ("sequence.editor", "sh -c 'echo hi'"),
+            ("core.editor", "sh -c 'echo hi'"),
+            ("gui.editor", "sh -c 'echo hi'"),
+            ("gpg.program", "/usr/bin/true"),
+            ("gpg.openpgp.program", "/usr/bin/true"),
+            ("gpg.ssh.defaultKeyCommand", "sh -c 'echo hi'"),
+            ("uploadpack.packObjectsHook", "sh -c 'echo hi'"),
+            ("trailer.sign.command", "sh -c 'echo hi'"),
+        ] {
+            let sb = sandbox();
+            let env = sb.env();
+            set_local(&sb, key, value);
+            let names = key_names(&pull_impl(&root(&sb), &env).unwrap());
+            assert!(
+                names.iter().any(|k| k == &key.to_ascii_lowercase()),
+                "pull did not ask about {key}: {names:?}"
+            );
+            let names = key_names(&push_impl(&root(&sb), &env).unwrap());
+            assert!(
+                names.iter().any(|k| k == &key.to_ascii_lowercase()),
+                "push did not ask about {key}: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pull_asks_on_interactive_rebase_config() {
+        // `branch.<n>.rebase=interactive` and `pull.rebase=interactive` turn
+        // Pull into an interactive rebase, which executes the sequence /
+        // core editor on the repo-controlled todo list.
+        for key in ["branch.main.rebase", "pull.rebase"] {
+            let sb = sandbox();
+            let env = sb.env();
+            set_local(&sb, key, "interactive");
+            let names = key_names(&pull_impl(&root(&sb), &env).unwrap());
+            assert!(
+                names.iter().any(|k| k == &key.to_ascii_lowercase()),
+                "pull did not ask about {key}=interactive: {names:?}"
+            );
+        }
+        // A non-interactive rebase value still does not fire the gate.
+        let sb = sandbox();
+        let env = sb.env();
+        set_local(&sb, "pull.rebase", "true");
+        sb.commit_in(&sb.work, "n.md", "n\n", "n");
         let r = pull_impl(&root(&sb), &env).unwrap();
         assert!(r.needs_confirmation.is_none(), "{r:?}");
     }
