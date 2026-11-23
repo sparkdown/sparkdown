@@ -40,6 +40,21 @@ static WATCH_GENERATION: OnceLock<Mutex<HashMap<String, Arc<AtomicU64>>>> = Once
 /// (mux) connection and its `-R` forward.
 static LIFECYCLE: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 
+/// Every window label whose session wrote context on a remote host, and the
+/// session it wrote it under. Populated by `agent_context_update` on a
+/// successful write and drained on disconnect / release / wholesale clear.
+/// Lets the pref-off handler (which fires on any window — see
+/// `context::remove_all_context_dirs`) reach sibling windows' remote residue
+/// without needing the owning page to cooperate.
+static PUBLISHED_REMOTE: OnceLock<Mutex<HashMap<String, RemoteSession>>> = OnceLock::new();
+
+fn published_remote() -> std::sync::MutexGuard<'static, HashMap<String, RemoteSession>> {
+    PUBLISHED_REMOTE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 fn sessions() -> std::sync::MutexGuard<'static, HashMap<String, RemoteSession>> {
     SESSIONS
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -99,6 +114,12 @@ pub(crate) fn set_session_for_test(session: Option<RemoteSession>) {
 /// Labels of windows with a live session (shutdown releases them all).
 fn session_labels() -> Vec<String> {
     sessions().keys().cloned().collect()
+}
+
+/// Whether a window other than the current one has a session on `host`.
+fn host_shared_with_other_window(host: &str) -> bool {
+    let me = crate::windows::current_label();
+    sessions().iter().any(|(label, s)| *label != me && s.host == host)
 }
 
 /// Preflight + store. `probe` is `ssh host 'cd path && pwd -P'` in production.
@@ -165,6 +186,7 @@ pub fn connect_with(
         // left unsaved copies on the old host. Do it before closing the
         // control connection so the cleanup still has a live link.
         clear_all_context(&prev);
+        forget_published(&crate::windows::current_label());
         if prev.host != host {
             close_mux(&prev.host);
         }
@@ -380,6 +402,10 @@ pub fn agent_context_update(
     validate_remote_path(&sd_root)?;
     let script = context_write_script(&dir, &files, &[sd_root, cache]);
     ssh_run_stdin(&session.host, "sh -s", Some(script.as_bytes()))?;
+    // Remember this label published on this session so the pref-off handler
+    // (which may fire from another window) can wipe the remote residue even
+    // when the owning page cannot cooperate (page reload, crashed webview).
+    published_remote().insert(crate::windows::current_label(), session.clone());
     Ok(dir)
 }
 
@@ -400,6 +426,57 @@ fn clear_all_context(session: &RemoteSession) {
     }
     let base = client_cache_dir(session);
     let _ = ssh_run(&session.host, &format!("rm -rf {}", shell_quote(&base)));
+}
+
+/// Pref-off / startup / exit hook (`context::remove_all_context_dirs`): wipe
+/// the per-client cache dir on every remote session that has published
+/// context, regardless of which window fires the hook. The local tree is
+/// still purged by the caller; this is the remote twin.
+pub fn clear_all_published_contexts() {
+    let sessions: Vec<RemoteSession> = {
+        let mut g = published_remote();
+        let v = g.values().cloned().collect();
+        g.clear();
+        v
+    };
+    for s in &sessions {
+        clear_all_context(s);
+    }
+}
+
+/// Drop one window's remote-published entry (window closed / session
+/// replaced). The caller is responsible for the actual SSH wipe when it
+/// still has a live session; this just keeps the tracker from carrying a
+/// stale entry.
+pub fn forget_published(label: &str) {
+    published_remote().remove(label);
+}
+
+/// Tests: observe and prime the published-remote tracker so a test in
+/// another module can assert that `context::remove_all_context_dirs`
+/// drains it.
+#[cfg(test)]
+pub(crate) fn test_published_remote_len() -> usize {
+    published_remote().len()
+}
+
+#[cfg(test)]
+pub(crate) fn test_insert_published_remote(label: &str, host: &str) {
+    published_remote().insert(
+        label.into(),
+        RemoteSession {
+            host: host.into(),
+            path: "/proj".into(),
+            // Empty $HOME so `clear_all_context` short-circuits before any
+            // real ssh call — the tracker drain is still observable.
+            home: String::new(),
+        },
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn test_published_remote_clear() {
+    published_remote().clear();
 }
 
 #[tauri::command]
@@ -458,6 +535,14 @@ pub async fn remote_connect(
             crate::askpass::set_current(previous);
         }
         let session = result?;
+        // Fresh connect: remove what a previous run left in this client's
+        // cache dir on the host when it ended without a clean disconnect
+        // (killed, power loss), so stale `buffers/` don't carry over. Not
+        // while another window of this app is connected to the same host:
+        // the dir holds that window's live context too. Best effort.
+        if !host_shared_with_other_window(&session.host) {
+            clear_all_context(&session);
+        }
         // Phase 4: give remote agents the live MCP server by reverse-forwarding
         // the local socket over the SSH control (mux) connection. Best effort
         // — when it fails (no mux, old sshd, no home) the remote keeps the
@@ -543,6 +628,7 @@ fn disconnect_now() {
         mcp_forward_stop(&prev);
         // Shadow buffers (unsaved text) must not outlive the session.
         clear_all_context(&prev);
+        forget_published(&crate::windows::current_label());
         close_mux(&prev.host);
     }
     set_session(None);
@@ -4442,6 +4528,80 @@ Host *.example.com
         disconnect_now();
         let _ = std::fs::remove_file(&local);
         let _ = server.join();
+    }
+
+    /// With a remote session that published context and no live page to
+    /// clear it (page reload / sibling window), the
+    /// pref-off handler (`context::remove_all_context_dirs`) must still
+    /// erase the tracked remote entry so an SSH-side wipe is attempted in
+    /// addition to the local purge. Uses `home=""` so `clear_all_context`
+    /// short-circuits before ssh; we only assert the tracker is drained.
+    #[test]
+    #[serial_test::serial(session)]
+    fn pref_off_drains_remote_published_tracker_for_every_window() {
+        let _guard = TEST_SESSION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Start clean: labels from earlier tests must not carry over.
+        published_remote().clear();
+        let sess_a = RemoteSession {
+            host: "hostA".into(),
+            path: "/proj".into(),
+            home: String::new(),
+        };
+        let sess_b = RemoteSession {
+            host: "hostB".into(),
+            path: "/proj".into(),
+            home: String::new(),
+        };
+        published_remote().insert("w-a".into(), sess_a);
+        published_remote().insert("w-b".into(), sess_b);
+        assert_eq!(published_remote().len(), 2);
+        // The pref-off hook: context::remove_all_context_dirs calls through
+        // to this. With no live windows, the tracker is the only way to
+        // reach the published remote dirs.
+        clear_all_published_contexts();
+        assert!(
+            published_remote().is_empty(),
+            "tracker must be drained after wholesale clear",
+        );
+    }
+
+    /// Valid-input regression: with no remote session that ever published
+    /// context, `clear_all_published_contexts` is a no-op. This ensures a
+    /// purely-local pref flip does not change behaviour.
+    #[test]
+    #[serial_test::serial(session)]
+    fn pref_off_without_any_remote_session_is_a_noop() {
+        let _guard = TEST_SESSION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        published_remote().clear();
+        clear_all_published_contexts();
+        assert!(published_remote().is_empty());
+    }
+
+    /// `release_window` / `disconnect_now` drops the window's remote entry
+    /// so a released label does not carry a stale session into the next
+    /// wholesale clear.
+    #[test]
+    #[serial_test::serial(session)]
+    fn forget_published_removes_only_the_named_label() {
+        let _guard = TEST_SESSION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        published_remote().clear();
+        let sess = RemoteSession {
+            host: "hostA".into(),
+            path: "/".into(),
+            home: String::new(),
+        };
+        published_remote().insert("w-a".into(), sess.clone());
+        published_remote().insert("w-b".into(), sess);
+        forget_published("w-a");
+        assert!(!published_remote().contains_key("w-a"));
+        assert!(published_remote().contains_key("w-b"));
+        published_remote().clear();
     }
 }
 
