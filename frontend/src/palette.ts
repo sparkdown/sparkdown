@@ -17,7 +17,7 @@ import { commands as defaultRegistry, type Command, type CommandRegistry } from 
 import { FuzzyIndex, basenameStart, scoreTarget } from './fuzzy';
 import { trapFocus, type ModalHandle } from './modal';
 import { formatShortcut } from './shortcuts';
-import { dirname, basename, isUnderRoot, joinPath, toRelativePath } from './utils';
+import { dirname, basename, isUnderRoot, joinPath, toRelativePath, neutralizeUnicodeControls } from './utils';
 
 export type PaletteMode = 'files' | 'commands' | 'line';
 
@@ -522,11 +522,25 @@ function infoRow(text: string): Row {
 /** A file row: basename bold-marked, directory dim. `marks` index `rel`. */
 function fileRow(rel: string, marks: number[], abs: string, recent: boolean, deps: PaletteDeps): Row {
   const start = basenameStart(rel);
+  // Neutralize the name/dir so a U+202E (or any other bidi/invisible
+  // format character) in the file name cannot show one extension while the
+  // row opens a different file (see `changes-view.ts` for the same policy).
+  // When neutralization rewrites the string the mark indices no longer line
+  // up with the displayed text, so drop them rather than point into the
+  // middle of a `<U+XXXX>` marker.
+  const rawLabel = rel.slice(start);
+  const rawDetail = start > 0 ? rel.slice(0, start - 1) : '';
+  const label = neutralizeUnicodeControls(rawLabel);
+  const detail = neutralizeUnicodeControls(rawDetail);
+  const labelMarks = label === rawLabel
+    ? marks.filter((p) => p >= start).map((p) => p - start)
+    : [];
+  const detailMarks = detail === rawDetail ? marks.filter((p) => p < start - 1) : [];
   return {
-    label: rel.slice(start),
-    labelMarks: marks.filter((p) => p >= start).map((p) => p - start),
-    detail: start > 0 ? rel.slice(0, start - 1) : '',
-    detailMarks: marks.filter((p) => p < start - 1),
+    label,
+    labelMarks,
+    detail,
+    detailMarks,
     hint: recent ? 'recent' : '',
     disabled: false,
     activate: (side) => (side ? deps.openToSide(abs) : deps.openFile(abs)),
@@ -547,11 +561,17 @@ function rankAbsolute(paths: string[], q: string, deps: PaletteDeps): Row[] {
     const name = basename(p);
     const dir = dirname(p);
     const start = p.length - name.length;
+    const label = neutralizeUnicodeControls(name);
+    const detail = neutralizeUnicodeControls(dir);
+    const labelMarks = label === name
+      ? marks.filter((m) => m >= start).map((m) => m - start)
+      : [];
+    const detailMarks = detail === dir ? marks.filter((m) => m < dir.length) : [];
     return {
-      label: name,
-      labelMarks: marks.filter((m) => m >= start).map((m) => m - start),
-      detail: dir,
-      detailMarks: marks.filter((m) => m < dir.length),
+      label,
+      labelMarks,
+      detail,
+      detailMarks,
       hint: 'recent',
       disabled: false,
       activate: (side: boolean) => (side ? deps.openToSide(p) : deps.openFile(p)),

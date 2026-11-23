@@ -530,3 +530,60 @@ describe('FileTree save dir (Save dialog start)', () => {
     expect(tree.getSaveDir()).toBe(ROOT);
   });
 });
+
+/**
+ * Explorer rows render file names as found on disk: a U+202E in the name must not
+ * display one extension while the row acts on the real `entry.path` (mirrors
+ * the Changes-view policy in `changes-view.ts`).
+ */
+describe('FileTree bidi/control-character neutralization', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('renders file names through neutralizeUnicodeControls and flags the row', async () => {
+    const marked = `report\u202Egnp.sh`;
+    const markedPath = `/proj/${marked}`;
+    listDirectory.mockReset();
+    listDirectory.mockResolvedValue([
+      { name: marked, path: markedPath, is_dir: false },
+      { name: 'a.md', path: FILE_A, is_dir: false },
+    ]);
+    const { tree } = mountTree();
+    await tree.setRoot(ROOT);
+
+    const markedRow = row(markedPath)!;
+    const label = markedRow.querySelector('.tree-name')!;
+    // The visible label must carry a visible marker, not the raw U+202E.
+    expect(label.textContent).toBe('report<U+202E>gnp.sh');
+    expect(label.textContent!.includes('\u202E')).toBe(false);
+    expect(markedRow.classList.contains('change-row-bidi')).toBe(true);
+    // The real path stays intact so actions do not change.
+    expect(markedRow.dataset.path).toBe(markedPath);
+
+    // Plain names still behave as before.
+    const plain = row(FILE_A)!;
+    expect(plain.querySelector('.tree-name')!.textContent).toBe('a.md');
+    expect(plain.classList.contains('change-row-bidi')).toBe(false);
+  });
+
+  it('neutralizes symlink target in the tooltip', async () => {
+    const markedTarget = `foo\u202Egnp.sh`;
+    listDirectory.mockReset();
+    listDirectory.mockResolvedValue([
+      {
+        name: 'link',
+        path: '/proj/link',
+        is_dir: false,
+        is_symlink: true,
+        symlink_target: markedTarget,
+      },
+    ]);
+    const { tree } = mountTree();
+    await tree.setRoot(ROOT);
+    const el = row('/proj/link')!;
+    expect(el.title.includes('\u202E')).toBe(false);
+    expect(el.title).toContain('<U+202E>');
+    expect(el.getAttribute('aria-label')).toBe('link (symbolic link)');
+  });
+});

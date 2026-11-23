@@ -324,4 +324,22 @@ describe('Palette', () => {
     key('Enter');
     expect(deps.gotoLine).toHaveBeenCalledWith(40);
   });
+
+  it('neutralizes bidi/control characters in quick-open file rows', async () => {
+    const marked = 'report\u202Egnp.sh';
+    const deps = makeDeps({
+      listFiles: vi.fn(async (): Promise<FileListing> => ({
+        files: [marked, 'README.md'],
+        truncated: false,
+      })) as any,
+    });
+    const p = new Palette(deps, reg);
+    await openFiles(p);
+    const plain = items().find((el) => labelOf(el) === 'README.md');
+    expect(plain).toBeDefined();
+    const markedRow = items().find((el) => labelOf(el).includes('<U+202E>'));
+    expect(markedRow).toBeDefined();
+    expect(labelOf(markedRow!)).toBe('report<U+202E>gnp.sh');
+    expect(labelOf(markedRow!).includes('\u202E')).toBe(false);
+  });
 });
