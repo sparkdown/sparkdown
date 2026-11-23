@@ -130,6 +130,13 @@ pub struct AppConfig {
     #[cfg_attr(test, ts(type = "number"))]
     pub last_update_check_ms: u64,
 
+    /// Highest update version this install has seen (running or offered),
+    /// as a semver string; empty until the first check. The update check
+    /// refuses a manifest below it, also after a downgraded install, so an
+    /// older signed release is not offered again.
+    #[serde(default)]
+    pub highest_update_version_seen: String,
+
     /// Terminal split layout per workspace, keyed by the workspace's tmux
     /// session prefix (`sd-<hash>-`): a binary tree of rows/columns whose
     /// leaves name the tmux session each pane reattaches to. Restored on the
@@ -312,6 +319,7 @@ impl Default for AppConfig {
             agent_args: std::collections::HashMap::new(),
             check_updates_automatically: true,
             last_update_check_ms: 0,
+            highest_update_version_seen: String::new(),
             terminal_layouts: std::collections::HashMap::new(),
             mcp_install_prompt_dismissed: vec![],
             mcp_external_agents: false,

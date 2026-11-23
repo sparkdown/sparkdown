@@ -1216,6 +1216,29 @@ fn fetch_manifest() -> Result<String, String> {
     })
 }
 
+/// The highest update version this install has seen, after a check that
+/// returned `manifest` while running `current`. Err when `manifest` is below
+/// `floor` (an older release offered again). An empty or unparseable floor
+/// accepts anything.
+fn next_version_floor(floor: &str, current: &str, manifest: &str) -> Result<String, String> {
+    if let (Some(m), Some(f)) = (Version::parse(manifest), Version::parse(floor)) {
+        if m < f {
+            return Err(format!(
+                "The update server offered {manifest}, older than {floor} which this install has already seen."
+            ));
+        }
+    }
+    let mut best = floor.to_string();
+    for cand in [current, manifest] {
+        match (Version::parse(cand), Version::parse(&best)) {
+            (Some(c), Some(b)) if c > b => best = cand.to_string(),
+            (Some(_), None) => best = cand.to_string(),
+            _ => {}
+        }
+    }
+    Ok(best)
+}
+
 /// Fetch latest.json; `None` when this version is current. When the Settings
 /// toggle is off, this returns an error and does not talk to the network.
 #[tauri::command]
@@ -1236,6 +1259,19 @@ pub async fn update_check(
         let json = fetch_manifest()?;
         let manifest = parse_manifest(&json)?;
         let current = app.package_info().version.to_string();
+        // Version floor: refuse a manifest below the highest version this
+        // install has seen, so an older (still validly signed) manifest is
+        // not offered again, even after a downgraded install.
+        let store = app.state::<crate::session::ConfigStore>();
+        let floor = store
+            .pref_string("highest_update_version_seen")
+            .unwrap_or_default();
+        let new_floor = next_version_floor(&floor, &current, &manifest.version)?;
+        if new_floor != floor {
+            if let Err(e) = store.set_pref_string("highest_update_version_seen", &new_floor) {
+                eprintln!("warning: could not save the update version floor: {e}");
+            }
+        }
         if !is_newer(&manifest.version, &current) {
             return Ok(None);
         }
@@ -2959,5 +2995,21 @@ mod tests {
         assert!(err.contains("Both update endpoints failed"), "{err}");
         assert!(err.contains("Primary: nope"), "{err}");
         assert!(err.contains("Fallback: nope"), "{err}");
+    }
+
+    #[test]
+    fn version_floor_refuses_an_older_manifest_and_only_moves_up() {
+        // Floor 0.5.0 (seen before): an older manifest is refused.
+        assert!(next_version_floor("0.5.0", "0.4.5", "0.3.0").is_err());
+        // At or above the floor passes; the floor rises to the highest of
+        // floor, running version and manifest.
+        assert_eq!(next_version_floor("0.5.0", "0.4.5", "0.5.0").unwrap(), "0.5.0");
+        assert_eq!(next_version_floor("0.5.0", "0.4.5", "0.6.0").unwrap(), "0.6.0");
+        assert_eq!(next_version_floor("0.5.0", "0.7.0", "0.6.0").unwrap(), "0.7.0");
+        // Fresh install (empty floor): anything is accepted.
+        assert_eq!(next_version_floor("", "0.4.5", "0.0.1").unwrap(), "0.4.5");
+        assert_eq!(next_version_floor("", "0.4.5", "0.4.6").unwrap(), "0.4.6");
+        // An unparseable stored floor is replaced, not used to refuse.
+        assert_eq!(next_version_floor("junk", "0.4.5", "0.4.6").unwrap(), "0.4.6");
     }
 }
