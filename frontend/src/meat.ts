@@ -190,28 +190,112 @@ function isImportLine(body: string): boolean {
 }
 
 /**
+ * Strip line (`//`, `#`) and single-line block (`/* … */`) comments, plus
+ * the contents of `'…'` / `"…"` / `` `…` `` string literals, from a line
+ * body before the import-span brace count looks at it. A `{` hiding inside
+ * a comment or a string literal must not open or extend a span — otherwise
+ * a comment such as `+import x from 'x'; // {` can swallow
+ * the executable lines that follow and have the hunk rendered as
+ * "import-only". Keep in sync with strip_comments_and_strings in meat.rs.
+ */
+function stripCommentsAndStrings(body: string): string {
+  let out = '';
+  let i = 0;
+  while (i < body.length) {
+    const c = body[i];
+    // `//` or `#` to end of line.
+    if (c === '#' || (c === '/' && body[i + 1] === '/')) break;
+    // `/* … */` on the same line (and if unterminated, to end of line).
+    if (c === '/' && body[i + 1] === '*') {
+      i += 2;
+      while (i + 1 < body.length && !(body[i] === '*' && body[i + 1] === '/')) i += 1;
+      if (i + 1 < body.length) i += 2;
+      else break;
+      continue;
+    }
+    // String literal: keep the quotes themselves (they anchor the
+    // import-shape check) but drop the inner characters.
+    if (c === "'" || c === '"' || c === '`') {
+      const quote = c;
+      out += quote;
+      i += 1;
+      while (i < body.length && body[i] !== quote) {
+        if (body[i] === '\\' && i + 1 < body.length) i += 2;
+        else i += 1;
+      }
+      if (i < body.length) {
+        out += quote;
+        i += 1;
+      }
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * After comments and string literals are stripped, a continuation line of a
+ * multi-line import statement may hold only identifiers, whitespace and the
+ * punctuation imports use (`,`, `.`, `{`, `}`, `*`, `;`, quote stubs). Any
+ * other character (a call `(`, an assignment `=`, an operator, …) means the
+ * line is not import boilerplate and must not extend a span, so the hunk
+ * stays Substantive and visible.
+ */
+function isImportShaped(stripped: string): boolean {
+  return /^[A-Za-z0-9_ \t\r,.{}*;'"`]*$/.test(stripped);
+}
+
+/**
+ * A cap on how many lines one span may swallow. Legitimate multi-line
+ * imports are a handful of lines; this bound stops a span that never
+ * re-balances from running to the end of the hunk. Keep in sync with
+ * IMPORT_SPAN_MAX_LINES in meat.rs.
+ */
+const IMPORT_SPAN_MAX_LINES = 32;
+
+/**
  * Mark which line indices of a hunk fall inside a MULTI-LINE import statement
  * (`import {\n  a,\n} from './x';`) whose continuation lines don't match the
  * single-line IMPORT_RE. A span opens only on an import/export line with an
- * unbalanced `{` and closes when braces re-balance — so brace-less imports
- * (Python `import os`, Rust `use`) never open a span and can't swallow the
- * code lines that follow them.
+ * unbalanced `{` (counted after comments and string literals are stripped)
+ * and closes when braces re-balance, when a continuation line is not
+ * import-shaped (contains a call, assignment or operator), or at a fixed
+ * line cap — so brace-less imports (Python `import os`, Rust `use`) and
+ * imports with a stray `{` in a comment or string can't swallow the code
+ * lines that follow them.
  */
 function importSpanLines(hunk: DiffHunk): Set<number> {
   const spans = new Set<number>();
   let depth = 0;
+  let spanLen = 0;
   hunk.lines.forEach((line, i) => {
     const body = line.slice(1); // strip the +/-/space marker
+    const stripped = stripCommentsAndStrings(body);
     const balance =
-      (body.match(/\{/g) ?? []).length - (body.match(/\}/g) ?? []).length;
+      (stripped.match(/\{/g) ?? []).length - (stripped.match(/\}/g) ?? []).length;
     if (depth === 0) {
-      if (/^\s*(import\b|export\s+(type\s+)?\{)/.test(body) && balance > 0) {
+      if (
+        /^\s*(import\b|export\s+(type\s+)?\{)/.test(body) &&
+        balance > 0 &&
+        isImportShaped(stripped)
+      ) {
         depth = balance;
+        spanLen = 1;
         spans.add(i);
       }
-    } else {
+    } else if (isImportShaped(stripped) && spanLen < IMPORT_SPAN_MAX_LINES) {
       spans.add(i);
+      spanLen += 1;
       depth = Math.max(0, depth + balance);
+      if (depth === 0) spanLen = 0;
+    } else {
+      // A non-import-shaped line, or the line cap, closes the span. Leave
+      // this line OUT of the span so classifyHunk sees the executable line
+      // and returns 'substantive'.
+      depth = 0;
+      spanLen = 0;
     }
   });
   return spans;
