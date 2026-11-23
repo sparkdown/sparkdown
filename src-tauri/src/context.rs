@@ -1153,7 +1153,7 @@ mod tests {
         let target = base.join("target");
         std::fs::create_dir_all(&target).unwrap();
         // Create a directory junction with `mklink /J` (needs no privilege).
-        let status = std::process::Command::new("cmd")
+        let status = crate::proc::command("cmd")
             .args([
                 "/c",
                 "mklink",
