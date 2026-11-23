@@ -54,6 +54,11 @@ struct PendingScan {
     /// The known_hosts entry name (`host` or `[host]:port`). Carried so
     /// `trust_scan` can re-verify absence at append time.
     name: String,
+    /// Alternate spellings the entry could have been stored under (bare vs.
+    /// port-qualified host, and — for `HostKeyAlias` hosts — the historical
+    /// `[alias]:port` form). Queried alongside `name` at re-verification
+    /// time so a late-arriving entry under any form still blocks the write.
+    alt_names: Vec<String>,
     lines: Vec<String>,
     known_hosts_file: PathBuf,
     /// Every known_hosts file ssh would check for this host (user + global),
@@ -244,15 +249,23 @@ fn compute_stored_key_types_for(host: &str) -> Vec<String> {
     let Ok(r) = resolve(host) else {
         return Vec::new();
     };
-    let name = r.host_key_alias.as_deref().unwrap_or(&r.hostname);
-    let full = known_hosts_name(name, r.port);
+    // Primary name: the name OpenSSH actually uses (alias verbatim when
+    // HostKeyAlias is set; `[host]:port` or bare host otherwise).
+    let primary = known_hosts_lookup_name(&r);
+    // Alternate form: the other spelling an entry might have been written
+    // under historically (bare vs. port-qualified host). ssh-keygen -F does
+    // not cross-match these, so we query both so a lookup-name mismatch
+    // cannot hide a stored key type.
+    let bare = r.host_key_alias.as_deref().unwrap_or(&r.hostname).to_string();
+    let port_qualified = known_hosts_name(&bare, r.port);
     let home = home_dir();
     let files = resolved_known_hosts_files(&r, &home);
-    // Try both the port-qualified form (`[host]:port`) and the bare name:
-    // ssh-keygen -F looks up either depending on how the entry was written.
-    let mut types = stored_key_types_in(&full, &files).unwrap_or_default();
-    if full != name {
-        for t in stored_key_types_in(name, &files).unwrap_or_default() {
+    let mut types = stored_key_types_in(&primary, &files).unwrap_or_default();
+    for alt in [bare, port_qualified] {
+        if alt == primary {
+            continue;
+        }
+        for t in stored_key_types_in(&alt, &files).unwrap_or_default() {
             if !types.iter().any(|x| x == &t) {
                 types.push(t);
             }
@@ -296,6 +309,17 @@ pub(crate) fn known_hosts_name(name: &str, port: u16) -> String {
         name.to_string()
     } else {
         format!("[{name}]:{port}")
+    }
+}
+
+/// The known_hosts lookup/storage name OpenSSH uses for this host, mirroring
+/// `get_hostfile_hostname_ipaddr` in sshconnect.c: when `HostKeyAlias` is in
+/// effect the alias is used **verbatim** (no `[alias]:port` wrapping); when
+/// no alias is set, the normal `host` / `[host]:port` form applies.
+pub(crate) fn known_hosts_lookup_name(r: &ResolvedHost) -> String {
+    match r.host_key_alias.as_deref() {
+        Some(alias) => alias.to_string(),
+        None => known_hosts_name(&r.hostname, r.port),
     }
 }
 
@@ -498,6 +522,57 @@ fn existing_entries_with(
     Ok(hits)
 }
 
+/// Query `existing_entries_with` for `primary` and for every alternate
+/// spelling the entry could have been stored under (`alt_names`), merging
+/// hits by the file they matched. `ssh-keygen -F` does not cross-match the
+/// bare and port-qualified forms of the same host, so we consult each
+/// explicitly: a lookup-name mismatch must not turn a pinned / `@revoked`
+/// host into a "first connection" offer.
+fn existing_entries_any(
+    keygen: &str,
+    primary: &str,
+    alt_names: &[String],
+    files: &[PathBuf],
+) -> Result<Vec<ExistingEntry>, String> {
+    let mut hits = existing_entries_with(keygen, primary, files)?;
+    for alt in alt_names {
+        if alt == primary {
+            continue;
+        }
+        for hit in existing_entries_with(keygen, alt, files)? {
+            if let Some(existing) = hits.iter_mut().find(|h| h.file == hit.file) {
+                existing.revoked = existing.revoked || hit.revoked;
+            } else {
+                hits.push(hit);
+            }
+        }
+    }
+    Ok(hits)
+}
+
+/// The lookup name OpenSSH actually consults for `r`, plus every alternate
+/// spelling an entry might historically have been written under (bare vs.
+/// port-qualified host, and the alias's port-qualified form when a
+/// `HostKeyAlias` is set). Used by the pre-scan / pre-append gates.
+fn known_hosts_lookup_alt_names(r: &ResolvedHost) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |n: String| {
+        if !n.is_empty() && !out.contains(&n) {
+            out.push(n);
+        }
+    };
+    // Bare + port-qualified form of the host itself.
+    push(r.hostname.clone());
+    push(known_hosts_name(&r.hostname, r.port));
+    if let Some(alias) = r.host_key_alias.as_deref() {
+        // Bare alias is the OpenSSH canonical form; also check the
+        // historical `[alias]:port` spelling SparkDown used to write.
+        push(alias.to_string());
+        push(known_hosts_name(alias, r.port));
+    }
+    out
+}
+
 /// Build the user-visible, `[hostkey-changed]`-prefixed error for a host
 /// that is already pinned (or revoked) when the current peer offered a
 /// different / revoked key. The frontend recognises the prefix and shows
@@ -547,12 +622,18 @@ fn scan_resolved(
     if !safe_scan_target(&r.hostname) {
         return Err(format!("Can't scan host name '{}'.", r.hostname));
     }
-    let name = known_hosts_name(r.host_key_alias.as_deref().unwrap_or(&r.hostname), r.port);
+    // OpenSSH uses `HostKeyAlias` verbatim for known_hosts lookup/storage,
+    // and only applies `[host]:port` wrapping when no alias is set. Mirror
+    // that so the name we look up and later write is the one ssh consults.
+    let name = known_hosts_lookup_name(r);
+    let alt_names = known_hosts_lookup_alt_names(r);
     let checked = expanded_known_hosts_files(r, home);
     // Before offering a scan: if any known_hosts file ssh would consult
     // already pins this host (any key type, including a `@revoked` marker),
-    // refuse.
-    let hits = existing_entries_with(keygen, &name, &checked)?;
+    // refuse. Query every form the entry could have been stored under
+    // (bare and port-qualified) so a name-form mismatch cannot turn an
+    // already-pinned / @revoked host into a "first connection" offer.
+    let hits = existing_entries_any(keygen, &name, &alt_names, &checked)?;
     if !hits.is_empty() {
         return Err(already_pinned_error(host, &name, &hits));
     }
@@ -598,6 +679,7 @@ fn scan_resolved(
             scan_id,
             PendingScan {
                 name,
+                alt_names,
                 lines,
                 known_hosts_file: file,
                 known_hosts_checked: checked,
@@ -623,7 +705,11 @@ fn trust_scan_with(keygen: &str, scan_id: &str) -> Result<(), String> {
     // appeared between `scan` and now (another window, another process, a
     // stale frontend reusing an old scan id), refuse. We never want
     // to append a second co-equal line to a host that is already pinned.
-    let hits = existing_entries_with(keygen, &scan.name, &scan.known_hosts_checked)?;
+    // Re-check every spelling the entry could have been stored under, not
+    // just the primary lookup name, so a late-arriving entry written under
+    // the alternate form (bare vs `[host]:port`) still blocks the append.
+    let hits =
+        existing_entries_any(keygen, &scan.name, &scan.alt_names, &scan.known_hosts_checked)?;
     if !hits.is_empty() {
         return Err(already_pinned_error(&scan.name, &scan.name, &hits));
     }
@@ -897,6 +983,7 @@ mod tests {
             id.clone(),
             PendingScan {
                 name: "[h]:2".into(),
+                alt_names: Vec::new(),
                 lines: vec!["[h]:2 ssh-ed25519 AAAA".into()],
                 known_hosts_file: file.clone(),
                 // Empty: no pre-existing file to re-check. The file about to
@@ -1033,6 +1120,7 @@ mod tests {
             id.clone(),
             PendingScan {
                 name: "pinned.example".into(),
+                alt_names: Vec::new(),
                 // The ed25519 line the frontend thought
                 // we were about to append.
                 lines: vec!["pinned.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl".to_string()],
@@ -1192,6 +1280,104 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// OpenSSH uses `HostKeyAlias` verbatim as the known_hosts name,
+    /// without `[alias]:port` wrapping. SparkDown must mirror that so the
+    /// pre-scan "already pinned / @revoked" gate never misses an entry ssh
+    /// does consult.
+    #[test]
+    fn known_hosts_lookup_name_uses_alias_verbatim() {
+        let plain = parse_ssh_g("hostname h.example\nport 2222\n");
+        assert_eq!(known_hosts_lookup_name(&plain), "[h.example]:2222");
+        let aliased = parse_ssh_g("hostname h.example\nport 2222\nhostkeyalias my-alias\n");
+        assert_eq!(known_hosts_lookup_name(&aliased), "my-alias");
+        let aliased_p22 = parse_ssh_g("hostname h.example\nport 22\nhostkeyalias my-alias\n");
+        assert_eq!(known_hosts_lookup_name(&aliased_p22), "my-alias");
+    }
+
+    /// HostKeyAlias with a non-default Port: a host that is already pinned
+    /// under the bare alias (the form ssh stores) must get the
+    /// `[hostkey-changed]` stop, not a "first connection" scan. Before,
+    /// `scan_resolved` looked up `[alias]:port`, missed the bare-alias
+    /// entry, and went on to ssh-keyscan.
+    #[test]
+    fn scan_refuses_pinned_hostkeyalias_entry_on_nondefault_port() {
+        let probe = crate::proc::command("ssh-keygen").arg("-?").output();
+        if probe.is_err() {
+            return; // no OpenSSH here
+        }
+        let dir = tmp("scan-pinned-alias");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kh = dir.join("known_hosts");
+        // Bare alias, the only form OpenSSH writes for HostKeyAlias hosts.
+        std::fs::write(
+            &kh,
+            "my-alias ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n",
+        )
+        .unwrap();
+        let r = parse_ssh_g(&format!(
+            "hostname 10.0.0.9\nport 2222\nhostkeyalias my-alias\nuserknownhostsfile {}\nglobalknownhostsfile /nonexistent-dir/none\n",
+            kh.display()
+        ));
+        let err = scan_resolved("ssh-keygen", "tunnelled", &r, &dir).unwrap_err();
+        assert!(
+            err.starts_with(super::super::ssh::ERR_HOSTKEY_CHANGED),
+            "{err}"
+        );
+        assert!(err.contains("already pinned"), "{err}");
+        // And the hint names the entry ssh actually reads (bare alias).
+        assert!(err.contains("ssh-keygen -R my-alias"), "{err}");
+
+        // Same configuration, this time an explicit `@revoked` marker:
+        // must also be caught.
+        let rev = dir.join("revoked");
+        std::fs::write(
+            &rev,
+            "@revoked my-alias ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n",
+        )
+        .unwrap();
+        let r = parse_ssh_g(&format!(
+            "hostname 10.0.0.9\nport 2222\nhostkeyalias my-alias\nuserknownhostsfile {}\nglobalknownhostsfile /nonexistent-dir/none\n",
+            rev.display()
+        ));
+        let err = scan_resolved("ssh-keygen", "tunnelled", &r, &dir).unwrap_err();
+        assert!(
+            err.starts_with(super::super::ssh::ERR_HOSTKEY_CHANGED),
+            "{err}"
+        );
+        assert!(err.contains("REVOKED"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Valid-input regression: a non-aliased host on a non-default port
+    /// keeps using the `[host]:port` form for both lookup and the pinned
+    /// error hint. (No behaviour change for the common case.)
+    #[test]
+    fn scan_pinned_host_without_alias_still_uses_port_qualified_name() {
+        let probe = crate::proc::command("ssh-keygen").arg("-?").output();
+        if probe.is_err() {
+            return;
+        }
+        let dir = tmp("scan-pinned-no-alias");
+        std::fs::create_dir_all(&dir).unwrap();
+        let kh = dir.join("known_hosts");
+        std::fs::write(
+            &kh,
+            "[h.example]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n",
+        )
+        .unwrap();
+        let r = parse_ssh_g(&format!(
+            "hostname h.example\nport 2222\nuserknownhostsfile {}\nglobalknownhostsfile /nonexistent-dir/none\n",
+            kh.display()
+        ));
+        let err = scan_resolved("ssh-keygen", "h.example", &r, &dir).unwrap_err();
+        assert!(
+            err.starts_with(super::super::ssh::ERR_HOSTKEY_CHANGED),
+            "{err}"
+        );
+        assert!(err.contains("[h.example]:2222"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn trust_scan_fails_closed_when_ssh_keygen_cannot_run() {
         let dir = tmp("trust-nokeygen");
@@ -1203,6 +1389,7 @@ mod tests {
             id.clone(),
             PendingScan {
                 name: "new.example".into(),
+                alt_names: Vec::new(),
                 lines: vec!["new.example ssh-ed25519 AAAA".into()],
                 known_hosts_file: file.clone(),
                 known_hosts_checked: vec![file.clone()],
