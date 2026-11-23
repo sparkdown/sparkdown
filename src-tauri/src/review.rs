@@ -327,9 +327,12 @@ pub(crate) fn remote_stats_script(
         // among the untracked paths emits the unknown marker `-` instead of
         // stalling the whole batch in `git diff --no-index`'s open() for
         // the full SSH_TIMEOUT.
+        // Paths are relative to the repo root (`g` runs `git -C root`), so
+        // the test is too.
         s.push_str(&format!(
-            "for f in {}; do if [ ! -f \"$f\" ]; then printf '%s\\n' '-'; continue; fi; n=$(g diff --no-index --numstat --no-ext-diff --no-textconv -- /dev/null \"$f\" 2>/dev/null | head -n 1 | cut -f1,2); printf '%s\\n' \"${{n:--}}\"; done\n",
-            list.join(" ")
+            "for f in {}; do if [ ! -f {}/\"$f\" ]; then printf '%s\\n' '-'; continue; fi; n=$(g diff --no-index --numstat --no-ext-diff --no-textconv -- /dev/null \"$f\" 2>/dev/null | head -n 1 | cut -f1,2); printf '%s\\n' \"${{n:--}}\"; done\n",
+            list.join(" "),
+            quote(root)
         ));
     }
     s.push_str("true\n");
