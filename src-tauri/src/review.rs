@@ -321,8 +321,14 @@ pub(crate) fn remote_stats_script(
     s.push_str(&format!("echo {REMOTE_SEP}\n"));
     if !untracked.is_empty() {
         let list: Vec<String> = untracked.iter().map(|p| quote(p)).collect();
+        // `[ -f "$f" ]` mirrors the local special-file guard in
+        // `git_diff_file_impl`: `-f` dereferences symlinks and is true only
+        // for a regular file, so a FIFO (or a symlink pointing at one)
+        // among the untracked paths emits the unknown marker `-` instead of
+        // stalling the whole batch in `git diff --no-index`'s open() for
+        // the full SSH_TIMEOUT.
         s.push_str(&format!(
-            "for f in {}; do n=$(g diff --no-index --numstat --no-ext-diff --no-textconv -- /dev/null \"$f\" 2>/dev/null | head -n 1 | cut -f1,2); printf '%s\\n' \"${{n:--}}\"; done\n",
+            "for f in {}; do if [ ! -f \"$f\" ]; then printf '%s\\n' '-'; continue; fi; n=$(g diff --no-index --numstat --no-ext-diff --no-textconv -- /dev/null \"$f\" 2>/dev/null | head -n 1 | cut -f1,2); printf '%s\\n' \"${{n:--}}\"; done\n",
             list.join(" ")
         ));
     }
@@ -767,6 +773,79 @@ mod tests {
         let r = parse_remote_stats("", 4, 2);
         let stats = remote_stats_from(&changes, &hashed, &r);
         assert!(stats.iter().all(|s| s.adds.is_none()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_stats_script_skips_special_files_in_untracked_loop() {
+        // Same rule as the local special-file check in git_diff_file_impl:
+        // a FIFO in the untracked list used to make the whole stats batch
+        // block for 30s in `git diff --no-index`. With the `[ -f "$f" ]`
+        // guard the FIFO yields the `-` unknown marker and the regular
+        // untracked file still gets its numstat.
+        let _session = crate::remote::TEST_SESSION_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir()
+            .join(format!("sd-review-fifo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            crate::proc::command("git")
+                .current_dir(&dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "-q"]) {
+            return; // no usable git here
+        }
+        fs::write(dir.join("new.md"), "a\nb\nc").unwrap();
+        let fifo = dir.join("pipe");
+        let mkfifo_ok = crate::proc::command("mkfifo")
+            .arg(&fifo)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !mkfifo_ok {
+            let _ = fs::remove_dir_all(&dir);
+            return; // mkfifo not available on this host
+        }
+        let root = dir.to_string_lossy().to_string();
+        let untracked: Vec<&str> = vec!["pipe", "new.md"];
+        let script =
+            remote_stats_script(&root, false, &[], &untracked, q)
+                .expect("remote_stats_script should succeed");
+        let start = std::time::Instant::now();
+        let out = crate::proc::command("sh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("sh should run");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "stats script stalled on the FIFO: {:?}",
+            elapsed
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let parsed = parse_remote_stats(
+            &String::from_utf8_lossy(&out.stdout),
+            0,
+            untracked.len(),
+        );
+        // The FIFO stays unknown instead of hanging.
+        assert_eq!(parsed.untracked[0], None);
+        // Valid-input case: the regular file still produces its numstat.
+        assert_eq!(parsed.untracked[1], Some((Some(3), Some(0))));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

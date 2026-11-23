@@ -1525,12 +1525,18 @@ pub(crate) fn ssh_git(root: &str, args: &[&str]) -> Result<String, String> {
         // (no GNU-only `realpath -e`): `cd … && pwd -P` canonicalizes through
         // symlinks, and `CDPATH=` stops a set CDPATH from making `cd` print
         // and from resolving against the wrong base. The confinement check
-        // then rejects any path that escaped the repo.
+        // then rejects any path that escaped the repo. The `test -f` guard
+        // mirrors the local `git_diff_file_impl` special-file screen: `-f`
+        // dereferences symlinks and returns true only for a regular file,
+        // so FIFOs, devices, and symlinks whose target is not a regular
+        // file are rejected before git opens them (a FIFO would make
+        // `git diff --no-index` block in open() for the full SSH_TIMEOUT).
         format!(
             "repo=$(CDPATH= cd -- {r} && pwd -P) && \
              dir=$(CDPATH= cd -- {r} && CDPATH= cd -- \"$(dirname -- {p})\" && pwd -P) && \
              file=\"$dir/$(basename -- {p})\" && \
-             case \"$file\" in \"$repo\"/*) ;; *) echo \"git path is outside the repository\" >&2; exit 2;; esac && ",
+             case \"$file\" in \"$repo\"/*) ;; *) echo \"git path is outside the repository\" >&2; exit 2;; esac && \
+             if [ ! -f \"$file\" ] || [ -p \"$file\" ]; then echo \"cannot diff special file: \"{p} >&2; exit 3; fi && ",
             r = shell_quote(root),
             p = shell_quote(requested)
         )
