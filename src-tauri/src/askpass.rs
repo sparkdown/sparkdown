@@ -124,8 +124,10 @@ pub fn tokens_match(expected: &[u8], got: &[u8]) -> bool {
         == 0
 }
 
-/// 256 random bits as hex: /dev/urandom on Unix; on Windows the OS-seeded
-/// `RandomState` construction the MCP pipe name uses.
+/// 256 random bits as hex from the OS CSPRNG: `/dev/urandom` on Unix,
+/// `BCryptGenRandom` on Windows via [`crate::mcp::os_random_bytes`]. Fails
+/// closed when the OS RNG is unavailable rather than falling back to a
+/// non-cryptographic hasher.
 pub fn new_token() -> String {
     #[cfg(unix)]
     {
@@ -135,31 +137,16 @@ pub fn new_token() -> String {
                 return buf.iter().map(|b| format!("{b:02x}")).collect();
             }
         }
-        // No urandom: fall through to the hasher construction.
+        // No urandom: delegate to the shared OS-CSPRNG path, which panics
+        // if no CSPRNG is reachable instead of degrading to a hasher.
     }
     fallback_token()
 }
 
 fn fallback_token() -> String {
-    #[cfg(windows)]
-    {
-        format!(
-            "{}{}",
-            crate::mcp::random_token(),
-            crate::mcp::random_token()
-        )
-    }
-    #[cfg(not(windows))]
-    {
-        use std::hash::{BuildHasher, Hasher};
-        let mut t = String::new();
-        for i in 0..4u64 {
-            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-            h.write_u64(0x9E37_79B9_7F4A_7C15 ^ i);
-            t.push_str(&format!("{:016x}", h.finish()));
-        }
-        t
-    }
+    let mut buf = [0u8; 32];
+    crate::mcp::os_random_bytes(&mut buf);
+    buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // --- Wire protocol ------------------------------------------------------------

@@ -1659,16 +1659,68 @@ pub fn mcp_socket_path() -> PathBuf {
     .clone()
 }
 
-/// 128 bits of OS-seeded randomness as hex, no extra crate. `RandomState` is
-/// seeded from the platform RNG (it backs HashMap's collision resistance), so
-/// hashing a fixed input under two fresh instances yields a random token.
+/// Fill `buf` with bytes from the OS CSPRNG: `/dev/urandom` on Unix,
+/// `BCryptGenRandom` on Windows. Panics (fails closed) when the OS RNG is
+/// unavailable rather than falling back to any non-cryptographic source.
+///
+/// Not public: all capability-token generation goes through [`random_token`]
+/// / [`crate::windows::random_hex`] / askpass helpers so the policy stays in
+/// one place.
+pub(crate) fn os_random_bytes(buf: &mut [u8]) {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let mut f = std::fs::File::open("/dev/urandom")
+            .expect("os CSPRNG unavailable: cannot open /dev/urandom");
+        f.read_exact(buf)
+            .expect("os CSPRNG unavailable: short read from /dev/urandom");
+    }
+    #[cfg(windows)]
+    {
+        // BCryptGenRandom with BCRYPT_USE_SYSTEM_PREFERRED_RNG uses the
+        // system-wide CSPRNG and does not need a provider handle. NTSTATUS 0
+        // is STATUS_SUCCESS; anything else is a fail-closed panic (as for
+        // /dev/urandom on Unix).
+        #[link(name = "bcrypt")]
+        extern "system" {
+            fn BCryptGenRandom(
+                hAlgorithm: *mut core::ffi::c_void,
+                pbBuffer: *mut u8,
+                cbBuffer: u32,
+                dwFlags: u32,
+            ) -> i32;
+        }
+        const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
+        // Invariants: valid mutable slice, length fits u32 for the sizes we
+        // ever request (<= 64 bytes).
+        let len = u32::try_from(buf.len()).expect("os CSPRNG request too large");
+        let status = unsafe {
+            BCryptGenRandom(
+                core::ptr::null_mut(),
+                buf.as_mut_ptr(),
+                len,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        if status != 0 {
+            panic!("os CSPRNG unavailable: BCryptGenRandom returned {status:#x}");
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        compile_error!("os_random_bytes: no CSPRNG implementation for this target");
+    }
+}
+
+/// 128 bits from the OS CSPRNG, as 32 lowercase hex chars. Each call is an
+/// independent draw.
 pub(crate) fn random_token() -> String {
-    use std::hash::{BuildHasher, Hasher};
+    let mut buf = [0u8; 16];
+    os_random_bytes(&mut buf);
     let mut token = String::with_capacity(32);
-    for _ in 0..2 {
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        h.write_u64(0x9E37_79B9_7F4A_7C15);
-        token.push_str(&format!("{:016x}", h.finish()));
+    for b in buf {
+        use std::fmt::Write as _;
+        let _ = write!(token, "{b:02x}");
     }
     token
 }
@@ -3458,6 +3510,22 @@ fn roundtrip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn random_token_is_32_hex_and_independent_draws() {
+        // Length/charset contract preserved from the old helper.
+        let a = random_token();
+        assert_eq!(a.len(), 32, "{a}");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "{a}");
+        // Independent OS-CSPRNG draws of 128-bit tokens never collide in
+        // practice. This checks the length/charset and the per-call
+        // independence that callers (pipe names, the forward token, window
+        // tokens) rely on.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..256 {
+            assert!(seen.insert(random_token()), "random_token collided");
+        }
+    }
 
     fn two_windows() -> (
         crate::windows::Registry,
