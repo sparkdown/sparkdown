@@ -253,12 +253,36 @@ const watcherSettle = async () => {
   await flush();
 };
 
-/** Wait for the startup git status (and the branch query it triggers). */
-const gitSettle = async () => {
-  await new Promise((r) => setTimeout(r, 450));
+/** Wait until `cond` holds, re-checking every 10 ms (fails after `timeout`). */
+const until = (cond: () => boolean, what: string, timeout = 10_000) =>
+  vi.waitFor(
+    () => {
+      if (!cond()) throw new Error(`still waiting for ${what}`);
+    },
+    { timeout, interval: 10 },
+  );
+
+const callCount = (cmd: string) => invokeCalls.filter((c) => c.cmd === cmd).length;
+
+/**
+ * Wait for the startup git status and the branch query behind it (the app
+ * debounces the branch query), then let their answers reach the DOM. It waits
+ * for the calls themselves, not for a fixed time, so a slow machine only
+ * makes it take longer. The call counts alone can include calls a previous
+ * test's app made late, so pass `ready` to wait for the state the test is
+ * about to check.
+ */
+const gitSettle = async (ready?: () => boolean) => {
+  await until(() => callCount('git_status') > 0, 'the startup git_status call');
+  await until(() => callCount('git_branch_status') > 0, 'the git_branch_status call');
+  if (ready) await until(ready, 'the state the test checks');
   await flush();
   await flush();
 };
+
+/** A `git_branch_status` call for this repo root has been made. */
+const branchAskedFor = (root: string) =>
+  invokeCalls.some((c) => c.cmd === 'git_branch_status' && c.args?.root === root);
 
 /** The live CodeMirror view. */
 const editorView = async () => {
@@ -2066,7 +2090,7 @@ describe('App integration', () => {
       gitChanges.push({ path: 'a.md', status: 'modified', staged: false });
       restoreConfig(['/repo/a.md']);
       await startApp();
-      await gitSettle();
+      await gitSettle(() => !viewDisabled('diff'));
 
       // Switch the active file to its Diff view → first diff render.
       viewBtn('diff').click();
@@ -2088,7 +2112,7 @@ describe('App integration', () => {
       gitChanges.push({ path: 'a.md', status: 'modified', staged: false });
       restoreConfig(['/repo/a.md']);
       await startApp();
-      await gitSettle();
+      await gitSettle(() => !viewDisabled('diff'));
 
       viewBtn('diff').click();
       await flush();
@@ -2197,7 +2221,7 @@ describe('App integration', () => {
       gitChanges.push({ path: 'a.md', status: 'modified', staged: false });
       await startApp();
       await open('/repo/a.md');
-      await gitSettle();
+      await gitSettle(() => !viewDisabled('diff'));
       expect(viewDisabled('diff')).toBe(false);
 
       emitTauriEvent(MENU.VIEW_DIFF);
@@ -2233,7 +2257,7 @@ describe('App integration', () => {
         gitChanges.push({ path: 'a.md', status: 'modified', staged: false });
         await startApp();
         await open('/repo/a.md');
-        await gitSettle();
+        await gitSettle(() => !viewDisabled('diff'));
       };
 
       it('Diff: keys aimed at the editor change nothing; focus is in the diff pane', async () => {
@@ -2293,7 +2317,7 @@ describe('App integration', () => {
         gitChanges.push({ path: 'a.md', status: 'modified', staged: false });
         await startApp();
         await open('/repo/a.md');
-        await gitSettle();
+        await gitSettle(() => !viewDisabled('diff'));
         emitTauriEvent(MENU.VIEW_DIFF);
         await flush();
         const view = await editorView();
@@ -2356,7 +2380,7 @@ describe('App integration', () => {
       gitChanges.push({ path: 'main.rs', status: 'modified', staged: false });
       await startApp();
       await open('/repo/main.rs');
-      await gitSettle();
+      await gitSettle(() => !viewDisabled('diff'));
       expect(pressedView()).toBe('edit');
       expect(viewDisabled('split')).toBe(true);
       expect(viewDisabled('preview')).toBe(true);
@@ -2513,18 +2537,16 @@ describe('App integration', () => {
       git.branch = { branch: 'feature/x', detached: false, has_upstream: true, ahead: 2, behind: 1 };
       await startApp();
       emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/repo/a.md' });
-      await gitSettle();
+      await gitSettle(() => el('status-branch').textContent === 'feature/x ↑2 ↓1');
       expect(el('status-branch').classList.contains('hidden')).toBe(false);
       expect(el('status-branch').textContent).toBe('feature/x ↑2 ↓1');
 
       // The next watcher tick refreshes it (no polling).
       git.branch = { ...git.branch, ahead: 0, behind: 0 };
       emitTauriEvent('watcher://changes', [{ path: '/repo/a.md', kind: 'modify' }]);
-      // Watcher coalescing (250 ms) + the status debounce (600 ms) + the
-      // branch debounce (300 ms), plus slack for the async git calls.
-      for (let i = 0; i < 60 && el('status-branch').textContent !== 'feature/x'; i++) {
-        await new Promise((r) => setTimeout(r, 50));
-      }
+      // The watcher coalesces, then the branch query is debounced; wait for
+      // the label itself.
+      await until(() => el('status-branch').textContent === 'feature/x', 'the branch label to update');
       expect(el('status-branch').textContent).toBe('feature/x');
 
       // No polling: with no further watcher tick, the branch is not re-queried.
@@ -2539,7 +2561,7 @@ describe('App integration', () => {
       git.branch = { branch: null, detached: false, has_upstream: false, ahead: 0, behind: 0 };
       await startApp();
       emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/repo/a.md' });
-      await gitSettle();
+      await gitSettle(() => branchAskedFor('/repo'));
       expect(el('status-branch').classList.contains('hidden')).toBe(true);
     });
 
@@ -3081,7 +3103,7 @@ describe('App integration', () => {
       emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/tmp/x/docs/a.md' });
       await flush();
       await flush();
-      await gitSettle();
+      await gitSettle(() => !viewDisabled('diff') && branchAskedFor('/tmp/x'));
 
       // Diff view mode is available for the modified file.
       expect(viewDisabled('diff')).toBe(false);
