@@ -218,11 +218,26 @@ describe('UpdateManager notice', () => {
 
   it('swallows a failed automatic check and reports a failed manual one', async () => {
     backend({ checkError: new Error('curl: (22) 404') });
-    await new UpdateManager(makeHost()).check(false);
+    const host = makeHost();
+    await new UpdateManager(host).check(false);
     expect(chip()).toBeNull();
+    // A failing check does not stamp last_update_check_ms, so it is not
+    // skipped for 24 h.
+    expect(host.config.last_update_check_ms).toBe(0);
+    expect(host.saveConfig).not.toHaveBeenCalled();
 
     await new UpdateManager(makeHost()).check(true);
     expect(chipText()).toBe("Couldn't check for updates.");
+  });
+
+  it('stamps last_update_check_ms when the backend says we are up to date', async () => {
+    // Valid-input case: a completed check that returns null still stamps,
+    // so the 24 h throttle runs normally.
+    backend({ update: null });
+    const host = makeHost();
+    await new UpdateManager(host).check(false);
+    expect(host.config.last_update_check_ms).toBeGreaterThan(0);
+    expect(host.saveConfig).toHaveBeenCalled();
   });
 
   it('points .deb / AUR installs at the package manager, with no install button', async () => {

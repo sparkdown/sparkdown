@@ -98,6 +98,13 @@ check_updates_automatically: boolean,
  */
 last_update_check_ms: number, 
 /**
+ * Highest update version this install has seen (running or offered),
+ * as a semver string; empty until the first check. The update check
+ * refuses a manifest below it, also after a downgraded install, so an
+ * older signed release is not offered again.
+ */
+highest_update_version_seen: string, 
+/**
  * Terminal split layout per workspace, keyed by the workspace's tmux
  * session prefix (`sd-<hash>-`): a binary tree of rows/columns whose
  * leaves name the tmux session each pane reattaches to. Restored on the
