@@ -67,6 +67,7 @@ const DEFAULT_CONFIG: AppConfig = {
   agent_args: {},
   check_updates_automatically: true,
   last_update_check_ms: 0,
+  highest_update_version_seen: '',
   terminal_layouts: {},
   mcp_install_prompt_dismissed: [],
   mcp_external_agents: false,
@@ -857,6 +858,7 @@ export class App {
         agent_args: this.config.agent_args ?? {},
         check_updates_automatically: this.config.check_updates_automatically ?? true,
         last_update_check_ms: this.config.last_update_check_ms ?? 0,
+        highest_update_version_seen: this.config.highest_update_version_seen ?? '',
         // Kept current by the cockpit (terminal split layout per workspace).
         terminal_layouts: this.config.terminal_layouts ?? {},
         mcp_install_prompt_dismissed: this.config.mcp_install_prompt_dismissed ?? [],
