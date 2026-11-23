@@ -588,9 +588,17 @@ pub fn remote_session(webview_window: tauri::WebviewWindow) -> Option<RemoteSess
 
 const MAX_REMOTE_FILE_BYTES: u64 = 50 * 1024 * 1024;
 
-pub fn read_file(path: &str) -> Result<String, AppError> {
+pub fn read_file(path: &str, folder_only: bool) -> Result<String, AppError> {
     let session = current_session().ok_or_else(|| AppError::Other("no remote session".into()))?;
     validate_remote_path(path).map_err(AppError::Other)?;
+    // Paths from a document link, terminal output or an agent must be
+    // inside this window's folder on the remote host, same as the local
+    // branch and the other routed path operations (`delete_file`,
+    // `create_entry`, `read_image`). Paths the user picked locally are
+    // not checked.
+    if folder_only {
+        remote_deletable(&session.path, path).map_err(AppError::InvalidPath)?;
+    }
     // One round trip: a status line, then (only on OK) the contents. The
     // old shape was two ssh calls (size probe, then cat) — every file open
     // paid the connection latency twice.
@@ -4605,6 +4613,34 @@ mod image_tests {
     fn read_image_rejects_non_image_path_before_ssh() {
         let err = read_image("/home/u/.ssh/id_rsa").unwrap_err();
         assert!(matches!(err, AppError::InvalidPath(_)), "{err}");
+    }
+
+    // An agent's `sparkdown_open_file` (read_file with folder_only=true)
+    // reads only inside the opened remote folder, refused before any ssh
+    // call. With folder_only=false (a path the user picked) the same paths
+    // pass this check; that branch is the unchanged `cat` script.
+    #[test]
+    fn remote_read_file_with_folder_only_rejects_paths_outside_the_window_folder() {
+        let _guard = TEST_SESSION_LOCK.lock().unwrap();
+        set_session_for_test(Some(RemoteSession {
+            host: "dev".into(),
+            path: "/srv/proj".into(),
+            home: "/home/u".into(),
+        }));
+        for p in [
+            "/home/u/.ssh/id_ed25519",
+            "/etc/passwd",
+            "/srv/proj/../other/a.md",
+            "/srv/projx/a.md",
+            "/srv/proj",
+        ] {
+            let err = read_file(p, true).unwrap_err();
+            assert!(
+                matches!(&err, AppError::InvalidPath(m) if !m.is_empty()),
+                "{p}: {err}"
+            );
+        }
+        set_session_for_test(None);
     }
 
     #[cfg(unix)]
