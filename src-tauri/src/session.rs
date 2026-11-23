@@ -492,6 +492,33 @@ impl ConfigStore {
             .unwrap_or(default)
     }
 
+    /// Read a string preference straight from the shared store. Returns
+    /// `None` when the key is missing or not a string. Used by the updater
+    /// to read the persisted rollback floor (`highest_update_version_seen`)
+    /// from the shared prefs without waiting for a window-save round-trip.
+    pub fn pref_string(&self, key: &str) -> Option<String> {
+        self.lock()
+            .stored
+            .prefs
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    }
+
+    /// Write a string preference straight to the shared store and persist
+    /// the file. Keeps the value visible to other windows live, like
+    /// [`pref_bool`](Self::pref_bool) reads do. Used by the updater to bump
+    /// the rollback floor after a manifest check completes.
+    pub fn set_pref_string(&self, key: &str, value: &str) -> Result<(), String> {
+        {
+            let mut g = self.lock();
+            g.stored
+                .prefs
+                .insert(key.to_string(), Value::String(value.to_string()));
+        }
+        self.write()
+    }
+
     /// `true` when the last load could not parse the stored preferences as
     /// an `AppConfig`.
     #[cfg(test)]

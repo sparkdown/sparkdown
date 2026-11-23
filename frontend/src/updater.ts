@@ -150,12 +150,13 @@ export class UpdateManager {
         }
         return;
       }
-      // Stamp before the network call, so a failing check (offline, repo
-      // not public yet) still waits 24 h instead of retrying every launch.
+      // Stamp only after the check has completed (an update was found or
+      // the server said we are up to date). A failed check (offline, an
+      // error from the server) is retried at the next launch instead of
+      // waiting 24 h.
+      const update = await invoke<UpdateInfo | null>('update_check');
       this.host.config.last_update_check_ms = Date.now();
       this.host.saveConfig();
-
-      const update = await invoke<UpdateInfo | null>('update_check');
       if (!update) {
         if (manual) this.showChip('SparkDown is up to date.', [], INFO_HIDE_MS);
         return;
