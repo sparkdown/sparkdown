@@ -13,9 +13,28 @@ if [ -n "${ARCH_SNAPSHOT:-}" ] && [ "$ARCH_SNAPSHOT" != live ]; then
   echo "Server = https://archive.archlinux.org/repos/$ARCH_SNAPSHOT/\$repo/os/\$arch" > /etc/pacman.d/mirrorlist
   SYNC=-Syyuu
 fi
-pacman $SYNC --noconfirm --needed hyprland seatd grim wtype tmux python git mesa ttf-dejavu \
-  webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg xdotool openssl dbus procps-ng at-spi2-core python-gobject >"$OUT/pacman.log" 2>&1 \
-  || { tail -30 "$OUT/pacman.log"; exit 1; }
+# archive.archlinux.org can stall below 1 byte/s; pacman's default 10s
+# low-speed cutoff then aborts the whole transaction. Turn that off
+# and fetch one package at a time so a slow file does not starve the rest.
+sed -i 's/^ParallelDownloads/# ParallelDownloads/' /etc/pacman.conf
+sed -i '/^\[options\]/a DisableDownloadTimeout\
+ParallelDownloads = 1' /etc/pacman.conf
+ok=0
+for try in 1 2 3; do
+  echo "===== pacman try $try/3 =====" >>"$OUT/pacman.log"
+  if pacman $SYNC --noconfirm --needed hyprland seatd grim wtype tmux python git mesa ttf-dejavu \
+    webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg xdotool openssl dbus procps-ng at-spi2-core python-gobject >>"$OUT/pacman.log" 2>&1; then
+    ok=1
+    break
+  fi
+  if [ "$try" -lt 3 ]; then
+    sleep $((try * 20))
+  fi
+done
+if [ "$ok" -ne 1 ]; then
+  tail -30 "$OUT/pacman.log"
+  exit 1
+fi
 pacman -Q hyprland aquamarine webkit2gtk-4.1 | tee "$OUT/versions.txt"
 install -m 755 "$BIN_IN" /usr/local/bin/sparkdown
 if ldd /usr/local/bin/sparkdown | grep 'not found'; then echo "missing libraries"; exit 1; fi
