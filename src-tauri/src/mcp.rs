@@ -908,9 +908,12 @@ fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    // Per-user `%LOCALAPPDATA%\\Temp` already has a per-user ACL that the new
-    // directory inherits; nothing else to do.
-    std::fs::create_dir(dir)
+    // Windows: `GetTempPath()` can be a shared location (machine-wide
+    // `TMP`/`TEMP`), so don't rely on the parent's inherited ACL. Create the
+    // directory (fails if the name exists, like the Unix 0700 create) and
+    // give it a DACL granting only the current user and SYSTEM.
+    std::fs::create_dir(dir)?;
+    crate::context::windows_acl::set_owner_only_dacl(dir, true)
 }
 
 /// Ensure the base dir exists, is a real directory (not a symlink) we own,
@@ -952,7 +955,10 @@ fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)
+    // Windows twin of `create_private_dir` above, but idempotent: an
+    // existing directory is accepted once its owner is checked and its DACL
+    // reapplied. See the Unix block for the behaviour this mirrors.
+    crate::context::ensure_owned_dir(dir)
 }
 
 /// A private per-call working directory. Tries `<root>/sparkdown/…` first;

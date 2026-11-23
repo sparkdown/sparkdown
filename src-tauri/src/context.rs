@@ -337,10 +337,16 @@ pub(crate) fn truncate_at_char_boundary(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-/// Write one file of the context folder: new files are 0600.
+/// Write one file of the context folder: new files are 0600 on Unix, and on
+/// Windows get a DACL granting only the current user and SYSTEM (not the
+/// parent directory's inherited ACL), so `context.json` / `README.md` /
+/// `buffers/<name>` stay private to this account under a shared `%TMP%`.
 fn write_private_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    crate::fsio::create_private_file(path)?.write_all(data)
+    crate::fsio::create_private_file(path)?.write_all(data)?;
+    #[cfg(windows)]
+    windows_acl::set_owner_only_dacl(path, false)?;
+    Ok(())
 }
 
 /// Create `<runtime>/sparkdown/<key>/buffers` and its parents down from the
@@ -361,9 +367,243 @@ fn secure_context_tree(buf_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Non-Unix (Windows) twin of the Unix walk above. The base can be a shared
+/// `%TMP%` (e.g. a machine-wide `TMP=C:\Temp`), so each level we create gets
+/// a DACL that does not inherit from the parent and grants only the current
+/// user and SYSTEM, and an
+/// existing level is required to be a real directory (not a reparse point /
+/// junction) owned by the current user — the Windows equivalent of the
+/// Unix `symlink_metadata` + `euid` + 0o700 checks.
 #[cfg(not(unix))]
 fn secure_context_tree(buf_dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(buf_dir)
+    let key_dir = buf_dir
+        .parent()
+        .ok_or_else(|| std::io::Error::other("buffers dir has no parent"))?;
+    let sd_root = key_dir
+        .parent()
+        .ok_or_else(|| std::io::Error::other("context dir has no parent"))?;
+    for level in [sd_root, key_dir, buf_dir] {
+        ensure_owned_dir(level)?;
+    }
+    Ok(())
+}
+
+/// Windows equivalent of the Unix `ensure_owned_dir`: create `dir` with a
+/// non-inheriting DACL granting only the current user and SYSTEM, or if it
+/// already exists require it to be a real directory (not a reparse
+/// point / junction) owned by the current user, then reapply that DACL so
+/// a wider ACL inherited from a shared parent is replaced.
+///
+/// Crate-visible so `mcp.rs` (PrivateCwd) can use the same rule.
+#[cfg(windows)]
+pub(crate) fn ensure_owned_dir(dir: &Path) -> std::io::Result<()> {
+    match std::fs::create_dir(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    // symlink_metadata, not metadata: a junction / symlink here is refused,
+    // not followed.
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.file_type().is_dir() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a directory",
+            dir.display()
+        )));
+    }
+    if windows_acl::is_reparse_point(&meta) {
+        return Err(std::io::Error::other(format!(
+            "{} is a reparse point (junction or link), not a plain directory",
+            dir.display()
+        )));
+    }
+    windows_acl::require_owner_is_current_user(dir)?;
+    windows_acl::set_owner_only_dacl(dir, true)?;
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+/// The error for a folder owned by another account: names the folder,
+/// who owns it and who SparkDown expected (the signed-in user), and what
+/// to do about it.
+fn owner_mismatch_message(path: &Path, owner_sid: &str, want_sid: &str) -> String {
+    let me = match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
+        (Ok(d), Ok(u)) if !d.is_empty() && !u.is_empty() => format!("{d}\\{u} ({want_sid})"),
+        (_, Ok(u)) if !u.is_empty() => format!("{u} ({want_sid})"),
+        _ => want_sid.to_string(),
+    };
+    format!(
+        "The folder {} belongs to another account (owner {owner_sid}); SparkDown expected it to belong to {me}. Delete the folder or take ownership of it, then try again.",
+        path.display()
+    )
+}
+
+/// Windows ACL helpers used by [`ensure_owned_dir`] and
+/// [`write_private_file`] above and by `mcp::create_private_dir` /
+/// `mcp::ensure_private_dir`. Kept together so the raw Win32 calls live
+/// in one place.
+#[cfg(windows)]
+pub(crate) mod windows_acl {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use std::path::Path;
+    use windows_sys::core::BOOL;
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        GetNamedSecurityInfoW, SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    };
+
+    /// `FILE_ATTRIBUTE_REPARSE_POINT` from `Win32::Storage::FileSystem`; we
+    /// inline the constant so we do not need to enable that feature just to
+    /// test one bit on a `Metadata`.
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+    /// True when `meta` describes a reparse point (symlink, junction, mount
+    /// point). `std::fs::FileType::is_symlink` catches name-surrogate
+    /// reparse points but not every reparse tag we care about, so inspect
+    /// the raw attributes bit directly.
+    pub(crate) fn is_reparse_point(meta: &std::fs::Metadata) -> bool {
+        meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+
+    /// Encode a path as a NUL-terminated UTF-16 buffer for the Win32 API.
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    /// RAII wrapper for a pointer that must be freed with `LocalFree`.
+    struct LocalPtr<T>(*mut T);
+    impl<T> Drop for LocalPtr<T> {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // Invariants: `self.0` came from a Win32 call that documents
+                // `LocalFree` as its matching deallocator (e.g.
+                // ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                // ConvertSidToStringSidW, GetNamedSecurityInfoW's returned
+                // descriptor).
+                unsafe { LocalFree(self.0.cast()) };
+            }
+        }
+    }
+
+    /// Reject `dir`/`file` when its NTFS owner is not the current process's
+    /// user: another account controls it, so nothing is written through it.
+    /// Reads the owner via `GetNamedSecurityInfoW`, compares SIDs as
+    /// strings (the same form `mcp::current_user_sid` returns).
+    pub(crate) fn require_owner_is_current_user(path: &Path) -> std::io::Result<()> {
+        let want = crate::mcp::current_user_sid()?;
+        let path_w = wide(path);
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // Invariants: `path_w` is NUL-terminated UTF-16; all out-pointers are
+        // valid; on success the returned `sd` must be freed with LocalFree.
+        let rc = unsafe {
+            GetNamedSecurityInfoW(
+                path_w.as_ptr(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut sd,
+            )
+        };
+        let _sd_guard = LocalPtr::<std::ffi::c_void>(sd.cast());
+        if rc != ERROR_SUCCESS {
+            return Err(std::io::Error::from_raw_os_error(rc as i32));
+        }
+        let mut sid_w: *mut u16 = std::ptr::null_mut();
+        // Invariants: `owner` points into the SD we hold; `sid_w` is a valid
+        // out-pointer.
+        let ok: BOOL = unsafe { ConvertSidToStringSidW(owner, &mut sid_w) };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _sid_guard = LocalPtr::<u16>(sid_w);
+        // Invariants: on success `sid_w` is a NUL-terminated UTF-16 string.
+        let got = unsafe {
+            let n = (0..).take_while(|&i| *sid_w.add(i) != 0).count();
+            String::from_utf16_lossy(std::slice::from_raw_parts(sid_w, n))
+        };
+        if !got.eq_ignore_ascii_case(&want) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                super::owner_mismatch_message(path, &got, &want),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Replace `path`'s DACL with a non-inheriting one (`P`: no inherited ACEs)
+    /// that grants `FA` (`FILE_ALL_ACCESS`) only to the current user and to
+    /// SYSTEM. `inheritable` adds the object/container inherit flags so new
+    /// children of a directory start with the same ACL; files pass `false`.
+    pub(crate) fn set_owner_only_dacl(path: &Path, inheritable: bool) -> std::io::Result<()> {
+        let sid = crate::mcp::current_user_sid()?;
+        let flags = if inheritable { "OICI" } else { "" };
+        let sddl = format!("D:P(A;{flags};FA;;;{sid})(A;{flags};FA;;;SY)");
+        let sddl_w: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        // Invariants: `sddl_w` is NUL-terminated UTF-16; `sd` is a valid
+        // out-pointer; on success the returned SD must be freed with
+        // LocalFree.
+        let ok: BOOL = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl_w.as_ptr(),
+                SDDL_REVISION_1 as u32,
+                &mut sd,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let _sd_guard = LocalPtr::<std::ffi::c_void>(sd.cast());
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut present: BOOL = 0;
+        let mut defaulted: BOOL = 0;
+        // Invariants: `sd` is a valid descriptor; the out-pointers are
+        // valid; the DACL pointer aliases memory owned by `sd` and lives
+        // until `_sd_guard` drops.
+        let ok: BOOL =
+            unsafe { GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if present == 0 {
+            return Err(std::io::Error::other(
+                "the built descriptor has no DACL",
+            ));
+        }
+        let path_w = wide(path);
+        // Invariants: `path_w` is NUL-terminated UTF-16; `dacl` is a valid DACL
+        // from the SD above. PROTECTED_DACL_SECURITY_INFORMATION drops
+        // inherited ACEs, so a shared parent's ACL grants no one else access.
+        let rc = unsafe {
+            SetNamedSecurityInfoW(
+                path_w.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
+            )
+        };
+        if rc != ERROR_SUCCESS {
+            return Err(std::io::Error::from_raw_os_error(rc as i32));
+        }
+        Ok(())
+    }
 }
 
 /// Create `dir` mode 0700 if it is absent, then require it to be a real
@@ -669,6 +909,19 @@ pub async fn detect_agents(webview_window: tauri::WebviewWindow) -> Vec<AgentCli
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn owner_mismatch_message_names_the_folder_and_the_expected_owner() {
+        let m = owner_mismatch_message(
+            Path::new(r"C:\Temp\sparkdown\k"),
+            "S-1-5-32-544",
+            "S-1-5-21-1-2-3-1001",
+        );
+        assert!(m.contains(r"C:\Temp\sparkdown\k"), "{m}");
+        assert!(m.contains("S-1-5-32-544"), "{m}");
+        assert!(m.contains("expected it to belong to"), "{m}");
+        assert!(m.contains("S-1-5-21-1-2-3-1001"), "{m}");
+    }
+
     use super::*;
 
     #[test]
@@ -885,6 +1138,81 @@ mod tests {
             err.to_string().contains("not a directory"),
             "unexpected error: {err}"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Windows twin of `refuses_a_symlinked_buffers_dir`: a junction
+    /// (directory reparse point) at `buffers/`, made by another local
+    /// account, is refused by `secure_context_tree`, so its target does not
+    /// receive `context.json` or the shadow buffers.
+    #[cfg(windows)]
+    #[test]
+    fn refuses_a_reparse_point_buffers_dir() {
+        let base = std::env::temp_dir().join(format!(
+            "sd-junction-{}-{}",
+            std::process::id(),
+            workspace_key("junction-test")
+        ));
+        let key_dir = base.join("sparkdown").join("k");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        // Create a directory junction with `mklink /J` (needs no privilege).
+        let status = std::process::Command::new("cmd")
+            .args([
+                "/c",
+                "mklink",
+                "/J",
+                &key_dir.join("buffers").to_string_lossy(),
+                &target.to_string_lossy(),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J failed");
+        let err = secure_context_tree(&key_dir.join("buffers")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("reparse") || msg.contains("not a directory"),
+            "unexpected error: {err}"
+        );
+        // The target directory must still be intact — we did not write through
+        // the junction.
+        assert!(target.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Normal Windows flow: a fresh context tree is created, is not a
+    /// reparse point, and its owner is the current user. A file written
+    /// via `write_private_file` gets its own DACL instead of the parent's.
+    #[cfg(windows)]
+    #[test]
+    fn windows_context_tree_is_owner_only_and_not_a_reparse_point() {
+        use super::windows_acl;
+        let base = std::env::temp_dir().join(format!(
+            "sd-wintree-{}-{}",
+            std::process::id(),
+            workspace_key("wintree")
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let key_dir = base.join("sparkdown").join("k");
+        let buf_dir = key_dir.join("buffers");
+        std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&base).unwrap();
+        secure_context_tree(&buf_dir).unwrap();
+        for level in [&base.join("sparkdown"), &key_dir, &buf_dir] {
+            let meta = std::fs::symlink_metadata(level).unwrap();
+            assert!(meta.is_dir(), "{} is not a directory", level.display());
+            assert!(
+                !windows_acl::is_reparse_point(&meta),
+                "{} is a reparse point",
+                level.display()
+            );
+            windows_acl::require_owner_is_current_user(level).unwrap();
+        }
+        let f = buf_dir.join("Untitled.md");
+        write_private_file(&f, b"hello").unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"hello");
+        windows_acl::require_owner_is_current_user(&f).unwrap();
         let _ = std::fs::remove_dir_all(&base);
     }
 
