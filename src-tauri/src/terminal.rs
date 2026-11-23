@@ -2047,11 +2047,12 @@ fn fallback_shell() -> String {
 
 /// Send an OS notification for a terminal that needs attention (OSC 9, OSC 777, BEL).
 /// The frontend calls this only when the window is unfocused and rate-limits enforced.
-/// Clicking the notification focuses the window where supported (macOS, Linux).
+/// Showing it does not raise or focus the window: the text comes from program
+/// output, and a window that takes focus while the user types elsewhere would
+/// receive their keystrokes. Clicking the notification is up to the OS.
 #[tauri::command]
 pub fn terminal_notify(
     app: tauri::AppHandle,
-    webview_window: tauri::WebviewWindow,
     _pane_id: String,
     title: String,
     message: String,
@@ -2070,11 +2071,6 @@ pub fn terminal_notify(
         .body(body)
         .show()
         .map_err(|e| format!("Failed to show notification: {}", e))?;
-
-    // On platforms that support it (macOS, Linux), clicking the notification
-    // focuses the window. The pane itself cannot be focused cross-platform via
-    // notification click; the frontend focuses it when the window gains focus.
-    let _ = webview_window.set_focus();
 
     Ok(())
 }
