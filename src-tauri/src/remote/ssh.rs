@@ -518,9 +518,13 @@ pub fn map_ssh_failure(host: &str, stderr: &str) -> String {
         || s.contains("host key revoked");
     if revoked {
         let target = changed_key_entry(host, stderr, || {
+            // Return the known_hosts name OpenSSH actually consults: the
+            // alias verbatim when HostKeyAlias is set, otherwise the usual
+            // `host`/`[host]:port` form. `known_hosts_name` is then a
+            // no-op on this value (port=22).
             super::hostkey::resolve(host)
                 .ok()
-                .map(|r| (r.host_key_alias.unwrap_or(r.hostname), r.port))
+                .map(|r| (super::hostkey::known_hosts_lookup_name(&r), 22))
         });
         return format!(
             "{ERR_HOSTKEY_CHANGED}WARNING: the host key for '{host}' is REVOKED. The administrator has marked this key as no longer trusted. \
@@ -530,9 +534,10 @@ pub fn map_ssh_failure(host: &str, stderr: &str) -> String {
     }
     if s.contains("remote host identification has changed") {
         let target = changed_key_entry(host, stderr, || {
+            // See the REVOKED branch above: pass the name OpenSSH consults.
             super::hostkey::resolve(host)
                 .ok()
-                .map(|r| (r.host_key_alias.unwrap_or(r.hostname), r.port))
+                .map(|r| (super::hostkey::known_hosts_lookup_name(&r), 22))
         });
         return format!(
             "{ERR_HOSTKEY_CHANGED}WARNING: the host key for '{host}' has CHANGED since you last connected. \
