@@ -117,13 +117,14 @@ pub struct GitActionResult {
     pub output: String,
     pub commits: Option<u32>,
     pub target: Option<String>,
-    /// When set, Pull or Push has not run: the repository's own settings
+    /// When set, the action has not run: the repository's own settings
     /// would run these commands, and the frontend should ask first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub needs_confirmation: Option<RepoCommandConfirm>,
 }
 
-/// One repository-local Git setting that would run a command during Pull or Push.
+/// One repository-local Git setting that would run a command during Pull, Push,
+/// Commit or Discard.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RepoCommandKey {
     pub key: String,
@@ -147,9 +148,9 @@ pub(crate) type ExtraEnv<'a> = &'a [(&'a str, &'a str)];
 /// Fixed `-c` overrides for read-only git calls that go through
 /// [`query`] / [`run_stdout_raw`] (status, ls-files, rev-parse, and the
 /// like). Commit, Pull, Push and Discard keep [`user_git`] as-is, so hooks,
-/// `core.sshCommand` and credential helpers stay those of the user. Pull
-/// and Push ask first when the repository itself sets command
-/// keys (see [`repo_config_exec_entries`]).
+/// filters, `core.sshCommand` and credential helpers stay those of the user.
+/// Those four ask first when the repository itself sets command keys (see
+/// [`repo_config_exec_entries`] and [`confirm_gate`]).
 const READ_GIT_OVERRIDES: &[&str] = &[
     "-c",
     "core.fsmonitor=false",
@@ -179,6 +180,36 @@ fn user_git(
     args: &[&str],
     timeout: Duration,
 ) -> Result<Output, GitActionError> {
+    user_git_inner(root, extra, args, timeout, false)
+}
+
+/// Same as [`user_git`] but additionally blanks every repo-local
+/// `filter.<x>.{clean,smudge,process}` and `diff.<x>.{command,textconv}`
+/// driver through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`, so a repository's
+/// own `.git/config` + `.gitattributes` don't make this invocation run a
+/// command the user did not ask for. Used by the read / planning calls on
+/// the write path (status, ls-files, rev-parse), which includes the
+/// planning step before Discard asks for its confirmation. Commit
+/// (`git add` / `git commit`), Discard's own `git restore` / `git rm` and
+/// Pull / Push use the plain [`user_git`], so hooks and filters (LFS
+/// included) run as in the terminal once the user has confirmed (all four
+/// go through `confirm_gate` first).
+fn user_git_sandboxed(
+    root: &Path,
+    extra: ExtraEnv,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Output, GitActionError> {
+    user_git_inner(root, extra, args, timeout, true)
+}
+
+fn user_git_inner(
+    root: &Path,
+    extra: ExtraEnv,
+    args: &[&str],
+    timeout: Duration,
+    sandbox_local_drivers: bool,
+) -> Result<Output, GitActionError> {
     let mut cmd = crate::proc::command(crate::git::git_bin());
     cmd.current_dir(root)
         .env("PATH", crate::context::login_shell_path())
@@ -194,6 +225,27 @@ fn user_git(
         .args(args);
     for (k, v) in extra {
         cmd.env(k, v);
+    }
+    if sandbox_local_drivers {
+        // Enumerate the repo's own `filter.*` / `diff.*` drivers and pass
+        // blanked values through `GIT_CONFIG_*` (the same mechanism the
+        // read path in git.rs and `fetch_impl` already use). Must come
+        // after `extra` so the caller cannot accidentally overwrite
+        // `GIT_CONFIG_COUNT` with its own count and let the drivers back in.
+        let neutralisers = crate::git::local_exec_neutralisers(root).map_err(|e| {
+            GitActionError::new(
+                GitErrorKind::Other,
+                "Couldn't read this repository's Git settings.",
+                e,
+            )
+        })?;
+        if !neutralisers.is_empty() {
+            cmd.env("GIT_CONFIG_COUNT", neutralisers.len().to_string());
+            for (i, (key, value)) in neutralisers.iter().enumerate() {
+                cmd.env(format!("GIT_CONFIG_KEY_{i}"), key);
+                cmd.env(format!("GIT_CONFIG_VALUE_{i}"), value);
+            }
+        }
     }
     let mut child = cmd.spawn().map_err(|e| {
         GitActionError::new(GitErrorKind::Other, "Couldn't run git.", e.to_string())
@@ -290,7 +342,7 @@ fn run_stdout_raw(
     action: Action,
 ) -> Result<String, GitActionError> {
     let mut buf = Vec::new();
-    let o = user_git(
+    let o = user_git_sandboxed(
         root,
         extra,
         with_read_git_overrides(args, &mut buf),
@@ -306,7 +358,7 @@ fn run_stdout_raw(
 /// Run a quiet query; `None` on failure.
 fn query(root: &Path, extra: ExtraEnv, args: &[&str]) -> Option<String> {
     let mut buf = Vec::new();
-    let o = user_git(
+    let o = user_git_sandboxed(
         root,
         extra,
         with_read_git_overrides(args, &mut buf),
@@ -587,11 +639,22 @@ fn with_rename_sources(root: &Path, extra: ExtraEnv, paths: &[String]) -> Vec<St
 /// Commit. `paths` = the files to include (repo-relative to the top level),
 /// or `None` for every change. Untracked files among them are added; only
 /// they go into the commit (the rest of the index is left as it was).
+#[cfg(test)]
 pub(crate) fn commit_impl(
     root: &str,
     message: &str,
     paths: Option<Vec<String>>,
     extra: ExtraEnv,
+) -> ActionResult {
+    commit_with(root, message, paths, extra, false)
+}
+
+pub(crate) fn commit_with(
+    root: &str,
+    message: &str,
+    paths: Option<Vec<String>>,
+    extra: ExtraEnv,
+    confirmed: bool,
 ) -> ActionResult {
     if message.trim().is_empty() {
         return Err(GitActionError::new(
@@ -601,6 +664,9 @@ pub(crate) fn commit_impl(
         ));
     }
     let root = check_local(root, SYNC_UNSUPPORTED)?;
+    if let Some(ask) = confirm_gate(&root, extra, confirmed)? {
+        return Ok(ask);
+    }
     let top = query(&root, extra, &["rev-parse", "--show-toplevel"])
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
@@ -1038,6 +1104,25 @@ fn confirm_gate(
     extra: ExtraEnv,
     confirmed: bool,
 ) -> Result<Option<GitActionResult>, GitActionError> {
+    Ok(
+        confirm_needed(root, extra, confirmed)?.map(|ask| GitActionResult {
+            summary: String::new(),
+            output: String::new(),
+            commits: None,
+            target: None,
+            needs_confirmation: Some(ask),
+        }),
+    )
+}
+
+/// The gate itself, shared by Pull, Push, Commit and Discard: the list to
+/// confirm, or `None` when the repository sets no such command or the user
+/// already confirmed.
+fn confirm_needed(
+    root: &Path,
+    extra: ExtraEnv,
+    confirmed: bool,
+) -> Result<Option<RepoCommandConfirm>, GitActionError> {
     let keys = repo_config_exec_entries(root, extra).map_err(|_| {
         GitActionError::new(
             GitErrorKind::Other,
@@ -1048,15 +1133,9 @@ fn confirm_gate(
     if keys.is_empty() || confirmed {
         return Ok(None);
     }
-    Ok(Some(GitActionResult {
-        summary: String::new(),
-        output: String::new(),
-        commits: None,
-        target: None,
-        needs_confirmation: Some(RepoCommandConfirm {
-            fingerprint: repo_command_fingerprint(root, &keys),
-            keys,
-        }),
+    Ok(Some(RepoCommandConfirm {
+        fingerprint: repo_command_fingerprint(root, &keys),
+        keys,
     }))
 }
 
@@ -1326,6 +1405,10 @@ pub struct DiscardResult {
     pub failed: Vec<DiscardFailure>,
     /// git's output, for the Git tab.
     pub output: String,
+    /// When set, nothing ran: the repository's own settings would run these
+    /// commands, and the frontend should ask first (see `confirm_gate`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_confirmation: Option<RepoCommandConfirm>,
 }
 
 /// Moves one path to the OS trash (never follows a symlink: the link
@@ -1732,12 +1815,30 @@ fn trash_file(top: &Path, rel: &str, trasher: Trasher) -> Result<bool, String> {
 /// to the OS trash. Never `reset --hard`, never `clean`, never a recursive
 /// delete, never through a symlinked folder. Each path is re-checked
 /// against a fresh status first.
+#[cfg(test)]
 pub(crate) fn discard_impl(
     root: &str,
     confirmed: &[DiscardRequest],
     extra: ExtraEnv,
     trasher: Trasher,
 ) -> Result<DiscardResult, GitActionError> {
+    discard_with(root, confirmed, extra, trasher, false)
+}
+
+pub(crate) fn discard_with(
+    root: &str,
+    confirmed: &[DiscardRequest],
+    extra: ExtraEnv,
+    trasher: Trasher,
+    repo_commands_confirmed: bool,
+) -> Result<DiscardResult, GitActionError> {
+    let local = check_local(root, DISCARD_UNSUPPORTED)?;
+    if let Some(ask) = confirm_needed(&local, extra, repo_commands_confirmed)? {
+        return Ok(DiscardResult {
+            needs_confirmation: Some(ask),
+            ..DiscardResult::default()
+        });
+    }
     let paths: Vec<String> = confirmed.iter().map(|r| r.path.clone()).collect();
     let (top, head, planned, mut failed) = plan_discard(root, &paths, extra)?;
     let mut items = Vec::new();
@@ -1816,6 +1917,9 @@ fn discard_one(
 ) -> (bool, Result<(), String>) {
     let git = |args: &[&str], log: &mut Vec<String>| -> Result<(), String> {
         log.push(format!("$ git {}", args.join(" ")));
+        // The user confirmed (see `discard_with`), so the repository's own
+        // filters run as they do in the terminal (Git LFS needs its smudge
+        // filter to restore a file).
         let o = user_git(top, extra, args, COMMIT_TIMEOUT).map_err(|e| e.message)?;
         let t = text(&o);
         if !t.is_empty() {
@@ -1942,9 +2046,10 @@ pub async fn git_discard(
     webview_window: tauri::WebviewWindow,
     root: String,
     items: Vec<DiscardRequest>,
+    confirmed: Option<bool>,
 ) -> Result<DiscardResult, GitActionError> {
     crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
-        discard_impl(&root, &items, &[], &os_trash)
+        discard_with(&root, &items, &[], &os_trash, confirmed.unwrap_or(false))
     })
     .await
     .map_err(|e| GitActionError::new(GitErrorKind::Other, "The git task failed.", e.to_string()))?
@@ -1956,9 +2061,10 @@ pub async fn git_commit(
     root: String,
     message: String,
     paths: Option<Vec<String>>,
+    confirmed: Option<bool>,
 ) -> ActionResult {
     spawn(webview_window, move || {
-        commit_impl(&root, &message, paths, &[])
+        commit_with(&root, &message, paths, &[], confirmed.unwrap_or(false))
     })
     .await
 }
@@ -3821,6 +3927,149 @@ mod tests {
         ] {
             assert!(!code.contains(bad), "discard must never use {bad}");
         }
+    }
+
+    /// A committed `a.txt` bound to a repo-defined `filter.demo` whose
+    /// clean and smudge commands leave a marker file each.
+    #[cfg(unix)]
+    fn filter_sandbox() -> (Sandbox, PathBuf, PathBuf) {
+        let sb = sandbox();
+        fs::write(sb.work.join(".gitattributes"), "* filter=demo\n").unwrap();
+        sb.git(&sb.work, &["add", ".gitattributes"]);
+        sb.commit_in(&sb.work, "a.txt", "original\n", "add a");
+        let marker_clean = sb._dir.path().join("RAN_CLEAN");
+        let marker_smudge = sb._dir.path().join("RAN_SMUDGE");
+        let shell = |marker: &Path| {
+            format!(
+                "sh -c 'touch {}; cat'",
+                marker.to_string_lossy()
+            )
+        };
+        set_config(&sb, "filter.demo.clean", &shell(&marker_clean));
+        set_config(&sb, "filter.demo.smudge", &shell(&marker_smudge));
+        // The commit above ran the filters when they did not exist yet;
+        // start from a clean slate.
+        let _ = fs::remove_file(&marker_clean);
+        let _ = fs::remove_file(&marker_smudge);
+        (sb, marker_clean, marker_smudge)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discard_asks_before_running_a_repo_filter_and_runs_it_once_confirmed() {
+        let (sb, marker_clean, marker_smudge) = filter_sandbox();
+        let env = sb.env();
+        fs::write(sb.work.join("a.txt"), "edited\n").unwrap();
+
+        // The preview only reads; no filter runs before the user has seen
+        // the dialogs.
+        let items = discard_preview_impl(&root(&sb), &["a.txt".to_string()], &env).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].action, DiscardAction::Revert);
+        assert!(!marker_clean.exists() && !marker_smudge.exists());
+
+        // Not confirmed: the gate lists the filter commands and nothing runs.
+        let t = FakeTrash::new(&sb);
+        let reqs = confirmed(&sb, &["a.txt"]);
+        let r = discard_with(&root(&sb), &reqs, &env, &|p: &Path| t.trash(p), false).unwrap();
+        let ask = r.needs_confirmation.as_ref().expect("expected a question");
+        let names: Vec<String> = ask
+            .keys
+            .iter()
+            .map(|k| k.key.to_ascii_lowercase())
+            .collect();
+        assert!(
+            names.contains(&"filter.demo.clean".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"filter.demo.smudge".to_string()),
+            "{names:?}"
+        );
+        assert!(r.discarded.is_empty() && r.trashed.is_empty() && r.failed.is_empty());
+        assert!(!marker_clean.exists() && !marker_smudge.exists());
+        assert_eq!(
+            fs::read_to_string(sb.work.join("a.txt")).unwrap(),
+            "edited\n"
+        );
+
+        // Confirmed: the file reverts and the filters run as in a terminal.
+        let r = discard_with(&root(&sb), &reqs, &env, &|p: &Path| t.trash(p), true).unwrap();
+        assert!(r.needs_confirmation.is_none());
+        assert_eq!(r.discarded, ["a.txt"]);
+        assert!(r.failed.is_empty(), "{:?}", r.failed);
+        assert_eq!(
+            fs::read_to_string(sb.work.join("a.txt")).unwrap(),
+            "original\n"
+        );
+        assert!(marker_smudge.exists(), "the smudge filter should run");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_asks_before_running_a_repo_filter_and_runs_it_once_confirmed() {
+        let (sb, marker_clean, _) = filter_sandbox();
+        let env = sb.env();
+        fs::write(sb.work.join("a.txt"), "edited\n").unwrap();
+
+        let count = |sb: &Sandbox| query(&sb.work, &env, &["rev-list", "--count", "HEAD"]).unwrap();
+        let before: u32 = count(&sb).parse().unwrap();
+        let r = commit_with(&root(&sb), "edit a", None, &env, false).unwrap();
+        let ask = r.needs_confirmation.as_ref().expect("expected a question");
+        assert!(ask
+            .keys
+            .iter()
+            .any(|k| k.key.eq_ignore_ascii_case("filter.demo.clean")));
+        assert!(!marker_clean.exists(), "nothing runs before confirmation");
+        assert_eq!(count(&sb), before.to_string(), "no commit was made");
+
+        let r = commit_with(&root(&sb), "edit a", None, &env, true).unwrap();
+        assert!(r.needs_confirmation.is_none(), "{r:?}");
+        assert!(marker_clean.exists(), "the clean filter should run");
+        assert_eq!(count(&sb), (before + 1).to_string());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pull_commit_and_discard_share_one_fingerprint() {
+        // One remembered "Run anyway" covers all four actions, and changes
+        // when the repository's command settings change.
+        let (sb, _, _) = filter_sandbox();
+        let env = sb.env();
+        fs::write(sb.work.join("a.txt"), "edited\n").unwrap();
+        let t = FakeTrash::new(&sb);
+        let reqs = confirmed(&sb, &["a.txt"]);
+        let pull = pull_impl(&root(&sb), &env).unwrap();
+        let commit = commit_with(&root(&sb), "m", None, &env, false).unwrap();
+        let discard = discard_with(&root(&sb), &reqs, &env, &|p: &Path| t.trash(p), false).unwrap();
+        let fp = asked(&pull).fingerprint.clone();
+        assert_eq!(asked(&commit).fingerprint, fp);
+        assert_eq!(discard.needs_confirmation.as_ref().unwrap().fingerprint, fp);
+        set_config(&sb, "filter.demo.process", "cat");
+        let again = commit_with(&root(&sb), "m", None, &env, false).unwrap();
+        assert_ne!(asked(&again).fingerprint, fp);
+    }
+
+    #[test]
+    fn commit_and_discard_do_not_ask_without_repo_commands() {
+        let sb = discard_sandbox();
+        let env = sb.env();
+        fs::write(sb.work.join("a.md"), "changed\n").unwrap();
+        let t = FakeTrash::new(&sb);
+        let r = discard_with(
+            &root(&sb),
+            &confirmed(&sb, &["a.md"]),
+            &env,
+            &|p: &Path| t.trash(p),
+            false,
+        )
+        .unwrap();
+        assert!(r.needs_confirmation.is_none());
+        assert_eq!(r.discarded, ["a.md"]);
+        fs::write(sb.work.join("b.md"), "changed\n").unwrap();
+        let r = commit_with(&root(&sb), "m", None, &env, false).unwrap();
+        assert!(r.needs_confirmation.is_none());
+        assert!(!r.summary.is_empty());
     }
 
     #[test]

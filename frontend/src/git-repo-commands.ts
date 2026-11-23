@@ -1,15 +1,15 @@
 /**
- * Pull / Push confirmation when a repository's own Git settings will run
- * commands. Cancel is the default; "Run anyway" is remembered per repo
- * until those settings change.
+ * Pull / Push / Commit / Discard confirmation when a repository's own Git
+ * settings will run commands. Cancel is the default; "Run anyway" is
+ * remembered per repo until those settings change.
  */
 import { trapFocus } from './modal';
 import { escapeHtml, escapeReviewText, hasUnicodeControls } from './utils';
-import type { RepoCommandKey } from './api';
+import type { RepoCommandConfirm, RepoCommandKey } from './api';
 
 export const REPO_COMMANDS_TITLE = 'This repository runs its own commands';
 export const REPO_COMMANDS_BODY =
-  'Its Git settings will run these commands during Pull/Push:';
+  'Its Git settings will run these commands when you Pull, Push, Commit or Discard:';
 export const REPO_COMMANDS_CANCEL = 'Cancel';
 export const REPO_COMMANDS_RUN = 'Run anyway';
 
@@ -37,6 +37,31 @@ export function repoCommandsDialogHtml(keys: RepoCommandKey[]): string {
     `<button type="button" class="repo-cmd-run">${escapeHtml(REPO_COMMANDS_RUN)}</button>` +
     `</div>`
   );
+}
+
+/** How a caller remembers and asks; each part can be replaced in tests. */
+export interface RepoCommandsAsk {
+  /** Remembered "Run anyway" fingerprint for a repo, or undefined. */
+  remembered?(root: string): string | undefined;
+  /** Persist a "Run anyway" fingerprint until the repo's settings change. */
+  remember?(root: string, fingerprint: string): void;
+  confirm?(keys: RepoCommandKey[]): Promise<boolean>;
+}
+
+/**
+ * Whether to go ahead after the core answered `needs_confirmation`: true when
+ * the user already said "Run anyway" for exactly this list, or says it now
+ * (and it is remembered); false on Cancel.
+ */
+export async function confirmRepoCommandsFor(
+  root: string | null,
+  ask: RepoCommandConfirm,
+  how: RepoCommandsAsk,
+): Promise<boolean> {
+  if (root && how.remembered?.(root) === ask.fingerprint) return true;
+  const ok = await (how.confirm ?? showRepoCommandsDialog)(ask.keys);
+  if (ok && root) how.remember?.(root, ask.fingerprint);
+  return ok;
 }
 
 /** The confirmation modal. Cancel / Escape / backdrop resolve false. */

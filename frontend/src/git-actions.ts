@@ -2,7 +2,7 @@ import { api, type GitActionError, type GitActionResult, type GitBranchStatus, t
 import { escapeAttr, escapeHtml } from './utils';
 import type { GitAction, GitReporter } from './git-output';
 import { fetchedAgo } from './git-fetch';
-import { showRepoCommandsDialog } from './git-repo-commands';
+import { confirmRepoCommandsFor } from './git-repo-commands';
 
 /**
  * Commit / Pull / Push for the Changes view (#122, header icons since 0.4.1).
@@ -162,7 +162,7 @@ export class GitActions {
     // Every change ticked: commit all (lets git pick up anything the view
     // hasn't caught yet, the same as `git commit -a` plus new files).
     const all = this.excluded.size === 0;
-    await this.run('commit', () => api.gitCommit(root, message, all ? null : paths), () => {
+    await this.run('commit', (confirmed) => api.gitCommit(root, message, all ? null : paths, confirmed), () => {
       this.dom.message.value = '';
       this.excluded.clear();
       this.closePanel();
@@ -197,19 +197,21 @@ export class GitActions {
     let ran = false;
     try {
       let r = await call(false);
-      if (r.needs_confirmation && (what === 'pull' || what === 'push')) {
+      if (r.needs_confirmation) {
         const root = this.opts.repoRoot();
-        const fp = r.needs_confirmation.fingerprint;
         const remembered = root ? this.opts.rememberedRunAnyway?.(root) : undefined;
-        if (remembered !== fp) {
+        if (remembered !== r.needs_confirmation.fingerprint) {
           this.opts.report.cancel?.();
           this.busy = null;
           this.sync();
-          const ok = await (this.opts.confirmRepoCommands ?? showRepoCommandsDialog)(
-            r.needs_confirmation.keys,
-          );
-          if (!ok) return;
-          if (root) this.opts.rememberRunAnyway?.(root, fp);
+        }
+        const ok = await confirmRepoCommandsFor(root, r.needs_confirmation, {
+          remembered: this.opts.rememberedRunAnyway,
+          remember: this.opts.rememberRunAnyway,
+          confirm: this.opts.confirmRepoCommands,
+        });
+        if (!ok) return;
+        if (this.busy === null) {
           this.busy = what;
           this.opts.report.start(what);
           this.sync();

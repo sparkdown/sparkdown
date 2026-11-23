@@ -354,3 +354,71 @@ describe('discard dialog', () => {
     expect(document.querySelector('.discard-overlay')).toBeNull();
   });
 });
+
+describe('runDiscard: asks before running repo commands', () => {
+  const keys = [{ key: 'filter.lfs.smudge', value: 'git-lfs smudge -- %f' }];
+  const ask = { discarded: [], trashed: [], failed: [], output: '', needs_confirmation: { keys, fingerprint: 'fp-d1' } };
+
+  /** A harness whose core asks on the first call, then runs. */
+  function gated(repoCommands: DiscardDeps['repoCommands']) {
+    const h = harness({ items: [item('a.md', 'revert')] });
+    const confirmedArgs: (boolean | undefined)[] = [];
+    h.deps.discard = vi.fn(async (_root: string, rows: DiscardRequest[], confirmed?: boolean) => {
+      confirmedArgs.push(confirmed);
+      h.sent.push(rows);
+      return confirmed
+        ? { discarded: rows.map((r) => r.path), trashed: [], failed: [], output: '' }
+        : ask;
+    });
+    h.deps.repoCommands = repoCommands;
+    return { h, confirmedArgs };
+  }
+
+  it('shown: the dialog gets the keys; Run anyway runs the same rows with confirmation', async () => {
+    const confirm = vi.fn(async () => true);
+    const remember = vi.fn();
+    const { h, confirmedArgs } = gated({ confirm, remember });
+    expect(await runDiscard(ROOT, ['a.md'], h.deps)).toBe('done');
+    expect(confirm).toHaveBeenCalledWith(keys);
+    expect(confirmedArgs).toEqual([false, true]);
+    expect(h.sent[0]).toEqual(h.sent[1]);
+    expect(remember).toHaveBeenCalledWith(ROOT, 'fp-d1');
+    expect(h.report.done).toHaveBeenCalled();
+  });
+
+  it('cancelled: nothing runs, nothing is remembered, tabs are left alone', async () => {
+    const confirm = vi.fn(async () => false);
+    const remember = vi.fn();
+    const { h, confirmedArgs } = gated({ confirm, remember });
+    expect(await runDiscard(ROOT, ['a.md'], h.deps)).toBe('cancelled');
+    expect(confirmedArgs).toEqual([false]);
+    expect(remember).not.toHaveBeenCalled();
+    expect(h.report.done).not.toHaveBeenCalled();
+    expect(h.report.fail).not.toHaveBeenCalled();
+    expect(h.calls).toEqual([]);
+  });
+
+  it('remembered: the same fingerprint skips the dialog', async () => {
+    const confirm = vi.fn(async () => true);
+    const { h, confirmedArgs } = gated({ confirm, remembered: () => 'fp-d1' });
+    expect(await runDiscard(ROOT, ['a.md'], h.deps)).toBe('done');
+    expect(confirm).not.toHaveBeenCalled();
+    expect(confirmedArgs).toEqual([false, true]);
+  });
+
+  it('a changed fingerprint asks again', async () => {
+    const confirm = vi.fn(async () => true);
+    const { h } = gated({ confirm, remembered: () => 'older' });
+    await runDiscard(ROOT, ['a.md'], h.deps);
+    expect(confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('no question from the core: no dialog', async () => {
+    const confirm = vi.fn(async () => true);
+    const h = harness({ items: [item('a.md', 'revert')] });
+    h.deps.repoCommands = { confirm };
+    expect(await runDiscard(ROOT, ['a.md'], h.deps)).toBe('done');
+    expect(confirm).not.toHaveBeenCalled();
+    expect(h.deps.discard).toHaveBeenCalledTimes(1);
+  });
+});
