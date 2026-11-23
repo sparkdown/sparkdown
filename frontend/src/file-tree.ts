@@ -1,6 +1,6 @@
 import { startDrag } from '@crabnebula/tauri-plugin-drag';
 import { EventBus } from './events';
-import { debounce, parentDir, basename, isUnderRoot, normalizePathForCompare, isMacOS, isLinux } from './utils';
+import { debounce, parentDir, basename, isUnderRoot, normalizePathForCompare, isMacOS, isLinux, neutralizeUnicodeControls, hasUnicodeControls } from './utils';
 import { TIMING, LAYOUT } from './constants';
 import { isTextFile } from './file-types';
 import { api, type FileEntry } from './api';
@@ -778,15 +778,20 @@ export class FileTree {
     const { entry, depth } = row;
     const el = document.createElement('div');
     el.className = row.kind === 'dir' ? 'tree-item directory' : 'tree-item';
-    // Mark symlinks in the tree (tooltip names the target).
+    // Mark symlinks in the tree (tooltip names the target). The
+    // names/targets are routed through `neutralizeUnicodeControls` so a
+    // U+202E (or any other bidi/invisible format character) in the name or
+    // symlink target cannot display one extension while the row acts on the
+    // real `entry.path` (see `changes-view.ts` for the same policy).
+    const displayName = neutralizeUnicodeControls(entry.name);
     if (entry.is_symlink) {
       el.classList.add('symlink');
       if (entry.symlink_target) {
-        el.title = `Symbolic link → ${entry.symlink_target}`;
+        el.title = `Symbolic link → ${neutralizeUnicodeControls(entry.symlink_target)}`;
       } else {
         el.title = 'Symbolic link';
       }
-      el.setAttribute('aria-label', `${entry.name} (symbolic link)`);
+      el.setAttribute('aria-label', `${displayName} (symbolic link)`);
     }
     el.style.paddingLeft = `${rowIndent(row.kind, depth)}px`;
     el.dataset.path = entry.path;
@@ -796,11 +801,13 @@ export class FileTree {
     el.tabIndex = -1;
     if (this.flashedPaths.has(entry.path)) el.classList.add(TREE_FLASH_CLASS);
     if (this.currentPath === entry.path) el.classList.add(TREE_CURRENT_CLASS);
+    if (hasUnicodeControls(entry.name) || hasUnicodeControls(entry.path))
+      el.classList.add('change-row-bidi');
     const norm = normalizePathForCompare(entry.path);
 
     const name = document.createElement('span');
     name.className = 'tree-name';
-    name.textContent = entry.name;
+    name.textContent = displayName;
 
     if (row.kind === 'dir') {
       el.setAttribute('aria-expanded', String(row.expanded));

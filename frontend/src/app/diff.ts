@@ -21,6 +21,7 @@ import {
   joinPath,
   normalizePathForCompare,
   toRelativePath,
+  neutralizeUnicodeControls,
 } from '../utils';
 import type { AppContext } from './context';
 import { syncEditorInput } from './editor-gate';
@@ -740,12 +741,16 @@ export class DiffController {
     const tab = this.ctx.tabs.activeTab();
     const { title, meta: metaEl, prev, next, review } = this.dom;
     if (!tab || !title) return;
-    title.textContent = tab.title;
+    // Neutralize the name / folder so a U+202E (or any other
+    // bidi/invisible format character) in the file name cannot make the
+    // header show a different extension from the file the diff is actually
+    // reviewing (see `changes-view.ts` for the same policy).
+    title.textContent = neutralizeUnicodeControls(tab.title);
     const root = tab.gitDiff?.root ?? this.changesView?.getRepoRoot() ?? null;
     const rel = tab.gitDiff?.relPath ?? (root ? toRelativePath(tab.path, root) : null);
     const folder = rel && rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
     const meta: string[] = [];
-    if (folder) meta.push(folder);
+    if (folder) meta.push(neutralizeUnicodeControls(folder));
     const shown = this.shownDiff?.tabId === tab.id ? this.shownDiff : null;
     if (shown) {
       meta.push(`${shown.hunks} ${shown.hunks === 1 ? 'hunk' : 'hunks'}`);
