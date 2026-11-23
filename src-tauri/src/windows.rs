@@ -216,8 +216,7 @@ pub fn init_token_secret(config_dir: &std::path::Path) {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| {
-            s.starts_with(TOKEN_SECRET_V2_PREFIX)
-                && s[TOKEN_SECRET_V2_PREFIX.len()..].len() >= 32
+            s.starts_with(TOKEN_SECRET_V2_PREFIX) && s[TOKEN_SECRET_V2_PREFIX.len()..].len() >= 32
         })
         .unwrap_or_else(|| {
             let s = format!("{TOKEN_SECRET_V2_PREFIX}{}", random_hex());
