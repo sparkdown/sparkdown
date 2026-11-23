@@ -580,9 +580,7 @@ pub(crate) mod windows_acl {
             return Err(std::io::Error::last_os_error());
         }
         if present == 0 {
-            return Err(std::io::Error::other(
-                "the built descriptor has no DACL",
-            ));
+            return Err(std::io::Error::other("the built descriptor has no DACL"));
         }
         let path_w = wide(path);
         // Invariants: `path_w` is NUL-terminated UTF-16; `dacl` is a valid DACL
@@ -1006,10 +1004,7 @@ mod tests {
         // Valid-input side: a key-shaped local dir must still be removed,
         // a non-key entry and the mcp.sock-style sibling must be kept.
         // (Covers the existing local semantics.)
-        let base = std::env::temp_dir().join(format!(
-            "sd-ctx-prefoff-{}",
-            std::process::id()
-        ));
+        let base = std::env::temp_dir().join(format!("sd-ctx-prefoff-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let gone = workspace_key("/ctx-gone");
         std::fs::create_dir_all(base.join(&gone).join("buffers")).unwrap();

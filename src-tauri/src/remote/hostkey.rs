@@ -256,7 +256,11 @@ fn compute_stored_key_types_for(host: &str) -> Vec<String> {
     // under historically (bare vs. port-qualified host). ssh-keygen -F does
     // not cross-match these, so we query both so a lookup-name mismatch
     // cannot hide a stored key type.
-    let bare = r.host_key_alias.as_deref().unwrap_or(&r.hostname).to_string();
+    let bare = r
+        .host_key_alias
+        .as_deref()
+        .unwrap_or(&r.hostname)
+        .to_string();
     let port_qualified = known_hosts_name(&bare, r.port);
     let home = home_dir();
     let files = resolved_known_hosts_files(&r, &home);
@@ -708,8 +712,12 @@ fn trust_scan_with(keygen: &str, scan_id: &str) -> Result<(), String> {
     // Re-check every spelling the entry could have been stored under, not
     // just the primary lookup name, so a late-arriving entry written under
     // the alternate form (bare vs `[host]:port`) still blocks the append.
-    let hits =
-        existing_entries_any(keygen, &scan.name, &scan.alt_names, &scan.known_hosts_checked)?;
+    let hits = existing_entries_any(
+        keygen,
+        &scan.name,
+        &scan.alt_names,
+        &scan.known_hosts_checked,
+    )?;
     if !hits.is_empty() {
         return Err(already_pinned_error(&scan.name, &scan.name, &hits));
     }

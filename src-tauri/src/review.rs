@@ -786,8 +786,7 @@ mod tests {
         let _session = crate::remote::TEST_SESSION_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir()
-            .join(format!("sd-review-fifo-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("sd-review-fifo-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
@@ -816,9 +815,8 @@ mod tests {
         }
         let root = dir.to_string_lossy().to_string();
         let untracked: Vec<&str> = vec!["pipe", "new.md"];
-        let script =
-            remote_stats_script(&root, false, &[], &untracked, q)
-                .expect("remote_stats_script should succeed");
+        let script = remote_stats_script(&root, false, &[], &untracked, q)
+            .expect("remote_stats_script should succeed");
         let start = std::time::Instant::now();
         let out = crate::proc::command("sh")
             .arg("-c")
@@ -836,11 +834,7 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let parsed = parse_remote_stats(
-            &String::from_utf8_lossy(&out.stdout),
-            0,
-            untracked.len(),
-        );
+        let parsed = parse_remote_stats(&String::from_utf8_lossy(&out.stdout), 0, untracked.len());
         // The FIFO stays unknown instead of hanging.
         assert_eq!(parsed.untracked[0], None);
         // Valid-input case: the regular file still produces its numstat.
