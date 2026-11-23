@@ -43,14 +43,20 @@ function utcDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
+/** Midnight UTC of `d` as 'YYYY-MM-DD HH:MM:SS', the form toDateTime() takes. */
+function utcMidnight(d: Date): string {
+  return `${utcDate(d)} 00:00:00`;
+}
+
 async function queryAnalytics(): Promise<void> {
   const now = new Date();
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   start.setUTCDate(start.getUTCDate() - DAYS);
 
-  // Select and group by the real column names (blob1..blob4, toDate(timestamp)).
-  // Aliases are only for the printed rows. Multiply by _sample_interval so
-  // a sampled dataset still sums to the number of checks.
+  // Group by the select aliases: the Analytics Engine SQL API rejects a
+  // GROUP BY on the raw columns once they are aliased. toDateTime() needs
+  // 'YYYY-MM-DD HH:MM:SS'. Multiply by _sample_interval so a sampled dataset
+  // still sums to the number of checks.
   const query = `
     SELECT
       toDate(timestamp) AS day,
@@ -60,9 +66,9 @@ async function queryAnalytics(): Promise<void> {
       blob4 AS country,
       SUM(_sample_interval * double1) AS checks
     FROM UPDATE_CHECKS
-    WHERE timestamp >= toDateTime('${utcDate(start)}')
-      AND timestamp < toDateTime('${utcDate(now)}') + INTERVAL 1 DAY
-    GROUP BY toDate(timestamp), blob1, blob2, blob3, blob4
+    WHERE timestamp >= toDateTime('${utcMidnight(start)}')
+      AND timestamp < toDateTime('${utcMidnight(now)}') + INTERVAL '1' DAY
+    GROUP BY day, target, arch, current_version, country
     ORDER BY day DESC, checks DESC
   `.trim();
 
