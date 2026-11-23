@@ -233,8 +233,8 @@ export const api = {
     invoke<GitBranchStatus>("git_branch_status", { root }),
   /** #122: commit `paths` (repo-relative; null = every change). Rejects
    *  with a `GitActionError`. */
-  gitCommit: (root: string, message: string, paths: string[] | null) =>
-    invoke<GitActionResult>("git_commit", { root, message, paths }),
+  gitCommit: (root: string, message: string, paths: string[] | null, confirmed = false) =>
+    invoke<GitActionResult>("git_commit", { root, message, paths, confirmed }),
   /** #122: pull the current branch from its upstream (user's own git). */
   gitPull: (root: string, confirmed = false) =>
     invoke<GitActionResult>("git_pull", { root, confirmed }),
@@ -250,8 +250,8 @@ export const api = {
     invoke<DiscardItem[]>("git_discard_preview", { root, paths }),
   /** #172: discard the changes of `paths` (revert to HEAD; files with no
    *  committed version go to the OS trash). Rejects with a GitActionError. */
-  gitDiscard: (root: string, items: DiscardRequest[]) =>
-    invoke<DiscardResult>("git_discard", { root, items }),
+  gitDiscard: (root: string, items: DiscardRequest[], confirmed = false) =>
+    invoke<DiscardResult>("git_discard", { root, items, confirmed }),
   gitDiffFile: (root: string, path: string, untracked: boolean) =>
     invoke<string>("git_diff_file", { root, path, untracked }),
   /** Per changed file: +adds / −dels and a fingerprint of the change
@@ -449,7 +449,7 @@ export interface GitActionResult {
   commits: number | null;
   /** Pull / push: the upstream, such as `origin/main`. */
   target: string | null;
-  /** When set, Pull or Push has not run: the frontend should ask first. */
+  /** When set, the action has not run: the frontend should ask first. */
   needs_confirmation?: RepoCommandConfirm;
 }
 
@@ -479,6 +479,8 @@ export interface DiscardResult {
   trashed: string[];
   failed: { path: string; message: string }[];
   output: string;
+  /** When set, nothing ran: the frontend should ask first (see GitActionResult). */
+  needs_confirmation?: RepoCommandConfirm;
 }
 
 /** Mirror of `GitBranchStatus` in src-tauri/src/git.rs. */

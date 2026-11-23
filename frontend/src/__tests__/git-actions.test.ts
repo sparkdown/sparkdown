@@ -121,7 +121,7 @@ describe('GitActions header + commit panel (0.4.1)', () => {
     typeMsg($('m'), 'Only a');
     $('c').click();
     await flush();
-    expect(gitCommit).toHaveBeenCalledWith('/repo', 'Only a', ['a.md']);
+    expect(gitCommit).toHaveBeenCalledWith('/repo', 'Only a', ['a.md'], false);
   });
 
   it('⌘/Ctrl+Enter commits all, then the panel closes, the message clears and the status bar says so, then fades', async () => {
@@ -133,7 +133,7 @@ describe('GitActions header + commit panel (0.4.1)', () => {
     typeMsg($('m'), 'Msg');
     $('m').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true }));
     for (let i = 0; i < 10; i++) await Promise.resolve();
-    expect(gitCommit).toHaveBeenCalledWith('/repo', 'Msg', null);
+    expect(gitCommit).toHaveBeenCalledWith('/repo', 'Msg', null, false);
     expect(($('m') as HTMLTextAreaElement).value).toBe('');
     expect($('panel').hidden).toBe(true);
     expect(refresh).toHaveBeenCalled();
@@ -405,5 +405,66 @@ describe('GitActions: Pull/Push ask before running repo commands', () => {
     expect(confirmRepoCommands).toHaveBeenCalledTimes(1);
     expect(gitPush).toHaveBeenNthCalledWith(1, '/repo', false);
     expect(gitPush).toHaveBeenNthCalledWith(2, '/repo', true);
+  });
+});
+
+describe('GitActions: Commit asks before running repo commands', () => {
+  const confirm = {
+    keys: [{ key: 'filter.lfs.clean', value: 'git-lfs clean -- %f' }],
+    fingerprint: 'fp-c1',
+  };
+  const ask = { summary: '', output: '', commits: null, target: null, needs_confirmation: confirm };
+  const done = { summary: '[main abc] msg', output: '[main abc] msg', commits: null, target: null };
+
+  beforeEach(() => {
+    gitCommit.mockReset();
+  });
+
+  function ready(extra: Partial<GitActionsOptions>) {
+    const t = make('/repo', extra);
+    t.ga.setChanges(changes('a.md'));
+    (t.$('m') as HTMLTextAreaElement).value = 'msg';
+    return t;
+  }
+
+  it('shows the dialog; Run anyway commits with confirmation and clears the message', async () => {
+    const confirmRepoCommands = vi.fn(async () => true);
+    const remember = vi.fn();
+    gitCommit.mockResolvedValueOnce(ask).mockResolvedValueOnce(done);
+    const { ga, $ } = ready({ confirmRepoCommands, rememberRunAnyway: remember });
+    await ga.commit();
+    expect(confirmRepoCommands).toHaveBeenCalledWith(confirm.keys);
+    expect(remember).toHaveBeenCalledWith('/repo', 'fp-c1');
+    expect(gitCommit.mock.calls.map((c) => c[3])).toEqual([false, true]);
+    expect(($('m') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('Cancel commits nothing, remembers nothing and keeps the message', async () => {
+    const confirmRepoCommands = vi.fn(async () => false);
+    const remember = vi.fn();
+    gitCommit.mockResolvedValue(ask);
+    const { ga, $ } = ready({ confirmRepoCommands, rememberRunAnyway: remember });
+    await ga.commit();
+    expect(confirmRepoCommands).toHaveBeenCalledTimes(1);
+    expect(remember).not.toHaveBeenCalled();
+    expect(gitCommit).toHaveBeenCalledTimes(1);
+    expect(($('m') as HTMLTextAreaElement).value).toBe('msg');
+  });
+
+  it('a remembered fingerprint skips the dialog', async () => {
+    const confirmRepoCommands = vi.fn(async () => true);
+    gitCommit.mockResolvedValueOnce(ask).mockResolvedValueOnce(done);
+    const { ga } = ready({ confirmRepoCommands, rememberedRunAnyway: () => 'fp-c1' });
+    await ga.commit();
+    expect(confirmRepoCommands).not.toHaveBeenCalled();
+    expect(gitCommit.mock.calls.map((c) => c[3])).toEqual([false, true]);
+  });
+
+  it('a different fingerprint asks again', async () => {
+    const confirmRepoCommands = vi.fn(async () => true);
+    gitCommit.mockResolvedValueOnce(ask).mockResolvedValueOnce(done);
+    const { ga } = ready({ confirmRepoCommands, rememberedRunAnyway: () => 'older' });
+    await ga.commit();
+    expect(confirmRepoCommands).toHaveBeenCalledTimes(1);
   });
 });

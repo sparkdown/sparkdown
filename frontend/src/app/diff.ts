@@ -543,7 +543,15 @@ export class DiffController {
     await runDiscard(this.changesView?.getRepoRoot() ?? null, paths, {
       isRemote: () => this.isRemote(),
       preview: (root, p) => api.gitDiscardPreview(root, p),
-      discard: (root, items) => api.gitDiscard(root, items),
+      discard: (root, items, confirmed) => api.gitDiscard(root, items, confirmed),
+      repoCommands: {
+        remembered: (root) => this.ctx.config.git_run_anyway?.[root],
+        remember: (root, fingerprint) => {
+          if (!this.ctx.config.git_run_anyway) this.ctx.config.git_run_anyway = {};
+          this.ctx.config.git_run_anyway[root] = fingerprint;
+          this.ctx.saveConfigSoon();
+        },
+      },
       tabs: () => this.ctx.tabs.tabsOfOrigin(),
       reloadTab: (id, path, force) => this.reloadDiscardedTab(id, path, force),
       closeTab: (id) => this.ctx.tabs.closeTab(id),

@@ -18,6 +18,7 @@
  *    the badge) refreshes. Per-file failures are reported, not hidden.
  */
 import type { DiscardItem, DiscardRequest, DiscardResult, GitActionError, GitActionResult } from './api';
+import { confirmRepoCommandsFor, type RepoCommandsAsk } from './git-repo-commands';
 import type { GitReporter } from './git-output';
 import { trapFocus } from './modal';
 import { escapeAttr, escapeHtml, escapeReviewText, hasUnicodeControls, joinPath, normalizePathForCompare } from './utils';
@@ -40,8 +41,12 @@ export interface DiscardTab {
 export interface DiscardDeps {
   isRemote(): boolean;
   preview(root: string, paths: string[]): Promise<DiscardItem[]>;
-  /** Run the confirmed rows (the core refuses a row whose plan changed). */
-  discard(root: string, items: DiscardRequest[]): Promise<DiscardResult>;
+  /** Run the confirmed rows (the core refuses a row whose plan changed).
+   *  `confirmed` answers a `needs_confirmation` about the repo's own Git
+   *  commands (filters and the like); the first call sends false. */
+  discard(root: string, items: DiscardRequest[], confirmed?: boolean): Promise<DiscardResult>;
+  /** Remembered "Run anyway" for this repo and how to ask (see Pull / Push). */
+  repoCommands?: RepoCommandsAsk;
   /** Tabs of the active machine. */
   tabs(): DiscardTab[];
   /** Re-read a tab's file; `force` drops unsaved edits. Without `force` a
@@ -276,15 +281,23 @@ export async function runDiscard(
   deps.report.start('discard');
   let result: DiscardResult;
   try {
-    result = await deps.discard(
-      repoRoot,
-      items.map(({ path, action, source, fingerprint }) => ({
-        path,
-        action,
-        ...(source ? { source } : {}),
-        fingerprint,
-      })),
-    );
+    const requests = items.map(({ path, action, source, fingerprint }) => ({
+      path,
+      action,
+      ...(source ? { source } : {}),
+      fingerprint,
+    }));
+    result = await deps.discard(repoRoot, requests, false);
+    if (result.needs_confirmation) {
+      // The repository's own settings would run commands (filters, hooks):
+      // ask the same question as Pull / Push, then run for real.
+      const ok = await confirmRepoCommandsFor(repoRoot, result.needs_confirmation, deps.repoCommands ?? {});
+      if (!ok) {
+        deps.report.cancel?.();
+        return 'cancelled';
+      }
+      result = await deps.discard(repoRoot, requests, true);
+    }
   } catch (e) {
     // The core errors only when nothing changed on disk, but never trust
     // that with unsaved work: re-read every affected tab without dropping
