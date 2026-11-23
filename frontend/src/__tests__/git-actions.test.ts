@@ -254,6 +254,30 @@ describe('GitActions header + commit panel (0.4.1)', () => {
     const r = make();
     expect(r.$('acts').hidden).toBe(false);
   });
+
+  it('shows direction and invisible characters in file names as visible markers', () => {
+    const { ga, $ } = make();
+    ga.setChanges(changes('src/data\u202Egnp.js', 'b\u200Bc.md', 'a.md'));
+    $('tog').click();
+    const files = $('f');
+    const html = files.innerHTML;
+    // Only the data attribute (the real path) keeps the raw character.
+    const visible = html.replace(/data-path="[^"]*"/g, '');
+    expect(visible).not.toMatch(/[\u202A-\u202E\u2066-\u2069\u200B-\u200F]/);
+    expect(html).toContain('data&lt;U+202E&gt;gnp.js');
+    expect(html).toContain('b&lt;U+200B&gt;c.md');
+    // Rows with bidi/invisible controls are flagged, plain rows are not.
+    const labels = Array.from(files.querySelectorAll<HTMLLabelElement>('label.git-file'));
+    const byPath = (p: string) =>
+      labels.find((l) => l.querySelector<HTMLInputElement>('input')!.dataset.path === p)!;
+    expect(byPath('src/data\u202Egnp.js').classList.contains('change-row-bidi')).toBe(true);
+    expect(byPath('b\u200Bc.md').classList.contains('change-row-bidi')).toBe(true);
+    expect(byPath('a.md').classList.contains('change-row-bidi')).toBe(false);
+    // The checkbox still acts on the real path git reported.
+    expect(files.querySelector<HTMLInputElement>('input[data-path="src/data\u202Egnp.js"]')).not.toBeNull();
+    // A plain path renders as itself.
+    expect(byPath('a.md').querySelector('span')!.textContent).toBe('a.md');
+  });
 });
 
 describe('GitActions: diverged pull and background fetch (#174, #175)', () => {
