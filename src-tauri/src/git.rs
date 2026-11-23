@@ -267,8 +267,14 @@ pub(crate) fn repo_config_key_runs_commands(key: &str) -> bool {
             | "core.askpass"
             | "core.alternaterefscommand"
             | "core.fsmonitor"
+            | "core.editor"
+            | "sequence.editor"
+            | "gui.editor"
             | "diff.external"
             | "diff.tool"
+            | "gpg.program"
+            | "gpg.ssh.defaultkeycommand"
+            | "uploadpack.packobjectshook"
     ) {
         return true;
     }
@@ -292,7 +298,43 @@ pub(crate) fn repo_config_key_runs_commands(key: &str) -> bool {
             }
         }
     }
+    // `merge.<name>.driver` — custom merge driver command invoked when
+    // `.gitattributes` assigns `merge=<name>` to a path that needs a content
+    // merge during Pull.
+    if let Some(rest) = k.strip_prefix("merge.") {
+        if let Some((name, sub)) = rest.rsplit_once('.') {
+            if !name.is_empty() && sub == "driver" {
+                return true;
+            }
+        }
+    }
+    // `gpg.<format>.program` (e.g. `gpg.openpgp.program`, `gpg.ssh.program`)
+    // — signing program forced by a repo-local `commit.gpgsign=true`.
+    if let Some(rest) = k.strip_prefix("gpg.") {
+        if let Some((fmt, sub)) = rest.rsplit_once('.') {
+            if !fmt.is_empty() && sub == "program" {
+                return true;
+            }
+        }
+    }
+    // `trailer.<token>.command` — command run by `git interpret-trailers`
+    // (invoked implicitly during commit when configured).
+    if let Some(rest) = k.strip_prefix("trailer.") {
+        if let Some((name, sub)) = rest.rsplit_once('.') {
+            if !name.is_empty() && sub == "command" {
+                return true;
+            }
+        }
+    }
     false
+}
+
+/// Whether a `pull.rebase` / `branch.<n>.rebase` config value makes `git pull`
+/// run an interactive rebase, which executes the sequence/core editor on the
+/// repo-controlled todo list. Compared in lowercase.
+pub(crate) fn rebase_value_is_interactive(value: &str) -> bool {
+    let v = value.trim().to_ascii_lowercase();
+    matches!(v.as_str(), "interactive" | "i" | "true-interactive")
 }
 
 /// Apply config overrides via GIT_CONFIG_COUNT/KEY/VALUE env vars. Key and
@@ -1981,6 +2023,9 @@ mod tests {
             "core.gitProxy",
             "core.askPass",
             "core.alternateRefsCommand",
+            "core.editor",
+            "sequence.editor",
+            "gui.editor",
             "diff.external",
             "diff.tool",
             "filter.demo.clean",
@@ -1996,6 +2041,13 @@ mod tests {
             "protocol.allow",
             "protocol.ssh.allow",
             "url.https://example.com/.insteadOf",
+            "merge.demo.driver",
+            "gpg.program",
+            "gpg.openpgp.program",
+            "gpg.ssh.program",
+            "gpg.ssh.defaultKeyCommand",
+            "uploadpack.packObjectsHook",
+            "trailer.sign.command",
         ] {
             assert!(
                 repo_config_key_runs_commands(key),
@@ -2006,16 +2058,30 @@ mod tests {
             "user.name",
             "core.hooksPath",
             "core.pager",
-            "core.editor",
             "filter.demo.required",
             "diff.demo.cachetextconv",
             "remote.origin.url",
             "branch.main.merge",
+            "branch.main.rebase",
+            "pull.rebase",
+            "merge.demo.name",
+            "gpg.format",
+            "trailer.sign.key",
         ] {
             assert!(
                 !repo_config_key_runs_commands(key),
                 "{key} should not be treated as a command-running setting"
             );
+        }
+    }
+
+    #[test]
+    fn rebase_value_is_interactive_covers_the_spellings() {
+        for v in ["interactive", "i", "true-interactive", " Interactive ", "TRUE-INTERACTIVE"] {
+            assert!(rebase_value_is_interactive(v), "{v}");
+        }
+        for v in ["", "true", "false", "merges", "preserve"] {
+            assert!(!rebase_value_is_interactive(v), "{v}");
         }
     }
 
