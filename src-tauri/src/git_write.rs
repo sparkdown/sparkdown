@@ -1549,6 +1549,12 @@ fn disk_state(top: &Path, rel: &str) -> String {
     if m.is_dir() {
         return "dir".into();
     }
+    // Reject non-regular files (FIFO, socket, device) before opening:
+    // `File::open` on a FIFO blocks until a writer appears, which would
+    // hang the Discard plan indefinitely. Mirror `review.rs::read_content`.
+    if !m.is_file() {
+        return format!("special:{:?}", m.file_type());
+    }
     let mut f = match std::fs::File::open(&p) {
         Ok(f) => f,
         Err(e) => return format!("unreadable:{:?}", e.kind()),
@@ -2217,6 +2223,44 @@ mod tests {
     fn empty_message_is_blocked_before_git_runs() {
         let e = commit_impl("/definitely/not/here", "  \n\t", None, &[]).unwrap_err();
         assert_eq!(e.kind, GitErrorKind::EmptyMessage);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn disk_state_does_not_block_on_a_fifo() {
+        // Regression: `disk_state` used to fall through to `File::open` on
+        // any non-symlink, non-directory entry. Opening a FIFO for reading
+        // on Unix blocks until a writer appears, which hung the Discard
+        // plan indefinitely. Now non-regular files fingerprint as `special:`.
+        let dir = tempdir();
+        let regular_rel = "regular.txt";
+        fs::write(dir.path().join(regular_rel), "hello\n").unwrap();
+        let fifo_rel = "pipe";
+        let fifo = dir.path().join(fifo_rel);
+        let status = crate::proc::command("mkfifo").arg(&fifo).status().unwrap();
+        assert!(status.success(), "mkfifo failed");
+
+        // FIFO case: must return quickly with a non-`file:` fingerprint,
+        // not block on `File::open` with no writer present.
+        let start = std::time::Instant::now();
+        let s = disk_state(dir.path(), fifo_rel);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "disk_state should not block on a FIFO (took {:?})",
+            start.elapsed(),
+        );
+        assert!(
+            s.starts_with("special:"),
+            "FIFO should fingerprint as special:..., got {s:?}"
+        );
+
+        // Valid-input case: a regular file still produces the usual
+        // `file:<len>:<hash>` fingerprint.
+        let r = disk_state(dir.path(), regular_rel);
+        assert!(
+            r.starts_with("file:6:"),
+            "regular file fingerprint changed, got {r:?}"
+        );
     }
 
     #[test]
