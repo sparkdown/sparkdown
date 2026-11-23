@@ -84,4 +84,19 @@ set -e
 grep -q 'sha256 mismatch' "$TMP/err5" || fail "no mismatch: $(cat "$TMP/err5")"
 pass "wrong sibling .sha256 is rejected"
 
+rm -f "$DEB.sha256"
+printf '%s  other_file.deb\n%s *%s\n' "$BAD_SHA" "$GOOD_SHA" "$(basename "$DEB")" > "$TMP/SHA256SUMS"
+SPARKDOWN_VERIFY_ONLY=1 bash "$SCRIPT" "$DEB" >"$TMP/out6" 2>"$TMP/err6"
+grep -q 'verified sha256 .*SHA256SUMS' "$TMP/out6" || fail "SHA256SUMS entry for the bundle not used: $(cat "$TMP/out6")"
+pass "multi-entry SHA256SUMS: the bundle's own line is used"
+
+printf '%s  %s\n' "$BAD_SHA" "$(basename "$DEB")" > "$TMP/SHA256SUMS"
+set +e
+SPARKDOWN_VERIFY_ONLY=1 bash "$SCRIPT" "$DEB" >"$TMP/out7" 2>"$TMP/err7"
+rc=$?
+set -e
+[[ $rc -ne 0 ]] || fail "wrong SHA256SUMS entry was accepted"
+grep -q 'sha256 mismatch' "$TMP/err7" || fail "no mismatch: $(cat "$TMP/err7")"
+pass "wrong SHA256SUMS entry is rejected"
+
 echo "ALL TESTS PASSED"

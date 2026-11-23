@@ -110,7 +110,7 @@ PREFIX="$HOME/.local" bash scripts/install-linux.sh /tmp/sparkdown-dl/*.deb
 sparkdown ~/some/folder
 ```
 
-To install a CI build instead, download the workflow artifact: `gh run download --repo sparkdown/sparkdown --name sparkdown-linux --dir /tmp/sparkdown-dl`. `scripts/install-linux.sh` extracts `usr/bin/sparkdown` from the `.deb` and refuses to copy an AppImage onto PATH.
+To install a CI build instead, download the workflow artifact: `gh run download --repo sparkdown/sparkdown --name sparkdown-linux --dir /tmp/sparkdown-dl`. `scripts/install-linux.sh` extracts `usr/bin/sparkdown` from the `.deb` and refuses to copy an AppImage onto PATH. It also checks the `.deb` against the release's `SHA256SUMS` (published with each release from 0.4.6), a `.sha256` file next to it, or `--sha256 <hex>`, stops on a mismatch, and warns when it has nothing to check against (`SPARKDOWN_REQUIRE_VERIFY=1` makes that an error).
 
 Omarchy shell plugin (it launches the app; it does not embed the editor):
 

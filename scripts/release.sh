@@ -30,6 +30,10 @@
 # out, so without the CI key latest.json has only the macOS entry; re-run
 # later with --manifest-only to add the others.
 #
+# A SHA256SUMS asset listing every artifact is written by
+# .github/workflows/release-checksums.yml after the package workflows finish
+# (scripts/install-linux.sh checks the .deb against it).
+#
 # Each platform entry also carries `size` (bytes), read from the release's
 # asset list (`gh release view --json assets`), so the app can show a download
 # percentage, cap the download and reject a file of the wrong length. For the
@@ -340,6 +344,23 @@ done
 
 echo "==> Writing the auto-update manifest (latest.json)"
 publish_manifest || echo "WARNING: latest.json not published; fix, then: bash scripts/release.sh $VERSION --manifest-only" >&2
+
+# SHA256SUMS (all release artifacts) is written by the Release checksums
+# workflow once the package workflows finish. Give it a moment, then say how
+# to run it by hand if it has not appeared.
+echo "==> Checking for SHA256SUMS"
+CHECKSUMS_SEEN=0
+for _ in 1 2 3 4 5 6 7 8; do
+  if gh release view "v$VERSION" --repo "$REPO" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx 'SHA256SUMS'; then
+    CHECKSUMS_SEEN=1
+    break
+  fi
+  sleep 15
+done
+if [ "$CHECKSUMS_SEEN" -ne 1 ]; then
+  echo "WARNING: SHA256SUMS is not on v$VERSION yet. Check the 'Release checksums' workflow run, or start it:" >&2
+  echo "           gh workflow run release-checksums.yml --repo $REPO -f tag=v$VERSION" >&2
+fi
 
 echo "==> Done: v$VERSION released. Install locally with:"
 echo "    rm -rf /Applications/SparkDown.app && cp -R $APP /Applications/"
