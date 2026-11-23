@@ -10,6 +10,25 @@ requests.
 ### Changed
 
 - **Search in files** uses a smaller regex engine, which makes the Linux download about 1 MB smaller. Case-insensitive search still matches accented letters (`são` finds `SÃO` and `São`, but not `sao`), and `\w`, `\d`, `\s` still cover non-ASCII text. A `\b` at the very start or end of a pattern, next to a letter, also knows accented letters (`\bção` does not match inside `ação`). In regex mode, `\p{…}` classes are no longer supported (the search shows "Unicode classes like \p{..} aren't supported"), and a `\b` or `\B` anywhere else in a pattern treats only ASCII letters as word characters.
+- **Update checks** remember the highest version SparkDown has seen and don't offer an older one. A check that fails is retried at the next launch instead of a day later.
+- **Git**: Pull and Push also ask before running merge drivers, `core.editor` / `sequence.editor` and similar commands set in the repository's own Git settings. Commit and Discard now ask the same question (Cancel is the default) when the repository's own settings define filter, diff or other commands; once you choose Run anyway, filters such as Git LFS run normally. One remembered Run anyway covers all four actions until those settings change.
+- **Terminal notifications** no longer bring the window to the front.
+- **Linux install script** checks the bundle against a minisign signature, `--sha256` / `SPARKDOWN_SHA256`, or a `.sha256` / `SHA256SUMS` file when one is available, and stops on a mismatch. Set `SPARKDOWN_REQUIRE_VERIFY=1` to stop when there is nothing to check against.
+- **Releases** publish a `SHA256SUMS` file that lists every release download.
+- **SSH passphrase prompts** are answered only for the key files ssh uses for that host (including ProxyJump hosts). For any other key, the connect error names the key and suggests running the command in the terminal instead.
+- **Windows**: the agent context folder and MCP work folders are readable only by your user account; SparkDown refuses existing ones owned by another account, and the error names the folder and the owner it expected.
+- The agent token key is regenerated once on the first launch after updating.
+
+### Fixed
+
+- File names with bidi or invisible characters show those characters as markers in the explorer, Quick Open, diff headers and the Commit file list.
+- Reading-mode diffs no longer hide changed lines when a comment contains a brace.
+- Discard and untracked-file diffs skip FIFOs and device files instead of waiting on them.
+- Remote file reads for agent tools stay inside the window's folder, and Preview resolves `..` in absolute link paths before checking the folder.
+- Remote host keys are matched using `HostKeyAlias` as ssh does.
+- Turning off context sharing also clears the remote copies of open buffers (only for hosts no other window is using).
+- An askpass prompt that starts with `--` is handled as a prompt.
+- `worker/query-counts.ts` builds valid Analytics Engine SQL.
 
 ## [0.4.5] — 2026-11-21
 
