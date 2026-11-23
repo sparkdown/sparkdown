@@ -190,7 +190,7 @@ function isImportLine(body: string): boolean {
 }
 
 /**
- * Strip line (`//`, `#`) and single-line block (`/* … */`) comments, plus
+ * Strip line (`//`, `#`) and single-line block (slash-star … star-slash) comments, plus
  * the contents of `'…'` / `"…"` / `` `…` `` string literals, from a line
  * body before the import-span brace count looks at it. A `{` hiding inside
  * a comment or a string literal must not open or extend a span — otherwise

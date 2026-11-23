@@ -1063,10 +1063,7 @@ fn repo_config_key_lists(key: &str, value: &str) -> bool {
     // repo-controlled todo list. The key itself is harmless; the value is
     // what makes it execute code.
     let rebase_key = k == "pull.rebase" || (k.starts_with("branch.") && k.ends_with(".rebase"));
-    if rebase_key && crate::git::rebase_value_is_interactive(value) {
-        return true;
-    }
-    false
+    rebase_key && crate::git::rebase_value_is_interactive(value)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
