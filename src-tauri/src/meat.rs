@@ -284,21 +284,131 @@ fn opens_import_span(body: &str) -> bool {
     false
 }
 
+/// Strip line (`//`, `#`) and single-line block (`/* … */`) comments, plus
+/// the contents of `'…'` / `"…"` / `` `…` `` string literals, from a line
+/// body. Braces inside comments or strings must not count toward the
+/// import-span brace balance, or a comment such as
+/// `+import x from 'x'; // {` would open a span that swallows arbitrary
+/// following code lines. Keep in sync with stripCommentsAndStrings in
+/// meat.ts.
+fn strip_comments_and_strings(body: &str) -> String {
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        // `//` or `#` to end of line.
+        if b == b'#' || (b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/') {
+            break;
+        }
+        // `/* … */` on the same line (and if unterminated, to end of line).
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            if i + 1 < bytes.len() {
+                i += 2;
+            } else {
+                break;
+            }
+            continue;
+        }
+        // String literal: keep the quotes themselves (they anchor the
+        // import-shape check) but drop the inner characters.
+        if b == b'\'' || b == b'"' || b == b'`' {
+            let quote = b;
+            out.push(quote as char);
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            if i < bytes.len() {
+                out.push(quote as char);
+                i += 1;
+            }
+            continue;
+        }
+        // Non-ASCII byte: copy through as-is so string positions stay
+        // meaningful; the import-shape check below already rejects bytes
+        // outside the allowed ASCII alphabet.
+        out.push(b as char);
+        i += 1;
+    }
+    out
+}
+
+/// After comments and string literals are stripped, a continuation line of a
+/// multi-line import statement may hold only identifiers, whitespace and the
+/// punctuation imports use (`,`, `.`, `{`, `}`, `*`, `;`, quote stubs). Any
+/// other character (a call `(`, an assignment `=`, an operator, …) means the
+/// line is not import boilerplate and must not extend a span, so the hunk
+/// stays Substantive and visible.
+fn is_import_shaped(stripped: &str) -> bool {
+    stripped.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || c == '_'
+            || c == ' '
+            || c == '\t'
+            || c == '\r'
+            || c == ','
+            || c == '.'
+            || c == '{'
+            || c == '}'
+            || c == '*'
+            || c == ';'
+            || c == '\''
+            || c == '"'
+            || c == '`'
+    })
+}
+
+/// A cap on how many lines one span may swallow. Legitimate multi-line
+/// imports are a handful of lines; this bound stops a span that never
+/// re-balances from running to the end of the hunk. Keep in sync with
+/// IMPORT_SPAN_MAX_LINES in meat.ts.
+const IMPORT_SPAN_MAX_LINES: usize = 32;
+
 /// Indices of lines inside a multi-line import statement (brace-balanced).
+///
+/// Braces are counted on a body with comments and string literals stripped,
+/// so a `{` inside `// …` or `'…'` cannot open or extend a span. A span also
+/// closes immediately at the first continuation line that is not
+/// import-shaped (e.g. contains a call, assignment or operator) and at a
+/// fixed line cap, which keeps `classify_hunk` on the Substantive branch for
+/// any hunk that mixes imports with executable code.
 fn import_span_lines(hunk: &Hunk) -> Vec<bool> {
     let mut spans = vec![false; hunk.lines.len()];
     let mut depth: i64 = 0;
+    let mut span_len: usize = 0;
     for (i, line) in hunk.lines.iter().enumerate() {
         let body = line.get(1..).unwrap_or("");
-        let balance = body.matches('{').count() as i64 - body.matches('}').count() as i64;
+        let stripped = strip_comments_and_strings(body);
+        let balance =
+            stripped.matches('{').count() as i64 - stripped.matches('}').count() as i64;
         if depth == 0 {
-            if opens_import_span(body) && balance > 0 {
+            if opens_import_span(body) && balance > 0 && is_import_shaped(&stripped) {
                 depth = balance;
+                span_len = 1;
                 spans[i] = true;
             }
-        } else {
+        } else if is_import_shaped(&stripped) && span_len < IMPORT_SPAN_MAX_LINES {
             spans[i] = true;
+            span_len += 1;
             depth = (depth + balance).max(0);
+            if depth == 0 {
+                span_len = 0;
+            }
+        } else {
+            // A non-import-shaped line, or the line cap, closes the span.
+            // Leave spans[i] = false so classify_hunk sees the executable
+            // line and returns Substantive.
+            depth = 0;
+            span_len = 0;
         }
     }
     spans
