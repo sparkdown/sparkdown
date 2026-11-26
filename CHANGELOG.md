@@ -38,6 +38,7 @@ requests.
 - **Startup:** starting SparkDown with the folder that was open last time (`sparkdown <folder>`) restores that folder's tabs again.
 - **Startup:** each folder keeps its own tabs, active tab and window size. Starting SparkDown with another folder (`sparkdown <folder>`) no longer replaces the saved tabs of the folder that was open before, so starting it with that folder again brings them back. The 20 most recently used folders are kept, and a folder that no longer exists is dropped. With several windows, a folder argument opens in the window that already has that folder.
 - **Startup:** the tab that was active when you quit is active again after a restart. Before, the last tab was.
+- **Quit:** the session is written before the windows close, and starting SparkDown while the previous one is still closing now waits for it to finish and then opens with that session.
 - **Agent tools under WSL (Windows):** a `wsl` shell in a SparkDown terminal keeps the terminal's agent-tool routing (`WSLENV`), and `$SPARKDOWN_MCP_SHIM` names SparkDown's program for registering it in Linux agents. See docs/windows.md.
 
 ## [0.4.6] — 2026-11-23

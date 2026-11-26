@@ -617,6 +617,9 @@ struct Inner {
     /// Windows restored maximized that the WM hasn't reported maximized yet
     /// (#154), with the time after which we stop waiting.
     awaiting_max: HashMap<String, std::time::Instant>,
+    /// The file's text as this store last read or wrote it, for
+    /// [`ConfigStore::flush_if_changed`].
+    written: Option<String>,
 }
 
 /// The one config writer. Managed by Tauri.
@@ -655,6 +658,7 @@ impl ConfigStore {
                 given: HashMap::new(),
                 closed: Vec::new(),
                 awaiting_max: HashMap::new(),
+                written: text.clone(),
             }),
         };
         if text.is_some_and(|t| !t.contains("\"version\"")) {
@@ -749,7 +753,7 @@ impl ConfigStore {
             g.stored.apply_save(label, base.as_ref(), cfg, folder);
             g.given.insert(label.to_string(), prefs_of(cfg));
         }
-        self.write_with(&[label])
+        self.write_with(&[label], false)
     }
 
     /// Record a window's geometry and focus order (written with the next
@@ -881,18 +885,30 @@ impl ConfigStore {
         self.write()
     }
 
+    /// Write only when the file would change: the exit's flush after the
+    /// quit already wrote the session, so it does not replace the file a
+    /// starting launch may be reading.
+    pub fn flush_if_changed(&self) -> Result<(), String> {
+        self.write_with(&[], true)
+    }
+
     /// Serialize under the lock and replace the file atomically (a reader
     /// sees the old file or the new one, never part of one). Each window's
     /// local folder state is copied into the folder sessions first.
     fn write(&self) -> Result<(), String> {
-        self.write_with(&[])
+        self.write_with(&[], false)
     }
 
-    fn write_with(&self, touched: &[&str]) -> Result<(), String> {
+    fn write_with(&self, touched: &[&str], skip_same: bool) -> Result<(), String> {
         let mut g = self.lock();
         g.stored.remember_folders(now_ms(), touched);
         let json = g.stored.to_json();
-        write_atomic(&self.path, json.as_bytes()).map_err(|e| e.to_string())
+        if skip_same && g.written.as_deref() == Some(json.as_str()) {
+            return Ok(());
+        }
+        write_atomic(&self.path, json.as_bytes()).map_err(|e| e.to_string())?;
+        g.written = Some(json);
+        Ok(())
     }
 }
 
@@ -1631,6 +1647,33 @@ mod tests {
         );
         save_tabs(&store, "w", &f, &["/p/a.md"], Some("/p/gone.md"));
         assert_eq!(store.load_for("w").last_active_file, None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_flush_with_nothing_new_does_not_rewrite_the_file() {
+        let d = tmpdir("flush-same");
+        let path = d.join("config.json");
+        let store = ConfigStore::open(path.clone());
+        save_tabs(
+            &store,
+            "w",
+            &FolderId::Local { path: "/p".into() },
+            &["/p/a.md"],
+            None,
+        );
+        std::fs::write(&path, "marker").unwrap();
+        // The quit wrote; the exit's flush has nothing new and leaves it.
+        store.flush_if_changed().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "marker");
+        save_tabs(
+            &store,
+            "w",
+            &FolderId::Local { path: "/p".into() },
+            &["/p/b.md"],
+            None,
+        );
+        assert!(std::fs::read_to_string(&path).unwrap().contains("/p/b.md"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

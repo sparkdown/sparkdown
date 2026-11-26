@@ -92,9 +92,83 @@ pub fn spawn_detached_self(argv: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Start this app again on `paths` once this process has exited (Linux).
+///
+/// A second launch that arrives while this instance is quitting is handed
+/// to it by the single-instance check and would be lost with it. The new
+/// process waits for this one to end ([`wait_for_previous_instance`]), so it
+/// reads the session file this quit wrote and owns the instance lock.
+#[cfg(target_os = "linux")]
+pub fn spawn_self_after_exit(paths: &[String], new_window: bool) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    let exe = std::env::current_exe()?;
+    let mut cmd = command_gui(&exe);
+    cmd.args(crate::cli::relaunch_args(paths, new_window))
+        .env(crate::cli::DETACHED_ENV, "1")
+        .env(crate::cli::AFTER_PID_ENV, std::process::id().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let _child = cmd.spawn()?;
+    Ok(())
+}
+
+/// Started by [`spawn_self_after_exit`]: wait (at most 30 s) until the
+/// instance that started this one has exited. No-op otherwise.
+#[cfg(target_os = "linux")]
+pub fn wait_for_previous_instance() {
+    let Some(pid) = std::env::var(crate::cli::AFTER_PID_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+    else {
+        return;
+    };
+    // Not passed on to terminals and other children of this instance.
+    std::env::remove_var(crate::cli::AFTER_PID_ENV);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while process_running(pid) && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Whether process `pid` is still running (a zombie has ended).
+#[cfg(target_os = "linux")]
+fn process_running(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // `pid (comm) S ...`: the state follows the last ')'.
+    let state = stat
+        .rsplit_once(')')
+        .and_then(|(_, rest)| rest.trim_start().chars().next());
+    !matches!(state, Some('Z') | Some('X') | None)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_relaunch_waits_until_the_previous_process_has_ended() {
+        assert!(super::process_running(std::process::id()));
+        let mut child = super::command("sleep").arg("0.3").spawn().unwrap();
+        let pid = child.id();
+        assert!(super::process_running(pid));
+        let t0 = std::time::Instant::now();
+        let waiter = std::thread::spawn(move || {
+            while super::process_running(pid) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+        // Reaped here: until then the child is a zombie, which has ended too.
+        let _ = child.wait();
+        waiter.join().unwrap();
+        assert!(t0.elapsed() >= std::time::Duration::from_millis(250));
+        assert!(!super::process_running(pid));
+    }
 
     fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap() {

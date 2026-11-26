@@ -1121,6 +1121,12 @@ pub fn quit(app_handle: AppHandle, webview_window: tauri::WebviewWindow) -> Resu
         return Err("no quit in progress for this window".into());
     }
     crate::windows::set_quitting();
+    // The session is on disk before any window closes: a launch right
+    // after the windows disappear reads this quit's tabs. The flush at
+    // exit then has nothing new to write.
+    if let Some(store) = app_handle.try_state::<crate::session::ConfigStore>() {
+        let _ = store.flush();
+    }
     crate::mcp::shutdown(); // remove the MCP socket file
     app_handle.exit(0);
     Ok(())

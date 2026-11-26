@@ -64,6 +64,27 @@ pub const WAIT_FLAG: &str = "--wait";
 /// Env set on the detached child so it does not detach again.
 pub const DETACHED_ENV: &str = "SPARKDOWN_DETACHED";
 
+/// Env naming the process a launch waits for before it starts: a launch
+/// handed to an instance that was quitting is started again by that
+/// instance and waits until it has exited (see `proc::spawn_self_after_exit`).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub const AFTER_PID_ENV: &str = "SPARKDOWN_AFTER_PID";
+
+/// The arguments that start this app on `paths`, as `spawn_self_after_exit`
+/// passes them: the flag first, then `--`, so no path is read as a flag.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn relaunch_args(paths: &[String], new_window: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    if new_window {
+        out.push(NEW_WINDOW_FLAG.to_string());
+    }
+    if !paths.is_empty() {
+        out.push(END_OF_FLAGS.to_string());
+        out.extend(paths.iter().cloned());
+    }
+    out
+}
+
 /// Env set by the Windows console shim so the GUI skips its own detach.
 pub const FROM_SHIM_ENV: &str = "SPARKDOWN_FROM_SHIM";
 
@@ -135,6 +156,19 @@ mod tests {
 
     fn argv(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_relaunch_passes_its_paths_back_as_paths() {
+        let args = relaunch_args(&["/a b".into(), "-dash".into()], true);
+        let mut argv = vec!["sparkdown".to_string()];
+        argv.extend(args.clone());
+        assert!(wants_new_window(&argv));
+        assert_eq!(
+            forwarded_paths(&argv, "/cwd"),
+            vec!["/a b".to_string(), "/cwd/-dash".to_string()]
+        );
+        assert!(relaunch_args(&[], false).is_empty());
     }
 
     #[test]

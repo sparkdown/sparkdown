@@ -153,6 +153,17 @@ fn open_forwarded_argv(
 ) {
     let new_window = new_window_flag(&argv);
     let paths = cli::forwarded_paths(&argv, &cwd);
+    // This instance is quitting: its windows are gone or going, so the
+    // launch would be lost with it. Start it again after this exit; it then
+    // reads the session this quit wrote.
+    #[cfg(target_os = "linux")]
+    if windows::is_quitting() {
+        match proc::spawn_self_after_exit(&paths, new_window) {
+            Ok(()) => eprintln!("a launch arrived while quitting: it starts after this exit"),
+            Err(e) => eprintln!("Warning: could not start the launch after this exit: {e}"),
+        }
+        return;
+    }
     open_forwarded_paths(app, paths, new_window);
 }
 
@@ -531,6 +542,10 @@ fn main() {
         mcp_stdio::run();
         return;
     }
+
+    // Started again by an instance that was quitting: wait for it to end.
+    #[cfg(target_os = "linux")]
+    proc::wait_for_previous_instance();
 
     // Detach on first launch so the terminal is free (#160 decision 1).
     // `--wait`, the Windows shim, and an already-detached child skip this.
@@ -924,7 +939,7 @@ fn main() {
             // offline).
             if let tauri::RunEvent::Exit = &event {
                 windows::set_quitting();
-                let _ = app.state::<session::ConfigStore>().flush();
+                let _ = app.state::<session::ConfigStore>().flush_if_changed();
                 remote::shutdown();
                 mcp::shutdown();
                 // The page's own clear does not run on every exit (a hidden
