@@ -34,6 +34,7 @@ requests.
 
 - **Terminals:** with split terminals, a pane that didn't have keyboard focus could come back blank after hiding and showing the terminal panel or switching bottom tabs, until you clicked it. Every pane now draws again when it comes back into view.
 - **Unsaved changes prompt:** Save (on quit, when closing a window or tab, or when connecting to a remote host) now saves the file. Before, it acted like Don't Save. In the "changed on disk" prompt, Reload now reloads the file instead of acting like Cancel.
+- **Startup:** starting SparkDown with the folder that was open last time (`sparkdown <folder>`) restores that folder's tabs again.
 - **Agent tools under WSL (Windows):** a `wsl` shell in a SparkDown terminal keeps the terminal's agent-tool routing (`WSLENV`), and `$SPARKDOWN_MCP_SHIM` names SparkDown's program for registering it in Linux agents. See docs/windows.md.
 
 ## [0.4.6] — 2026-11-23
