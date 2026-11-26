@@ -123,6 +123,8 @@ export function registerMenuListeners(t: ActionTargets): void {
     });
   });
   reg(MENU.CLOSE_TAB, () => closeTabOrPane(t));
+  reg(MENU.NEXT_TAB, () => t.tabs.switchNext());
+  reg(MENU.PREV_TAB, () => t.tabs.switchPrev());
   reg(MENU.TERMINAL_SPLIT_RIGHT, () => void t.cockpit.splitTerminal('right'));
   reg(MENU.TERMINAL_SPLIT_DOWN, () => void t.cockpit.splitTerminal('down'));
   reg(MENU.TERMINAL_CLOSE_PANE, () => t.cockpit.closeTerminalPane());

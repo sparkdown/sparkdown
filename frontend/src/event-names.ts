@@ -36,6 +36,8 @@ export const MENU = {
   EXPORT_HTML: 'menu:export-html',
   EXPORT_PDF: 'menu:export-pdf',
   CLOSE_TAB: 'menu:close-tab',
+  NEXT_TAB: 'menu:next-tab',
+  PREV_TAB: 'menu:prev-tab',
   FIND: 'menu:find',
   // View menu: the per-document view (title bar Edit | Split | Preview | Diff).
   VIEW_EDIT: 'menu:view-edit',

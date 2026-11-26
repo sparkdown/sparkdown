@@ -1,6 +1,6 @@
 import { trapFocus, type ModalHandle } from './modal';
 import { ACTIONS } from './event-names';
-import { formatShortcut, shortcutFor, terminalPaneShortcut } from './shortcuts';
+import { formatShortcut, shortcutFor, tabSwitchLabel, terminalPaneShortcut } from './shortcuts';
 import { viewShortcutLabel } from './activity-bar';
 import { isMacOS } from './utils';
 import { newWindowClickLabel } from './app/recent-folders';
@@ -75,8 +75,8 @@ function shortcutSections(): Array<{ section: string; items: Array<[string, stri
     {
       section: 'Navigation',
       items: [
-        [k(ACTIONS.NEXT_TAB), 'Next Tab'],
-        [k(ACTIONS.PREV_TAB), 'Previous Tab'],
+        [tabSwitchLabel('next'), 'Next Tab'],
+        [tabSwitchLabel('prev'), 'Previous Tab'],
         [k(ACTIONS.SHOW_SHORTCUTS), 'Show Shortcuts'],
       ],
     },

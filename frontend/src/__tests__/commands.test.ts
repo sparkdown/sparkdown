@@ -102,7 +102,7 @@ describe('built-in commands', () => {
     expect(label('go.file')).toBe('⌘P');
     expect(label('remote.openFolder')).toBe('⌘⇧O');
     expect(label('terminal.toggle')).toBe('⌃`');
-    expect(label('tabs.next')).toBe('⌘⌥→');
+    expect(label('tabs.next')).toBe('⌃⇥');
     expect(label('view.toggleTheme')).toBe('');
     expect(label('view.search')).toBe('⌘⇧F');
     expect(label('view.focusMode')).toBe('⌘⇧↩');
@@ -188,7 +188,7 @@ describe('KEYBINDINGS', () => {
     const parts = accel.split('+');
     const k = parts.pop()!;
     const init: KeyboardEventInit = {
-      key: k === 'Right' ? 'ArrowRight' : k === 'Left' ? 'ArrowLeft' : k.toLowerCase(),
+      key: k === 'Right' ? 'ArrowRight' : k === 'Left' ? 'ArrowLeft' : k.length > 1 ? k : k.toLowerCase(),
     };
     for (const m of parts) {
       if (m === 'CmdOrCtrl' || m === 'Ctrl') init.ctrlKey = true;

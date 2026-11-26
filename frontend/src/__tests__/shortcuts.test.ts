@@ -2,7 +2,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { EventBus } from '../events';
 import { ACTIONS } from '../event-names';
-import { ShortcutManager, terminalPaneAction } from '../shortcuts';
+import { ShortcutManager, tabSwitchLabel, tabSwitchStep, terminalPaneAction, terminalPassesToApp } from '../shortcuts';
 
 function press(init: KeyboardEventInit): void {
   document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, ...init }));
@@ -200,5 +200,83 @@ describe('terminalPaneAction (keys inside a focused terminal pane)', () => {
     expect(terminalPaneAction(ev({ key: 'd', ctrlKey: true }), false)).toBeNull();
     expect(terminalPaneAction(ev({ key: 'w', ctrlKey: true }), false)).toBeNull();
     expect(terminalPaneAction(ev({ key: 'd', metaKey: true }), false)).toBeNull();
+  });
+});
+
+describe('next / previous tab keys', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    Object.defineProperty(navigator, 'platform', { value: 'Win32', configurable: true });
+  });
+
+  /** Fire from `target` (bubbling to the document listener); returns the tab
+   *  actions it dispatched. */
+  function tabActions(platform: string, init: KeyboardEventInit, target: Element = document.body): string[] {
+    Object.defineProperty(navigator, 'platform', { value: platform, configurable: true });
+    const bus = new EventBus();
+    const fired: string[] = [];
+    bus.on(ACTIONS.NEXT_TAB, () => fired.push('next'));
+    bus.on(ACTIONS.PREV_TAB, () => fired.push('prev'));
+    const m = new ShortcutManager(bus);
+    m.init();
+    // Not cancelable: every earlier test's manager is still listening, and a
+    // preventDefault there would make this one bail.
+    target.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, ...init }));
+    return fired;
+  }
+
+  for (const platform of ['Win32', 'Linux x86_64', 'MacIntel']) {
+    it(`Ctrl+Tab, Ctrl+PageDown and the reverse switch tabs (${platform})`, () => {
+      expect(tabActions(platform, { key: 'Tab', ctrlKey: true })).toEqual(['next']);
+      document.body.innerHTML = '';
+      expect(tabActions(platform, { key: 'Tab', ctrlKey: true, shiftKey: true })).toEqual(['prev']);
+      expect(tabActions(platform, { key: 'Unidentified', code: 'Tab', ctrlKey: true, shiftKey: true })).toEqual(['prev']);
+      expect(tabActions(platform, { key: 'PageDown', ctrlKey: true })).toEqual(['next']);
+      expect(tabActions(platform, { key: 'PageUp', ctrlKey: true })).toEqual(['prev']);
+    });
+  }
+
+  it('Ctrl+Alt+Right / Left still switch tabs', () => {
+    expect(tabActions('Linux x86_64', { key: 'ArrowRight', ctrlKey: true, altKey: true })).toEqual(['next']);
+    expect(tabActions('Linux x86_64', { key: 'ArrowLeft', ctrlKey: true, altKey: true })).toEqual(['prev']);
+    expect(tabActions('MacIntel', { key: 'ArrowRight', metaKey: true, altKey: true })).toEqual(['next']);
+  });
+
+  it('plain Tab, Shift+Tab, PageDown and Cmd+Tab do not switch tabs', () => {
+    expect(tabActions('Linux x86_64', { key: 'Tab' })).toEqual([]);
+    expect(tabActions('Linux x86_64', { key: 'Tab', shiftKey: true })).toEqual([]);
+    expect(tabActions('Linux x86_64', { key: 'PageDown' })).toEqual([]);
+    expect(tabActions('Linux x86_64', { key: 'PageDown', ctrlKey: true, shiftKey: true })).toEqual([]);
+    expect(tabActions('MacIntel', { key: 'Tab', metaKey: true })).toEqual([]);
+  });
+
+  it('a focused terminal pane keeps Ctrl+Tab and Ctrl+PageDown / PageUp', () => {
+    const pane = document.createElement('div');
+    pane.className = 'xterm';
+    const input = document.createElement('textarea');
+    pane.appendChild(input);
+    document.body.appendChild(pane);
+    for (const init of [
+      { key: 'Tab', ctrlKey: true },
+      { key: 'Tab', ctrlKey: true, shiftKey: true },
+      { key: 'PageDown', ctrlKey: true },
+      { key: 'PageUp', ctrlKey: true },
+    ]) {
+      expect(tabActions('Linux x86_64', init, input), JSON.stringify(init)).toEqual([]);
+      expect(terminalPassesToApp({ code: '', metaKey: false, altKey: false, shiftKey: false, ...init }, false)).toBe(false);
+    }
+    // Ctrl+Alt+→ still reaches the app from a terminal (#16).
+    expect(tabActions('Linux x86_64', { key: 'ArrowRight', ctrlKey: true, altKey: true }, input)).toEqual(['next']);
+  });
+
+  it('tabSwitchStep and the labels', () => {
+    expect(tabSwitchStep({ key: 'Tab', ctrlKey: true, metaKey: false, altKey: false, shiftKey: false })).toBe('next');
+    expect(tabSwitchStep({ key: 'Tab', ctrlKey: true, metaKey: false, altKey: true, shiftKey: false })).toBe(null);
+    // WebKitGTK: Shift+Tab arrives as key "Unidentified" (ISO_Left_Tab), code "Tab".
+    expect(tabSwitchStep({ key: 'Unidentified', code: 'Tab', ctrlKey: true, metaKey: false, altKey: false, shiftKey: true })).toBe('prev');
+    expect(tabSwitchLabel('next', false)).toBe('Ctrl+Tab / Ctrl+PageDown / Ctrl+Alt+→');
+    expect(tabSwitchLabel('prev', false)).toBe('Ctrl+Shift+Tab / Ctrl+PageUp / Ctrl+Alt+←');
+    expect(tabSwitchLabel('next', true)).toBe('⌃⇥ / ⌃⇟ / ⌘⌥→');
+    expect(tabSwitchLabel('prev', true)).toBe('⌃⇧⇥ / ⌃⇞ / ⌘⌥←');
   });
 });

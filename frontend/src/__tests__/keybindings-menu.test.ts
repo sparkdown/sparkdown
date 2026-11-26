@@ -33,6 +33,12 @@ describe('KEYBINDINGS', () => {
     expect(accels.get('show-files')).toBe(viewAccelerator('files'));
     expect(accels.get('show-changes')).toBe(viewAccelerator('changes'));
     expect(accels.get('search-in-files')).toBe(viewAccelerator('search'));
+    // Next / previous tab: the key shown on the Windows/Linux popup (no key
+    // on macOS, see menu.rs) is the one KEYBINDINGS lists.
+    for (const [v, action] of [['next_tab', ACTIONS.NEXT_TAB], ['prev_tab', ACTIONS.PREV_TAB]] as const) {
+      const m = new RegExp(`let ${v} = ${v}\\.accelerator\\("([^"]+)"\\)`).exec(src);
+      expect(m?.[1], v).toBe(KEYBINDINGS[action]);
+    }
     // No accelerator is claimed twice.
     const all = [...accels.values()];
     expect(new Set(all).size).toBe(all.length);

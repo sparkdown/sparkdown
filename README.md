@@ -77,7 +77,7 @@ On Windows and Linux, `⌘` is `Ctrl` and `⌥` is `Alt`. Help → Keyboard Shor
 | Focus mode (`Esc` leaves) | `⌘⇧↩` |
 | Toggle terminal / Terminals Only | `⌃\`` / `⌃⇧\`` (Ctrl on every platform) |
 | Toggle word wrap | `⌥Z` |
-| Next / previous tab | `⌘⌥→` / `⌘⌥←` |
+| Next / previous tab | `⌃⇥` / `⌃⇧⇥`, `⌃PageDown` / `⌃PageUp` (Ctrl on every platform; a focused terminal keeps them), or `⌘⌥→` / `⌘⌥←` |
 | Settings / keyboard shortcuts | `⌘,` / `⌘⇧H` |
 
 When a terminal pane has focus (elsewhere, the editor keeps `⌘D` and `⌘[` / `⌘]`):

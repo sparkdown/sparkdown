@@ -32,13 +32,56 @@ export const KEYBINDINGS: Partial<Record<ActionName, string>> = {
   [ACTIONS.TOGGLE_WRAP]: 'Alt+Z',
   [ACTIONS.TOGGLE_TERMINAL]: 'Ctrl+`',
   [ACTIONS.TOGGLE_TERMINALS_ONLY]: 'Ctrl+Shift+`',
-  [ACTIONS.NEXT_TAB]: 'CmdOrCtrl+Alt+Right',
-  [ACTIONS.PREV_TAB]: 'CmdOrCtrl+Alt+Left',
+  // More keys for these in TAB_SWITCH_KEYS.
+  [ACTIONS.NEXT_TAB]: 'Ctrl+Tab',
+  [ACTIONS.PREV_TAB]: 'Ctrl+Shift+Tab',
   [ACTIONS.SHOW_SHORTCUTS]: 'CmdOrCtrl+Shift+H',
   [ACTIONS.SHOW_SETTINGS]: 'CmdOrCtrl+,',
   [ACTIONS.QUICK_OPEN]: 'CmdOrCtrl+P',
   [ACTIONS.COMMAND_PALETTE]: 'CmdOrCtrl+Shift+P',
 };
+
+/**
+ * Every key for the next / previous document tab, on every platform (Ctrl is
+ * the Control key on macOS too, as in Safari). The first is the one in
+ * KEYBINDINGS. Ctrl+Tab and Ctrl+PageDown / PageUp stay with a focused
+ * terminal pane (see tabSwitchStep).
+ */
+export const TAB_SWITCH_KEYS = {
+  next: ['Ctrl+Tab', 'Ctrl+PageDown', 'CmdOrCtrl+Alt+Right'],
+  prev: ['Ctrl+Shift+Tab', 'Ctrl+PageUp', 'CmdOrCtrl+Alt+Left'],
+} as const;
+
+/** All keys for the next or previous tab, for labels ("Ctrl+Tab / …"). */
+export function tabSwitchLabel(dir: keyof typeof TAB_SWITCH_KEYS, mac = isMacOS()): string {
+  return TAB_SWITCH_KEYS[dir].map((k) => formatShortcut(k, mac)).join(' / ');
+}
+
+/**
+ * Ctrl+Tab / Ctrl+PageDown → next tab, Ctrl+Shift+Tab / Ctrl+PageUp →
+ * previous tab, else null. Control only (no Cmd, no Alt), on every platform.
+ * Matched on e.key, which names these keys the same on every layout, or on
+ * the physical e.code: WebKitGTK reports Shift+Tab as key "Unidentified"
+ * (X11's ISO_Left_Tab) with code "Tab".
+ */
+export function tabSwitchStep(
+  e: Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'altKey' | 'shiftKey'> & { code?: string },
+): 'next' | 'prev' | null {
+  if (!e.ctrlKey || e.metaKey || e.altKey) return null;
+  const key = e.key.toLowerCase();
+  const code = e.code ?? '';
+  if (key === 'tab' || code === 'Tab') return e.shiftKey ? 'prev' : 'next';
+  if (e.shiftKey) return null;
+  if (key === 'pagedown' || code === 'PageDown') return 'next';
+  if (key === 'pageup' || code === 'PageUp') return 'prev';
+  return null;
+}
+
+/** True when a key event comes from inside a terminal pane (xterm.js). */
+function fromTerminal(e: Event): boolean {
+  const t = e.target;
+  return t instanceof Element && t.closest('.xterm') !== null;
+}
 
 /** The display label for a bound action (e.g. "⌘⇧P" / "Ctrl+Shift+P"). */
 export function shortcutFor(action: string, mac = isMacOS()): string {
@@ -52,9 +95,13 @@ const MAC_GLYPHS: Record<string, string> = {
 };
 const KEY_NAMES: Record<string, string> = {
   Right: '→', Left: '←', Up: '↑', Down: '↓', Enter: '↩', Space: 'Space',
+  Tab: '⇥', PageDown: '⇟', PageUp: '⇞',
 };
-/** Windows/Linux spell Enter out; the arrows read the same everywhere. */
-const KEY_NAMES_OTHER: Record<string, string> = { ...KEY_NAMES, Enter: 'Enter' };
+/** Windows/Linux spell Enter, Tab and the page keys out; the arrows read the
+ *  same everywhere. */
+const KEY_NAMES_OTHER: Record<string, string> = {
+  ...KEY_NAMES, Enter: 'Enter', Tab: 'Tab', PageDown: 'PageDown', PageUp: 'PageUp',
+};
 
 /** Tauri accelerator → label: macOS glyphs ("⌘⌥O"), elsewhere words
  *  ("Ctrl+Alt+O"). Modifier order follows the accelerator. */
@@ -141,7 +188,8 @@ export function isBacktickKey(e: Pick<KeyboardEvent, 'key' | 'code'>): boolean {
  * (Ctrl+Shift+O), Command Palette (Ctrl+Shift+P), Shortcuts
  * (Ctrl+Shift+H), Focus Mode (Ctrl+Shift+Enter), Settings (Ctrl+,), Quit
  * (Ctrl+Q) and tab switching (Ctrl+Alt+←/→). Other plain Ctrl+letter, the clipboard (Ctrl+Shift+C/V) and the pane keys
- * (Ctrl+Shift+D/E/W/[/]) stay with the terminal.
+ * (Ctrl+Shift+D/E/W/[/]) stay with the terminal, and so do Ctrl+Tab,
+ * Ctrl+Shift+Tab and Ctrl+PageDown / PageUp, which terminal programs use.
  */
 export function terminalPassesToApp(
   e: Pick<KeyboardEvent, 'key' | 'code' | 'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey'>,
@@ -242,6 +290,16 @@ export class ShortcutManager {
     if (key === 'b' && e.shiftKey) {
       e.preventDefault();
       this.bus.emit(ACTIONS.TOGGLE_SIDEBAR);
+      return;
+    }
+    // Ctrl+Tab / Ctrl+PageDown and the reverse, on every platform. A focused
+    // terminal keeps them (terminalPassesToApp lets xterm have them; this
+    // check covers a key xterm leaves alone).
+    const step = tabSwitchStep(e);
+    if (step) {
+      if (fromTerminal(e)) return;
+      e.preventDefault();
+      this.bus.emit(step === 'next' ? ACTIONS.NEXT_TAB : ACTIONS.PREV_TAB);
       return;
     }
     if (e.key === 'ArrowRight' && e.altKey) {

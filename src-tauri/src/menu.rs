@@ -295,8 +295,24 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
     // lifecycle::refresh after the last separator).
     let new_window =
         MenuItemBuilder::with_id(crate::lifecycle::NEW_WINDOW_ID, "New Window").build(app)?;
+    // Next / previous document tab. The Windows/Linux popup shows the key; its
+    // accelerators never fire, and the frontend handles Ctrl+Tab, Ctrl+PageDown
+    // and the reverse (frontend/src/shortcuts.ts), leaving them to a focused
+    // terminal. No key on macOS: a menu key equivalent would take Ctrl+Tab
+    // from a focused terminal; the frontend handles the keys there too.
+    let next_tab = MenuItemBuilder::with_id("next-tab", "Next Tab");
+    #[cfg(not(target_os = "macos"))]
+    let next_tab = next_tab.accelerator("Ctrl+Tab");
+    let next_tab = next_tab.build(app)?;
+    let prev_tab = MenuItemBuilder::with_id("prev-tab", "Previous Tab");
+    #[cfg(not(target_os = "macos"))]
+    let prev_tab = prev_tab.accelerator("Ctrl+Shift+Tab");
+    let prev_tab = prev_tab.build(app)?;
     let window_menu = SubmenuBuilder::new(app, "Window")
         .item(&new_window)
+        .separator()
+        .item(&next_tab)
+        .item(&prev_tab)
         .separator()
         .minimize()
         .maximize()
@@ -409,6 +425,21 @@ mod tests {
         assert_eq!(m.version.as_deref(), Some("0.4.1"));
         assert_eq!(m.license.as_deref(), Some("MIT"));
         assert_eq!(m.website.as_deref(), Some("https://sparkdown.dev"));
+    }
+
+    #[test]
+    fn window_menu_lists_next_and_previous_tab_with_ctrl_tab() {
+        let rust = include_str!("menu.rs");
+        for (var, id, key) in [
+            ("next_tab", "next-tab", "Ctrl+Tab"),
+            ("prev_tab", "prev-tab", "Ctrl+Shift+Tab"),
+        ] {
+            assert!(rust.contains(&format!("let {var} = MenuItemBuilder::with_id(\"{id}\"")));
+            assert!(rust.contains(&format!("let {var} = {var}.accelerator(\"{key}\");")));
+        }
+        let window = &rust[rust.find("SubmenuBuilder::new(app, \"Window\")").unwrap()..];
+        let window = &window[..window.find(".build()").unwrap()];
+        assert!(window.contains(".item(&next_tab)") && window.contains(".item(&prev_tab)"));
     }
 
     #[test]
