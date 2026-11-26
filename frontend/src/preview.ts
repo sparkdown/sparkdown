@@ -21,6 +21,7 @@ import { TIMING } from './constants';
 import { EVENTS } from './event-names';
 import { isTextFile } from './file-types';
 import { PreviewImageResolver, resolveAgainst, resolveImagePath } from './preview-images';
+import { SourceMap, chunkLayout, tokenLineRanges, type ChunkRef, type LineRange, type SourceToken } from './preview-source-map';
 import { WIKI_LINK_AT_START, toWikiLink, type WikiRender } from './wiki-links';
 
 /**
@@ -400,6 +401,7 @@ export class PreviewPane {
     this.container = container;
     this.configureMarked();
     this.interceptLinks();
+    this.initSourceClicks();
   }
 
   /** Register how a clicked local-file link is opened (normally App.openFile). */
@@ -720,6 +722,12 @@ export class PreviewPane {
    */
   private prevBlocks: string[] = [];
   private prevNodeCounts: number[] = [];
+  /** Per-chunk relative line layout (see chunkLayout), parallel to prevBlocks. */
+  private prevBlockSigs: string[] = [];
+  /** Per-chunk absolute start line, shared by the chunk's mapped elements. */
+  private prevChunkRefs: ChunkRef[] = [];
+  /** Source line range of each rendered block. */
+  private sourceMap = new SourceMap();
   /** raw chunk source -> rendered HTML, carried across renders. */
   private chunkCache = new Map<string, string>();
 
@@ -828,8 +836,20 @@ export class PreviewPane {
         .sort()
         .map((k) => [k, links[k]]),
     );
+    // Source line range of every top-level token, grouped per chunk below.
+    const ranges = tokenLineRanges(content, tokens as unknown as SourceToken[]);
+    const chunkTokens: SourceToken[][] = [];
+    const chunkRanges: (LineRange | null)[][] = [];
+    const sigs: string[] = [];
+    const starts: number[] = [];
     for (let i = 0; i < tokens.length; i += CHUNK_TOKENS) {
       const slice = tokens.slice(i, i + CHUNK_TOKENS);
+      const sliceRanges = ranges.slice(i, i + CHUNK_TOKENS);
+      const layout = chunkLayout(sliceRanges);
+      chunkTokens.push(slice as unknown as SourceToken[]);
+      chunkRanges.push(sliceRanges);
+      sigs.push(layout.signature);
+      starts.push(layout.start);
       const raw = slice.map((t) => t.raw).join('');
       const key = linksFingerprint + '\u0000' + raw;
       let html: string | undefined = this.chunkCache.get(key) ?? nextCache.get(key);
@@ -853,21 +873,38 @@ export class PreviewPane {
     if (this.prevBlocks.length === 0 || this.container.children.length === 0) {
       const endDom = span('dom-full-rebuild', `${blocks.length} chunks`);
       this.replaceAllBlocks(blocks);
+      this.sourceMap = new SourceMap();
+      this.prevBlockSigs = sigs;
+      this.prevChunkRefs = starts.map((start) => ({ start }));
+      this.annotateChunks(Array.from(this.container.childNodes), 0, blocks.length, this.prevNodeCounts, chunkTokens, chunkRanges);
       endDom();
       return;
     }
 
-    // Match unchanged blocks from both ends; splice only the middle.
+    // Match unchanged blocks from both ends; splice only the middle. A block
+    // is unchanged when its HTML and its tokens' relative line layout match.
     const prev = this.prevBlocks;
+    const prevSigs = this.prevBlockSigs;
+    const same = (o: number, n: number): boolean => prev[o] === blocks[n] && prevSigs[o] === sigs[n];
     let start = 0;
     const maxStart = Math.min(prev.length, blocks.length);
-    while (start < maxStart && prev[start] === blocks[start]) start++;
+    while (start < maxStart && same(start, start)) start++;
     let endOld = prev.length;
     let endNew = blocks.length;
-    while (endOld > start && endNew > start && prev[endOld - 1] === blocks[endNew - 1]) {
+    while (endOld > start && endNew > start && same(endOld - 1, endNew - 1)) {
       endOld--;
       endNew--;
     }
+
+    // Reused chunks keep their DOM; only their absolute start line moves.
+    const refs = [
+      ...this.prevChunkRefs.slice(0, start),
+      ...starts.slice(start, endNew).map((s) => ({ start: s })),
+      ...this.prevChunkRefs.slice(endOld),
+    ];
+    refs.forEach((ref, i) => { ref.start = starts[i]; });
+    this.prevChunkRefs = refs;
+    this.prevBlockSigs = sigs;
 
     if (start === endOld && start === endNew) return; // identical
 
@@ -892,8 +929,30 @@ export class PreviewPane {
 
     this.prevBlocks = blocks;
     this.prevNodeCounts = [...counts.slice(0, start), ...newCounts, ...counts.slice(endOld)];
+    this.annotateChunks(inserted, start, endNew, newCounts, chunkTokens, chunkRanges);
 
     this.resolveLocalImages(inserted);
+  }
+
+  /**
+   * Map the nodes of chunks [from, to) to their source lines. `nodes` holds
+   * exactly those chunks' nodes in order; `counts[i - from]` is chunk i's
+   * node count.
+   */
+  private annotateChunks(
+    nodes: Node[],
+    from: number,
+    to: number,
+    counts: number[],
+    chunkTokens: SourceToken[][],
+    chunkRanges: (LineRange | null)[][],
+  ): void {
+    let at = 0;
+    for (let i = from; i < to; i++) {
+      const n = counts[i - from] ?? 0;
+      this.sourceMap.annotate(nodes.slice(at, at + n), chunkTokens[i], chunkRanges[i], this.prevChunkRefs[i]);
+      at += n;
+    }
   }
 
   private renderEmptyState(): void {
@@ -1179,6 +1238,80 @@ export class PreviewPane {
 
   private invalidateSyncMap(): void {
     this.headingOffsetsCache = null;
+    this.anchorsCache = null;
+  }
+
+  private anchorsCache: {
+    height: number;
+    width: number;
+    anchors: { lines: number[]; offsets: number[] } | null;
+  } | null = null;
+
+  /**
+   * Source-line landmarks for scroll sync: the first source line of every
+   * mapped block (and list item) paired with its offset in the preview's
+   * scroll coordinates, in document order. Null when nothing is mapped
+   * (HTML/SVG preview, empty document). Cached until the next render or a
+   * layout change that alters the scroll height or width (images loading,
+   * diagrams rendering, pane resize).
+   */
+  sourceAnchors(): { lines: number[]; offsets: number[] } | null {
+    if (this.framedMode || !this.container) return null;
+    const height = this.container.scrollHeight;
+    const width = this.container.clientWidth;
+    const cached = this.anchorsCache;
+    if (cached && cached.height === height && cached.width === width) return cached.anchors;
+    const found = this.sourceMap.anchors(this.container);
+    let anchors: { lines: number[]; offsets: number[] } | null = null;
+    if (found.length > 0) {
+      const base = this.container.getBoundingClientRect().top - this.container.scrollTop;
+      anchors = {
+        lines: found.map((a) => a.line),
+        offsets: found.map((a) => a.el.getBoundingClientRect().top - base),
+      };
+    }
+    this.anchorsCache = { height, width, anchors };
+    return anchors;
+  }
+
+  /** Source line range a rendered element came from (its nearest mapped
+   *  block or list item), or null when it isn't mapped. */
+  sourceRangeOf(node: Node): LineRange | null {
+    if (!this.container) return null;
+    const el = this.sourceMap.closestMapped(node, this.container);
+    return el ? this.sourceMap.rangeOf(el) : null;
+  }
+
+  private onSourceClick: ((line: number, viewportTop: number) => void) | null = null;
+
+  /**
+   * Called with the clicked block's first source line and its distance from
+   * the top of the visible preview, so the editor can show that line at the
+   * same height.
+   */
+  setSourceClickHandler(handler: (line: number, viewportTop: number) => void): void {
+    this.onSourceClick = handler;
+  }
+
+  /**
+   * A plain click on rendered text jumps the editor to its source. Links,
+   * form controls, modified/secondary clicks, double clicks and clicks that
+   * end a text selection keep their usual behavior.
+   */
+  private initSourceClicks(): void {
+    this.container.addEventListener('click', (e) => {
+      if (!this.onSourceClick || this.framedMode) return;
+      if (e.button !== 0 || e.detail > 1 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const target = e.target as Element | null;
+      if (!target || target.closest?.('a, button, input, select, textarea, label, summary')) return;
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed && sel.rangeCount > 0 && this.container.contains(sel.getRangeAt(0).commonAncestorContainer)) return;
+      const el = this.sourceMap.closestMapped(target, this.container);
+      const range = el ? this.sourceMap.rangeOf(el) : null;
+      if (!el || !range) return;
+      const viewportTop = el.getBoundingClientRect().top - this.container.getBoundingClientRect().top;
+      this.onSourceClick(range.start, viewportTop);
+    });
   }
 
   headingOffsets(expectedCount: number): number[] | null {

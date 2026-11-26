@@ -335,7 +335,7 @@ export class EditorManager {
    * scroll-sync landmark map. CodeMirror's lineBlockAt gives exact geometry
    * even for lines outside the rendered viewport.
    */
-  headingOffsets(lines: number[]): number[] {
+  lineOffsets(lines: number[]): number[] {
     const doc = this.view.state.doc;
     return lines.map((n) => {
       const clamped = Math.max(1, Math.min(doc.lines, n));
@@ -353,6 +353,20 @@ export class EditorManager {
 
   scrollToTop(top: number): void {
     scrollElementToTop(this.view.scrollDOM, top, this.scrollState);
+  }
+
+  /**
+   * Put the cursor at the start of `line` (1-based, clamped). With
+   * `viewportTop`, also scroll so the line sits that many pixels below the
+   * top of the editor's visible area. Focus stays where it is.
+   */
+  revealLine(line: number, viewportTop: number | null): void {
+    const doc = this.view.state.doc;
+    const target = doc.line(Math.max(1, Math.min(doc.lines, line)));
+    this.view.dispatch({ selection: { anchor: target.from } });
+    if (viewportTop === null) return;
+    const top = this.view.lineBlockAt(target.from).top + this.view.documentPadding.top;
+    this.scrollToTop(top - viewportTop);
   }
 
   /** Tell the status bar where the caret is in `state`. */

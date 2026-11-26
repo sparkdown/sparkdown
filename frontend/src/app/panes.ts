@@ -62,32 +62,43 @@ export class PaneController {
     return this.view !== 'preview';
   }
 
-  registerScrollSync(): void {
-    // Directional sync lock. Programmatic scrolls are echo-suppressed for
-    // only two frames, but momentum scrolling outlasts that — so the pane
-    // being synced would fire its own sync back and the two panes fight
-    // (visible as jitter). Whichever pane the user is actively scrolling
-    // owns the sync; the other pane's events are ignored until the owner
-    // has been quiet for a beat.
-    let syncOwner: 'editor' | 'preview' | null = null;
-    let syncOwnerUntil = 0;
-    const claimSync = (who: 'editor' | 'preview'): boolean => {
-      const now = performance.now();
-      if (syncOwner && syncOwner !== who && now < syncOwnerUntil) return false;
-      syncOwner = who;
-      syncOwnerUntil = now + 250;
-      return true;
-    };
+  // Directional sync lock. Programmatic scrolls are echo-suppressed for
+  // only two frames, but momentum scrolling outlasts that — so the pane
+  // being synced would fire its own sync back and the two panes fight
+  // (visible as jitter). Whichever pane the user is actively scrolling
+  // owns the sync; the other pane's events are ignored until the owner
+  // has been quiet for a beat.
+  private syncOwner: 'editor' | 'preview' | null = null;
+  private syncOwnerUntil = 0;
 
+  private claimSync(who: 'editor' | 'preview'): boolean {
+    const now = performance.now();
+    if (this.syncOwner && this.syncOwner !== who && now < this.syncOwnerUntil) return false;
+    this.syncOwner = who;
+    this.syncOwnerUntil = now + 250;
+    return true;
+  }
+
+  registerScrollSync(): void {
     this.ctx.bus.on(EVENTS.SCROLL_SYNC, (data) => {
-      if (!this.pane || !claimSync('editor')) return;
+      if (!this.pane || !this.claimSync('editor')) return;
       this.syncScroll('editor', data.scrollRatio);
     });
 
     this.ctx.bus.on(EVENTS.PREVIEW_SCROLL, (data) => {
-      if (!claimSync('preview')) return;
+      if (!this.claimSync('preview')) return;
       this.syncScroll('preview', data.scrollRatio);
     });
+  }
+
+  /**
+   * A click in the preview moved the editor to `line`. The preview owns the
+   * sync while the editor scrolls to match, so the editor's scroll can't
+   * pull the preview away from what was just clicked.
+   */
+  private revealSourceLine(line: number, viewportTop: number): void {
+    this.claimSync('preview');
+    this.ctx.editor.revealLine(line, this.isEditorVisible() ? viewportTop : null);
   }
 
   /**
@@ -150,25 +161,24 @@ export class PaneController {
   }
 
   /**
-   * Content-anchored scroll sync: heading landmarks pair the editor's line
-   * geometry with the preview's rendered h1–h6 offsets into a monotone
+   * Content-anchored scroll sync: source-line landmarks pair the editor's
+   * line geometry with the preview's rendered block offsets into a monotone
    * scrollTop→scrollTop map (endpoints pinned, so top and bottom coincide
    * exactly). Interpolating a monotone map can never scroll the target pane
-   * opposite to the source. Falls back to proportional sync when heading
-   * pairing isn't possible (no headings, setext/quoted headings, mismatch).
+   * opposite to the source. Landmarks are every rendered block's first
+   * source line; when blocks aren't mapped, ATX headings paired by position
+   * stand in, and with neither the sync is proportional.
    */
   private syncScroll(from: 'editor' | 'preview', ratio: number): void {
     const target = from === 'editor' ? this.pane : this.ctx.editor;
     if (!target) return;
 
-    const sourceLines = this.ctx.editor.headingSourceLines();
-    const previewOffsets =
-      sourceLines.length > 0 ? this.pane?.headingOffsets(sourceLines.length) : null;
-    if (!previewOffsets || !this.pane) {
+    const landmarks = this.landmarks();
+    if (!landmarks || !this.pane) {
       target.scrollToRatio(ratio);
       return;
     }
-    const editorOffsets = this.ctx.editor.headingOffsets(sourceLines);
+    const { editorOffsets, previewOffsets } = landmarks;
     const ed = this.ctx.editor.scrollMetrics();
     const pv = this.pane.scrollMetrics();
     if (ed.maxScroll <= 0 || pv.maxScroll <= 0) {
@@ -183,6 +193,28 @@ export class PaneController {
       const map = buildScrollMap(previewOffsets, editorOffsets, pv.maxScroll, ed.maxScroll);
       this.ctx.editor.scrollToTop(mapLineToY(map, pv.scrollTop));
     }
+  }
+
+  private editorOffsetsCache: { lines: number[]; maxScroll: number; offsets: number[] } | null = null;
+
+  /** Paired editor/preview pixel offsets of the same source lines. */
+  private landmarks(): { editorOffsets: number[]; previewOffsets: number[] } | null {
+    if (!this.pane) return null;
+    const anchors = this.pane.sourceAnchors();
+    if (anchors) {
+      // lineBlockAt per landmark is cheap but not free on long documents;
+      // reuse it until the landmarks or the editor's geometry change.
+      const maxScroll = this.ctx.editor.scrollMetrics().maxScroll;
+      const c = this.editorOffsetsCache;
+      if (!c || c.lines !== anchors.lines || c.maxScroll !== maxScroll) {
+        this.editorOffsetsCache = { lines: anchors.lines, maxScroll, offsets: this.ctx.editor.lineOffsets(anchors.lines) };
+      }
+      return { editorOffsets: this.editorOffsetsCache!.offsets, previewOffsets: anchors.offsets };
+    }
+    const sourceLines = this.ctx.editor.headingSourceLines();
+    const previewOffsets = sourceLines.length > 0 ? this.pane.headingOffsets(sourceLines.length) : null;
+    if (!previewOffsets) return null;
+    return { editorOffsets: this.ctx.editor.lineOffsets(sourceLines), previewOffsets };
   }
 
   loadPreview(): Promise<PreviewPane> {
@@ -213,6 +245,7 @@ export class PaneController {
         return tab ? tab.origin : this.ctx.tabs.getOrigin();
       });
       p.setPathResolver(() => this.ctx.tabs.activeTab()?.path ?? null);
+      p.setSourceClickHandler((line, viewportTop) => this.revealSourceLine(line, viewportTop));
       if (this.ctx.baseDir) p.setBaseDir(this.ctx.baseDir);
       // Preview links open only files inside the open folder (see
       // PreviewPane.setWorkspaceRoot). Without a folder, they stay inside
