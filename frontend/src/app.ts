@@ -41,6 +41,7 @@ import { api, type AppConfig, type FsChange } from './api';
 import { ACTIONS, EVENTS } from './event-names';
 import { initPerfTrace, span } from './perf-trace';
 import { GitFeedback } from './git-output';
+import { ImageInserter, clipboardImageFiles, isImagePath } from './image-insert';
 import { TERMINAL_SCROLLBACK_DEFAULT } from './terminal-scrollback';
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -105,6 +106,23 @@ export class App {
   private diff!: DiffController;
   private viewMode!: ViewModeController;
   private workspace!: WorkspaceController;
+  /** Images pasted or dropped into the markdown editor. */
+  private images = new ImageInserter({
+    activeTarget: () => {
+      const tab = this.tabs.activeTab();
+      if (!tab || !this.editor.isInputEnabled()) return null;
+      return { tabId: tab.id, path: tab.path, origin: tab.origin };
+    },
+    insert: (tabId, text, at) => {
+      if (this.tabs.activeTab()?.id !== tabId || !this.editor.isInputEnabled()) return false;
+      if (at === null) this.editor.replaceSelection(text);
+      else this.editor.insertAt(text, at);
+      return true;
+    },
+    notify: async (text, title) => {
+      await message(text, { title, kind: 'warning' });
+    },
+  });
   private welcome!: WelcomeController;
   private activityBar!: ActivityBar;
   private searchView!: SearchView;
@@ -234,6 +252,7 @@ export class App {
       search: this.searchView,
       syncEmptyState: () => this.welcome.sync(),
       openFolder: (dir, opts) => this.openFolder(dir, opts),
+      takeImageDrop: (paths, x, y) => this.takeImageDrop(paths, x, y),
     });
     this.welcome = new WelcomeController(this.ctx, {
       openFolderDialog: () => this.openFolderDialog(),
@@ -248,6 +267,14 @@ export class App {
     this.palette = this.createPalette();
 
     this.editor.init(document.getElementById('editor-container')!);
+    this.editor.setPasteHandler((e) => {
+      if (!this.images.wantsImages()) return false;
+      const files = clipboardImageFiles(e.clipboardData);
+      if (files.length === 0) return false;
+      e.preventDefault();
+      void this.images.pasteFiles(files);
+      return true;
+    });
     this.documents.initUntitledOnEditorFocus();
     this.toolbar.init();
     this.titlebar.init();
@@ -648,6 +675,17 @@ export class App {
   }
 
   /** Quick open / command palette (palette.ts) over the workspace root. */
+
+  /** Image files dropped onto the markdown editor go into the document at
+   *  the drop point; everything else (and drops elsewhere) opens as usual. */
+  private takeImageDrop(paths: string[], x: number, y: number): string[] {
+    const images = paths.filter(isImagePath);
+    if (images.length === 0 || !this.images.wantsImages()) return paths;
+    const at = this.editor.posAtPoint(x, y);
+    if (at === null) return paths;
+    void this.images.dropPaths(images, at);
+    return paths.filter((p) => !isImagePath(p));
+  }
   private createPalette(): Palette {
     const palette = new Palette({
       root: () => this.ctx.workspaceRoot ?? this.fileTree.getRoot(),

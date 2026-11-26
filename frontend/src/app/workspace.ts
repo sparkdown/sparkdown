@@ -32,6 +32,9 @@ export interface WorkspaceDeps {
   syncEmptyState(): void;
   /** App.openFolder: routes through the remote handler when one is set. */
   openFolder(dir: string, opts?: { newWindow?: boolean }): Promise<void>;
+  /** Images dropped onto a markdown editor go into the document; returns
+   *  the paths left to open as usual. `x`/`y` are CSS pixels. */
+  takeImageDrop?(paths: string[], x: number, y: number): string[];
 }
 
 /**
@@ -68,6 +71,7 @@ export class WorkspaceController {
    * (anywhere in the window, including the sidebar or editor, counts).
    *
    * A dropped directory becomes the sidebar root; dropped files open as tabs.
+   * Image files dropped onto a markdown editor are added to the document.
    */
   registerFileDrop(): void {
     const appEl = document.getElementById('app');
@@ -79,7 +83,14 @@ export class WorkspaceController {
         appEl?.classList.remove('drag-over');
       } else if (payload.type === 'drop') {
         appEl?.classList.remove('drag-over');
-        if (payload.paths.length > 0) void this.openDroppedPaths(payload.paths);
+        let paths = payload.paths;
+        if (paths.length > 0 && this.deps.takeImageDrop && payload.position) {
+          // Tauri reports the drop point in physical pixels.
+          const scale = window.devicePixelRatio || 1;
+          const { x, y } = payload.position;
+          paths = this.deps.takeImageDrop(paths, x / scale, y / scale);
+        }
+        if (paths.length > 0) void this.openDroppedPaths(paths);
       }
     });
   }

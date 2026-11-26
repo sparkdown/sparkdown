@@ -246,21 +246,27 @@ pub async fn read_file(
         // Grant only the opened file, not the parent directory recursively
         let _ = app.asset_protocol_scope().allow_file(&safe_path);
 
-        // Record the file's canonical parent directory in opened_dirs so
-        // preview images in the same directory can be loaded
-        if let Some(parent) = safe_path.parent() {
-            let mut reg = crate::windows::registry();
-            if let Some(entry) = reg.windows.get_mut(&label) {
-                entry
-                    .opened_dirs
-                    .insert(parent.to_string_lossy().to_string());
-            }
-        }
+        // Preview images in the same directory can be loaded.
+        remember_opened_dir(&label, &safe_path);
 
         Ok(contents)
     })
     .await
     .map_err(|e| AppError::Other(format!("read task failed: {e}")))?
+}
+
+/// Record the canonical parent directory of a file this window opened or
+/// saved in `opened_dirs`: preview images there can load, and pasted or
+/// dropped images can be stored there (images.rs).
+fn remember_opened_dir(label: &str, file: &Path) {
+    if let Some(parent) = file.parent() {
+        let mut reg = crate::windows::registry();
+        if let Some(entry) = reg.windows.get_mut(label) {
+            entry
+                .opened_dirs
+                .insert(parent.to_string_lossy().to_string());
+        }
+    }
 }
 
 /// Refuse `canon` (a canonical local path) unless it is `folder` or inside
@@ -537,8 +543,16 @@ pub async fn write_file(
     // write (local atomic replace, or a remote ssh round trip) goes to the
     // blocking pool so a remote save can't freeze the main thread.
     limiter.check(Path::new(&path))?;
-    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
-        write_file_impl(&path, &content)
+    let label = webview_window.label().to_string();
+    crate::windows::spawn_scoped(label.clone(), move || {
+        write_file_impl(&path, &content)?;
+        // A document saved to a new folder (Save As) can take pasted images.
+        if !crate::remote::is_active() {
+            if let Ok(saved) = validate_path(&path) {
+                remember_opened_dir(&label, &saved);
+            }
+        }
+        Ok(())
     })
     .await
     .map_err(|e| AppError::Other(format!("write task failed: {e}")))?

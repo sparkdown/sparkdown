@@ -119,6 +119,8 @@ export class EditorManager {
   private inputCompartment = new Compartment();
   private inputEnabled = true;
   private states = new Map<string, EditorState>();
+  /** Claims a paste before CodeMirror's text paste (true = handled). */
+  private pasteHandler: ((e: ClipboardEvent) => boolean) | null = null;
 
   constructor(bus: EventBus, wordWrap: boolean) {
     this.bus = bus;
@@ -307,6 +309,9 @@ export class EditorManager {
         this.wordWrap ? EditorView.lineWrapping : []
       ),
       this.inputCompartment.of(this.inputExtension()),
+      EditorView.domEventHandlers({
+        paste: (e) => this.inputEnabled && (this.pasteHandler?.(e) ?? false),
+      }),
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
           this.bus.emit(EVENTS.CONTENT_CHANGED, {
@@ -488,6 +493,36 @@ export class EditorManager {
     const pos = this.view.state.selection.main.head;
     this.view.dispatch({ changes: { from: pos, insert: text } });
     this.view.focus();
+  }
+
+  /** Replace the selection with `text`, like a paste. */
+  replaceSelection(text: string): void {
+    if (!this.inputEnabled) return;
+    this.view.dispatch(this.view.state.replaceSelection(text));
+    this.view.focus();
+  }
+
+  /** Insert `text` at document offset `pos` (clamped) and put the caret after it. */
+  insertAt(text: string, pos: number): void {
+    if (!this.inputEnabled) return;
+    const from = Math.max(0, Math.min(pos, this.view.state.doc.length));
+    this.view.dispatch({
+      changes: { from, insert: text },
+      selection: { anchor: from + text.length },
+    });
+    this.view.focus();
+  }
+
+  /** Document offset under the window point (CSS pixels), or null when the
+   *  point is not over the editor. */
+  posAtPoint(x: number, y: number): number | null {
+    const el = document.elementFromPoint?.(x, y);
+    if (!el || !this.view.dom.contains(el)) return null;
+    return this.view.posAtCoords({ x, y }) ?? this.view.state.selection.main.head;
+  }
+
+  setPasteHandler(handler: ((e: ClipboardEvent) => boolean) | null): void {
+    this.pasteHandler = handler;
   }
 
   insertLinePrefix(prefix: string): void {
