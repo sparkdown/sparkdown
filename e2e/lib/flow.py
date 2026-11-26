@@ -14,6 +14,7 @@ import mcp
 
 SUF = " — SparkDown"
 EDIT = "E2E unsaved edit."
+QUIT_SAVE = "E2E saved at the quit prompt."
 
 
 def titled(*names):
@@ -432,19 +433,65 @@ def run(R, D):
                                                 f"unsaved dot cleared={clean}; file ends {tail!r}")
         R.run("type-then-save", type_then_save)
 
-    def restore():
+    quit_state = {"before": None}
+
+    def quit_save_writes():
+        """Quit with alpha's note unsaved and answer Save at the prompt: the
+        app may exit only once the note on disk holds the edit."""
         D.kill_job()
-        D.save("alpha" + SUF)
-        saved = wait_for(lambda: EDIT in pathlib.Path(note).read_text(encoding="utf-8"), 10)
-        before = D.windows()
+        want = f"# alpha\n\n{EDIT}\n{QUIT_SAVE}\n"
+        ok, r = mcp.call(D.exe, A, "sparkdown_edit_buffer", {"path": note, "content": want})
+        time.sleep(2)
+        if not ok:
+            return "FAIL", f"could not edit alpha's note over MCP: {r}"
+        quit_state["before"] = D.windows()
         D.quit_keys("alpha" + SUF)
+        answered = []
+        end = time.time() + 40
+        while D.procs() and time.time() < end:
+            ds = D.dialogs()
+            if not ds:
+                time.sleep(0.5)
+                continue
+            if len(answered) >= 4:
+                break
+            D.shot(f"quit-save-prompt-{len(answered)}")
+            pressed = D.press_dialog("Save")
+            answered.append({"prompts": [d.get("name") for d in ds], "pressed": pressed})
+            if not pressed:
+                break
+            time.sleep(1.5)
         gone = wait_for(lambda: D.procs() == 0, 25)
         D.shot("after-quit")
+        text = pathlib.Path(note).read_text(encoding="utf-8")
+        detail = f"prompts and what was pressed={answered}; app exited={bool(gone)}; note ends {text[-60:]!r}"
         if not gone:
-            ds = D.dialogs()
-            for d in ds:
+            for d in D.dialogs():
                 D.cancel_dialog(d)
-            return "FAIL", f"no clean exit (saved={bool(saved)}); prompts={ds}"
+        if not answered:
+            return "FAIL", f"no save prompt appeared; {detail}"
+        if not all(a["pressed"] for a in answered):
+            return "FAIL", f"a prompt had no Save button to press; {detail}"
+        return ("PASS" if gone and text == want else "FAIL"), detail
+
+    def restore():
+        D.kill_job()
+        if D.procs() == 0:
+            # quit_save_writes already quit, saving alpha's note at the prompt.
+            saved = EDIT in pathlib.Path(note).read_text(encoding="utf-8")
+            before = quit_state["before"]
+        else:
+            D.save("alpha" + SUF)
+            saved = wait_for(lambda: EDIT in pathlib.Path(note).read_text(encoding="utf-8"), 10)
+            before = D.windows()
+            D.quit_keys("alpha" + SUF)
+            gone = wait_for(lambda: D.procs() == 0, 25)
+            D.shot("after-quit")
+            if not gone:
+                ds = D.dialogs()
+                for d in ds:
+                    D.cancel_dialog(d)
+                return "FAIL", f"no clean exit (saved={bool(saved)}); prompts={ds}"
         D.relaunch()
         wait_for(lambda: titled("alpha", "beta") <= set(D.windows()), 60)
         time.sleep(3)
@@ -475,6 +522,8 @@ def run(R, D):
     if fixtures.TMUX and hasattr(D, "reload"):
         R.run("reload-keeps-jobs", reload_keeps_jobs)
 
+    if hasattr(D, "press_dialog"):
+        R.run("quit-save-writes", quit_save_writes)
     R.run("restore", restore)
 
     def quit_from_terminal_relaunched():

@@ -144,6 +144,16 @@ class Base:
     def procs(self):
         return len(sh("pgrep", "-x", "sparkdown").split())
 
+    def press_dialog(self, button):
+        """Press `button` in the open SparkDown prompt over AT-SPI. Returns
+        what was activated (e.g. "button 'Save' action 'click'") and the
+        prompts seen, so the check reports exactly what it pressed; an
+        empty list when no prompt had that button."""
+        ds = atspi_dialogs(button)
+        R.log(f"press {button!r}: {ds}")
+        done = [p for d in ds for p in d.get("pressed", []) if not p.startswith("failed")]
+        return [p for p in done if repr(button) in p]
+
     def job_alive(self):
         return bool(sh("pgrep", "-x", "sleep"))
 
