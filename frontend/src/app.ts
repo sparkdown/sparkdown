@@ -45,7 +45,7 @@ import { GitFeedback } from './git-output';
 import { ImageInserter, clipboardImageFiles, isImagePath } from './image-insert';
 import { UserRunOutputLog } from './user-run-output';
 import { UserRunController } from './user-run';
-import type { UserCommand } from './api';
+import type { SaveHook, UserCommand } from './api';
 import { TERMINAL_SCROLLBACK_DEFAULT } from './terminal-scrollback';
 import { changesFileList } from './file-list-changes';
 import { FocusMode } from './focus-mode';
@@ -932,6 +932,7 @@ export class App {
       userRun: {
         view: () => this.userRun.view,
         saveCommands: async (cmds: UserCommand[]) => { await this.userRun.saveCommands(cmds); },
+        saveHooks: async (hooks: SaveHook[]) => { await this.userRun.saveHooks(hooks); },
         openFile: () => {
           this.settingsDialog.close();
           void this.userRun.openConfigFile();

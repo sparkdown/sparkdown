@@ -414,16 +414,21 @@ describe('Custom commands in Settings', () => {
   let saved: { name: string; argv: string[] }[] | null;
   let opened: number;
 
+  let hooks: { name: string; argv: string[]; globs: string[]; enabled: boolean }[];
+
   const userRun = () => ({
     view: () => ({
       commands,
-      save_hooks: [],
+      save_hooks: hooks,
       problems: commands.length ? [] : ['Command 2 has no name; it was ignored.'],
       path: '/cfg/user-run.json',
     }),
     saveCommands: async (next: { name: string; argv: string[] }[]) => {
       saved = next;
       commands = next.map((c) => ({ ...c, argv: [...c.argv] }));
+    },
+    saveHooks: async (next: { name: string; argv: string[]; globs: string[]; enabled: boolean }[]) => {
+      hooks = next.map((h) => ({ ...h, argv: [...h.argv], globs: [...h.globs] }));
     },
     openFile: () => { opened++; },
   });
@@ -432,6 +437,7 @@ describe('Custom commands in Settings', () => {
     document.body.innerHTML = '<div id="app"></div>';
     config = { use_tmux: false, agent_context_enabled: false } as AppConfig;
     commands = [{ name: 'Format', argv: ['prettier', '--write', '.'] }];
+    hooks = [];
     saved = null;
     opened = 0;
     vi.useFakeTimers();
@@ -486,6 +492,52 @@ describe('Custom commands in Settings', () => {
 
     dialog.toggle({ config, onChange: () => {} });
     expect(document.querySelector('[data-section="commands"]')).toBeNull();
+    dialog.close();
+  });
+});
+
+describe('On-save hooks in Settings', () => {
+  let config: AppConfig;
+  const hooks = [
+    { name: 'Format', argv: ['prettier', '--write'], globs: ['*.md'], enabled: false },
+  ];
+  let savedHooks: typeof hooks | null;
+
+  const userRun = () => ({
+    view: () => ({ commands: [], save_hooks: hooks, problems: [], path: '/cfg/user-run.json' }),
+    saveCommands: async () => {},
+    saveHooks: async (next: typeof hooks) => { savedHooks = next; },
+    openFile: () => {},
+  });
+
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="app"></div>';
+    config = { use_tmux: false, agent_context_enabled: false } as AppConfig;
+    hooks[0] = { name: 'Format', argv: ['prettier', '--write'], globs: ['*.md'], enabled: false };
+    savedHooks = null;
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    document.body.innerHTML = '';
+  });
+
+  it('turns a hook on and edits its file filter', async () => {
+    const dialog = new SettingsDialog();
+    dialog.toggle({ config, onChange: () => {}, userRun: userRun() });
+    const section = document.querySelector('[data-section="hooks"]')!;
+    expect(section.textContent).toContain('On save');
+    const enabled = section.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(enabled.checked).toBe(false);
+    enabled.checked = true;
+    enabled.dispatchEvent(new Event('change'));
+    const files = section.querySelector<HTMLInputElement>('input[data-run-field="hook-globs"]')!;
+    expect(files.value).toBe('*.md');
+    files.value = '*.md, **/*.ts';
+    files.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(savedHooks?.[0]?.enabled).toBe(true);
+    expect(savedHooks?.[0]?.globs).toEqual(['*.md', '**/*.ts']);
     dialog.close();
   });
 });

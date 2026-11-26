@@ -1,5 +1,5 @@
 import { api } from './api';
-import type { AgentMcpStatus, AppConfig, UserCommand, UserRunView } from './api';
+import type { AgentMcpStatus, AppConfig, SaveHook, UserCommand, UserRunView } from './api';
 import { joinCommandLine, trySplitCommandLine } from './user-run-argv';
 import { trapFocus, type ModalHandle } from './modal';
 import {
@@ -28,6 +28,7 @@ export interface SettingsHost {
 export interface UserRunSettings {
   view(): UserRunView;
   saveCommands(commands: UserCommand[]): Promise<void>;
+  saveHooks(hooks: SaveHook[]): Promise<void>;
   openFile(): void;
 }
 
@@ -211,6 +212,7 @@ function buildSettingsOverlay(host: SettingsHost, close: () => void): HTMLElemen
 
   if (host.userRun) {
     dialog.appendChild(buildCommandsSection(host.userRun));
+    dialog.appendChild(buildHooksSection(host.userRun));
   }
 
   const agents = document.createElement('div');
@@ -663,6 +665,129 @@ function buildCommandsSection(userRun: UserRunSettings): HTMLElement {
   actions.append(add, open);
   section.appendChild(actions);
   return section;
+}
+
+function buildHooksSection(userRun: UserRunSettings): HTMLElement {
+  const section = document.createElement('div');
+  section.className = 'settings-section';
+  section.dataset.section = 'hooks';
+  const heading = document.createElement('h3');
+  heading.textContent = 'On save';
+  section.appendChild(heading);
+
+  const desc = document.createElement('p');
+  desc.className = 'settings-run-desc';
+  desc.textContent =
+    'When you save a file in a local folder, SparkDown can run a command ' +
+    'with the file path as the last argument. A failed command never fails ' +
+    'the save. Each hook is off until you turn it on. Hooks do not run in a ' +
+    'remote (SSH) folder, or for files an agent writes on its own — they do ' +
+    'run when you save after reviewing an agent edit. An empty file filter ' +
+    'matches every file in the folder. Output appears in the Output tab.';
+  section.appendChild(desc);
+
+  const list = document.createElement('div');
+  section.appendChild(list);
+
+  let draft: SaveHook[] = userRun.view().save_hooks.map((h) => ({ ...h, argv: [...h.argv], globs: [...h.globs] }));
+  let saveTimer: number | null = null;
+
+  const scheduleSave = () => {
+    if (saveTimer !== null) window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(() => {
+      saveTimer = null;
+      void userRun.saveHooks(draft);
+    }, 400);
+  };
+
+  const render = () => {
+    list.replaceChildren();
+    draft.forEach((hook, i) => {
+      list.appendChild(hookRow(hook, {
+        onChange: (next) => {
+          draft[i] = next;
+          scheduleSave();
+        },
+        onRemove: () => {
+          draft.splice(i, 1);
+          render();
+          scheduleSave();
+        },
+      }));
+    });
+  };
+  render();
+
+  const actions = document.createElement('div');
+  actions.className = 'settings-run-actions';
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'settings-btn';
+  add.textContent = 'Add hook';
+  add.addEventListener('click', () => {
+    draft.push({ name: 'New hook', argv: ['echo'], globs: [], enabled: false });
+    render();
+    scheduleSave();
+  });
+  actions.appendChild(add);
+  section.appendChild(actions);
+  return section;
+}
+
+interface HookRowHandlers {
+  onChange: (hook: SaveHook) => void;
+  onRemove: () => void;
+}
+
+function hookRow(hook: SaveHook, handlers: HookRowHandlers): HTMLElement {
+  const item = document.createElement('div');
+  item.className = 'settings-run-item';
+  let current: SaveHook = { ...hook, argv: [...hook.argv], globs: [...hook.globs] };
+  const emit = (next: SaveHook) => {
+    current = next;
+    handlers.onChange(next);
+  };
+
+  const on = document.createElement('label');
+  on.className = 'settings-run-row';
+  const onLabel = document.createElement('label');
+  onLabel.textContent = 'Enabled';
+  const check = document.createElement('input');
+  check.type = 'checkbox';
+  check.className = 'settings-switch';
+  check.checked = current.enabled;
+  check.addEventListener('change', () => emit({ ...current, enabled: check.checked }));
+  on.append(onLabel, check);
+
+  const nameRow = labeledField('Name', 'hook-name', current.name, (value) => {
+    emit({ ...current, name: value.trim() || current.name });
+  });
+  const runRow = labeledField('Run', 'hook-run', joinCommandLine(current.argv), (value) => {
+    const argv = trySplitCommandLine(value);
+    if (!argv) return;
+    emit({ ...current, argv });
+  }, 'prettier --write');
+  const globRow = labeledField('Files', 'hook-globs', current.globs.join(', '), (value) => {
+    const globs = value.split(',').map((s) => s.trim()).filter(Boolean);
+    emit({ ...current, globs });
+  }, '*.md, **/*.{ts,js}');
+  const timeout = current.timeout_ms != null ? String(current.timeout_ms) : '';
+  const timeRow = labeledField('Timeout (ms)', 'hook-timeout', timeout, (value) => {
+    const n = Number.parseInt(value, 10);
+    emit({
+      ...current,
+      timeout_ms: Number.isFinite(n) && n > 0 ? n : null,
+    });
+  }, '30000');
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'settings-btn';
+  remove.textContent = 'Remove';
+  remove.addEventListener('click', () => handlers.onRemove());
+  timeRow.appendChild(remove);
+
+  item.append(on, nameRow, runRow, globRow, timeRow);
+  return item;
 }
 
 interface CommandRowHandlers {

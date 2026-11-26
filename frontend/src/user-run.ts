@@ -72,6 +72,17 @@ export class UserRunController {
     return this.view;
   }
 
+  /** Persist `hooks` (keeping current commands) and reload. */
+  async saveHooks(hooks: SaveHook[]): Promise<UserRunView> {
+    const view = await api.saveUserRun({
+      commands: this.commands,
+      save_hooks: hooks,
+    });
+    this.apply(view);
+    this.reportProblems();
+    return this.view;
+  }
+
   /** Open the user-level file in the editor, creating it if needed. */
   async openConfigFile(): Promise<void> {
     if (!this.filePath) await this.load();
@@ -85,11 +96,13 @@ export class UserRunController {
   }
 
   /** After a successful SparkDown save of `path`. Reloads the user-level
-   *  file when that file itself was saved. */
+   *  file when that file itself was saved, then runs matching on-save hooks
+   *  without blocking the save. */
   afterSave(path: string): void {
     if (this.filePath && samePath(path, this.filePath)) {
       this.hookQueue = this.hookQueue.then(() => this.load().then(() => undefined)).catch(() => {});
     }
+    this.hookQueue = this.hookQueue.then(() => this.runHooksFor(path)).catch(() => {});
   }
 
   /** Run a named custom command; output appears in the Output tab. */
@@ -103,6 +116,29 @@ export class UserRunController {
       this.finishOutcome(entry, out);
     } catch (err) {
       this.deps.output.finish(entry, 'error', String(err), '');
+    }
+  }
+
+  private async runHooksFor(path: string): Promise<void> {
+    if (this.deps.origin() !== LOCAL_ORIGIN) return;
+    if (this.hooks.every((h) => !h.enabled)) return;
+    let outcomes: RunOutcome[];
+    try {
+      outcomes = await api.runSaveHooks(path);
+    } catch {
+      // A hook-runner failure must never surface as a save failure.
+      return;
+    }
+    if (outcomes.length === 0) return;
+    let opened = false;
+    for (const out of outcomes) {
+      const failed = !!(out.timed_out || out.error || (out.exit_code !== null && out.exit_code !== 0));
+      if (failed && !opened) {
+        this.deps.showOutput();
+        opened = true;
+      }
+      const entry = this.deps.output.start('On save', out.name, joinCommandLine(out.argv));
+      this.finishOutcome(entry, out);
     }
   }
 

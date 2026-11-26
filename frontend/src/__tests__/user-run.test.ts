@@ -134,7 +134,7 @@ describe('UserRunController', () => {
     expect(cmd.enabled?.()).toBe(false);
   });
 
-  it('reloads when the user-level file itself is saved, without calling hooks', async () => {
+  it('reloads when the user-level file itself is saved', async () => {
     loadUserRun.mockResolvedValue(view({
       commands: [{ name: 'One', argv: ['echo'] }],
     }));
@@ -148,7 +148,58 @@ describe('UserRunController', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(registry.get('user.run.two')?.title).toBe('Run: Two');
+    // No hook is enabled, so the runner is not called.
     expect(runSaveHooks).not.toHaveBeenCalled();
+  });
+
+  it('runs enabled hooks after a local save and never throws when they fail', async () => {
+    loadUserRun.mockResolvedValue(view({
+      save_hooks: [{ name: 'Fmt', argv: ['prettier', '--write'], globs: ['*.md'], enabled: true }],
+    }));
+    runSaveHooks.mockResolvedValue([
+      {
+        name: 'Fmt',
+        argv: ['prettier', '--write', '/ws/a.md'],
+        cwd: '/ws',
+        exit_code: 1,
+        timed_out: false,
+        output: 'parse error',
+      } satisfies RunOutcome,
+    ]);
+    const { ctrl, showOutput, outputEl } = setup();
+    await ctrl.load();
+    ctrl.afterSave('/ws/a.md');
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(runSaveHooks).toHaveBeenCalledWith('/ws/a.md');
+    expect(showOutput).toHaveBeenCalled();
+    expect(outputEl.textContent).toContain('parse error');
+    expect(outputEl.querySelector('[data-state="error"]')).toBeTruthy();
+
+    runSaveHooks.mockRejectedValue(new Error('runner down'));
+    expect(() => ctrl.afterSave('/ws/b.md')).not.toThrow();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+  });
+
+  it('does not run hooks in a remote folder, and stays quiet when none match', async () => {
+    loadUserRun.mockResolvedValue(view({
+      save_hooks: [{ name: 'Fmt', argv: ['prettier', '--write'], globs: ['*.md'], enabled: true }],
+    }));
+    runSaveHooks.mockResolvedValue([]);
+    const { ctrl, showOutput, setOrigin } = setup();
+    await ctrl.load();
+    setOrigin('me@host');
+    ctrl.afterSave('/ws/a.md');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(runSaveHooks).not.toHaveBeenCalled();
+
+    setOrigin(null);
+    ctrl.afterSave('/ws/a.md');
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(runSaveHooks).toHaveBeenCalledWith('/ws/a.md');
+    expect(showOutput).not.toHaveBeenCalled();
   });
 
   it('records a failed command in the Output tab', async () => {
