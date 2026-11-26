@@ -376,6 +376,7 @@ pub(crate) enum Action {
     Pull,
     Push,
     Discard,
+    Resolve,
 }
 
 /// Map git's (C-locale) output to a typed error. Pure, unit-tested.
@@ -504,6 +505,7 @@ pub(crate) fn classify(action: Action, out: &str) -> GitActionError {
             Action::Push => "push",
             Action::Pull => "pull",
             Action::Discard => "discard",
+            Action::Resolve => "resolve",
         };
         (
             K::Hook,
@@ -2030,6 +2032,274 @@ fn discard_one(
     }
 }
 
+// --- Accept ours / Accept theirs -------------------------------------------
+
+/// Why Accept ours / theirs is off in a remote session.
+const ACCEPT_UNSUPPORTED: &str =
+    "Accept ours / Accept theirs isn't available in remote sessions yet. Use the terminal on the remote host.";
+
+/// Outcome of accepting one side of an unmerged file.
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct AcceptConflictResult {
+    pub path: String,
+    pub side: String,
+    /// "merge", "rebase", or "other".
+    pub operation: String,
+    /// The chosen side removed the file.
+    pub deleted: bool,
+    /// A copy of the pre-resolution content was moved to the Trash.
+    pub trashed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_confirmation: Option<RepoCommandConfirm>,
+    pub output: String,
+}
+
+/// Write `side` ("ours" or "theirs", in git's meaning) for one unmerged
+/// path and mark it resolved (`git add` / `git rm`). A copy of the
+/// pre-resolution content is moved to the Trash first so it can be restored.
+pub(crate) fn accept_conflict_with(
+    root: &str,
+    path: &str,
+    side: &str,
+    extra: ExtraEnv,
+    trasher: Trasher,
+    repo_commands_confirmed: bool,
+) -> Result<AcceptConflictResult, GitActionError> {
+    let local = check_local(root, ACCEPT_UNSUPPORTED)?;
+    if side != "ours" && side != "theirs" {
+        return Err(GitActionError::new(
+            GitErrorKind::Other,
+            "Choose ours or theirs.",
+            "",
+        ));
+    }
+    if let Some(ask) = confirm_needed(&local, extra, repo_commands_confirmed)? {
+        return Ok(AcceptConflictResult {
+            needs_confirmation: Some(ask),
+            path: path.to_string(),
+            side: side.to_string(),
+            ..AcceptConflictResult::default()
+        });
+    }
+    let top = query(&local, extra, &["rev-parse", "--show-toplevel"])
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            GitActionError::new(
+                GitErrorKind::NotARepo,
+                "This folder is not a git repository.",
+                "",
+            )
+        })?;
+    ensure_work_tree_is_checkout(&local, &top)?;
+    if let Err(why) = check_discard_path(&top, path) {
+        return Err(GitActionError::new(
+            GitErrorKind::Other,
+            format!("Refused: {why}."),
+            "",
+        ));
+    }
+    let recs = status_records(&top, extra)?;
+    let rec = recs.iter().find(|r| r.path == path).ok_or_else(|| {
+        GitActionError::new(
+            GitErrorKind::Other,
+            "That file is not conflicted any more.",
+            "",
+        )
+    })?;
+    let code = format!("{}{}", rec.x, rec.y);
+    let kind = crate::git::conflict_kind(&code).ok_or_else(|| {
+        GitActionError::new(
+            GitErrorKind::Other,
+            "That file is not conflicted any more.",
+            "",
+        )
+    })?;
+    let operation = crate::git::conflict_op(&top).unwrap_or("other").to_string();
+    let mut log: Vec<String> = Vec::new();
+    let trashed = backup_conflict_copy(&top, extra, path, trasher, &mut log).map_err(|e| {
+        GitActionError::new(
+            GitErrorKind::Other,
+            format!("Couldn't keep a copy in the Trash: {e}"),
+            log.join("\n"),
+        )
+    })?;
+    let git = |args: &[&str], log: &mut Vec<String>| -> Result<(), GitActionError> {
+        log.push(format!("$ git {}", args.join(" ")));
+        let o = user_git(&top, extra, args, COMMIT_TIMEOUT).map_err(|mut e| {
+            if !log.is_empty() {
+                e.detail = format!("{}\n\n{}", e.detail, log.join("\n"));
+            }
+            e
+        })?;
+        let t = text(&o);
+        if !t.is_empty() {
+            log.push(t.clone());
+        }
+        if o.status.success() {
+            Ok(())
+        } else {
+            let mut e = classify(Action::Resolve, &t);
+            if !log.is_empty() {
+                e.detail = format!("{}\n\n{}", e.detail, log.join("\n"));
+            }
+            Err(e)
+        }
+    };
+    let checkout_and_add = |side: &str, log: &mut Vec<String>| -> Result<(), GitActionError> {
+        git(
+            &[
+                "--literal-pathspecs",
+                "checkout",
+                &format!("--{side}"),
+                "--",
+                path,
+            ],
+            log,
+        )?;
+        git(&["--literal-pathspecs", "add", "--", path], log)
+    };
+    let remove = |log: &mut Vec<String>| -> Result<(), GitActionError> {
+        git(&["--literal-pathspecs", "rm", "-f", "--", path], log)
+    };
+    let deleted = match (kind, side) {
+        ("both-modified" | "both-added", _) => {
+            checkout_and_add(side, &mut log)?;
+            false
+        }
+        ("both-deleted", _) => {
+            // Both sides removed it; mark the removal resolved.
+            let _ = remove(&mut log);
+            // `git rm` can fail if the work tree path is already gone and the
+            // index only needs `git add`; try add as a fallback.
+            if crate::git::conflict_kind(
+                &status_records(&top, extra)?
+                    .iter()
+                    .find(|r| r.path == path)
+                    .map(|r| format!("{}{}", r.x, r.y))
+                    .unwrap_or_default(),
+            )
+            .is_some()
+            {
+                git(&["--literal-pathspecs", "add", "--", path], &mut log)?;
+            }
+            true
+        }
+        ("deleted-by-us", "ours")
+        | ("deleted-by-them", "theirs")
+        | ("added-by-us", "theirs")
+        | ("added-by-them", "ours") => {
+            remove(&mut log)?;
+            true
+        }
+        ("deleted-by-us", _) | ("added-by-them", _) => {
+            checkout_and_add("theirs", &mut log)?;
+            false
+        }
+        ("deleted-by-them", _) | ("added-by-us", _) => {
+            checkout_and_add("ours", &mut log)?;
+            false
+        }
+        _ => {
+            checkout_and_add(side, &mut log)?;
+            false
+        }
+    };
+    Ok(AcceptConflictResult {
+        path: path.to_string(),
+        side: side.to_string(),
+        operation,
+        deleted,
+        trashed,
+        needs_confirmation: None,
+        output: log.join("\n"),
+    })
+}
+
+/// Copy the current work-tree file (or an index stage, if the file is gone)
+/// to a temp path and move that copy to the Trash.
+fn backup_conflict_copy(
+    top: &Path,
+    extra: ExtraEnv,
+    path: &str,
+    trasher: Trasher,
+    log: &mut Vec<String>,
+) -> Result<bool, String> {
+    let abs = top.join(path);
+    let contents: Option<Vec<u8>> = match abs.symlink_metadata() {
+        Ok(m) if m.is_dir() => return Err("it is a folder".into()),
+        Ok(_) => std::fs::read(&abs).ok(),
+        Err(_) => None,
+    };
+    let bytes = if let Some(b) = contents {
+        b
+    } else {
+        let mut found = None;
+        for stage in [2_u8, 3, 1] {
+            let spec = format!(":{stage}:{path}");
+            if let Ok(o) = user_git(top, extra, &["show", &spec], COMMIT_TIMEOUT) {
+                if o.status.success() {
+                    found = Some(o.stdout);
+                    break;
+                }
+            }
+        }
+        match found {
+            Some(b) => b,
+            None => return Ok(false),
+        }
+    };
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("conflict");
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!(
+        "sparkdown-conflict-{}-{}-{}-{}",
+        std::process::id(),
+        stamp,
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        name
+    ));
+    std::fs::write(&tmp, bytes).map_err(|e| format!("couldn't write a copy: {e}"))?;
+    match trasher(&tmp) {
+        Ok(()) => {
+            log.push(format!("kept a copy of {path} in the Trash"));
+            Ok(true)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn git_accept_conflict(
+    webview_window: tauri::WebviewWindow,
+    root: String,
+    path: String,
+    side: String,
+    confirmed: Option<bool>,
+) -> Result<AcceptConflictResult, GitActionError> {
+    crate::windows::spawn_scoped(webview_window.label().to_string(), move || {
+        accept_conflict_with(
+            &root,
+            &path,
+            &side,
+            &[],
+            &os_trash,
+            confirmed.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|e| GitActionError::new(GitErrorKind::Other, "The git task failed.", e.to_string()))?
+}
+
 #[tauri::command]
 pub async fn git_discard_preview(
     webview_window: tauri::WebviewWindow,
@@ -3492,6 +3762,184 @@ mod tests {
             "the merge itself is not aborted"
         );
         assert!(conflicted_files(&sb.work, &env).is_empty());
+    }
+
+    fn accept(
+        sb: &Sandbox,
+        t: &FakeTrash,
+        path: &str,
+        side: &str,
+    ) -> Result<AcceptConflictResult, GitActionError> {
+        let env = sb.env();
+        accept_conflict_with(
+            &root(sb),
+            path,
+            side,
+            &env,
+            &|p| t.trash(p),
+            true, // already confirmed (no repo-command prompt)
+        )
+    }
+
+    fn start_merge_conflict(sb: &Sandbox) {
+        let env = sb.env();
+        let other = sb.other();
+        sb.commit_in(&other, "README.md", "theirs\n", "theirs");
+        sb.git(&other, &["push", "-q"]);
+        sb.commit_in(&sb.work, "README.md", "ours\n", "ours");
+        assert_eq!(
+            pull_impl(&root(sb), &env).unwrap_err().kind,
+            GitErrorKind::MergeConflict
+        );
+    }
+
+    #[test]
+    fn accept_ours_on_a_merge_keeps_our_side_and_marks_it_resolved() {
+        let sb = sandbox();
+        let t = FakeTrash::new(&sb);
+        start_merge_conflict(&sb);
+        let env = sb.env();
+        let r = accept(&sb, &t, "README.md", "ours").unwrap();
+        assert_eq!(r.side, "ours");
+        assert_eq!(r.operation, "merge");
+        assert!(!r.deleted);
+        assert!(r.trashed);
+        assert_eq!(
+            fs::read_to_string(sb.work.join("README.md")).unwrap(),
+            "ours\n"
+        );
+        // The pre-resolution file (with markers) is in the Trash.
+        let copy = t.content(0, &t.names()[0]);
+        assert!(copy.contains("ours") && copy.contains("theirs"), "{copy}");
+        assert!(conflicted_files(&sb.work, &env).is_empty());
+        assert!(
+            merge_in_progress(&sb.work, &env),
+            "the merge stays in progress"
+        );
+        let st = sb.git(&sb.work, &["status", "--porcelain"]);
+        assert!(!st.contains('U'), "{st}");
+    }
+
+    #[test]
+    fn accept_theirs_on_a_merge_keeps_their_side() {
+        let sb = sandbox();
+        let t = FakeTrash::new(&sb);
+        start_merge_conflict(&sb);
+        accept(&sb, &t, "README.md", "theirs").unwrap();
+        assert_eq!(
+            fs::read_to_string(sb.work.join("README.md")).unwrap(),
+            "theirs\n"
+        );
+        assert!(conflicted_files(&sb.work, &sb.env()).is_empty());
+    }
+
+    #[test]
+    fn accept_ours_and_theirs_swap_meaning_during_a_rebase() {
+        let sb = sandbox();
+        let t = FakeTrash::new(&sb);
+        let env = sb.env();
+        sb.git(&sb.work, &["config", "pull.rebase", "true"]);
+        let other = sb.other();
+        sb.commit_in(&other, "README.md", "theirs\n", "theirs");
+        sb.git(&other, &["push", "-q"]);
+        sb.commit_in(&sb.work, "README.md", "ours\n", "ours");
+        assert_eq!(
+            pull_impl(&root(&sb), &env).unwrap_err().kind,
+            GitErrorKind::RebaseConflict
+        );
+        // During a rebase, ours is the branch we rebase onto (theirs\n)
+        // and theirs is the commit being replayed (ours\n).
+        let r = accept(&sb, &t, "README.md", "ours").unwrap();
+        assert_eq!(r.operation, "rebase");
+        assert_eq!(
+            fs::read_to_string(sb.work.join("README.md")).unwrap(),
+            "theirs\n"
+        );
+        assert!(rebase_in_progress(&sb.work, &env));
+        assert!(conflicted_files(&sb.work, &env).is_empty());
+    }
+
+    #[test]
+    fn accept_theirs_during_a_rebase_keeps_the_replayed_commit() {
+        let sb = sandbox();
+        let t = FakeTrash::new(&sb);
+        let env = sb.env();
+        sb.git(&sb.work, &["config", "pull.rebase", "true"]);
+        let other = sb.other();
+        sb.commit_in(&other, "README.md", "theirs\n", "theirs");
+        sb.git(&other, &["push", "-q"]);
+        sb.commit_in(&sb.work, "README.md", "ours\n", "ours");
+        assert_eq!(
+            pull_impl(&root(&sb), &env).unwrap_err().kind,
+            GitErrorKind::RebaseConflict
+        );
+        accept(&sb, &t, "README.md", "theirs").unwrap();
+        assert_eq!(
+            fs::read_to_string(sb.work.join("README.md")).unwrap(),
+            "ours\n"
+        );
+    }
+
+    #[test]
+    fn accept_handles_a_delete_by_them_conflict() {
+        let sb = sandbox();
+        let t = FakeTrash::new(&sb);
+        let env = sb.env();
+        let other = sb.other();
+        sb.git(&other, &["rm", "-q", "README.md"]);
+        sb.git(&other, &["commit", "-q", "-m", "rm"]);
+        sb.git(&other, &["push", "-q"]);
+        sb.commit_in(&sb.work, "README.md", "keep-me\n", "edit");
+        assert_eq!(
+            pull_impl(&root(&sb), &env).unwrap_err().kind,
+            GitErrorKind::MergeConflict
+        );
+        let st = sb.git(&sb.work, &["status", "--porcelain"]);
+        assert!(st.contains("README.md"), "{st}");
+        // Accept ours: keep our edited file.
+        accept(&sb, &t, "README.md", "ours").unwrap();
+        assert_eq!(
+            fs::read_to_string(sb.work.join("README.md")).unwrap(),
+            "keep-me\n"
+        );
+        assert!(conflicted_files(&sb.work, &env).is_empty());
+    }
+
+    #[test]
+    fn accept_theirs_on_a_delete_by_them_conflict_removes_the_file() {
+        let sb = sandbox();
+        let t = FakeTrash::new(&sb);
+        let env = sb.env();
+        let other = sb.other();
+        sb.git(&other, &["rm", "-q", "README.md"]);
+        sb.git(&other, &["commit", "-q", "-m", "rm"]);
+        sb.git(&other, &["push", "-q"]);
+        sb.commit_in(&sb.work, "README.md", "keep-me\n", "edit");
+        assert_eq!(
+            pull_impl(&root(&sb), &env).unwrap_err().kind,
+            GitErrorKind::MergeConflict
+        );
+        let r = accept(&sb, &t, "README.md", "theirs").unwrap();
+        assert!(r.deleted);
+        assert!(!sb.work.join("README.md").exists());
+        assert!(conflicted_files(&sb.work, &env).is_empty());
+    }
+
+    #[test]
+    fn accept_refuses_a_file_that_is_not_conflicted() {
+        let sb = sandbox();
+        let t = FakeTrash::new(&sb);
+        fs::write(sb.work.join("README.md"), "edit\n").unwrap();
+        let e = accept(&sb, &t, "README.md", "ours").unwrap_err();
+        assert!(
+            e.message.to_lowercase().contains("not conflicted"),
+            "{}",
+            e.message
+        );
+        assert_eq!(
+            fs::read_to_string(sb.work.join("README.md")).unwrap(),
+            "edit\n"
+        );
     }
 
     #[test]

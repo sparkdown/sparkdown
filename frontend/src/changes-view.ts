@@ -11,6 +11,7 @@ import {
 } from './meat';
 import { ReviewState, workspaceId } from './review-state';
 import { showContextMenu } from './context-menu';
+import { openHowFor } from './accept-conflict';
 
 /** How a row was activated: show its diff, or open it in the editor. */
 export type OpenHow = 'diff' | 'editor';
@@ -29,6 +30,10 @@ export interface ChangesViewOptions {
   onDiscard?(paths: string[]): void;
   /** #172: why Discard is unavailable (remote session), or null. */
   discardDisabledReason?(): string | null;
+  /** Accept ours or theirs for one conflicted file (the handler confirms). */
+  onAcceptConflict?(path: string, side: 'ours' | 'theirs'): void;
+  /** Why Accept ours / theirs is unavailable (remote session), or null. */
+  acceptDisabledReason?(): string | null;
 }
 
 /** Outcome of one status + stats load. */
@@ -40,6 +45,7 @@ const STATUS_LETTER: Record<GitChange['status'], string> = {
   deleted: 'D',
   renamed: 'R',
   untracked: 'U',
+  conflicted: 'C',
 };
 
 const CHECK_SVG =
@@ -75,6 +81,8 @@ export class ChangesView {
   private repoRoot: string | null = null;
   private onOpen: (path: string, status: GitChange['status'], how: OpenHow) => void;
   private lastChanges: GitChange[] = [];
+  /** "merge", "rebase", or "other" when unmerged files are present. */
+  private conflictOp: string | null = null;
   /** Untracked nested repos (folders, #47): listed, never opened or queued. */
   private nestedRepos: GitChange[] = [];
   private stats = new Map<string, ChangeStat>();
@@ -180,7 +188,7 @@ export class ChangesView {
       // Marks unavailable: everything reads as pending.
     }
     if (gen !== this.generation) return 'stale';
-    this.setChanges(status.top_level, status.changes, stats);
+    this.setChanges(status.top_level, status.changes, stats, status.conflict_op ?? null);
     return (this.lastLoad = 'ok');
   }
 
@@ -189,8 +197,10 @@ export class ChangesView {
     repoRoot: string | null,
     changes: GitChange[],
     stats: ChangeStat[] | null,
+    conflictOp: string | null = null,
   ): void {
     this.repoRoot = repoRoot;
+    this.conflictOp = changes.some((c) => c.status === 'conflicted') ? conflictOp : null;
     // A folder entry (untracked nested repo) is not a file: it never joins
     // the review queue, the counts, or a tab (#47).
     this.nestedRepos = changes.filter((c) => c.is_dir);
@@ -228,6 +238,11 @@ export class ChangesView {
     return this.repoRoot;
   }
 
+  /** "merge", "rebase", or "other" when the list has conflicted files. */
+  getConflictOp(): string | null {
+    return this.conflictOp;
+  }
+
   /** Whether `path` is currently untracked (governs how to fetch its diff). */
   isUntracked(path: string): boolean {
     return this.lastChanges.some((c) => c.path === path && c.status === 'untracked');
@@ -260,27 +275,35 @@ export class ChangesView {
 
   /** The groups in display order: pending first, reviewed after, each
    *  keeping git's order. */
-  groups(): { meat: GitChange[]; noise: Array<GitChange & { reason: NoiseReason }> } {
-    const { meat, noise } = partitionChanges(this.lastChanges);
+  groups(): {
+    conflicts: GitChange[];
+    meat: GitChange[];
+    noise: Array<GitChange & { reason: NoiseReason }>;
+  } {
+    const conflicts = this.lastChanges.filter((c) => c.status === 'conflicted');
+    const rest = this.lastChanges.filter((c) => c.status !== 'conflicted');
+    const { meat, noise } = partitionChanges(rest);
     const byReview = <T extends GitChange>(list: T[]): T[] => [
       ...list.filter((c) => !this.isReviewed(c.path)),
       ...list.filter((c) => this.isReviewed(c.path)),
     ];
-    return { meat: byReview(meat), noise: byReview(noise) };
+    return { conflicts: byReview(conflicts), meat: byReview(meat), noise: byReview(noise) };
   }
 
   /** The files the counts, meter and badge are about. */
   private queueFiles(): GitChange[] {
-    const { meat, noise } = this.groups();
-    return meat.length > 0 ? meat : noise;
+    const { conflicts, meat, noise } = this.groups();
+    const main = [...conflicts, ...meat];
+    return main.length > 0 ? main : noise;
   }
 
   /** Files j/k walk through: the visible rows (noise only when expanded,
    *  or when the selection is inside it). */
   navOrder(): GitChange[] {
-    const { meat, noise } = this.groups();
+    const { conflicts, meat, noise } = this.groups();
+    const main = [...conflicts, ...meat];
     const inNoise = this.current !== null && noise.some((c) => c.path === this.current);
-    return this.showNoise || inNoise || meat.length === 0 ? [...meat, ...noise] : meat;
+    return this.showNoise || inNoise || main.length === 0 ? [...main, ...noise] : main;
   }
 
   /** Select `path` (no open). Re-renders the selection only. */
@@ -310,7 +333,7 @@ export class ChangesView {
     const target = order[next];
     if (!target) return null;
     this.select(target.path);
-    this.onOpen(target.path, target.status, 'diff');
+    this.onOpen(target.path, target.status, openHowFor(target.status));
     return target.path;
   }
 
@@ -346,7 +369,7 @@ export class ChangesView {
       return null;
     }
     this.select(next.path);
-    this.onOpen(next.path, next.status, 'diff');
+    this.onOpen(next.path, next.status, openHowFor(next.status));
     return next.path;
   }
 
@@ -447,12 +470,20 @@ export class ChangesView {
       this.requestDiscard([path]);
       return;
     }
+    const accept = target.closest<HTMLElement>('.change-accept');
+    if (accept) {
+      e.stopPropagation();
+      const side = accept.dataset.side === 'theirs' ? 'theirs' : 'ours';
+      this.opts.onAcceptConflict?.(path, side);
+      return;
+    }
     if (target.closest('.change-check')) {
       this.toggleReviewed(path);
       return;
     }
     this.select(path);
-    this.onOpen(path, row.dataset.status as GitChange['status'], 'diff');
+    const status = row.dataset.status as GitChange['status'];
+    this.onOpen(path, status, openHowFor(status));
   }
 
   /** #172: right-click a file row → Discard Changes… */
@@ -468,12 +499,26 @@ export class ChangesView {
     if (!row || !path || !this.opts.onDiscard) return;
     e.preventDefault();
     const reason = this.opts.discardDisabledReason?.() ?? null;
-    showContextMenu(e.clientX, e.clientY, [
-      {
-        label: reason ? 'Discard Changes… (not available in remote sessions)' : 'Discard Changes…',
-        onClick: () => this.requestDiscard([path]),
-      },
-    ]);
+    const change = this.change(path);
+    const items = [];
+    if (change?.status === 'conflicted' && this.opts.onAcceptConflict) {
+      const blocked = this.opts.acceptDisabledReason?.() ?? null;
+      items.push(
+        {
+          label: blocked ? 'Accept ours (not available in remote sessions)' : 'Accept ours…',
+          onClick: () => this.opts.onAcceptConflict?.(path, 'ours'),
+        },
+        {
+          label: blocked ? 'Accept theirs (not available in remote sessions)' : 'Accept theirs…',
+          onClick: () => this.opts.onAcceptConflict?.(path, 'theirs'),
+        },
+      );
+    }
+    items.push({
+      label: reason ? 'Discard Changes… (not available in remote sessions)' : 'Discard Changes…',
+      onClick: () => this.requestDiscard([path]),
+    });
+    showContextMenu(e.clientX, e.clientY, items);
   }
 
   /** Discard these files (the handler confirms first, or explains why it
@@ -509,10 +554,18 @@ export class ChangesView {
   }
 
   private renderList(): void {
-    const { meat, noise } = this.groups();
-    const queue = meat.length > 0 ? meat : noise;
+    const { conflicts, meat, noise } = this.groups();
+    const queue = this.queueFiles();
     const reviewed = queue.filter((c) => this.isReviewed(c.path)).length;
     const parts: string[] = queue.length > 0 ? [this.renderSummary(queue, reviewed)] : [];
+
+    if (conflicts.length > 0) {
+      const left = conflicts.length - conflicts.filter((c) => this.isReviewed(c.path)).length;
+      parts.push(
+        `<div class="changes-group-h">Conflicted <span class="changes-group-count">${left === 0 ? 'all reviewed' : `${left} left`}</span></div>`,
+      );
+      parts.push(conflicts.map((c) => this.renderRow(c)).join(''));
+    }
 
     if (meat.length > 0) {
       const left = meat.length - meat.filter((c) => this.isReviewed(c.path)).length;
@@ -650,8 +703,22 @@ export class ChangesView {
       (dir ? `<em class="change-dir">${escapeReviewText(dir)}</em>` : '') +
       `</span>` +
       `<span class="change-counts">${counts}</span>` +
+      this.renderAcceptButtons(c) +
       this.renderDiscardButton(c) +
       `</div>`
+    );
+  }
+
+  /** Accept ours / Accept theirs on a conflicted row. */
+  private renderAcceptButtons(c: GitChange): string {
+    if (c.status !== 'conflicted' || !this.opts.onAcceptConflict) return '';
+    const reason = this.opts.acceptDisabledReason?.() ?? null;
+    const ours = reason ?? 'Accept ours (this side of the conflict)';
+    const theirs = reason ?? 'Accept theirs (the other side of the conflict)';
+    const dis = reason ? ' aria-disabled="true"' : '';
+    return (
+      `<button type="button" class="change-accept" data-side="ours" tabindex="-1" title="${escapeHtml(ours)}" aria-label="${escapeReviewText(`Accept ours for ${c.path}`)}"${dis}>Ours</button>` +
+      `<button type="button" class="change-accept" data-side="theirs" tabindex="-1" title="${escapeHtml(theirs)}" aria-label="${escapeReviewText(`Accept theirs for ${c.path}`)}"${dis}>Theirs</button>`
     );
   }
 
@@ -686,8 +753,7 @@ export class ChangesView {
     // The meter's "now" segment tracks the selection.
     const summary = this.listEl.querySelector('.changes-review');
     if (summary && this.lastLoad === 'ok') {
-      const { meat, noise } = this.groups();
-      const queue = meat.length > 0 ? meat : noise;
+      const queue = this.queueFiles();
       const reviewed = queue.filter((c) => this.isReviewed(c.path)).length;
       const tmp = document.createElement('div');
       tmp.innerHTML = this.renderSummary(queue, reviewed);

@@ -323,6 +323,9 @@ export const api = {
    *  committed version go to the OS trash). Rejects with a GitActionError. */
   gitDiscard: (root: string, items: DiscardRequest[], confirmed = false) =>
     invoke<DiscardResult>("git_discard", { root, items, confirmed }),
+  /** Accept ours or theirs for one unmerged file and mark it resolved. */
+  gitAcceptConflict: (root: string, path: string, side: 'ours' | 'theirs', confirmed = false) =>
+    invoke<AcceptConflictResult>("git_accept_conflict", { root, path, side, confirmed }),
   gitDiffFile: (root: string, path: string, untracked: boolean) =>
     invoke<string>("git_diff_file", { root, path, untracked }),
   /** Per changed file: +adds / −dels and a fingerprint of the change
@@ -462,7 +465,9 @@ export interface AgentCli {
 /** A changed path in the git working tree (Changes view). */
 export interface GitChange {
   path: string;
-  status: "modified" | "added" | "deleted" | "renamed" | "untracked";
+  status: "modified" | "added" | "deleted" | "renamed" | "untracked" | "conflicted";
+  /** Unmerged case, only when status is "conflicted". */
+  conflict?: string;
   staged: boolean;
   /** A folder, not a file: an untracked nested git repo (`?? proj/`).
    *  Shown as a folder row, never opened as a tab (#47). */
@@ -582,6 +587,19 @@ export interface GitStatus {
    *  relative to this (not to the queried root, which may be a subdir). */
   top_level: string | null;
   changes: GitChange[];
+  /** When unmerged paths are present: "merge", "rebase", or "other". */
+  conflict_op?: string | null;
+}
+
+/** Outcome of Accept ours / Accept theirs for one unmerged file. */
+export interface AcceptConflictResult {
+  path: string;
+  side: string;
+  operation: string;
+  deleted: boolean;
+  trashed: boolean;
+  needs_confirmation?: { fingerprint: string; keys: Array<{ key: string; value: string }> };
+  output: string;
 }
 
 /** One matching line from `search_in_files` (search.rs). Columns and the
