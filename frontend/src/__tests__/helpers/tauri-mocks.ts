@@ -328,6 +328,16 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       return 'bash';
     case 'window_ready':
       return undefined;
+    case 'save_image': {
+      const doc = args?.docPath as string;
+      const name = `${args?.name as string}.png`;
+      vfs.set(`${doc.slice(0, doc.lastIndexOf('/'))}/${name}`, '<png>');
+      return name;
+    }
+    case 'import_image': {
+      const source = args?.source as string;
+      return source.slice(source.lastIndexOf('/') + 1);
+    }
     default:
       throw new Error(`tauri-mocks: unmocked command "${cmd}"`);
   }

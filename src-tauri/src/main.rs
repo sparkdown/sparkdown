@@ -11,6 +11,7 @@ mod file_index;
 mod fsio;
 mod git;
 mod git_write;
+mod images;
 mod lifecycle;
 #[cfg(target_os = "macos")]
 mod macos_quit;
@@ -795,6 +796,8 @@ fn main() {
             commands::get_app_info,
             commands::allow_preview_assets,
             commands::remote_read_image,
+            images::save_image,
+            images::import_image,
             commands::window_ready,
             terminal::terminal_start,
             terminal::terminal_write,
