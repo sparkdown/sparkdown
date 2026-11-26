@@ -239,7 +239,12 @@ export class App {
       root: () => this.ctx.workspaceRoot ?? this.fileTree.getRoot(),
       origin: () => this.tabs.getOrigin(),
       openFile: (path) => this.openFile(path),
-      showOutput: () => this.cockpit.showOutput(),
+      // The Output tab lives in the drawer, which focus mode hides; show it
+      // the way other drawer and sidebar reveals do, by leaving focus mode.
+      showOutput: () => {
+        this.focusMode.exit();
+        this.cockpit.showOutput();
+      },
       output: new UserRunOutputLog(document.getElementById('run-output')),
     });
     this.diff = new DiffController(this.ctx, {
