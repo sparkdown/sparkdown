@@ -234,6 +234,7 @@ const APP_SHELL = `
       <span class="status-spacer"></span>
       <span id="status-update" class="status-update hidden"></span>
       <span id="status-words">0 words</span>
+      <span id="status-reading-time">0 min read</span>
       <span id="status-chars">0 chars</span>
       <span id="status-lines">0 lines</span>
       <button id="status-cursor">Ln 1, Col 1</button>
@@ -3137,6 +3138,21 @@ describe('App integration', () => {
 
   describe('status bar items', () => {
     const el = (id: string) => document.getElementById(id)!;
+
+    it('reading time turns from 1 to 2 min between 200 and 201 words (the UI-check fixtures)', async () => {
+      // Built like words200.md / words201.md in the UI-check setup script.
+      // The heading counts: "# Two hundred" is 3 words, "# Two hundred and one" is 5.
+      const nwords = (n: number) => Array.from({ length: n }, (_, i) => `word${i + 1}`).join(' ') + '\n';
+      vfs.set('/docs/words200.md', '# Two hundred\n\n' + nwords(197));
+      vfs.set('/docs/words201.md', '# Two hundred and one\n\n' + nwords(196));
+      await startApp();
+      emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/docs/words200.md' });
+      await until(() => el('status-words').textContent === '200 words', '200 words');
+      expect(el('status-reading-time').textContent).toBe('1 min read');
+      emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/docs/words201.md' });
+      await until(() => el('status-words').textContent === '201 words', '201 words');
+      expect(el('status-reading-time').textContent).toBe('2 min read');
+    });
 
     it('shows the branch with ahead/behind from the git status tick', async () => {
       vfs.set('/repo/a.md', '# A');
