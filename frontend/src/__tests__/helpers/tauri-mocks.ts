@@ -464,6 +464,10 @@ export class PreviewPaneStub {
   refreshWikiLinks(): void {}
   setOriginResolver(): void {}
   setPathResolver(): void {}
+  setSourceClickHandler(): void {}
+  sourceAnchors(): null {
+    return null;
+  }
   setBaseDir(): void {}
   setWorkspaceRoot(): void {}
   setRenderMode(): void {}
