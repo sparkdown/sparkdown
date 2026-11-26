@@ -139,6 +139,19 @@ export const api = {
       root,
       includeHidden,
     }),
+  /** Like listWorkspaceFiles, and `onBatch` gets new paths (unsorted) while
+   *  a local walk runs: the first folder level right away, then more. A
+   *  cached or remote listing sends no batches. Resolves to the full list. */
+  listWorkspaceFilesStream: (
+    root: string,
+    includeHidden: boolean,
+    onBatch: (files: string[]) => void,
+  ) =>
+    invoke<{ files: string[]; truncated: boolean }>("list_workspace_files_stream", {
+      root,
+      includeHidden,
+      onBatch: new Channel<string[]>(onBatch),
+    }),
   loadConfig: () => invoke<AppConfig>("load_config"),
   saveConfig: (config: AppConfig) => invoke<void>("save_config", { config }),
   getPendingFiles: () => invoke<string[]>("get_pending_files"),
@@ -614,6 +627,8 @@ export interface ReplaceApplyResult {
 export interface FsChange {
   path: string;
   kind: string;
+  /** A content write to a `.gitignore`d file: only open tabs react. */
+  ignored?: boolean;
 }
 
 /** A concrete Host alias from ~/.ssh/config (wildcards omitted). */

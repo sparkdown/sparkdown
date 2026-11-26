@@ -233,6 +233,7 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
         return remoteList(args?.path as string, Boolean(args?.includeHidden));
       }
       return [];
+    case 'list_workspace_files_stream':
     case 'list_workspace_files': {
       // Quick open: every file under root, relative, from whichever machine
       // is active (the Rust command routes on remote::is_active()).
@@ -243,6 +244,9 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
         .map((p) => p.slice(root.length + 1))
         .filter((rel) => hidden || !rel.split('/').some((s) => s.startsWith('.')))
         .sort();
+      // The streaming variant sends the first level first, like the Rust walk.
+      const onBatch = args?.onBatch as MockChannel<string[]> | undefined;
+      onBatch?.onmessage(files.filter((f) => !f.includes('/')));
       return { files, truncated: false };
     }
     case 'load_config':
@@ -379,7 +383,13 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
 
 // -------------------------------------------------------- module mocks -----
 
-export const coreMock = { invoke: mockInvoke };
+/** Stand-in for `Channel` from @tauri-apps/api/core: tests call
+ *  `onmessage` directly. */
+export class MockChannel<T> {
+  constructor(public onmessage: (msg: T) => void = () => {}) {}
+}
+
+export const coreMock = { invoke: mockInvoke, Channel: MockChannel };
 
 export const eventMock = {
   listen: async (name: string, handler: EventHandler) => {

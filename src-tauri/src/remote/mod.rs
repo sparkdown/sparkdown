@@ -1440,6 +1440,7 @@ pub fn watch_start(app: AppHandle, root: &str) -> Result<(), String> {
                             vec![crate::watcher::FsChange {
                                 path: root.clone(),
                                 kind: kind.to_string(),
+                                ignored: false,
                             }],
                         );
                     }

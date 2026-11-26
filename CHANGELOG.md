@@ -15,6 +15,7 @@ requests.
 ### Changed
 
 - **Startup** with many restored tabs is faster: every tab appears right away, but only the active tab's file is read before the window shows. The other tabs read their files in the background after the window shows, or as soon as you click one, keeping their order and unsaved-changes behavior.
+- **Quick open** leaves out files that a `.gitignore` covers (nested `.gitignore` files too) and shows the top-level files right away while it lists the rest. The file watcher also skips folders a `.gitignore` covers, and an open ignored file still reloads when it changes on disk.
 
 ### Fixed
 
