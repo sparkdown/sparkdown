@@ -5,6 +5,47 @@ import { ptyBytes, type PtyOutput } from "./terminal-output";
 
 export type { AppConfig };
 
+/** One custom palette command from the user-level run file. */
+export interface UserCommand {
+  name: string;
+  argv: string[];
+  timeout_ms?: number | null;
+}
+
+/** One on-save hook from the user-level run file. Off until enabled. */
+export interface SaveHook {
+  name: string;
+  argv: string[];
+  globs: string[];
+  enabled: boolean;
+  timeout_ms?: number | null;
+}
+
+/** Contents of the user-level run file as written back on save. */
+export interface UserRunFile {
+  commands: UserCommand[];
+  save_hooks: SaveHook[];
+}
+
+/** Loaded user-level run file, plus notes about skipped entries. */
+export interface UserRunView {
+  commands: UserCommand[];
+  save_hooks: SaveHook[];
+  problems: string[];
+  path: string;
+}
+
+/** Result of running one user-level program. */
+export interface RunOutcome {
+  name: string;
+  argv: string[];
+  cwd: string;
+  exit_code: number | null;
+  timed_out: boolean;
+  output: string;
+  error?: string | null;
+}
+
 /** An agent's SparkDown MCP entry (#32). `stale`: the configured program
  *  is gone ('missing') or another SparkDown copy ('other'). */
 export interface AgentMcpStatus {
@@ -164,6 +205,11 @@ export const api = {
     }),
   loadConfig: () => invoke<AppConfig>("load_config"),
   saveConfig: (config: AppConfig) => invoke<void>("save_config", { config }),
+  loadUserRun: () => invoke<UserRunView>("load_user_run"),
+  saveUserRun: (file: UserRunFile) => invoke<UserRunView>("save_user_run", { file }),
+  userRunPath: () => invoke<string>("user_run_path"),
+  runUserCommand: (name: string) => invoke<RunOutcome>("run_user_command", { name }),
+  runSaveHooks: (savedPath: string) => invoke<RunOutcome[]>("run_save_hooks", { savedPath }),
   getPendingFiles: () => invoke<string[]>("get_pending_files"),
   quit: () => invoke<void>("quit"),
   setHtmlPreview: (html: string) => invoke<void>("set_html_preview", { html }),

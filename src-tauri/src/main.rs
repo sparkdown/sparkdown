@@ -30,6 +30,7 @@ mod session;
 mod terminal;
 mod terminal_stream;
 mod updates;
+mod user_run;
 mod watcher;
 #[cfg(all(test, windows))]
 mod win_test_agents;
@@ -863,6 +864,11 @@ fn main() {
             updates::update_download,
             updates::update_install,
             updates::update_restart,
+            user_run::user_run_path,
+            user_run::load_user_run,
+            user_run::save_user_run,
+            user_run::run_user_command,
+            user_run::run_save_hooks,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

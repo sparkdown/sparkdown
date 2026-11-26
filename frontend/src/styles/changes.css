@@ -708,6 +708,9 @@ button.diff-lnum:hover {
 .git-output-entry { padding: 4px 0; border-bottom: 1px solid var(--border-light); }
 .git-output-head { display: flex; gap: 8px; align-items: baseline; }
 .git-output-time { color: var(--text-subtle); font-variant-numeric: tabular-nums; }
+.git-output-kind, .git-output-name { color: var(--text-subtle); }
+.git-output-name { font-weight: 600; color: var(--fg); }
+
 .git-output-entry[data-state='error'] .git-output-msg { color: var(--status-warning); }
 .git-output-text { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font-size: 11px; }
 

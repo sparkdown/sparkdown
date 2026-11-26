@@ -73,6 +73,22 @@ export const git: {
 /** What mcp_server_running answers. */
 export const mcp = { running: true };
 
+/** User-level run file returned by load_user_run / save_user_run. */
+export const userRun = {
+  path: '/tmp/sparkdown-user-run.json',
+  commands: [] as Array<{ name: string; argv: string[]; timeout_ms?: number | null }>,
+  save_hooks: [] as Array<{
+    name: string;
+    argv: string[];
+    globs: string[];
+    enabled: boolean;
+    timeout_ms?: number | null;
+  }>,
+  problems: [] as string[],
+  lastRun: null as { name: string } | null,
+  lastHooks: null as { savedPath: string } | null,
+};
+
 /**
  * Scripted dialog answers, consumed FIFO. `message` feeds the 3-button
  * unsaved-changes prompt; `save`/`open` feed the file dialogs (null = user
@@ -136,6 +152,12 @@ export function resetTauriMocks(): void {
   git.topLevel = null;
   git.branch = { branch: 'main', detached: false, has_upstream: true, ahead: 0, behind: 0 };
   mcp.running = true;
+  userRun.path = '/tmp/sparkdown-user-run.json';
+  userRun.commands = [];
+  userRun.save_hooks = [];
+  userRun.problems = [];
+  userRun.lastRun = null;
+  userRun.lastHooks = null;
 }
 
 // ------------------------------------------------------------- backends ----
@@ -401,6 +423,39 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       const source = args?.source as string;
       return source.slice(source.lastIndexOf('/') + 1);
     }
+    case 'user_run_path':
+      return userRun.path;
+    case 'load_user_run':
+      return {
+        commands: userRun.commands,
+        save_hooks: userRun.save_hooks,
+        problems: userRun.problems,
+        path: userRun.path,
+      };
+    case 'save_user_run': {
+      const file = args?.file as { commands?: unknown; save_hooks?: unknown } | undefined;
+      if (file?.commands) userRun.commands = file.commands as typeof userRun.commands;
+      if (file?.save_hooks) userRun.save_hooks = file.save_hooks as typeof userRun.save_hooks;
+      return {
+        commands: userRun.commands,
+        save_hooks: userRun.save_hooks,
+        problems: userRun.problems,
+        path: userRun.path,
+      };
+    }
+    case 'run_user_command':
+      userRun.lastRun = { name: String(args?.name ?? '') };
+      return {
+        name: args?.name,
+        argv: ['echo'],
+        cwd: '/ws',
+        exit_code: 0,
+        timed_out: false,
+        output: 'ok',
+      };
+    case 'run_save_hooks':
+      userRun.lastHooks = { savedPath: String(args?.savedPath ?? '') };
+      return [];
     default:
       throw new Error(`tauri-mocks: unmocked command "${cmd}"`);
   }

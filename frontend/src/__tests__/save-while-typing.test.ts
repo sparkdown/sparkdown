@@ -270,3 +270,34 @@ describe('save while the user keeps typing', () => {
     expect(tabs.activeTab()?.modified).toBe(false);
   });
 });
+
+describe('afterWrite follow-up', () => {
+  beforeEach(() => {
+    disk.clear();
+    beforeRead = null;
+    beforeWrite = null;
+    messageMock.mockClear();
+  });
+
+  it('runs after a successful save and does not fail the save when it throws', async () => {
+    const afterWrite = vi.fn(() => { throw new Error('hook boom'); });
+    document.body.innerHTML = '';
+    const bus = new EventBus();
+    const tabs = new TabManager(bus);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    tabs.init(container);
+    disk.set(PATH, 'base');
+    tabs.openTab(PATH, 'base');
+    tabs.updateContent('changed');
+    tabs.refreshModified();
+    const editor = { getContent: () => 'changed' };
+    const fileTree = { getSaveDir: () => '/p' };
+    const ctx = { tabs, editor, fileTree } as never;
+    const docs = new DocumentController(ctx, { afterWrite } as never);
+    expect(await docs.save()).toBe(true);
+    expect(disk.get(PATH)).toBe('changed');
+    expect(afterWrite).toHaveBeenCalledWith(PATH);
+    expect(tabs.activeTab()?.modified).toBe(false);
+  });
+});
