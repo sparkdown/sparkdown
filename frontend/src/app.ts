@@ -296,7 +296,7 @@ export class App {
 
     // CLI / "Open With" paths can be files or folders. Folders become the
     // sidebar root (same as a dropped directory); files open as tabs.
-    // Session restore is files-only, so it stays on openFilesInOrder.
+    // Session restore is files-only, so it stays on restoreTabs.
     // A menu action queued for this new window (macOS with no window open).
     const queuedMenu = await api.windowTakeMenu().catch(() => null);
     if (queuedMenu) {
@@ -316,7 +316,7 @@ export class App {
     if (pendingFiles.length > 0) {
       await this.workspace.openDroppedPaths(pendingFiles);
     } else if (this.config.last_open_files.length > 0) {
-      await this.documents.openFilesInOrder(this.config.last_open_files);
+      await this.documents.restoreTabs(this.config.last_open_files);
     } else if (!folder && !routed) {
       // Nothing to restore → the welcome screen (an invitation to act),
       // rather than a blank Untitled buffer.
@@ -328,6 +328,8 @@ export class App {
     // #214: Signal that the window is ready to show, right after DOM build.
     // WebKitGTK doesn't run rAF for hidden windows, so signal immediately.
     void api.windowReady().catch(() => {});
+    // The other restored tabs read their files after the window shows.
+    void this.documents.loadRestoredTabs();
 
     this.ready = true;
     this.remoteHandler?.attach();

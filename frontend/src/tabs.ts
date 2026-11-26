@@ -31,7 +31,14 @@ export interface Tab {
    *  File I/O routes by the *global* remote session, so a tab may only be
    *  read or written while its origin is the active one. */
   origin: string | null;
+  /** Restored from the last session but its file is not read yet: content
+   *  and savedContent are empty placeholders until ensureLoaded fills them.
+   *  Never modified while set. Absent on every other tab. */
+  unloaded?: boolean;
 }
+
+/** Reads an unloaded tab's file; null when it can't be read. */
+export type TabContentLoader = (tab: Tab) => Promise<string | null>;
 
 /** Tab origin of the local machine. */
 export const LOCAL_ORIGIN: string | null = null;
@@ -54,6 +61,12 @@ export class TabManager {
   private origin: string | null = LOCAL_ORIGIN;
   /** View stamped on new tabs (see Tab.viewMode). */
   private defaultViewMode: DefaultViewMode = 'split';
+  /** Reads unloaded tabs (see Tab.unloaded); set by the app. */
+  private contentLoader: TabContentLoader = async () => null;
+  /** Reads in progress, by tab: concurrent callers share one read. */
+  private loads = new Map<string, Promise<boolean>>();
+  /** An unloaded tab switchTo is waiting on; a later switch replaces it. */
+  private pendingSwitchId: string | null = null;
 
   constructor(bus: EventBus) {
     this.bus = bus;
@@ -110,6 +123,8 @@ export class TabManager {
       // tab from another machine with the same path is a different file.
       const existing = this.findByPath(path, this.origin);
       if (existing) {
+        // The caller just read the file: that text loads an unloaded tab.
+        if (existing.unloaded) this.fillLoaded(existing, content);
         this.switchTo(existing.id);
         return;
       }
@@ -129,6 +144,78 @@ export class TabManager {
     this.tabs.push(tab);
     this.appendTabElement(tab);
     this.switchTo(id);
+  }
+
+  /**
+   * Add a tab for `path` without reading the file or activating the tab
+   * (session restore). Its text loads on first activation or through
+   * ensureLoaded. Returns the tab id, or null when the path is a folder or
+   * already open on this machine.
+   */
+  addUnloaded(path: string): string | null {
+    if (/[\\/]$/.test(path) || this.findByPath(path, this.origin)) return null;
+    const id = `tab-${++this.tabCounter}`;
+    this.tabs.push({
+      id,
+      path,
+      title: basename(path),
+      content: '',
+      modified: false,
+      savedContent: '',
+      origin: this.origin,
+      viewMode: this.defaultViewMode,
+      unloaded: true,
+    });
+    this.appendTabElement(this.tabs[this.tabs.length - 1]);
+    return id;
+  }
+
+  setContentLoader(loader: TabContentLoader): void {
+    this.contentLoader = loader;
+  }
+
+  /**
+   * Read an unloaded tab's file. Resolves true when the tab exists and holds
+   * its text. A file that can't be read closes its tab (as session restore
+   * always skipped missing files). A read that the active machine changed
+   * under is dropped and the tab stays unloaded.
+   */
+  ensureLoaded(tabId: string): Promise<boolean> {
+    const tab = this.getTab(tabId);
+    if (!tab) return Promise.resolve(false);
+    if (!tab.unloaded) return Promise.resolve(true);
+    const running = this.loads.get(tabId);
+    if (running) return running;
+    const origin = this.origin;
+    const load = this.contentLoader(tab)
+      .catch(() => null)
+      .then((content) => {
+        const now = this.getTab(tabId);
+        if (!now) return false;
+        if (!now.unloaded) return true;
+        if (this.origin !== origin) return false;
+        if (content === null) {
+          this.removeTab(tabId);
+          return false;
+        }
+        this.fillLoaded(now, content);
+        return true;
+      })
+      .finally(() => this.loads.delete(tabId));
+    this.loads.set(tabId, load);
+    return load;
+  }
+
+  /** Tabs whose file is not read yet, in strip order. */
+  getUnloadedTabs(): Tab[] {
+    return this.tabs.filter((t) => t.unloaded);
+  }
+
+  private fillLoaded(tab: Tab, content: string): void {
+    tab.content = content;
+    tab.savedContent = content;
+    delete tab.unloaded;
+    this.elements.get(tab.id)?.classList.remove('tab-unloaded');
   }
 
   /** The view new tabs open in. */
@@ -177,6 +264,22 @@ export class TabManager {
   }
 
   switchTo(id: string): void {
+    // An unloaded tab becomes active once its text is read, so the editor
+    // and every reader of the active tab never see the empty placeholder.
+    // Only the latest request wins; a failed read leaves the current tab.
+    if (this.getTab(id)?.unloaded) {
+      this.pendingSwitchId = id;
+      this.elements.get(id)?.classList.add('tab-loading');
+      void this.ensureLoaded(id).then((ok) => {
+        this.elements.get(id)?.classList.remove('tab-loading');
+        if (this.pendingSwitchId !== id) return;
+        this.pendingSwitchId = null;
+        if (ok) this.switchTo(id);
+        else if (!this.activeTab()) this.activateAfterLoss();
+      });
+      return;
+    }
+    this.pendingSwitchId = null;
     const prevId = this.activeTabId;
     if (prevId) this.bus.emit(EVENTS.TAB_SAVE_STATE, { tabId: prevId });
     if (prevId && prevId !== id) this.elements.get(prevId)?.classList.remove('active');
@@ -231,8 +334,7 @@ export class TabManager {
   reloadFromDisk(tabId: string, content: string): void {
     const tab = this.getTab(tabId);
     if (!tab) return;
-    tab.content = content;
-    tab.savedContent = content;
+    this.fillLoaded(tab, content);
     tab.modified = false;
     tab.diskConflict = false;
     this.updateModifiedState(tab);
@@ -368,6 +470,13 @@ export class TabManager {
     this.switchTo(this.tabs[prev].id);
   }
 
+  /** No tab is active and the one asked for is gone: take the first
+   *  remaining tab, or report that none is left. */
+  private activateAfterLoss(): void {
+    if (this.tabs.length > 0) this.switchTo(this.tabs[0].id);
+    else this.bus.emit(EVENTS.ALL_TABS_CLOSED, {});
+  }
+
   private removeTab(id: string): void {
     const idx = this.tabs.findIndex((t) => t.id === id);
     if (idx === -1) return;
@@ -397,7 +506,7 @@ export class TabManager {
   private appendTabElement(tab: Tab): void {
     if (!this.container) return;
     const el = document.createElement('div');
-    el.className = 'tab';
+    el.className = tab.unloaded ? 'tab tab-unloaded' : 'tab';
     el.dataset.tabId = tab.id;
 
     // A small leading ± glyph marks a tab that's currently showing its diff

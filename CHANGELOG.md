@@ -7,6 +7,10 @@ requests.
 
 ## [Unreleased]
 
+### Changed
+
+- **Startup** with many restored tabs is faster: every tab appears right away, but only the active tab's file is read before the window shows. The other tabs read their files in the background after the window shows, or as soon as you click one, keeping their order and unsaved-changes behavior.
+
 ### Fixed
 
 - **Agent tools under WSL (Windows):** a `wsl` shell in a SparkDown terminal keeps the terminal's agent-tool routing (`WSLENV`), and `$SPARKDOWN_MCP_SHIM` names SparkDown's program for registering it in Linux agents. See docs/windows.md.
