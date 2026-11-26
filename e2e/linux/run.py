@@ -434,6 +434,26 @@ class X11(Base):
 
 class Hypr(Base):
     close_how = "Hyprland closewindow (what Super+W does)"
+    # A tiling compositor sizes the windows itself: geometry-stable must not
+    # compare the size kept for a maximized window (#243, see lib/geometry.py).
+    tiling = True
+
+    def screen(self):
+        """(width, height) of the first monitor, or None."""
+        try:
+            m = json.loads(sh("hyprctl", "monitors", "-j"))[0]
+            return int(m["width"]), int(m["height"])
+        except (ValueError, IndexError, KeyError, TypeError):
+            return None
+
+    def geometry_snapshot(self, titles):
+        """{title: (x, y, w, h, fullscreen state)} from hyprctl, None until
+        every title is mapped. Compared sample to sample, so the check can wait
+        until the compositor has stopped moving the windows (#243)."""
+        by_title = {c["title"]: c for c in self._clients()}
+        if any(t not in by_title for t in titles):
+            return None
+        return {t: (*by_title[t]["at"], *by_title[t]["size"], by_title[t].get("fullscreen")) for t in titles}
 
     def _clients(self):
         try:

@@ -39,6 +39,8 @@ jobs:
           persist-credentials: false
       - name: Release workflows and scripts never enable the feature
         run: bash scripts/check-release-gate.sh
+      - name: E2E helper unit tests
+        run: python3 -m unittest discover -s e2e/lib -p 'test_*.py'
       - name: Install Tauri system dependencies
         timeout-minutes: 8
         run: >-

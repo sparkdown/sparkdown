@@ -6,6 +6,7 @@ import tempfile
 import time
 
 import fixtures
+import geometry
 import git_actions
 import explorer_menu
 import save_dialog
@@ -512,6 +513,16 @@ def run(R, D):
                 if hasattr(D, "wait_ready"):
                     R.log(f"geometry-stable: {t} ready={D.wait_ready(t)}")
             time.sleep(5)
+            # #243: on a tiling compositor the windows are still being
+            # tiled and maximized for a while after the relaunch. Wait until
+            # every window has kept the same compositor geometry for 6
+            # polls in a row (3 s), up to 30 s, instead of one fixed sleep.
+            snap = getattr(D, "geometry_snapshot", None)
+            if snap:
+                names = sorted(titled("alpha", "beta"))
+                stable, last, polls = geometry.wait_stable(lambda: snap(names))
+                R.log(f"geometry-stable: cycle {i + 1} compositor geometry "
+                      f"{'stable' if stable else 'NOT stable after 30 s'} ({polls} polls): {last}")
             # The relaunch restores alpha's terminal with focus, and the
             # terminal keeps plain Ctrl+Q (only app keys a shell has no use
             # for pass through). Quit from the editor, as `restore` does.
@@ -544,13 +555,18 @@ def run(R, D):
         R.log(f"geometry-stable: saved={cfg} live={seen}")
         if not cfg[0] or any(v is None for v in cfg[0].values()):
             return "FAIL", f"no saved geometry to compare: {cfg[0]}"
-        ok = cfg[0] == cfg[1] and seen[0] == seen[1]
+        # #243: on a tiling compositor the size kept for a maximized window is
+        # the tile it was in, which changes with the map order; see
+        # geometry.compare_saved for what is still compared.
+        screen = D.screen() if hasattr(D, "screen") else None
+        kind, why = geometry.compare_saved(cfg[0], cfg[1], screen, getattr(D, "tiling", False))
+        ok = kind != "diff" and seen[0] == seen[1]
         if ok and retried:
             return "PARTIAL", (f"sizes stable, but cycle(s) {retried} needed a second Ctrl+Q to quit; "
                                f"saved={cfg}; live={seen}")
         detail = f"saved after quit 1={cfg[0]} quit 2={cfg[1]}; live after relaunch 1={seen[0]} 2={seen[1]}"
         if ok:
-            return "PASS", detail
+            return "PASS", detail + (f"; {why}" if kind == "tiled" else "")
 
         def sizes(d, live=False):
             if d is None:
