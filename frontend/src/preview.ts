@@ -21,6 +21,7 @@ import { TIMING } from './constants';
 import { EVENTS } from './event-names';
 import { isTextFile } from './file-types';
 import { PreviewImageResolver, resolveAgainst, resolveImagePath } from './preview-images';
+import { WIKI_LINK_AT_START, toWikiLink, type WikiRender } from './wiki-links';
 
 /**
  * Lazy-loaded highlight.js language modules. Languages are imported on first
@@ -386,6 +387,10 @@ export class PreviewPane {
   private onFrameFind: (() => void) | null = null;
   // Opens a local file clicked in the preview (wired to App.openFile).
   private onOpenFile: ((path: string) => void) | null = null;
+  // Creates (then opens) the note a missing wiki link points at.
+  private onCreateFile: ((path: string) => void) | null = null;
+  // How a `[[target]]` renders for the current document (app/wiki-links.ts).
+  private wikiResolver: ((target: string) => WikiRender) | null = null;
 
   constructor(bus: EventBus) {
     this.bus = bus;
@@ -400,6 +405,36 @@ export class PreviewPane {
   /** Register how a clicked local-file link is opened (normally App.openFile). */
   setOpenFileHandler(handler: (path: string) => void): void {
     this.onOpenFile = handler;
+  }
+
+  /** Register how a missing wiki link's target is created and opened. */
+  setCreateFileHandler(handler: (path: string) => void): void {
+    this.onCreateFile = handler;
+  }
+
+  /** Register how `[[target]]` renders for the current document. */
+  setWikiResolver(resolver: ((target: string) => WikiRender) | null): void {
+    this.wikiResolver = resolver;
+  }
+
+  /**
+   * The set of files wiki links resolve against changed: drop every cached
+   * chunk holding a wiki link and re-render, so link targets and the
+   * missing-note style follow the new file list.
+   */
+  refreshWikiLinks(): void {
+    if (this.framedMode) return;
+    const content = this.lastRendered;
+    if (content === null || !content.includes('[[')) return;
+    this.dropWikiChunks();
+    this.lastRendered = null;
+    void this.renderImmediate(content);
+  }
+
+  private dropWikiChunks(): void {
+    for (const key of Array.from(this.chunkCache.keys())) {
+      if (key.includes('[[')) this.chunkCache.delete(key);
+    }
   }
 
   /**
@@ -420,9 +455,16 @@ export class PreviewPane {
       if (!link) return;
       e.preventDefault();
       const href = link.getAttribute('href') ?? link.getAttribute('xlink:href');
-      this.handleLink(
-        classifyPreviewLink(href, this.currentBaseDir, this.currentWorkspaceRoot ?? this.currentBaseDir),
+      const action = classifyPreviewLink(
+        href,
+        this.currentBaseDir,
+        this.currentWorkspaceRoot ?? this.currentBaseDir,
       );
+      if (action.kind === 'file' && link.classList.contains('wiki-link-missing')) {
+        this.onCreateFile?.(action.path);
+        return;
+      }
+      this.handleLink(action);
     }, true);
     // Middle-click / other buttons: WebKit may open or navigate; just block.
     this.container.addEventListener('auxclick', (e) => {
@@ -484,7 +526,36 @@ export class PreviewPane {
         return `<pre><code class="hljs language-${escapeHtml(lang)}">${highlighted}</code></pre>`;
       },
     };
-    marked.use({ renderer, gfm: true, breaks: false });
+    // `[[target]]` / `[[target|label]]`. Code spans and fenced code are
+    // lexed before inline text, so links inside code stay literal.
+    const wikiLink = {
+      name: 'wikiLink',
+      level: 'inline' as const,
+      start: (src: string) => {
+        const i = src.indexOf('[[');
+        return i < 0 ? undefined : i;
+      },
+      tokenizer: (src: string) => {
+        const m = WIKI_LINK_AT_START.exec(src);
+        if (!m) return undefined;
+        const link = toWikiLink(m[1], m[2]);
+        if (!link.target) return undefined;
+        return { type: 'wikiLink', raw: m[0], target: link.target, label: link.label };
+      },
+      renderer: (token: Tokens.Generic) => {
+        const label = escapeHtml(String(token.label));
+        const target = String(token.target);
+        const r: WikiRender = this.wikiResolver
+          ? this.wikiResolver(target)
+          : { kind: 'text', title: target };
+        if (r.kind === 'text') {
+          return `<span class="wiki-link wiki-link-missing" title="${escapeHtml(r.title)}">${label}</span>`;
+        }
+        const cls = r.missing ? 'wiki-link wiki-link-missing' : 'wiki-link';
+        return `<a class="${cls}" href="${escapeHtml(r.href)}" title="${escapeHtml(r.title)}">${label}</a>`;
+      },
+    };
+    marked.use({ renderer, gfm: true, breaks: false, extensions: [wikiLink] });
   }
   
   /**
@@ -547,6 +618,8 @@ export class PreviewPane {
       // drop it so the next render is a full rebuild for this path.
       this.prevBlocks = [];
       this.prevNodeCounts = [];
+      // Wiki link hrefs are relative to the document's folder.
+      this.dropWikiChunks();
     }
   }
 

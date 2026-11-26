@@ -1,5 +1,6 @@
 import { message } from '@tauri-apps/plugin-dialog';
 import type { PreviewPane } from '../preview';
+import type { WikiRender } from '../wiki-links';
 import type { Tab } from '../tabs';
 import { PreviewSearch } from '../preview-search';
 import { EVENTS } from '../event-names';
@@ -18,6 +19,12 @@ export interface PaneDeps {
   openFile(path: string, options?: OpenFileOptions): void;
   /** Find in the diff pane when it is on screen; false when it is not. */
   openDiffFind(): boolean;
+  /** How `[[target]]` renders for the active document (app/wiki-links.ts). */
+  resolveWikiLink(target: string): WikiRender;
+  /** Create, then open, the note a missing wiki link points at. */
+  createWikiNote(path: string): void;
+  /** The open folder changed (or closed). */
+  workspaceRootChanged(): void;
 }
 
 /**
@@ -198,6 +205,8 @@ export class PaneController {
       p.setOpenFileHandler((path) => {
         void this.deps.openFile(path, { folderOnly: this.ctx.workspaceRoot !== null });
       });
+      p.setCreateFileHandler((path) => this.deps.createWikiNote(path));
+      p.setWikiResolver((target) => this.deps.resolveWikiLink(target));
       // Remote tabs' images come over SSH, never from local asset:// paths.
       p.setOriginResolver(() => {
         const tab = this.ctx.tabs.activeTab();
@@ -213,6 +222,11 @@ export class PaneController {
       return p;
     });
     return this.previewLoading;
+  }
+
+  /** The wiki link file list changed: re-render links in the preview. */
+  refreshWikiLinks(): void {
+    this.pane?.refreshWikiLinks();
   }
 
   async renderPreview(content: string): Promise<void> {
@@ -292,6 +306,7 @@ export class PaneController {
    *  folder is open. See PreviewPane.setWorkspaceRoot. */
   setWorkspaceRoot(root: string | null): void {
     this.pane?.setWorkspaceRoot(root);
+    this.deps.workspaceRootChanged();
   }
 
   /** Close the preview-search widget; its highlights belong to the old
