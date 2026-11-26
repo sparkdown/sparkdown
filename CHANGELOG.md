@@ -5,7 +5,7 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
-## [Unreleased]
+## [0.4.7] — 2026-11-27
 
 ### Added
 
