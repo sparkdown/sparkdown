@@ -35,8 +35,8 @@ export class CockpitController {
   private terminalVisible = false;
   /** Terminals Only: terminal fills the center column; editor/preview hidden. */
   private terminalsOnly = false;
-  /** Which bottom-pane tab shows: the terminals or the Git output log. */
-  private bottomTab: 'terminals' | 'git' = 'terminals';
+  /** Which bottom-pane tab shows. */
+  private bottomTab: BottomTab = 'terminals';
 
   constructor(
     private readonly ctx: AppContext,
@@ -123,43 +123,42 @@ export class CockpitController {
     this.ctx.saveConfigSoon(); // remember drawer state across sessions
   }
 
-  /** Wire the bottom pane's Terminals / Git tab strip. */
+  /** Wire the bottom pane's Terminals / Git / Output tab strip. */
   initBottomTabs(): void {
-    const term = document.getElementById('bottom-tab-terminals');
-    const git = document.getElementById('bottom-tab-git');
-    term?.addEventListener('click', () => {
+    const button = (tab: BottomTab) => document.getElementById(BOTTOM_TAB_BUTTON[tab]);
+    button('terminals')?.addEventListener('click', () => {
       this.selectBottomTab('terminals');
       void this.openTerminals().then(() => this.terminals?.focusActive());
     });
-    git?.addEventListener('click', () => this.selectBottomTab('git'));
+    button('git')?.addEventListener('click', () => this.selectBottomTab('git'));
+    button('output')?.addEventListener('click', () => this.selectBottomTab('output'));
     document.getElementById('bottom-tabs')?.addEventListener('keydown', (e) => {
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
       e.preventDefault();
-      const next = this.bottomTab === 'git' ? term : git;
-      next?.click();
-      next?.focus();
+      const i = BOTTOM_TABS.indexOf(this.bottomTab);
+      const delta = e.key === 'ArrowRight' ? 1 : -1;
+      const next = BOTTOM_TABS[(i + delta + BOTTOM_TABS.length) % BOTTOM_TABS.length]!;
+      const el = button(next);
+      el?.click();
+      el?.focus();
     });
   }
 
-  getBottomTab(): 'terminals' | 'git' {
+  getBottomTab(): BottomTab {
     return this.bottomTab;
   }
 
-  private selectBottomTab(tab: 'terminals' | 'git'): void {
+  private selectBottomTab(tab: BottomTab): void {
     this.bottomTab = tab;
-    const isGit = tab === 'git';
-    document.getElementById('terminal-host')?.classList.toggle('hidden', isGit);
-    document.getElementById('git-output')?.classList.toggle('hidden', !isGit);
-    for (const [id, on] of [
-      ['bottom-tab-terminals', !isGit],
-      ['bottom-tab-git', isGit],
-    ] as const) {
-      const b = document.getElementById(id);
+    for (const t of BOTTOM_TABS) {
+      document.getElementById(BOTTOM_TAB_PANEL[t])?.classList.toggle('hidden', t !== tab);
+      const b = document.getElementById(BOTTOM_TAB_BUTTON[t]);
+      const on = t === tab;
       b?.setAttribute('aria-selected', String(on));
       b?.setAttribute('tabindex', on ? '0' : '-1');
       b?.classList.toggle('active', on);
     }
-    if (!isGit) this.terminals?.refitAll();
+    if (tab === 'terminals') this.terminals?.refitAll();
   }
 
   /**
@@ -174,6 +173,20 @@ export class CockpitController {
     }
     if (!this.terminalVisible) this.setDrawerVisible(true);
     this.selectBottomTab('git');
+  }
+
+  /**
+   * Show the Output tab (a custom command the user just ran). Opens the
+   * drawer if needed without starting a shell, and leaves keyboard focus
+   * where it was.
+   */
+  showOutput(): void {
+    if (this.terminalsOnly) {
+      this.terminalsOnly = false;
+      this.applyTerminalsOnlyLayout();
+    }
+    if (!this.terminalVisible) this.setDrawerVisible(true);
+    this.selectBottomTab('output');
   }
 
   /** Show/hide the terminal drawer, lazy-creating the manager on first reveal. */
@@ -381,3 +394,19 @@ export class CockpitController {
     }
   }
 }
+
+export type BottomTab = 'terminals' | 'git' | 'output';
+
+const BOTTOM_TABS: BottomTab[] = ['terminals', 'git', 'output'];
+
+const BOTTOM_TAB_BUTTON: Record<BottomTab, string> = {
+  terminals: 'bottom-tab-terminals',
+  git: 'bottom-tab-git',
+  output: 'bottom-tab-output',
+};
+
+const BOTTOM_TAB_PANEL: Record<BottomTab, string> = {
+  terminals: 'terminal-host',
+  git: 'git-output',
+  output: 'run-output',
+};

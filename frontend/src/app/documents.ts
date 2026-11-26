@@ -27,6 +27,8 @@ function save(options: SaveOptions): Promise<string | null> {
 export interface DocumentDeps {
   renderPreview(content: string): Promise<void>;
   loadPreview(): Promise<PreviewPane>;
+  /** After a successful save / save-as write (not export). Must not throw. */
+  afterWrite?(path: string): void;
 }
 
 /**
@@ -85,6 +87,12 @@ export class DocumentController {
   private async writeOwn(path: string, content: string): Promise<void> {
     await api.writeFile(path, content);
     this.ownWrites.set(path, Date.now());
+    try {
+      this.deps.afterWrite?.(path);
+    } catch {
+      // A follow-up (reload user commands, later on-save hooks) must never
+      // fail the save the user just completed.
+    }
   }
 
   /** Open `path` in a tab. `folderOnly`: see {@link OpenFileOptions}. */

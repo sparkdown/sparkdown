@@ -21,6 +21,7 @@ requests.
 - **Changes:** the file diff can switch between the inline view and a side-by-side view. The choice is remembered.
 - **Changes:** conflicted files are listed in their own group, with Accept ours and Accept theirs (a confirmation first, and a copy kept in the Trash).
 - **Changes:** stage or unstage an individual hunk, and commit only what is staged when the index is not empty.
+- **Custom commands** appear in the command palette from your SparkDown user config (Settings → Custom commands, or the `user-run.json` file in the app config directory), never from the opened folder. Each command is a program and its arguments (no shell), run with the local folder as the working directory. Output appears in the new Output tab of the bottom pane. A bad entry is skipped and listed, and the palette still opens. Commands are unavailable in a remote (SSH) folder, or when no folder is open.
 
 ### Changed
 
