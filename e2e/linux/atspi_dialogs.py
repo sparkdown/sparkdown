@@ -1,11 +1,15 @@
 """Print SparkDown's open dialogs as JSON via AT-SPI (GTK accessibility):
 [{"name": title, "text": all label text, "buttons": [...]}]. With
-`--press NAME`, also activate that button in each dialog.
+`--press NAME`, also activate that button in each dialog; "pressed" then
+lists the button and action that were activated.
 
 Used by the Ubuntu job so the quit prompt's wording can be read instead of
 only seen in a screenshot. Prints [] when the accessibility bus is absent."""
 import json
 import sys
+import warnings
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 try:
     import gi
@@ -16,6 +20,9 @@ except Exception:  # noqa: BLE001
     sys.exit(0)
 
 TITLES = ("Quit SparkDown", "Unsaved Changes")
+# A GtkButton's role name: "push button" up to at-spi2-core 2.52 (Ubuntu
+# 24.04), "button" in newer releases (Arch).
+BUTTON_ROLES = ("push button", "button")
 press = sys.argv[2] if len(sys.argv) > 2 and sys.argv[1] == "--press" else None
 
 
@@ -50,7 +57,7 @@ for a in range(desk.get_child_count()):
         role = win.get_role_name()
         if name not in TITLES and role not in ("dialog", "alert"):
             continue
-        texts, buttons = [], []
+        texts, buttons, pressed = [], [], []
         for n in walk(win):
             r = n.get_role_name()
             if r in ("label", "static", "text"):
@@ -63,15 +70,19 @@ for a in range(desk.get_child_count()):
                         t = ""
                 if t:
                     texts.append(t)
-            elif r == "push button":
+            elif r in BUTTON_ROLES:
                 b = n.get_name() or ""
                 buttons.append(b)
                 if press and b.replace("_", "") == press:
                     try:
-                        n.get_action_iface().do_action(0)
-                    except Exception:  # noqa: BLE001
-                        pass
-        out.append({"name": name, "role": role, "text": "\n".join(texts), "buttons": buttons})
+                        act = n.get_action_iface()
+                        names = [act.get_action_name(i) for i in range(act.get_n_actions())]
+                        i = next((k for k, a in enumerate(names) if a in ("click", "press", "activate")), 0)
+                        if act.do_action(i):
+                            pressed.append(f"{r} {b!r} action {names[i] if names else i!r}")
+                    except Exception as e:  # noqa: BLE001
+                        pressed.append(f"failed: {r} {b!r}: {e}")
+        out.append({"name": name, "role": role, "text": "\n".join(texts), "buttons": buttons, "pressed": pressed})
 if not out:
     print(f"at-spi apps: {seen}", file=sys.stderr)
 print(json.dumps(out))

@@ -456,19 +456,22 @@ def run(R, D):
             if len(answered) >= 4:
                 break
             D.shot(f"quit-save-prompt-{len(answered)}")
-            answered.append([d.get("name") for d in ds])
-            if not D.press_dialog("Save"):
+            pressed = D.press_dialog("Save")
+            answered.append({"prompts": [d.get("name") for d in ds], "pressed": pressed})
+            if not pressed:
                 break
             time.sleep(1.5)
         gone = wait_for(lambda: D.procs() == 0, 25)
         D.shot("after-quit")
         text = pathlib.Path(note).read_text(encoding="utf-8")
-        detail = f"prompts answered Save={answered}; app exited={bool(gone)}; note ends {text[-60:]!r}"
+        detail = f"prompts and what was pressed={answered}; app exited={bool(gone)}; note ends {text[-60:]!r}"
         if not gone:
             for d in D.dialogs():
                 D.cancel_dialog(d)
         if not answered:
             return "FAIL", f"no save prompt appeared; {detail}"
+        if not all(a["pressed"] for a in answered):
+            return "FAIL", f"a prompt had no Save button to press; {detail}"
         return ("PASS" if gone and text == want else "FAIL"), detail
 
     def restore():
