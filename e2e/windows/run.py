@@ -209,6 +209,35 @@ class Desktop:
         ok = folder in text and "notes.md" in text and edit in content and dot
         return ("PASS" if ok else "FAIL"), f"sidebar shows {folder}={folder in text}; editor has the edit={edit in content}; unsaved dot={dot}"
 
+    def put_image(self, path):
+        """The PNG on the clipboard ("PNG" format + bitmap), as an
+        image editor or a browser's Copy image puts it."""
+        ps = str(pathlib.Path(__file__).with_name("clip-image.ps1"))
+        p = subprocess.run(["powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", ps, path],
+                           capture_output=True, text=True, timeout=60)
+        R.log("clip-image:", p.returncode, p.stdout.strip()[-300:], p.stderr.strip()[-300:])
+        return None if p.returncode == 0 and "PNG" in p.stdout else f"clip-image.ps1 rc={p.returncode} {p.stderr.strip()[-200:]}"
+
+    def paste_image(self, title):
+        """Caret at the end of the active editor, then Ctrl+V."""
+        self.handle(title)
+        self.wd.click(self.wd.find(".cm-content"))
+        self.wd.js("const v = document.querySelector('.cm-content');"
+                   "const s = getSelection(); s.selectAllChildren(v); s.collapseToEnd(); return 1;")
+        time.sleep(0.3)
+        self.wd.chord("ctrl", "v")
+        time.sleep(1)
+
+    def new_untitled(self, title):
+        self.keys(title, "ctrl", "n")
+
+    def close_tab(self, title):
+        self.keys(title, "ctrl", "w")
+
+    def dismiss_message(self, d):
+        if not uia("click", str(d["id"]), "OK"):
+            self.cancel_dialog(d)
+
     def shot(self, name):
         self.n += 1
         uia("shot", str(pathlib.Path(OUT) / f"{self.n:02d}-{name}.png"))

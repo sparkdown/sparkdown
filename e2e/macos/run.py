@@ -9,6 +9,7 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "lib"))
 import fixtures  # noqa: E402
+import image_paste  # noqa: E402
 import mcp  # noqa: E402
 from report import Report  # noqa: E402
 
@@ -873,6 +874,66 @@ def main():
         ok = "alpha" in got and parent not in got.replace("alpha", "")
         return ("PASS" if ok else "FAIL"), f"Where popup={got!r} (want alpha, not {parent})"
     R.run("save-dialog-dir", save_dialog_dir)
+
+    class PasteDesktop:
+        """image-paste adapter: System Events keys, NSPasteboard via osascript."""
+        def raise_alpha(self):
+            wa = next((w for w in windows() if w.startswith("alpha")), None)
+            if wa:
+                se(f'perform action "AXRaise" of window "{wa}"')
+            activate()
+
+        def put_image(self, path):
+            osa(f'set the clipboard to (read (POSIX file "{path}") as «class PNGf»)')
+            info = osa("clipboard info")
+            R.log("clipboard info:", info[:200])
+            return None if "PNGf" in info else f"the clipboard holds {info[:120]!r}"
+
+        def paste_image(self, title):
+            # No DOM here: the palette's Go to line (past the last line) puts
+            # the caret at the end with the editor focused; then a real ⌘V.
+            self.raise_alpha()
+            key("p", "command down, shift down")
+            time.sleep(1)
+            osa('tell application "System Events" to keystroke "Go to line"')
+            time.sleep(1)
+            osa('tell application "System Events" to key code 36')
+            time.sleep(1)
+            osa('tell application "System Events" to keystroke "999"', 'tell application "System Events" to key code 36')
+            time.sleep(1)
+            key("v")
+            time.sleep(1)
+
+        def new_untitled(self, title):
+            self.raise_alpha()
+            key("n")
+
+        def close_tab(self, title):
+            self.raise_alpha()
+            key("w")
+
+        def save(self, title):
+            self.raise_alpha()
+            key("s")
+
+        def dialogs(self):
+            return dialogs()
+
+        def dismiss_message(self, d):
+            click_dialog_button(d, "OK")
+
+        def shot(self, name):
+            shot(name)
+
+    def image_paste_check():
+        if procs() == 0:
+            return "FAIL", "the app is not running"
+        try:
+            return image_paste.run(PasteDesktop(), "alpha" + SUF, A, BIN, R.log)
+        finally:
+            for d in dialogs():
+                click_dialog_button(d, "Cancel")
+    R.run("image-paste", image_paste_check)
 
     R.manual("manual-gatekeeper", "Gatekeeper first launch of the signed, notarized build", "CI builds are unsigned; see e2e/README.md")
     R.manual("manual-git-signing-credentials", "Commit / Pull / Push with your real setup (#122): signed commit (gpg / ssh pinentry), Keychain / HTTPS credential helper, SSH agent key, and a locked key failing with the auth error instead of a prompt",

@@ -22,7 +22,7 @@ ParallelDownloads = 1' /etc/pacman.conf
 ok=0
 for try in 1 2 3; do
   echo "===== pacman try $try/3 =====" >>"$OUT/pacman.log"
-  if pacman $SYNC --noconfirm --needed hyprland seatd grim wtype tmux python git mesa ttf-dejavu \
+  if pacman $SYNC --noconfirm --needed hyprland seatd grim wtype wl-clipboard tmux python git mesa ttf-dejavu \
     webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg xdotool openssl dbus procps-ng at-spi2-core python-gobject >>"$OUT/pacman.log" 2>&1; then
     ok=1
     break

@@ -20,7 +20,8 @@ MODE, BIN, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
 HYPR_LABEL = "Arch + Hyprland latest (vkms)" if os.environ.get("E2E_HYPR_LEG") == "latest" else "Arch + Hyprland (vkms)"
 R = Report(("Ubuntu (X11, WebKitWebDriver)" if MODE == "x11" else HYPR_LABEL) + fixtures.variant(), OUT)
 SUF = flow.SUF
-DIALOG_TITLES = ("Quit SparkDown", "Unsaved Changes", "Close Folder")
+# "Save Document First": an image pasted into an untitled document (image-paste).
+DIALOG_TITLES = ("Quit SparkDown", "Unsaved Changes", "Close Folder", "Save Document First")
 ATSPI = str(pathlib.Path(__file__).with_name("atspi_dialogs.py"))
 
 
@@ -151,6 +152,11 @@ class Base:
 
     def job_alive(self):
         return bool(sh("pgrep", "-x", "sleep"))
+
+    def dismiss_message(self, d):
+        """OK on a message: over AT-SPI, else Escape (GTK closes it the same)."""
+        if not self.press_dialog("OK"):
+            self.cancel_dialog(d)
 
     def kill_job(self):
         subprocess.run(["pkill", "-x", "sleep"])
@@ -439,6 +445,36 @@ class X11(Base):
         return ("PASS" if ok else "FAIL"), (f"Ctrl+V pasted={bool(v_ok)}; Shift+Insert pasted={bool(i_ok)}; "
                                             f"Ctrl+C (no selection) interrupted sleep={bool(started and stopped)}")
 
+    def put_image(self, path):
+        """The PNG's bytes on the X11 CLIPBOARD as image/png. xclip
+        forks to keep serving the selection; run() returns then."""
+        import shutil
+        if not shutil.which("xclip"):
+            return "xclip is not installed on this runner"
+        p = subprocess.run(["xclip", "-selection", "clipboard", "-t", "image/png", "-i", path],
+                           capture_output=True, text=True, timeout=10)
+        time.sleep(0.5)
+        targets = sh("xclip", "-selection", "clipboard", "-o", "-t", "TARGETS")
+        R.log("clipboard targets:", targets.split())
+        return None if p.returncode == 0 and "image/png" in targets else f"xclip rc={p.returncode} {p.stderr.strip()[:200]}"
+
+    def paste_image(self, title):
+        """Caret at the end of the active editor, then a real Ctrl+V (xdotool)."""
+        if self._wd_handle(title):
+            self.wd.click(self.wd.find(".cm-content"))
+            self.wd.js("const v = document.querySelector('.cm-content');"
+                       "const s = getSelection(); s.selectAllChildren(v); s.collapseToEnd(); return 1;")
+        sh("xdotool", "windowactivate", "--sync", self._wid(title))
+        time.sleep(0.5)
+        sh("xdotool", "key", "--clearmodifiers", "ctrl+v")
+        time.sleep(1)
+
+    def new_untitled(self, title):
+        self.keys(title, "ctrl+n", "ctrl", "n")
+
+    def close_tab(self, title):
+        self.keys(title, "ctrl+w", "ctrl", "w")
+
     def explorer_delete(self, title, folder):
         """#121: explorer right-click → Delete… → confirm → the file is in
         the freedesktop trash (not gone for good) and its row is gone."""
@@ -604,6 +640,37 @@ class Hypr(Base):
         self.focus(title)
         self.wtype("-M", "ctrl", "s", "-m", "ctrl")
         time.sleep(1)
+
+    def put_image(self, path):
+        """The PNG's bytes on the Wayland clipboard as image/png
+        (wl-copy forks to keep serving it)."""
+        import shutil
+        if not shutil.which("wl-copy"):
+            return "wl-copy (wl-clipboard) is not installed"
+        with open(path, "rb") as f:
+            p = subprocess.run(["wl-copy", "--type", "image/png"], stdin=f, capture_output=True, text=True, timeout=10)
+        time.sleep(0.5)
+        types = sh("wl-paste", "--list-types")
+        R.log("clipboard types:", types.split())
+        return None if p.returncode == 0 and "image/png" in types else f"wl-copy rc={p.returncode} {p.stderr.strip()[:200]}"
+
+    def paste_image(self, title):
+        """No DOM here: the palette's Go to line (past the last line) puts
+        the caret at the end with the editor focused, then a real Ctrl+V."""
+        self.command(title, "Go to line")
+        self.wtype("999")
+        self.wtype("-k", "Return")
+        time.sleep(1)
+        self.wtype("-M", "ctrl", "v", "-m", "ctrl")
+        time.sleep(1)
+
+    def new_untitled(self, title):
+        self.focus(title)
+        self.wtype("-M", "ctrl", "n", "-m", "ctrl")
+
+    def close_tab(self, title):
+        self.focus(title)
+        self.wtype("-M", "ctrl", "w", "-m", "ctrl")
 
     def close_window(self, title):
         hypr_dispatch("close", self._addr(title), self.ver)
