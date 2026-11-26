@@ -20,6 +20,7 @@ requests.
 
 - **Changes:** the file diff can switch between the inline view and a side-by-side view. The choice is remembered.
 - **Changes:** conflicted files are listed in their own group, with Accept ours and Accept theirs (a confirmation first, and a copy kept in the Trash).
+- **Changes:** stage or unstage an individual hunk, and commit only what is staged when the index is not empty.
 
 ### Changed
 

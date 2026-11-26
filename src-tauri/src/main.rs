@@ -10,6 +10,7 @@ mod context;
 mod file_index;
 mod fsio;
 mod git;
+mod git_stage;
 mod git_write;
 mod gitignore;
 mod images;
@@ -821,6 +822,8 @@ fn main() {
             git::git_status,
             git::git_branch_status,
             git::git_diff_file,
+            git_stage::git_file_layers,
+            git_stage::git_stage_hunk,
             git_write::git_commit,
             git_write::git_pull,
             git_write::git_push,

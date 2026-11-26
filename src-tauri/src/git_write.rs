@@ -638,6 +638,18 @@ fn with_rename_sources(root: &Path, extra: ExtraEnv, paths: &[String]) -> Vec<St
     out
 }
 
+fn index_has_changes(root: &Path, extra: ExtraEnv) -> bool {
+    match user_git_sandboxed(
+        root,
+        extra,
+        &["diff", "--cached", "--quiet"],
+        Duration::from_secs(20),
+    ) {
+        Ok(o) => o.status.code() == Some(1),
+        Err(_) => false,
+    }
+}
+
 /// Commit. `paths` = the files to include (repo-relative to the top level),
 /// or `None` for every change. Untracked files among them are added; only
 /// they go into the commit (the rest of the index is left as it was).
@@ -680,6 +692,7 @@ pub(crate) fn commit_with(
         })?;
     let top = PathBuf::from(top);
     ensure_work_tree_is_checkout(&root, &top)?;
+    let staged_only = index_has_changes(&top, extra);
     match paths {
         Some(p) if p.is_empty() => Err(GitActionError::new(
             GitErrorKind::NothingToCommit,
@@ -700,30 +713,34 @@ pub(crate) fn commit_with(
                 ));
             }
             let all = with_rename_sources(&top, extra, &p);
-            // Stage what's on disk or still in the index (new, edited and
-            // unstaged-deleted files). An already-staged deletion (or a
-            // rename's source) is in neither, and `git add` would refuse it;
-            // `git commit -- <path>` picks it up from HEAD.
-            let mut ls = vec!["--literal-pathspecs", "ls-files", "-z", "--"];
-            ls.extend(all.iter().map(|s| s.as_str()));
-            let indexed = query(&top, extra, &ls).unwrap_or_default();
-            let indexed: Vec<&str> = indexed.split('\0').collect();
-            let to_add: Vec<&str> = all
-                .iter()
-                .map(|s| s.as_str())
-                .filter(|s| top.join(s).symlink_metadata().is_ok() || indexed.contains(s))
-                .collect();
-            if !to_add.is_empty() {
-                let mut add = vec!["--literal-pathspecs", "add", "-A", "--"];
-                add.extend(to_add);
-                run_ok(&top, extra, &add, COMMIT_TIMEOUT, Action::Commit)?;
+            if !staged_only {
+                // Stage what's on disk or still in the index (new, edited and
+                // unstaged-deleted files). An already-staged deletion (or a
+                // rename's source) is in neither, and `git add` would refuse it;
+                // `git commit -- <path>` picks it up from HEAD.
+                let mut ls = vec!["--literal-pathspecs", "ls-files", "-z", "--"];
+                ls.extend(all.iter().map(|s| s.as_str()));
+                let indexed = query(&top, extra, &ls).unwrap_or_default();
+                let indexed: Vec<&str> = indexed.split('\0').collect();
+                let to_add: Vec<&str> = all
+                    .iter()
+                    .map(|s| s.as_str())
+                    .filter(|s| top.join(s).symlink_metadata().is_ok() || indexed.contains(s))
+                    .collect();
+                if !to_add.is_empty() {
+                    let mut add = vec!["--literal-pathspecs", "add", "-A", "--"];
+                    add.extend(to_add);
+                    run_ok(&top, extra, &add, COMMIT_TIMEOUT, Action::Commit)?;
+                }
             }
             let mut c = vec!["--literal-pathspecs", "commit", "-m", message, "--"];
             c.extend(all.iter().map(|s| s.as_str()));
             run_ok(&top, extra, &c, COMMIT_TIMEOUT, Action::Commit).map(summary)
         }
         None => {
-            run_ok(&top, extra, &["add", "-A"], COMMIT_TIMEOUT, Action::Commit)?;
+            if !staged_only {
+                run_ok(&top, extra, &["add", "-A"], COMMIT_TIMEOUT, Action::Commit)?;
+            }
             run_ok(
                 &top,
                 extra,
@@ -2583,6 +2600,48 @@ mod tests {
             vec!["README.md", "take.md"]
         );
         assert_eq!(sb.git(&sb.work, &["status", "--porcelain"]), "?? keep.md");
+    }
+
+    #[test]
+    fn commit_with_a_partially_staged_file_leaves_unstaged_hunks() {
+        let sb = sandbox();
+        let env = sb.env();
+        let root = root(&sb);
+        let mid = "keep\n".repeat(8);
+        fs::write(sb.work.join("notes.md"), format!("alpha\n{mid}gamma\n")).unwrap();
+        sb.git(&sb.work, &["add", "notes.md"]);
+        sb.git(&sb.work, &["commit", "-q", "-m", "base"]);
+        fs::write(sb.work.join("notes.md"), format!("ALPHA\n{mid}GAMMA\n")).unwrap();
+        let layers =
+            crate::git_stage::file_layers_impl(&root, "notes.md".into(), false, None).unwrap();
+        let header = crate::git_stage::split_diff(&layers.unstaged)
+            .1
+            .into_iter()
+            .map(|(h, _)| h)
+            .next()
+            .unwrap();
+        crate::git_stage::stage_hunk_impl(
+            &root,
+            "notes.md".into(),
+            false,
+            None,
+            crate::git_stage::StageSide::Unstaged,
+            Some(header),
+            layers.unstaged_fp,
+        )
+        .unwrap();
+        commit_impl(&root, "First hunk", None, &env).unwrap();
+        let committed = sb.git(&sb.work, &["show", "HEAD:notes.md"]);
+        assert!(committed.contains("ALPHA"), "{committed}");
+        assert!(committed.contains("gamma"), "{committed}");
+        assert!(!committed.contains("GAMMA"), "{committed}");
+        let work = fs::read_to_string(sb.work.join("notes.md")).unwrap();
+        assert!(work.contains("ALPHA") && work.contains("GAMMA"), "{work}");
+        assert!(
+            sb.git(&sb.work, &["status", "--porcelain"])
+                .contains("notes.md"),
+            "unstaged hunk should remain"
+        );
     }
 
     #[test]

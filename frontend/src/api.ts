@@ -328,6 +328,36 @@ export const api = {
     invoke<AcceptConflictResult>("git_accept_conflict", { root, path, side, confirmed }),
   gitDiffFile: (root: string, path: string, untracked: boolean) =>
     invoke<string>("git_diff_file", { root, path, untracked }),
+  gitFileLayers: (
+    root: string,
+    path: string,
+    untracked: boolean,
+    old_path?: string | null,
+  ) =>
+    invoke<FileLayers>("git_file_layers", {
+      root,
+      path,
+      untracked,
+      oldPath: old_path ?? null,
+    }),
+  gitStageHunk: (
+    root: string,
+    path: string,
+    untracked: boolean,
+    old_path: string | null | undefined,
+    side: StageSide,
+    hunk_header: string | null,
+    fingerprint: string,
+  ) =>
+    invoke<void>("git_stage_hunk", {
+      root,
+      path,
+      untracked,
+      oldPath: old_path ?? null,
+      side,
+      hunkHeader: hunk_header,
+      fingerprint,
+    }),
   /** Per changed file: +adds / −dels and a fingerprint of the change
    *  (review.rs). Paths are repo-relative to `root` (the repo top level). */
   gitChangeStats: (
@@ -469,10 +499,32 @@ export interface GitChange {
   /** Unmerged case, only when status is "conflicted". */
   conflict?: string;
   staged: boolean;
+  /** Worktree differs from the index, or the path is untracked. Omitted in
+   *  older payloads: treat as the inverse of `staged`. */
+  unstaged?: boolean;
+  /** Previous path of a rename or copy, when git reported one. */
+  old_path?: string | null;
   /** A folder, not a file: an untracked nested git repo (`?? proj/`).
    *  Shown as a folder row, never opened as a tab (#47). */
   is_dir?: boolean;
 }
+
+export function changeIsUnstaged(c: GitChange): boolean {
+  return c.unstaged ?? !c.staged;
+}
+
+/** Staged (index vs HEAD) and unstaged (worktree vs index) diffs for one path. */
+export interface FileLayers {
+  path: string;
+  staged: string;
+  unstaged: string;
+  staged_fp: string;
+  unstaged_fp: string;
+  binary_staged: boolean;
+  binary_unstaged: boolean;
+}
+
+export type StageSide = "staged" | "unstaged";
 
 /** Mirror of `GitErrorKind` in src-tauri/src/git_write.rs. */
 type GitErrorKind =

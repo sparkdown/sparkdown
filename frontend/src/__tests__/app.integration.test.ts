@@ -2384,7 +2384,7 @@ describe('App integration', () => {
       enable_diagrams: true,
     });
 
-  const diffCalls = () => invokeCalls.filter((c) => c.cmd === 'git_diff_file').length;
+  const diffCalls = () => invokeCalls.filter((c) => c.cmd === 'git_file_layers').length;
 
   describe('open diff refresh on disk change (finding #5)', () => {
     it('re-renders the active diff when its file changes on disk', async () => {
@@ -3635,7 +3635,7 @@ describe('App integration', () => {
       );
       expect(tabTitles()).toEqual(['a.md']);
       expect($('diff-view').classList.contains('hidden')).toBe(false);
-      const diff = invokeCalls.filter((c) => c.cmd === 'git_diff_file').pop();
+      const diff = invokeCalls.filter((c) => c.cmd === 'git_file_layers').pop();
       expect(diff?.args).toMatchObject({ root: '/tmp/x', path: 'docs/a.md' });
       // Review state and the status bar branch key off the same spelling.
       const load = invokeCalls.filter((c) => c.cmd === 'review_state_load').pop();

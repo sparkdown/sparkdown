@@ -25,8 +25,14 @@ pub struct GitChange {
     /// "deleted-by-them", "added-by-us", or "added-by-them".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conflict: Option<String>,
-    /// Whether the path is staged (informational; the diff shows working tree).
+    /// Whether the index differs from HEAD for this path.
     pub staged: bool,
+    /// Whether the worktree differs from the index (or the path is untracked).
+    #[serde(default)]
+    pub unstaged: bool,
+    /// The previous path of a rename or copy, when git reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
     /// A directory, not a file: git lists an untracked nested repository
     /// (a folder with its own `.git`) as `?? proj/` without descending into
     /// it (#47). `path` is given without the trailing slash. Never opened
@@ -367,7 +373,7 @@ const READ_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20)
 /// every git invocation, so all of them get the same environment, config, and
 /// driver overrides, plus a timeout to prevent repository content from blocking
 /// forever.
-fn run_git_raw(root: &Path, args: &[&str]) -> Result<Output, String> {
+pub(crate) fn run_git_raw(root: &Path, args: &[&str]) -> Result<Output, String> {
     let mut cmd = git_command(root)?;
     let neutralisers = local_exec_neutralisers(root)?;
     apply_config_env(&mut cmd, &neutralisers);
@@ -673,14 +679,15 @@ pub(crate) fn parse_porcelain(raw: &str) -> Vec<GitChange> {
         let Some(path) = entry.get(3..) else {
             continue;
         };
-        // Staged = the index (first) column is not space and not '?'.
-        let staged = code.starts_with(|c: char| c != ' ' && c != '?');
         // Rename/copy in EITHER column carries a paired path field to consume.
         let mut cols = code.chars();
         let x = cols.next().unwrap_or(' ');
         let y = cols.next().unwrap_or(' ');
+        let staged = x != ' ' && x != '?';
+        let unstaged = y != ' ' || x == '?' || y == '?';
+        let mut old_path = None;
         if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
-            let _ = parts.next(); // consume the paired old/source-path field
+            old_path = parts.next().map(str::to_string).filter(|s| !s.is_empty());
         }
         // A trailing separator marks a directory entry (nested repo, #47).
         let is_dir = path.ends_with('/');
@@ -701,6 +708,8 @@ pub(crate) fn parse_porcelain(raw: &str) -> Vec<GitChange> {
             status,
             conflict,
             staged,
+            unstaged,
+            old_path,
             is_dir,
         });
     }
@@ -1135,9 +1144,13 @@ mod tests {
         assert_eq!(changes[0].path, "src/app.ts");
         assert_eq!(changes[0].status, "modified");
         assert!(!changes[0].staged);
+        assert!(changes[0].unstaged);
         assert_eq!(changes[1].status, "untracked");
+        assert!(changes[1].unstaged);
+        assert!(!changes[1].staged);
         assert_eq!(changes[2].status, "added");
         assert!(changes[2].staged);
+        assert!(!changes[2].unstaged);
         assert_eq!(changes[0].conflict, None);
     }
 
@@ -1174,6 +1187,21 @@ mod tests {
         assert_eq!(map_status_code("A "), "added");
         assert_eq!(map_status_code(" D"), "deleted");
         assert_eq!(map_status_code("AD"), "deleted"); // staged add, worktree delete — not unmerged
+    }
+
+    #[test]
+    fn partially_staged_records_both_layers() {
+        let raw = "MM src/app.ts\0MD gone.txt\0AM new.rs\0";
+        let changes = parse_porcelain(raw);
+        assert_eq!(changes.len(), 3);
+        assert_eq!(changes[0].path, "src/app.ts");
+        assert_eq!(changes[0].status, "modified");
+        assert!(changes[0].staged && changes[0].unstaged);
+        assert_eq!(changes[1].status, "deleted");
+        assert!(changes[1].staged && changes[1].unstaged);
+        assert_eq!(changes[2].status, "added");
+        assert!(changes[2].staged && changes[2].unstaged);
+        assert!(changes[2].old_path.is_none());
     }
 
     #[test]
@@ -1247,6 +1275,9 @@ mod tests {
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0].status, "renamed");
         assert_eq!(changes[0].path, "src/new.ts");
+        assert_eq!(changes[0].old_path.as_deref(), Some("src/old.ts"));
+        assert!(changes[0].staged);
+        assert!(!changes[0].unstaged);
         assert_eq!(changes[1].path, "other.md");
         assert_eq!(changes[1].status, "untracked");
     }
