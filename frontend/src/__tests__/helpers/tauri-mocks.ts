@@ -324,6 +324,44 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       return;
     case 'search_in_files':
       return searchState.results ?? { matches: [], truncated: false };
+    // Replace in files over the vfs: literal, case-sensitive, offsets in
+    // chars (tests use ASCII); the fingerprint is the file text itself.
+    case 'replace_preview': {
+      const root = `${String(args?.root).replace(/\/$/, '')}/`;
+      const query = args?.query as string;
+      const unsaved = new Map(((args?.unsaved ?? []) as { path: string; text: string }[]).map((u) => [u.path, u.text]));
+      const skipped = [...vfs.entries()]
+        .filter(([p, text]) => p.startsWith(root) && unsaved.has(p) && (text.includes(query) || unsaved.get(p)!.includes(query)))
+        .map(([path]) => ({ path, reason: 'open with unsaved changes' }));
+      const files = [...vfs.entries()]
+        .filter(([p, text]) => p.startsWith(root) && !unsaved.has(p) && text.includes(query))
+        .map(([path, text]) => {
+          const hits = [];
+          for (let i = text.indexOf(query); i >= 0; i = text.indexOf(query, i + query.length)) {
+            hits.push({ start: i, end: i + query.length, line: 1, column: i + 1, preview: text, match_start: i, match_end: i + query.length, groups: [] });
+          }
+          return { path, fingerprint: text, hits };
+        });
+      return { files, skipped, truncated: false, group_count: 0, group_names: [] };
+    }
+    case 'replace_apply': {
+      const edits = args?.edits as { path: string; fingerprint: string; ranges: [number, number][] }[];
+      const files = edits.map((e) => {
+        const text = vfs.get(e.path);
+        if (text !== e.fingerprint) return { path: e.path, status: 'changed', count: 0, message: 'changed on disk since the preview' };
+        let out = '';
+        let at = 0;
+        for (const [a, b] of e.ranges) {
+          out += text.slice(at, a) + String(args?.replacement);
+          at = b;
+        }
+        vfs.set(e.path, out + text.slice(at));
+        return { path: e.path, status: 'done', count: e.ranges.length, message: null };
+      });
+      return { batch_id: 1, files };
+    }
+    case 'replace_undo':
+      return [];
     case 'git_diff_file':
       return '@@ -1 +1 @@\n-old\n+new';
     case 'tmux_sessions':

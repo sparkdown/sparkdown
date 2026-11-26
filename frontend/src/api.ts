@@ -242,6 +242,46 @@ export const api = {
       includeHidden,
       useRegex,
     }),
+  /** Every hit of `query` under `root`, per file, for the replace preview
+   *  (local folders only). */
+  /** `unsaved`: tabs open with unsaved changes; they come back as skipped. */
+  replacePreview: (
+    root: string,
+    query: string,
+    includeHidden = false,
+    useRegex = false,
+    unsaved: UnsavedBuffer[] = [],
+  ) =>
+    invoke<ReplacePreview>("replace_preview", {
+      root,
+      query,
+      caseSensitive: false,
+      includeHidden,
+      useRegex,
+      unsaved,
+    }),
+  /** Replace the previewed hits in `edits` with `replacement` (capture
+   *  groups in regex mode, see replace-plan.ts parseReplacement; plain text
+   *  otherwise). Query and options must be the preview's. */
+  replaceApply: (
+    root: string,
+    query: string,
+    replacement: string,
+    edits: ReplaceFileEdit[],
+    includeHidden = false,
+    useRegex = false,
+  ) =>
+    invoke<ReplaceApplyResult>("replace_apply", {
+      root,
+      query,
+      replacement,
+      edits,
+      caseSensitive: false,
+      includeHidden,
+      useRegex,
+    }),
+  /** Put back the files of the last replace (`batchId` from its result). */
+  replaceUndo: (batchId: number) => invoke<ReplaceFileOutcome[]>("replace_undo", { batchId }),
   /** Branch + ahead/behind its upstream (status bar). */
   gitBranchStatus: (root: string) =>
     invoke<GitBranchStatus>("git_branch_status", { root }),
@@ -542,6 +582,58 @@ export interface SearchResults {
   matches: SearchMatch[];
   /** The backend stopped at a limit (results or files scanned). */
   truncated: boolean;
+}
+
+/** One hit in the replace preview (search/replace.rs). `start` / `end`
+ *  are byte offsets in the file; the preview range is in characters. */
+export interface ReplaceHit {
+  start: number;
+  end: number;
+  line: number;
+  column: number;
+  preview: string;
+  match_start: number;
+  match_end: number;
+  /** Regex mode: each capture group's text (0 = the hit, null = the group
+   *  took no part). Empty for a literal query. */
+  groups: (string | null)[];
+}
+
+export interface ReplacePreview {
+  files: { path: string; fingerprint: string; hits: ReplaceHit[] }[];
+  /** Files with hits that replace leaves alone (not UTF-8, or open with
+   *  unsaved changes). */
+  skipped: { path: string; reason: string }[];
+  truncated: boolean;
+  /** Regex mode: the query's capture groups, and each named one's number. */
+  group_count: number;
+  group_names: [string, number][];
+}
+
+/** A tab open with unsaved changes, for the replace preview. */
+export interface UnsavedBuffer {
+  path: string;
+  text: string;
+}
+
+export interface ReplaceFileEdit {
+  path: string;
+  fingerprint: string;
+  ranges: [number, number][];
+}
+
+export interface ReplaceFileOutcome {
+  path: string;
+  /** done: written (or put back, for undo); changed: the file changed on
+   *  disk meanwhile and was left alone; failed: not written. */
+  status: 'done' | 'changed' | 'failed';
+  count: number;
+  message: string | null;
+}
+
+export interface ReplaceApplyResult {
+  batch_id: number | null;
+  files: ReplaceFileOutcome[];
 }
 
 /** One filesystem change from the watcher (`watcher://changes` event).

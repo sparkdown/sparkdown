@@ -132,6 +132,11 @@
             <div class="search-input-row">
               <input id="search-input" type="search" placeholder="Search" spellcheck="false" autocomplete="off" aria-label="Search in files" />
               <button id="search-regex-btn" class="search-toggle-btn" type="button" title="Use regular expression" aria-label="Use regular expression" aria-pressed="false">.*</button>
+              <button id="search-replace-btn" class="search-toggle-btn" type="button" title="Replace" aria-label="Replace" aria-pressed="false">&#8644;</button>
+            </div>
+            <div id="search-replace-row" class="search-input-row search-replace-row" hidden>
+              <input id="search-replace-input" type="text" placeholder="Replace" spellcheck="false" autocomplete="off" aria-label="Replace with" />
+              <button id="search-replace-preview-btn" class="replace-btn" type="button" title="Preview the replacements">Preview</button>
             </div>
           </div>
           <div id="search-status" class="search-status" role="status" aria-live="polite"></div>

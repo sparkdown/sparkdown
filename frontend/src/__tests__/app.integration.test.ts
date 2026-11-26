@@ -167,6 +167,10 @@ const APP_SHELL = `
         </section>
         <section id="sidebar-search" class="sidebar-view" hidden>
           <input id="search-input" />
+          <button id="search-replace-btn"></button>
+          <div id="search-replace-row" hidden>
+            <input id="search-replace-input" /><button id="search-replace-preview-btn"></button>
+          </div>
           <div id="search-status"></div>
           <div id="search-results"></div>
         </section>
@@ -733,6 +737,50 @@ describe('App integration', () => {
       await flush();
 
       expect(vfs.get('/docs/doc.md')).toBe('edited content');
+      expect(activeTabDot().style.display).toBe('none');
+    });
+
+    it('replace in files rewrites clean files, reloads their tabs and skips unsaved ones', async () => {
+      directories.add('/proj');
+      vfs.set('/proj/a.md', 'cat one');
+      vfs.set('/proj/b.md', 'cat two');
+      await startApp();
+      emitTauriEvent('open-paths', { paths: ['/proj'] });
+      await flush();
+      emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/proj/a.md' });
+      await flush();
+      emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/proj/b.md' });
+      await flush();
+      // b.md (active) gets an unsaved edit.
+      const { EditorView } = await import('@codemirror/view');
+      const view = EditorView.findFromDOM(document.querySelector('.cm-content') as HTMLElement)!;
+      view.dispatch({ changes: { from: view.state.doc.length, insert: '!' } });
+
+      const $ = (id: string) => document.getElementById(id)!;
+      $('act-search').click();
+      $('search-replace-btn').click();
+      ($('search-input') as HTMLInputElement).value = 'cat';
+      ($('search-replace-input') as HTMLInputElement).value = 'dog';
+      $('search-replace-preview-btn').click();
+      await until(() => !!document.querySelector('[data-action="apply"]'), 'the preview');
+      const heads = [...document.querySelectorAll('.replace-file')].map((h) => h.textContent);
+      expect(heads).toEqual(['a.md1']);
+      // b.md is not dropped silently: the preview lists it as skipped, and the
+      // backend got its unsaved text.
+      const skippedRows = [...document.querySelectorAll('.replace-skipped')].map((r) => r.textContent);
+      expect(skippedRows).toEqual(['b.mdskipped: open with unsaved changes']);
+      expect(document.getElementById('search-status')!.textContent).toBe('1 match in 1 file; 1 file skipped (listed)');
+      const previewCall = invokeCalls.filter((c) => c.cmd === 'replace_preview').pop()!;
+      expect((previewCall.args as { unsaved: unknown }).unsaved).toEqual([{ path: '/proj/b.md', text: 'cat two!' }]);
+      document.querySelector<HTMLElement>('[data-action="apply"]')!.click();
+      await until(() => vfs.get('/proj/a.md') === 'dog one', 'the replace');
+      expect(vfs.get('/proj/b.md')).toBe('cat two');
+      const liveText = () =>
+        EditorView.findFromDOM(document.querySelector('.cm-content') as HTMLElement)!.state.doc.toString();
+      expect(liveText()).toBe('cat two!');
+      // The clean background tab shows the new text.
+      document.querySelectorAll<HTMLElement>('.tab')[0].click();
+      await until(() => activeTitle() === 'a.md' && liveText() === 'dog one', 'a.md to reload');
       expect(activeTabDot().style.display).toBe('none');
     });
 
