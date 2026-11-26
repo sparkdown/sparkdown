@@ -1,5 +1,5 @@
 import { api } from './api';
-import type { AgentMcpStatus, AppConfig, UserCommand, UserRunView } from './api';
+import type { AgentMcpStatus, AppConfig, SaveHook, UserCommand, UserRunView } from './api';
 import { joinCommandLine, trySplitCommandLine } from './user-run-argv';
 import { trapFocus, type ModalHandle } from './modal';
 import {
@@ -28,7 +28,11 @@ export interface SettingsHost {
 export interface UserRunSettings {
   view(): UserRunView;
   saveCommands(commands: UserCommand[]): Promise<void>;
+  saveHooks(hooks: SaveHook[]): Promise<void>;
   openFile(): void;
+  /** Re-read user-run.json from disk; Settings calls it when it opens so an
+   *  edit made outside SparkDown is listed. */
+  reload?(): Promise<void>;
 }
 
 interface OpenSettings {
@@ -62,33 +66,86 @@ export class SettingsDialog {
     const open = this.open;
     if (!open) return;
     this.open = null;
-    // Closing (×, Escape, backdrop) must not drop a typed but uncommitted
-    // number: commit it the way blur would have.
-    for (const el of open.overlay.querySelectorAll<HTMLInputElement>('[data-commit-on-close]')) {
-      el.dispatchEvent(new Event('change'));
+    document.removeEventListener('keydown', open.onKey, true);
+    try {
+      // Closing (×, Escape, backdrop) must not drop a typed but uncommitted
+      // number: commit it the way blur would have.
+      for (const el of open.overlay.querySelectorAll<HTMLInputElement>('[data-commit-on-close]')) {
+        el.dispatchEvent(new Event('change'));
+      }
+    } finally {
+      open.overlay.remove();
+      open.modal.release();
     }
-    document.removeEventListener('keydown', open.onKey);
-    open.overlay.remove();
-    open.modal.release();
   }
 
   private show(host: SettingsHost): void {
-    const overlay = buildSettingsOverlay(host, () => this.close());
+    let overlay: HTMLElement;
+    try {
+      overlay = buildSettingsOverlay(host, () => this.close());
+    } catch (err) {
+      // Still open (and close) a dialog, with what went wrong.
+      overlay = buildSettingsFallback(err, () => this.close());
+    }
     document.body.appendChild(overlay);
     const dialog = overlay.querySelector<HTMLElement>('.settings-dialog')!;
     const modal = trapFocus(dialog);
     // Move focus off the editor/terminal onto the dialog so Escape lands here
     // right away, without requiring a click inside the modal first.
     dialog.focus();
+    // Capture phase: Escape closes the dialog wherever focus is inside it
+    // (a switch, a text field), before any other handler can stop it.
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !e.isComposing) {
         e.preventDefault();
+        e.stopPropagation();
         this.close();
       }
     };
-    document.addEventListener('keydown', onKey);
-    this.open = { overlay, modal, onKey };
+    document.addEventListener('keydown', onKey, true);
+    const open = { overlay, modal, onKey };
+    this.open = open;
+    const userRun = host.userRun;
+    if (userRun?.reload) {
+      const before = JSON.stringify(userRun.view());
+      userRun.reload().then(() => {
+        if (this.open !== open || JSON.stringify(userRun.view()) === before) return;
+        overlay.querySelector('[data-user-run]')?.replaceWith(buildUserRunArea(userRun));
+      }, () => {});
+    }
   }
+}
+
+/** A dialog with only a message and ×, for when the full one cannot be built. */
+function buildSettingsFallback(err: unknown, close: () => void): HTMLElement {
+  const overlay = document.createElement('div');
+  overlay.className = 'settings-overlay';
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) close();
+  });
+  const dialog = document.createElement('div');
+  dialog.className = 'settings-dialog';
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-label', 'Settings');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.tabIndex = -1;
+  const header = document.createElement('div');
+  header.className = 'settings-header';
+  const title = document.createElement('h2');
+  title.textContent = 'Settings';
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'settings-close';
+  closeBtn.setAttribute('aria-label', 'Close settings');
+  closeBtn.title = 'Close (Esc)';
+  closeBtn.textContent = '×';
+  closeBtn.addEventListener('click', () => close());
+  header.append(title, closeBtn);
+  const msg = document.createElement('p');
+  msg.className = 'settings-run-file-error';
+  msg.textContent = `Settings could not be shown: ${String(err)}`;
+  dialog.append(header, msg);
+  overlay.appendChild(dialog);
+  return overlay;
 }
 
 /** The overlay + dialog DOM; `close` is wired to ×, backdrop and Escape. */
@@ -209,9 +266,7 @@ function buildSettingsOverlay(host: SettingsHost, close: () => void): HTMLElemen
   );
   dialog.appendChild(git);
 
-  if (host.userRun) {
-    dialog.appendChild(buildCommandsSection(host.userRun));
-  }
+  if (host.userRun) dialog.appendChild(buildUserRunArea(host.userRun));
 
   const agents = document.createElement('div');
   agents.className = 'settings-section';
@@ -580,7 +635,91 @@ function scrollbackRow(spec: { value: number; onChange: (value: number) => void 
   return row;
 }
 
-function buildCommandsSection(userRun: UserRunSettings): HTMLElement {
+/**
+ * Custom commands and On save, under one notice that lists what
+ * user-run.json skipped. Never throws: if the sections cannot be built, a
+ * notice with "Open user-run.json" stands in, so the rest of Settings (and
+ * the way to fix the file) still opens.
+ */
+export function buildUserRunArea(userRun: UserRunSettings): HTMLElement {
+  const area = document.createElement('div');
+  area.dataset.userRun = '';
+  try {
+    const notice = buildRunNotice(userRun);
+    const commands = buildCommandsSection(userRun, notice.refresh);
+    const hooks = buildHooksSection(userRun, notice.refresh);
+    // A file SparkDown cannot read is shown read-only: saving from here
+    // would replace the hand edit.
+    if (userRun.view().file_error) {
+      for (const el of [commands, hooks]) {
+        for (const c of el.querySelectorAll<HTMLInputElement | HTMLButtonElement>('input, button')) {
+          c.disabled = true;
+        }
+      }
+    }
+    area.append(notice.el, commands, hooks);
+  } catch (err) {
+    area.replaceChildren(runFallback(userRun, err));
+  }
+  return area;
+}
+
+function openFileButton(userRun: UserRunSettings): HTMLButtonElement {
+  const open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'settings-btn';
+  open.textContent = 'Open user-run.json';
+  open.addEventListener('click', () => userRun.openFile());
+  return open;
+}
+
+function buildRunNotice(userRun: UserRunSettings): { el: HTMLElement; refresh: () => void } {
+  const el = document.createElement('div');
+  el.className = 'settings-section settings-run-notice';
+  el.dataset.runNotice = '';
+  el.setAttribute('role', 'status');
+  const fileError = document.createElement('p');
+  fileError.className = 'settings-run-file-error';
+  const problems = document.createElement('p');
+  problems.className = 'settings-run-problems';
+  const actions = document.createElement('div');
+  actions.className = 'settings-run-actions';
+  actions.appendChild(openFileButton(userRun));
+  el.append(fileError, problems, actions);
+  const refresh = () => {
+    const view = userRun.view();
+    const error = view.file_error ?? '';
+    // The file error is also the first problem line; list it once.
+    const notes = view.problems.filter((p) => p !== error);
+    fileError.hidden = !error;
+    fileError.textContent = error
+      ? `user-run.json could not be read: ${error.replace(/\.?\s*$/, '.')} Fix it in the editor; Settings shows it read-only until then.`
+      : '';
+    problems.hidden = notes.length === 0;
+    problems.textContent = notes.length ? `Skipped in user-run.json:\n${notes.join('\n')}` : '';
+    el.hidden = !error && notes.length === 0;
+  };
+  refresh();
+  return { el, refresh };
+}
+
+function runFallback(userRun: UserRunSettings, err: unknown): HTMLElement {
+  const el = document.createElement('div');
+  el.className = 'settings-section settings-run-notice';
+  el.dataset.runNotice = '';
+  const heading = document.createElement('h3');
+  heading.textContent = 'Custom commands and on-save hooks';
+  const msg = document.createElement('p');
+  msg.className = 'settings-run-file-error';
+  msg.textContent = `These settings could not be shown (${String(err)}). Open user-run.json to check it.`;
+  const actions = document.createElement('div');
+  actions.className = 'settings-run-actions';
+  actions.appendChild(openFileButton(userRun));
+  el.append(heading, msg, actions);
+  return el;
+}
+
+function buildCommandsSection(userRun: UserRunSettings, refreshNotice: () => void): HTMLElement {
   const section = document.createElement('div');
   section.className = 'settings-section';
   section.dataset.section = 'commands';
@@ -597,28 +736,17 @@ function buildCommandsSection(userRun: UserRunSettings): HTMLElement {
     'Output appears in the Output tab.';
   section.appendChild(desc);
 
-  const problems = document.createElement('p');
-  problems.className = 'settings-run-problems';
-  problems.hidden = true;
-  section.appendChild(problems);
-
   const list = document.createElement('div');
   section.appendChild(list);
 
-  let draft: UserCommand[] = userRun.view().commands.map((c) => ({ ...c, argv: [...c.argv] }));
+  const draft: UserCommand[] = userRun.view().commands.map((c) => ({ ...c, argv: [...c.argv] }));
   let saveTimer: number | null = null;
-
-  const showProblems = () => {
-    const notes = userRun.view().problems;
-    problems.hidden = notes.length === 0;
-    problems.textContent = notes.join('\n');
-  };
 
   const scheduleSave = () => {
     if (saveTimer !== null) window.clearTimeout(saveTimer);
     saveTimer = window.setTimeout(() => {
       saveTimer = null;
-      void userRun.saveCommands(draft).then(showProblems);
+      void userRun.saveCommands(draft).then(refreshNotice, refreshNotice);
     }, 400);
   };
 
@@ -637,7 +765,6 @@ function buildCommandsSection(userRun: UserRunSettings): HTMLElement {
         },
       }));
     });
-    showProblems();
   };
   render();
 
@@ -655,14 +782,132 @@ function buildCommandsSection(userRun: UserRunSettings): HTMLElement {
     inputs[inputs.length - 1]?.focus();
     inputs[inputs.length - 1]?.select();
   });
-  const open = document.createElement('button');
-  open.type = 'button';
-  open.className = 'settings-btn';
-  open.textContent = 'Open user-run.json';
-  open.addEventListener('click', () => userRun.openFile());
-  actions.append(add, open);
+  actions.append(add, openFileButton(userRun));
   section.appendChild(actions);
   return section;
+}
+
+function buildHooksSection(userRun: UserRunSettings, refreshNotice: () => void): HTMLElement {
+  const section = document.createElement('div');
+  section.className = 'settings-section';
+  section.dataset.section = 'hooks';
+  const heading = document.createElement('h3');
+  heading.textContent = 'On save';
+  section.appendChild(heading);
+
+  const desc = document.createElement('p');
+  desc.className = 'settings-run-desc';
+  desc.textContent =
+    'When you save a file in a local folder, SparkDown can run a command ' +
+    'with the file path as the last argument. A failed command never fails ' +
+    'the save. Each hook is off until you turn it on. Hooks do not run in a ' +
+    'remote (SSH) folder, or for files an agent writes on its own — they do ' +
+    'run when you save after reviewing an agent edit. An empty file filter ' +
+    'matches every file in the folder. Output appears in the Output tab.';
+  section.appendChild(desc);
+
+  const list = document.createElement('div');
+  section.appendChild(list);
+
+  const draft: SaveHook[] = userRun.view().save_hooks.map((h) => ({ ...h, argv: [...h.argv], globs: [...h.globs] }));
+  let saveTimer: number | null = null;
+
+  const scheduleSave = () => {
+    if (saveTimer !== null) window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(() => {
+      saveTimer = null;
+      void userRun.saveHooks(draft).then(refreshNotice, refreshNotice);
+    }, 400);
+  };
+
+  const render = () => {
+    list.replaceChildren();
+    draft.forEach((hook, i) => {
+      list.appendChild(hookRow(hook, {
+        onChange: (next) => {
+          draft[i] = next;
+          scheduleSave();
+        },
+        onRemove: () => {
+          draft.splice(i, 1);
+          render();
+          scheduleSave();
+        },
+      }));
+    });
+  };
+  render();
+
+  const actions = document.createElement('div');
+  actions.className = 'settings-run-actions';
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'settings-btn';
+  add.textContent = 'Add hook';
+  add.addEventListener('click', () => {
+    draft.push({ name: 'New hook', argv: ['echo'], globs: [], enabled: false });
+    render();
+    scheduleSave();
+  });
+  actions.appendChild(add);
+  section.appendChild(actions);
+  return section;
+}
+
+interface HookRowHandlers {
+  onChange: (hook: SaveHook) => void;
+  onRemove: () => void;
+}
+
+function hookRow(hook: SaveHook, handlers: HookRowHandlers): HTMLElement {
+  const item = document.createElement('div');
+  item.className = 'settings-run-item';
+  let current: SaveHook = { ...hook, argv: [...hook.argv], globs: [...hook.globs] };
+  const emit = (next: SaveHook) => {
+    current = next;
+    handlers.onChange(next);
+  };
+
+  const on = document.createElement('label');
+  on.className = 'settings-run-row';
+  const onLabel = document.createElement('label');
+  onLabel.textContent = 'Enabled';
+  const check = document.createElement('input');
+  check.type = 'checkbox';
+  check.className = 'settings-switch';
+  check.checked = current.enabled;
+  check.addEventListener('change', () => emit({ ...current, enabled: check.checked }));
+  on.append(onLabel, check);
+
+  const nameRow = labeledField('Name', 'hook-name', current.name, (value) => {
+    emit({ ...current, name: value.trim() || current.name });
+  });
+  const runRow = labeledField('Run', 'hook-run', joinCommandLine(current.argv), (value) => {
+    const argv = trySplitCommandLine(value);
+    if (!argv) return;
+    emit({ ...current, argv });
+  }, 'prettier --write');
+  const globRow = labeledField('Files', 'hook-globs', current.globs.join(', '), (value) => {
+    const globs = value.split(',').map((s) => s.trim()).filter(Boolean);
+    emit({ ...current, globs });
+  }, '*.md, **/*.{ts,js}');
+  const timeout = current.timeout_ms != null ? String(current.timeout_ms) : '';
+  const timeRow = labeledField('Timeout (ms)', 'hook-timeout', timeout, (value) => {
+    const n = Number.parseInt(value, 10);
+    emit({
+      ...current,
+      timeout_ms: Number.isFinite(n) && n > 0 ? n : null,
+    });
+  }, '30000');
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'settings-btn';
+  remove.textContent = 'Remove';
+  remove.addEventListener('click', () => handlers.onRemove());
+  timeRow.appendChild(remove);
+
+  item.append(on, nameRow, runRow, globRow, timeRow);
+  return item;
 }
 
 interface CommandRowHandlers {

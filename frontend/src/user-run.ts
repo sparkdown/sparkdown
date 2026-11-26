@@ -9,6 +9,7 @@ import type { CommandRegistry } from './commands';
 import { LOCAL_ORIGIN } from './tabs';
 import { joinCommandLine, splitCommandLine, trySplitCommandLine } from './user-run-argv';
 import { type UserRunOutputLog, type RunLogEntry } from './user-run-output';
+import { parseUserRunView } from './user-run-view';
 
 export type { RunOutcome, SaveHook, UserCommand, UserRunView };
 export { joinCommandLine, splitCommandLine, trySplitCommandLine };
@@ -31,6 +32,10 @@ export class UserRunController {
   private commands: UserCommand[] = [];
   private hooks: SaveHook[] = [];
   private problems: string[] = [];
+  private fileError: string | null = null;
+  /** Problems last written to the Output tab, so a reload with the same
+   *  problems (for example, each time Settings opens) adds no new note. */
+  private reported = '';
   private filePath: string | null = null;
   private unregister: (() => void) | null = null;
   private hookQueue: Promise<void> = Promise.resolve();
@@ -42,6 +47,7 @@ export class UserRunController {
       commands: this.commands,
       save_hooks: this.hooks,
       problems: this.problems,
+      file_error: this.fileError,
       path: this.filePath ?? '',
     };
   }
@@ -49,10 +55,10 @@ export class UserRunController {
   /** Load (or reload) the user-level file and refresh palette entries. */
   async load(): Promise<UserRunView> {
     try {
-      const view = await api.loadUserRun();
-      this.apply(view);
+      this.apply(parseUserRunView(await api.loadUserRun()));
     } catch (err) {
       this.problems = [`Could not load user commands: ${String(err)}`];
+      this.fileError = this.problems[0]!;
       this.commands = [];
       this.hooks = [];
       this.registerPalette();
@@ -62,12 +68,23 @@ export class UserRunController {
   }
 
   /** Persist `commands` (keeping current hooks) and reload. */
-  async saveCommands(commands: UserCommand[]): Promise<UserRunView> {
-    const view = await api.saveUserRun({
-      commands,
-      save_hooks: this.hooks,
-    });
-    this.apply(view);
+  saveCommands(commands: UserCommand[]): Promise<UserRunView> {
+    return this.save({ commands, save_hooks: this.hooks });
+  }
+
+  /** Persist `hooks` (keeping current commands) and reload. */
+  saveHooks(hooks: SaveHook[]): Promise<UserRunView> {
+    return this.save({ commands: this.commands, save_hooks: hooks });
+  }
+
+  /** Never rejects: a refused or failed write is listed with the problems. */
+  private async save(file: { commands: UserCommand[]; save_hooks: SaveHook[] }): Promise<UserRunView> {
+    try {
+      this.apply(parseUserRunView(await api.saveUserRun(file)));
+    } catch (err) {
+      await this.load();
+      this.problems = [`Settings could not save user-run.json: ${String(err)}`, ...this.problems];
+    }
     this.reportProblems();
     return this.view;
   }
@@ -85,11 +102,13 @@ export class UserRunController {
   }
 
   /** After a successful SparkDown save of `path`. Reloads the user-level
-   *  file when that file itself was saved. */
+   *  file when that file itself was saved, then runs matching on-save hooks
+   *  without blocking the save. */
   afterSave(path: string): void {
     if (this.filePath && samePath(path, this.filePath)) {
       this.hookQueue = this.hookQueue.then(() => this.load().then(() => undefined)).catch(() => {});
     }
+    this.hookQueue = this.hookQueue.then(() => this.runHooksFor(path)).catch(() => {});
   }
 
   /** Run a named custom command; output appears in the Output tab. */
@@ -103,6 +122,29 @@ export class UserRunController {
       this.finishOutcome(entry, out);
     } catch (err) {
       this.deps.output.finish(entry, 'error', String(err), '');
+    }
+  }
+
+  private async runHooksFor(path: string): Promise<void> {
+    if (this.deps.origin() !== LOCAL_ORIGIN) return;
+    if (this.hooks.every((h) => !h.enabled)) return;
+    let outcomes: RunOutcome[];
+    try {
+      outcomes = await api.runSaveHooks(path);
+    } catch {
+      // A hook-runner failure must never surface as a save failure.
+      return;
+    }
+    if (outcomes.length === 0) return;
+    let opened = false;
+    for (const out of outcomes) {
+      const failed = !!(out.timed_out || out.error || (out.exit_code !== null && out.exit_code !== 0));
+      if (failed && !opened) {
+        this.deps.showOutput();
+        opened = true;
+      }
+      const entry = this.deps.output.start('On save', out.name, joinCommandLine(out.argv));
+      this.finishOutcome(entry, out);
     }
   }
 
@@ -120,6 +162,7 @@ export class UserRunController {
     this.commands = view.commands;
     this.hooks = view.save_hooks;
     this.problems = view.problems;
+    this.fileError = view.file_error ?? null;
     this.filePath = view.path || this.filePath;
     this.registerPalette();
   }
@@ -163,6 +206,9 @@ export class UserRunController {
   }
 
   private reportProblems(): void {
+    const key = this.problems.join('\n');
+    if (key === this.reported) return;
+    this.reported = key;
     if (this.problems.length === 0) return;
     this.deps.output.note(
       'Config',

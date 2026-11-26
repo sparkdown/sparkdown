@@ -314,6 +314,19 @@
   line-height: 1.45;
   margin: 0 0 10px;
 }
+.settings-run-file-error {
+  font-size: 11.5px;
+  color: var(--status-warning);
+  font-weight: 600;
+  line-height: 1.45;
+  margin: 0 0 10px;
+  white-space: pre-wrap;
+}
+.settings-run-notice[hidden],
+.settings-run-file-error[hidden],
+.settings-run-problems[hidden] {
+  display: none;
+}
 .settings-run-problems {
   font-size: 11.5px;
   color: var(--status-warning);

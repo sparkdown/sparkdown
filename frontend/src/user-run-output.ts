@@ -77,7 +77,7 @@ export class UserRunOutputLog {
     if (!this.el) return;
     if (this.entries.length === 0) {
       this.el.innerHTML =
-        '<div class="git-output-empty">Output from custom commands appears here.</div>';
+        '<div class="git-output-empty">Output from custom commands and on-save hooks appears here.</div>';
       return;
     }
     this.el.innerHTML = this.entries

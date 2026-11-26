@@ -32,6 +32,9 @@ export interface UserRunView {
   commands: UserCommand[];
   save_hooks: SaveHook[];
   problems: string[];
+  /** Set when the file as a whole could not be read (for example, it is
+   *  not valid JSON). Settings shows it and does not write the file. */
+  file_error?: string | null;
   path: string;
 }
 
