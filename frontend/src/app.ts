@@ -16,7 +16,7 @@ import { EventBus } from './events';
 import { SettingsDialog } from './settings-dialog';
 import { UpdateManager } from './updater';
 import type { RemoteHandler } from './remote';
-import { isMarkdownFile, isPreviewable, debounce, createRafBatch, basename } from './utils';
+import { isMarkdownFile, isPreviewable, debounce, createRafBatch } from './utils';
 import { effectiveView } from './view-mode';
 import { TIMING, LAYOUT } from './constants';
 import { initResizeHandle, initSidebarResize, initToolbarDrag } from './app/layout';
@@ -44,6 +44,7 @@ import { initPerfTrace, span } from './perf-trace';
 import { GitFeedback } from './git-output';
 import { ImageInserter, clipboardImageFiles, isImagePath } from './image-insert';
 import { TERMINAL_SCROLLBACK_DEFAULT } from './terminal-scrollback';
+import { changesFileList } from './file-list-changes';
 import { FocusMode } from './focus-mode';
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -737,16 +738,15 @@ export class App {
     });
     this.bus.on(EVENTS.TAB_SWITCHED, () => wiki.noteChanged());
     this.bus.on(EVENTS.TAB_SAVED, () => wiki.noteChanged());
-    // Same rule as Quick open: only a structural change alters the file
-    // list. Any change may add or remove a link, so backlinks refresh.
+    // Same rule as Quick open (changesFileList): a structural change or a
+    // changed .gitignore alters the file list. Any change may add or remove
+    // a link, so backlinks refresh.
     this.ctx.listenTauri<FsChange[]>('watcher://changes', (e) => {
-      if (e.payload.some((c) => c.kind !== 'modify')) wiki.invalidateIndex();
+      if (changesFileList(e.payload)) wiki.invalidateIndex();
       else wiki.noteChanged();
     });
     return wiki;
   }
-
-  /** Quick open / command palette (palette.ts) over the workspace root. */
 
   /** Image files dropped onto the markdown editor go into the document at
    *  the drop point; everything else (and drops elsewhere) opens as usual. */
@@ -758,6 +758,8 @@ export class App {
     void this.images.dropPaths(images, at);
     return paths.filter((p) => !isImagePath(p));
   }
+
+  /** Quick open / command palette (palette.ts) over the workspace root. */
   private createPalette(): Palette {
     const palette = new Palette({
       root: () => this.ctx.workspaceRoot ?? this.fileTree.getRoot(),
@@ -779,11 +781,9 @@ export class App {
       lineCount: () => (this.tabs.activeTab() ? this.editor.getLineCount() : 0),
     });
     for (const path of this.config.last_open_files) palette.noteOpened(path, LOCAL_ORIGIN);
-    // Same rule as the backend cache (file_index.rs): only a structural
-    // change (not a content write), or a changed .gitignore, can change the
-    // file list.
+    // Same rule as the backend cache (file_index.rs), see changesFileList.
     this.ctx.listenTauri<FsChange[]>('watcher://changes', (e) => {
-      if (e.payload.some((c) => c.kind !== 'modify' || basename(c.path) === '.gitignore')) palette.invalidateFiles();
+      if (changesFileList(e.payload)) palette.invalidateFiles();
     });
     return palette;
   }
