@@ -359,6 +359,18 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       return [];
     case 'git_diff_file':
       return '@@ -1 +1 @@\n-old\n+new';
+    case 'git_file_layers':
+      return {
+        path: (args?.path as string) ?? '',
+        staged: '',
+        unstaged: '@@ -1 +1 @@\n-old\n+new',
+        staged_fp: 'staged-fp',
+        unstaged_fp: 'unstaged-fp',
+        binary_staged: false,
+        binary_unstaged: false,
+      };
+    case 'git_stage_hunk':
+      return;
     case 'tmux_sessions':
       return [];
     case 'detect_agents':
