@@ -16,7 +16,7 @@ import { EventBus } from './events';
 import { SettingsDialog } from './settings-dialog';
 import { UpdateManager } from './updater';
 import type { RemoteHandler } from './remote';
-import { isMarkdownFile, isPreviewable, debounce, createRafBatch } from './utils';
+import { isMarkdownFile, isPreviewable, debounce, createRafBatch, onlyNamesFolder } from './utils';
 import { effectiveView } from './view-mode';
 import { TIMING, LAYOUT } from './constants';
 import { initResizeHandle, initSidebarResize, initToolbarDrag } from './app/layout';
@@ -398,10 +398,15 @@ export class App {
     }
     // Session restore (#63): this window's folder, then its open files.
     const folder = routed ? null : this.config.window_folder;
-    if (folder && (await api.isDirectory(folder).catch(() => false))) {
+    const folderOpened = !!folder && (await api.isDirectory(folder).catch(() => false));
+    if (folderOpened) {
       await this.workspace.openFolder(folder);
     }
-    if (pendingFiles.length > 0) {
+    // `sparkdown <dir>` naming the folder this window had open last time (the
+    // command that started that session) is a relaunch: the folder is open
+    // already, and its tabs come back as on a launch without arguments.
+    const relaunch = !!folder && folderOpened && onlyNamesFolder(pendingFiles, folder);
+    if (pendingFiles.length > 0 && !relaunch) {
       await this.workspace.openDroppedPaths(pendingFiles);
     } else if (this.config.last_open_files.length > 0) {
       await this.documents.restoreTabs(this.config.last_open_files);

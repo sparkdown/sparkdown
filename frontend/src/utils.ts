@@ -430,3 +430,10 @@ export function defaultSavePath(tabPath: string | null | undefined, dir: string 
   if (dir && isAbsolutePath(dir)) return joinPath(dir, name);
   return name;
 }
+
+/** True when `paths` is not empty and every entry names `folder` (trailing
+ *  slashes and Windows separators aside). */
+export function onlyNamesFolder(paths: readonly string[], folder: string): boolean {
+  const norm = (p: string) => p.replace(/\\/g, '/').replace(/(.)\/+$/, '$1');
+  return paths.length > 0 && paths.every((p) => norm(p) === norm(folder));
+}

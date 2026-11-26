@@ -410,6 +410,46 @@ describe('App integration', () => {
       expect(tabTitles()).toEqual(['dropped.md']);
     });
 
+    it("relaunching with this window's own folder as the argument restores its tabs", async () => {
+      vfs.set('/notes/a.md', '# A');
+      vfs.set('/notes/b.md', '# B');
+      directories.add('/notes');
+      setConfigOnDisk({
+        theme: 'system',
+        window_folder: '/notes',
+        last_open_files: ['/notes/a.md', '/notes/b.md'],
+        sidebar_visible: true,
+      });
+      setPendingFiles(['/notes/']);
+
+      await startApp();
+      await flush();
+      expect(tabTitles()).toEqual(['a.md', 'b.md']);
+
+      // The next quit keeps them.
+      emitTauriEvent('exit-requested');
+      await flush();
+      const last = savedConfigs[savedConfigs.length - 1] as { last_open_files: string[] };
+      expect(last.last_open_files).toEqual(['/notes/a.md', '/notes/b.md']);
+    });
+
+    it('a CLI folder other than the last one opens without the old tabs', async () => {
+      vfs.set('/notes/a.md', '# A');
+      directories.add('/notes');
+      directories.add('/projects/site');
+      setConfigOnDisk({
+        theme: 'system',
+        window_folder: '/notes',
+        last_open_files: ['/notes/a.md'],
+        sidebar_visible: true,
+      });
+      setPendingFiles(['/projects/site']);
+
+      await startApp();
+      await flush();
+      expect(tabTitles()).toEqual([]);
+    });
+
     it('opens a pending CLI directory as the sidebar root', async () => {
       directories.add('/projects/notes');
       setPendingFiles(['/projects/notes']);
