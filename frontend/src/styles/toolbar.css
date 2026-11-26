@@ -225,3 +225,30 @@ html.os-macos .toolbar-end {
   flex-shrink: 0;
   align-self: center;
 }
+
+/* Failed on-save hooks while focus mode hides Output (hook-notice.ts): stays
+   in the title strip, in and out of focus mode, until clicked. */
+.hook-notice {
+  align-self: center;
+  max-width: 32ch;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--status-warning);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  cursor: default;
+}
+
+.hook-notice:hover {
+  background: var(--bg-tertiary);
+}
+
+.hook-notice.hidden {
+  display: none;
+}

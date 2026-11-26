@@ -101,6 +101,7 @@ import { FileTree } from '../file-tree';
 import { api } from '../api';
 import { installRemoteSessions } from '../remote';
 import { MENU } from '../event-names';
+import { userRun } from './helpers/tauri-mocks';
 
 /** The view control's button for a view. */
 const viewBtn = (mode: string) =>
@@ -129,6 +130,7 @@ const APP_SHELL = `
       </div>
       <div class="tab-strip"><div id="tab-bar"></div></div>
       <div class="toolbar-end">
+        <button id="hook-notice" class="hook-notice hidden"></button>
         <div id="view-mode" class="view-seg" hidden>
           <button data-view="edit">Edit</button>
           <button data-view="split">Split</button>
@@ -2918,6 +2920,44 @@ describe('App integration', () => {
       expect(on()).toBe(false);
       expect($('sidebar').classList.contains('hidden')).toBe(false);
       expect($('sidebar-changes').hidden).toBe(false);
+    });
+
+    it('a failed on-save hook keeps focus mode and names the hook in the title strip', async () => {
+      vfs.set('/docs/doc.md', '# Doc');
+      userRun.save_hooks = [{ name: 'Lint', argv: ['false'], globs: ['*.md'], enabled: true }];
+      userRun.hookOutcomes = [{ name: 'Lint', argv: ['false'], cwd: '/docs', exit_code: 1, timed_out: false, output: 'bad' }];
+      await startApp();
+      emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/docs/doc.md' });
+      await flush();
+      const notice = $('hook-notice');
+      const drawerShown = () => !$('terminal-panel').classList.contains('hidden');
+
+      emitTauriEvent(MENU.TOGGLE_FOCUS_MODE);
+      emitTauriEvent(MENU.SAVE);
+      await waitUntil(() => userRun.lastHooks !== null && !notice.classList.contains('hidden'), 'hook notice');
+      expect(on()).toBe(true);
+      expect(drawerShown()).toBe(false);
+      expect(notice.textContent).toBe('On save: Lint failed');
+
+      // Still there after focus mode ends; a click opens Output and clears it.
+      emitTauriEvent(MENU.TOGGLE_FOCUS_MODE);
+      expect(on()).toBe(false);
+      expect(notice.classList.contains('hidden')).toBe(false);
+      notice.click();
+      expect(drawerShown()).toBe(true);
+      expect(notice.classList.contains('hidden')).toBe(true);
+    });
+
+    it('a failed on-save hook outside focus mode still opens Output', async () => {
+      vfs.set('/docs/doc.md', '# Doc');
+      userRun.save_hooks = [{ name: 'Lint', argv: ['false'], globs: ['*.md'], enabled: true }];
+      userRun.hookOutcomes = [{ name: 'Lint', argv: ['false'], cwd: '/docs', exit_code: 1, timed_out: false, output: 'bad' }];
+      await startApp();
+      emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/docs/doc.md' });
+      await flush();
+      emitTauriEvent(MENU.SAVE);
+      await waitUntil(() => !$('terminal-panel').classList.contains('hidden'), 'Output in the drawer');
+      expect($('hook-notice').classList.contains('hidden')).toBe(true);
     });
 
     it('is not saved to the config (each launch starts with the normal layout)', async () => {

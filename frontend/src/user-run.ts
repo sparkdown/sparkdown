@@ -23,6 +23,10 @@ export interface UserRunDeps {
   openFile(path: string): void | Promise<void>;
   /** Reveal the Output tab (drawer open, no focus steal required). */
   showOutput(): void;
+  /** True while focus mode hides the drawer (and with it the Output tab). */
+  inFocusMode(): boolean;
+  /** Where failed on-save hooks are named when Output is not opened. */
+  notice: { show(names: string[]): void; clear(): void };
   output: UserRunOutputLog;
 }
 
@@ -147,6 +151,9 @@ export class UserRunController {
   async runCommand(name: string): Promise<void> {
     const cmd = this.commands.find((c) => c.name === name);
     const line = cmd ? joinCommandLine(cmd.argv) : name;
+    // The user asked for this run, so its output is shown even in focus mode
+    // (showOutput leaves focus mode first).
+    this.deps.notice.clear();
     this.deps.showOutput();
     const entry = this.deps.output.start('Command', name, line);
     try {
@@ -168,20 +175,25 @@ export class UserRunController {
       return;
     }
     if (outcomes.length === 0) return;
-    let opened = false;
     for (const out of outcomes) {
-      const failed = !!(out.timed_out || out.error || (out.exit_code !== null && out.exit_code !== 0));
-      if (failed && !opened) {
-        this.deps.showOutput();
-        opened = true;
-      }
       const entry = this.deps.output.start('On save', out.name, joinCommandLine(out.argv));
       this.finishOutcome(entry, out);
+    }
+    const failed = outcomes.filter(isFailure).map((out) => out.name);
+    if (failed.length === 0) {
+      this.deps.notice.clear();
+    } else if (this.deps.inFocusMode()) {
+      // A hook runs because of a save, not because the user asked to see it:
+      // keep focus mode and name the failure in the title strip instead.
+      this.deps.notice.show(failed);
+    } else {
+      this.deps.notice.clear();
+      this.deps.showOutput();
     }
   }
 
   private finishOutcome(entry: RunLogEntry, out: RunOutcome): void {
-    const failed = !!(out.timed_out || out.error || (out.exit_code !== null && out.exit_code !== 0));
+    const failed = isFailure(out);
     const message = out.error
       ? out.error
       : out.exit_code === 0 || out.exit_code === null
@@ -258,6 +270,10 @@ export class UserRunController {
 function draftOf<T extends { name: string }>(sent: T[], accepted: T[]): { list: T[]; base: string } | undefined {
   const names = (list: T[]) => list.map((e) => e.name.trim()).join('\n');
   return names(sent) === names(accepted) ? undefined : { list: sent, base: JSON.stringify(accepted) };
+}
+
+function isFailure(out: RunOutcome): boolean {
+  return !!(out.timed_out || out.error || (out.exit_code !== null && out.exit_code !== 0));
 }
 
 function slug(name: string): string {

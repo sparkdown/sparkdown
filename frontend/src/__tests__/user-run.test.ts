@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CommandRegistry } from '../commands';
 import { UserRunController } from '../user-run';
 import { UserRunOutputLog } from '../user-run-output';
+import { HookNotice } from '../hook-notice';
 import type { AppConfig, RunOutcome, SaveHook, UserCommand, UserRunView } from '../api';
 import { SettingsDialog } from '../settings-dialog';
 import { parseUserRunView } from '../user-run-view';
@@ -48,12 +49,18 @@ function setup() {
   const showOutput = vi.fn();
   let root: string | null = '/ws';
   let origin: string | null = null;
+  let focus = false;
+  const noticeEl = document.createElement('button');
+  noticeEl.className = 'hidden';
+  const notice = new HookNotice(noticeEl, showOutput);
   const ctrl = new UserRunController({
     registry,
     root: () => root,
     origin: () => origin,
     openFile,
     showOutput,
+    inFocusMode: () => focus,
+    notice,
     output,
   });
   return {
@@ -63,6 +70,9 @@ function setup() {
     outputEl,
     openFile,
     showOutput,
+    notice,
+    noticeEl,
+    setFocus: (on: boolean) => { focus = on; },
     setRoot: (r: string | null) => { root = r; },
     setOrigin: (o: string | null) => { origin = o; },
   };
@@ -184,6 +194,85 @@ describe('UserRunController', () => {
     expect(() => ctrl.afterSave('/ws/b.md')).not.toThrow();
     await new Promise((r) => setTimeout(r, 0));
     await new Promise((r) => setTimeout(r, 0));
+  });
+
+  describe('a failed on-save hook in focus mode', () => {
+    const fail = (name: string): RunOutcome => ({
+      name, argv: ['false'], cwd: '/ws', exit_code: 1, timed_out: false, output: `${name} said no`,
+    });
+    const pass = (name: string): RunOutcome => ({
+      name, argv: ['true'], cwd: '/ws', exit_code: 0, timed_out: false, output: '',
+    });
+    const settle = async () => {
+      for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 0));
+    };
+    const hooks = [
+      { name: 'Lint', argv: ['false'], globs: ['*.md'], enabled: true },
+      { name: 'Fmt', argv: ['true'], globs: ['*.md'], enabled: true },
+    ];
+
+    it('does not open Output (which would end focus mode); it names the hook instead', async () => {
+      loadUserRun.mockResolvedValue(view({ save_hooks: hooks }));
+      runSaveHooks.mockResolvedValue([fail('Lint'), pass('Fmt')]);
+      const { ctrl, showOutput, noticeEl, setFocus, outputEl } = setup();
+      await ctrl.load();
+      setFocus(true);
+      ctrl.afterSave('/ws/a.md');
+      await settle();
+      expect(showOutput).not.toHaveBeenCalled();
+      expect(noticeEl.classList.contains('hidden')).toBe(false);
+      expect(noticeEl.textContent).toBe('On save: Lint failed');
+      // The run is still in the Output log for later.
+      expect(outputEl.textContent).toContain('Lint said no');
+
+      // Leaving focus mode does not clear it; a click opens Output and does.
+      setFocus(false);
+      expect(noticeEl.classList.contains('hidden')).toBe(false);
+      noticeEl.click();
+      expect(showOutput).toHaveBeenCalledTimes(1);
+      expect(noticeEl.classList.contains('hidden')).toBe(true);
+    });
+
+    it('counts several failures, and a later clean run clears the notice', async () => {
+      loadUserRun.mockResolvedValue(view({ save_hooks: hooks }));
+      runSaveHooks.mockResolvedValue([fail('Lint'), fail('Fmt')]);
+      const { ctrl, noticeEl, setFocus } = setup();
+      await ctrl.load();
+      setFocus(true);
+      ctrl.afterSave('/ws/a.md');
+      await settle();
+      expect(noticeEl.textContent).toBe('2 on-save hooks failed');
+      runSaveHooks.mockResolvedValue([pass('Lint'), pass('Fmt')]);
+      ctrl.afterSave('/ws/a.md');
+      await settle();
+      expect(noticeEl.classList.contains('hidden')).toBe(true);
+    });
+
+    it('outside focus mode a failure opens Output as before, with no notice', async () => {
+      loadUserRun.mockResolvedValue(view({ save_hooks: hooks }));
+      runSaveHooks.mockResolvedValue([fail('Lint')]);
+      const { ctrl, showOutput, noticeEl } = setup();
+      await ctrl.load();
+      ctrl.afterSave('/ws/a.md');
+      await settle();
+      expect(showOutput).toHaveBeenCalledTimes(1);
+      expect(noticeEl.classList.contains('hidden')).toBe(true);
+    });
+
+    it('a command the user runs still shows Output in focus mode, and clears the notice', async () => {
+      loadUserRun.mockResolvedValue(view({ save_hooks: hooks, commands: [{ name: 'Build', argv: ['make'] }] }));
+      runSaveHooks.mockResolvedValue([fail('Lint')]);
+      runUserCommand.mockResolvedValue(pass('Build'));
+      const { ctrl, registry, showOutput, noticeEl, setFocus } = setup();
+      await ctrl.load();
+      setFocus(true);
+      ctrl.afterSave('/ws/a.md');
+      await settle();
+      expect(noticeEl.classList.contains('hidden')).toBe(false);
+      await registry.get('user.run.build')!.run();
+      expect(showOutput).toHaveBeenCalledTimes(1);
+      expect(noticeEl.classList.contains('hidden')).toBe(true);
+    });
   });
 
   it('does not run hooks in a remote folder, and stays quiet when none match', async () => {

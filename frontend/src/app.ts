@@ -49,6 +49,7 @@ import type { SaveHook, UserCommand } from './api';
 import { TERMINAL_SCROLLBACK_DEFAULT } from './terminal-scrollback';
 import { changesFileList } from './file-list-changes';
 import { FocusMode } from './focus-mode';
+import { HookNotice } from './hook-notice';
 
 const DEFAULT_CONFIG: AppConfig = {
   theme: 'system',
@@ -234,12 +235,20 @@ export class App {
       { status: document.getElementById('status-git'), output: document.getElementById('git-output') },
       () => this.cockpit.showGitOutput(),
     );
+    // The Output tab lives in the drawer, which focus mode hides; show it
+    // the way other drawer and sidebar reveals do, by leaving focus mode.
+    const showOutput = () => {
+      this.focusMode.exit();
+      this.cockpit.showOutput();
+    };
     this.userRun = new UserRunController({
       registry: commands,
       root: () => this.ctx.workspaceRoot ?? this.fileTree.getRoot(),
       origin: () => this.tabs.getOrigin(),
       openFile: (path) => this.openFile(path),
-      showOutput: () => this.cockpit.showOutput(),
+      showOutput,
+      inFocusMode: () => this.focusMode.isActive(),
+      notice: new HookNotice(document.getElementById('hook-notice'), showOutput),
       output: new UserRunOutputLog(document.getElementById('run-output')),
     });
     this.diff = new DiffController(this.ctx, {

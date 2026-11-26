@@ -87,6 +87,15 @@ export const userRun = {
   problems: [] as string[],
   lastRun: null as { name: string } | null,
   lastHooks: null as { savedPath: string } | null,
+  /** What run_save_hooks answers (no hook ran by default). */
+  hookOutcomes: [] as Array<{
+    name: string;
+    argv: string[];
+    cwd: string;
+    exit_code: number | null;
+    timed_out: boolean;
+    output: string;
+  }>,
 };
 
 /**
@@ -158,6 +167,7 @@ export function resetTauriMocks(): void {
   userRun.problems = [];
   userRun.lastRun = null;
   userRun.lastHooks = null;
+  userRun.hookOutcomes = [];
 }
 
 // ------------------------------------------------------------- backends ----
@@ -455,7 +465,7 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       };
     case 'run_save_hooks':
       userRun.lastHooks = { savedPath: String(args?.savedPath ?? '') };
-      return [];
+      return userRun.hookOutcomes;
     default:
       throw new Error(`tauri-mocks: unmocked command "${cmd}"`);
   }
