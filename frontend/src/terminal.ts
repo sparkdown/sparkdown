@@ -1200,7 +1200,7 @@ export class TerminalManager {
     });
     // Track the focused pane: a click anywhere in a pane, or keyboard focus
     // entering its terminal.
-    this.host.addEventListener('mousedown', (e) => this.focusFromEvent(e));
+    this.host.addEventListener('mousedown', (e) => this.focusFromPress(e));
     this.host.addEventListener('focusin', (e) => this.focusFromEvent(e));
     this.refreshAgents();
   }
@@ -1799,6 +1799,26 @@ export class TerminalManager {
     const card = (e.target as HTMLElement | null)?.closest<HTMLElement>('.terminal-pane');
     const id = card?.dataset.termId;
     if (id) this.setFocused(id);
+  }
+
+  /**
+   * A press anywhere in a pane focuses that pane's terminal, so the outline
+   * and the pane that gets keystrokes always agree. xterm focuses its own
+   * input for presses inside the terminal; outside it (the padding around
+   * the terminal, the header) nothing would, and the outline would move
+   * while keys still went elsewhere. Buttons, the find bar and the rename
+   * field keep their own behaviour.
+   */
+  private focusFromPress(e: MouseEvent): void {
+    const target = e.target instanceof Element ? e.target : null;
+    const id = target?.closest<HTMLElement>('.terminal-pane')?.dataset.termId;
+    if (!target || !id) return;
+    this.setFocused(id);
+    if (e.button !== 0) return;
+    if (target.closest('.xterm, button, input, textarea, select, a, .sd-find-terminal')) return;
+    // Keep the press from moving focus to the page after this.
+    e.preventDefault();
+    this.panes.get(id)?.focus();
   }
 
   private onSplitPointer(e: MouseEvent, act: 'split-right' | 'split-down'): void {

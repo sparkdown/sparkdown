@@ -34,6 +34,7 @@ requests.
 ### Fixed
 
 - **Terminals:** with split terminals, a pane that didn't have keyboard focus could come back blank after hiding and showing the terminal panel or switching bottom tabs, until you clicked it. Every pane now draws again when it comes back into view.
+- **Terminals:** clicking a blank part of a terminal pane (the space around the text, or its header) marked that pane as focused while keystrokes still went elsewhere. A click anywhere in a pane now gives that pane's terminal the keyboard.
 - **Unsaved changes prompt:** Save (on quit, when closing a window or tab, or when connecting to a remote host) now saves the file. Before, it acted like Don't Save. In the "changed on disk" prompt, Reload now reloads the file instead of acting like Cancel.
 - **Startup:** starting SparkDown with the folder that was open last time (`sparkdown <folder>`) restores that folder's tabs again.
 - **Startup:** each folder keeps its own tabs, active tab and window size. Starting SparkDown with another folder (`sparkdown <folder>`) no longer replaces the saved tabs of the folder that was open before, so starting it with that folder again brings them back. The 20 most recently used folders are kept, and a folder that no longer exists is dropped. With several windows, a folder argument opens in the window that already has that folder.
