@@ -3,8 +3,10 @@ import type { Tab } from '../tabs';
 import {
   ChangesView,
   parseDiffLayout,
+  renderLayeredDiff,
   renderUnifiedDiff,
   summarizeDiff,
+  summarizeLayers,
   type DiffLayout,
   type OpenHow,
 } from '../changes-view';
@@ -227,7 +229,16 @@ export class DiffController {
     this.dom.next?.addEventListener('click', () => this.stepFile(1));
     this.dom.review?.addEventListener('click', () => this.toggleActiveReviewed());
     this.dom.body?.addEventListener('click', (e) => {
-      const btn = (e.target as HTMLElement).closest<HTMLElement>('.diff-open-line');
+      const el = e.target as HTMLElement;
+      const stageBtn = el.closest<HTMLElement>('.diff-stage-hunk, .diff-stage-file');
+      if (stageBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (stageBtn.getAttribute('aria-disabled') === 'true') return;
+        void this.stageFromButton(stageBtn);
+        return;
+      }
+      const btn = el.closest<HTMLElement>('.diff-open-line');
       if (btn) void this.openActiveAtLine(Number(btn.dataset.line) || 1);
     });
     // Review keys while the diff pane has focus (never the editor/terminal:
@@ -431,8 +442,19 @@ export class DiffController {
     }
     let line = 1;
     try {
-      const diff = await api.gitDiffFile(root, relPath, status === 'untracked');
-      line = summarizeDiff(diff).firstLine;
+      if (!this.isRemote()) {
+        const change = this.changesView?.change(relPath);
+        const layers = await api.gitFileLayers(
+          root,
+          relPath,
+          status === 'untracked',
+          change?.old_path,
+        );
+        line = summarizeLayers(layers).firstLine;
+      } else {
+        const diff = await api.gitDiffFile(root, relPath, status === 'untracked');
+        line = summarizeDiff(diff).firstLine;
+      }
     } catch {
       // No diff: the top of the file.
     }
@@ -444,6 +466,46 @@ export class DiffController {
     const tab = this.ctx.tabs.activeTab();
     if (!tab?.path || !this.deps.openAt) return;
     await this.deps.openAt(tab.path, line, 1);
+  }
+
+  /** Stage or unstage one hunk, or the whole layer, from a button on the diff. */
+  private async stageFromButton(btn: HTMLElement): Promise<void> {
+    const tab = this.ctx.tabs.activeTab();
+    const root = tab?.gitDiff?.root ?? this.repoRoot();
+    const rel = tab?.gitDiff?.relPath ?? (root && tab?.path ? toRelativePath(tab.path, root) : null);
+    if (!root || !rel) return;
+    const change = this.changesView?.change(rel);
+    const side = btn.dataset.side === 'staged' ? 'staged' : 'unstaged';
+    const header = btn.classList.contains('diff-stage-hunk') ? (btn.dataset.header ?? null) : null;
+    const fingerprint = btn.dataset.fp ?? '';
+    const body = this.dom.body;
+    try {
+      await api.gitStageHunk(
+        root,
+        rel,
+        change?.status === 'untracked',
+        change?.old_path,
+        side,
+        header,
+        fingerprint,
+      );
+      await this.changesView?.refresh();
+      const tab = this.ctx.tabs.activeTab();
+      if (tab) await this.showDiffForTab(tab);
+    } catch (e) {
+      const msg =
+        typeof e === 'string'
+          ? e
+          : e && typeof e === 'object' && 'message' in e
+            ? String((e as { message: unknown }).message)
+            : String(e);
+      if (body) {
+        const note = document.createElement('div');
+        note.className = 'diff-stage-error';
+        note.textContent = msg;
+        body.prepend(note);
+      }
+    }
   }
 
   /** ↑ / ↓ in the diff header (and the palette): the previous / next file
@@ -804,24 +866,35 @@ export class DiffController {
     const change = this.changesView?.change(rel);
     // Guard against a fast tab switch resolving out of order: only paint if
     // this tab is still active (and still in diff view) when it comes back.
+    const untracked = this.changesView?.isUntracked(rel) ?? false;
+    const deleted = change?.status === 'deleted';
+    const renderOpts = {
+      reading: this.diffReading,
+      layout: this.diffLayout,
+      markdown: !deleted && isMarkdownFile(tab.path) ? tab.content : null,
+      openInEditor: !deleted && !!this.deps.openAt,
+    };
     try {
-      const diff = await api.gitDiffFile(
-        root,
-        rel,
-        this.changesView?.isUntracked(rel) ?? false,
-      );
-      const active = this.ctx.tabs.activeTab();
-      if (active?.id !== tab.id || !isDiff(active)) return;
-      const deleted = change?.status === 'deleted';
-      body.innerHTML = renderUnifiedDiff(diff, {
-        reading: this.diffReading,
-        layout: this.diffLayout,
-        markdown: !deleted && isMarkdownFile(tab.path) ? tab.content : null,
-        openInEditor: !deleted && !!this.deps.openAt,
-      });
-      body.scrollTop = 0;
-      this.shownDiff = { tabId: tab.id, ...summarizeDiff(diff) };
-      this.syncDiffHeader();
+      if (!this.isRemote()) {
+        const layers = await api.gitFileLayers(root, rel, untracked, change?.old_path);
+        const active = this.ctx.tabs.activeTab();
+        if (active?.id !== tab.id || !isDiff(active)) return;
+        body.innerHTML = renderLayeredDiff(layers, {
+          ...renderOpts,
+          disabledReason: null,
+        });
+        body.scrollTop = 0;
+        this.shownDiff = { tabId: tab.id, ...summarizeLayers(layers) };
+        this.syncDiffHeader();
+      } else {
+        const diff = await api.gitDiffFile(root, rel, untracked);
+        const active = this.ctx.tabs.activeTab();
+        if (active?.id !== tab.id || !isDiff(active)) return;
+        body.innerHTML = renderUnifiedDiff(diff, renderOpts);
+        body.scrollTop = 0;
+        this.shownDiff = { tabId: tab.id, ...summarizeDiff(diff) };
+        this.syncDiffHeader();
+      }
     } catch {
       const active = this.ctx.tabs.activeTab();
       if (active?.id !== tab.id || !isDiff(active)) return;

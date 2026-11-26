@@ -1,12 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
   alignHunkRows,
+  renderLayeredDiff,
   firstChangedLine,
   nearestHeading,
   parseDiffLayout,
   parseHunkHeader,
   renderUnifiedDiff,
-  summarizeDiff
+  summarizeDiff,
+  summarizeLayers,
 } from '../changes-view';
 import type { DiffHunk } from '../meat';
 
@@ -373,5 +375,72 @@ describe('renderUnifiedDiff side-by-side layout', () => {
     expect(inline).not.toContain('diff-split-row');
     expect(inline).not.toContain('diff-layout-split');
     expect(def).toBe(inline);
+  });
+});
+
+const SAMPLE_DIFF = [
+  'diff --git a/x b/x',
+  '--- a/x',
+  '+++ b/x',
+  '@@ -1,2 +1,2 @@ fn a',
+  ' a',
+  '-b',
+  '+B',
+  '',
+].join('\n');
+
+describe('renderLayeredDiff', () => {
+  const layers = {
+    path: 'x',
+    staged: SAMPLE_DIFF,
+    unstaged: SAMPLE_DIFF.replace('fn a', 'fn b').replace('-b', '-c').replace('+B', '+C'),
+    staged_fp: 'aaa',
+    unstaged_fp: 'bbb',
+    binary_staged: false,
+    binary_unstaged: false,
+  };
+
+  it('renders Staged and Unstaged sections with per-hunk and all-file buttons', () => {
+    const html = renderLayeredDiff(layers, { reading: false, openInEditor: false });
+    expect(html).toContain('Staged');
+    expect(html).toContain('Unstaged');
+    expect(html).toContain('Unstage all');
+    expect(html).toContain('Stage all');
+    expect(html).toContain('>Unstage<');
+    expect(html).toContain('>Stage<');
+    expect(html).toContain('data-side="staged"');
+    expect(html).toContain('data-side="unstaged"');
+    expect(html).toContain('data-fp="aaa"');
+    expect(html).toContain('data-fp="bbb"');
+    expect(html).toContain('data-header="@@ -1,2 +1,2 @@ fn a"');
+  });
+
+  it('disables the buttons and omits an empty layer', () => {
+    const html = renderLayeredDiff(
+      { ...layers, staged: '' },
+      { reading: false, openInEditor: false, disabledReason: 'Not in a remote session.' },
+    );
+    expect(html).not.toContain('Unstage all');
+    expect(html).toContain('Stage all');
+    expect(html).toContain('aria-disabled="true"');
+    expect(html).toContain('Not in a remote session.');
+  });
+
+  it('keeps the side-by-side layout and the Stage buttons in each layer', () => {
+    const html = renderLayeredDiff(layers, { reading: false, openInEditor: false, layout: 'split' });
+    expect((html.match(/diff-layout-split/g) || []).length).toBe(2);
+    expect(html).toContain('diff-split-row');
+    expect(html).toContain('>Unstage<');
+    expect(html).toContain('>Stage<');
+  });
+
+  it('summarizes both layers together', () => {
+    expect(summarizeLayers(layers)).toEqual({ hunks: 2, adds: 2, dels: 2, firstLine: 2 });
+  });
+
+  it('does not add Stage buttons to a plain unified render', () => {
+    const html = renderUnifiedDiff(SAMPLE_DIFF, { reading: false });
+    expect(html).not.toContain('diff-stage-hunk');
+    expect(html).toContain('Open in editor');
   });
 });
