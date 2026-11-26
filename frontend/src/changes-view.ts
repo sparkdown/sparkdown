@@ -1,4 +1,4 @@
-import { api, type ChangeStat, type GitChange } from './api';
+import { api, type ChangeStat, type FileLayers, type GitChange, type StageSide } from './api';
 import { escapeAttr, escapeHtml, escapeReviewText, hasUnicodeControls } from './utils';
 import {
   partitionChanges,
@@ -702,7 +702,7 @@ export class ChangesView {
       `<span class="change-file"><b class="change-name">${escapeReviewText(name)}</b>` +
       (dir ? `<em class="change-dir">${escapeReviewText(dir)}</em>` : '') +
       `</span>` +
-      `<span class="change-counts">${counts}</span>` +
+      `<span class="change-counts">${counts}${layerBadge(c)}</span>` +
       this.renderAcceptButtons(c) +
       this.renderDiscardButton(c) +
       `</div>`
@@ -1102,6 +1102,12 @@ export interface RenderDiffOptions {
   openInEditor?: boolean;
   /** Inline (unified, the default) or side-by-side columns. */
   layout?: DiffLayout;
+  /** When set, each hunk gets a Stage or Unstage button for this layer. */
+  stage?: {
+    side: StageSide;
+    fingerprint: string;
+    disabledReason?: string | null;
+  };
 }
 
 /** One hunk as a box: a header (heading or @@ context · line N, plus
@@ -1122,9 +1128,11 @@ function renderHunk(hunk: DiffHunk, opts: RenderDiffOptions): string {
       const where = heading ?? (h.context || null);
       label = where ? `${where} · line ${line}` : `line ${line}`;
     }
+    const stageBtn = renderStageButton(opts, hunk.header);
     out.push(
       `<div class="diff-hunk-head"><span class="diff-hunk-label" title="${escapeReviewText(hunk.header)}">${escapeReviewText(label)}</span>` +
         note +
+        stageBtn +
         (opts.openInEditor !== false && h
           ? `<button type="button" class="diff-open-line" data-line="${line}">Open in editor</button>`
           : '') +
@@ -1206,4 +1214,70 @@ export function renderUnifiedDiff(diff: string, opts: RenderDiffOptions = {}): s
 
 function plural(n: number, word: string): string {
   return n === 1 ? word : `${word}s`;
+}
+
+function renderStageButton(opts: RenderDiffOptions, header: string): string {
+  const stage = opts.stage;
+  if (!stage || !header) return '';
+  const label = stage.side === 'staged' ? 'Unstage' : 'Stage';
+  const reason = stage.disabledReason;
+  return (
+    `<button type="button" class="diff-stage-hunk" data-side="${stage.side}" data-header="${escapeAttr(header)}" data-fp="${escapeAttr(stage.fingerprint)}"` +
+    (reason ? ` aria-disabled="true" title="${escapeAttr(reason)}"` : ` title="${label} this hunk"`) +
+    `>${label}</button>`
+  );
+}
+
+/** Counts across both layers, used in the diff header. */
+export function summarizeLayers(layers: FileLayers): { hunks: number; adds: number; dels: number; firstLine: number } {
+  const a = summarizeDiff(layers.staged);
+  const b = summarizeDiff(layers.unstaged);
+  return {
+    hunks: a.hunks + b.hunks,
+    adds: a.adds + b.adds,
+    dels: a.dels + b.dels,
+    firstLine: b.hunks ? b.firstLine : a.firstLine,
+  };
+}
+
+/** Staged section above unstaged, each with Stage/Unstage (all and per hunk). */
+export function renderLayeredDiff(
+  layers: FileLayers,
+  opts: Omit<RenderDiffOptions, 'stage'> & { disabledReason?: string | null } = {},
+): string {
+  const parts: string[] = [];
+  const add = (title: string, side: StageSide, diff: string, fp: string, binary: boolean) => {
+    if (!binary && !diff.trim()) return;
+    const label = side === 'staged' ? 'Unstage all' : 'Stage all';
+    const reason = opts.disabledReason;
+    const head =
+      `<div class="diff-layer-head"><span class="diff-layer-title">${title}</span>` +
+      `<button type="button" class="diff-stage-file" data-side="${side}" data-fp="${escapeAttr(fp)}"` +
+      (reason ? ` aria-disabled="true" title="${escapeAttr(reason)}"` : ` title="${label} in this file"`) +
+      `>${label}</button></div>`;
+    const body = binary
+      ? '<div class="diff-empty">Binary file — stage or unstage the whole file.</div>'
+      : renderUnifiedDiff(diff, {
+          reading: opts.reading,
+          markdown: opts.markdown,
+          openInEditor: opts.openInEditor,
+          layout: opts.layout,
+          stage: { side, fingerprint: fp, disabledReason: reason },
+        });
+    parts.push(`<section class="diff-layer" data-side="${side}">${head}${body}</section>`);
+  };
+  add('Staged', 'staged', layers.staged, layers.staged_fp, layers.binary_staged);
+  add('Unstaged', 'unstaged', layers.unstaged, layers.unstaged_fp, layers.binary_unstaged);
+  if (!parts.length) {
+    return '<div class="diff-empty">No textual changes (binary file or identical).</div>';
+  }
+  return `<div class="diff-layers">${parts.join('')}</div>`;
+}
+
+
+function layerBadge(c: { staged: boolean; unstaged?: boolean }): string {
+  const unstaged = c.unstaged ?? !c.staged;
+  if (c.staged && unstaged) return '<span class="change-layer">Partially staged</span>';
+  if (c.staged) return '<span class="change-layer">Staged</span>';
+  return '';
 }

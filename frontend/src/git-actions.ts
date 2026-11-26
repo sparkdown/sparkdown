@@ -94,7 +94,7 @@ export class GitActions {
     });
     dom.selectAll.addEventListener('change', () => {
       if (dom.selectAll.checked) this.excluded.clear();
-      else for (const c of this.changes) this.excluded.add(c.path);
+      else for (const c of this.commitable()) this.excluded.add(c.path);
       this.renderFiles();
       this.sync();
     });
@@ -122,9 +122,20 @@ export class GitActions {
     this.sync();
   }
 
+  /** Files a Commit will consider: staged paths when anything is staged,
+   *  otherwise every changed file (existing path-based behaviour). */
+  private commitable(): GitChange[] {
+    const staged = this.changes.filter((c) => c.staged);
+    return staged.length > 0 ? staged : this.changes;
+  }
+
+  private hasStaged(): boolean {
+    return this.changes.some((c) => c.staged);
+  }
+
   /** The paths a Commit would include. */
   selected(): string[] {
-    return this.changes.filter((c) => !this.excluded.has(c.path)).map((c) => c.path);
+    return this.commitable().filter((c) => !this.excluded.has(c.path)).map((c) => c.path);
   }
 
   isPanelOpen(): boolean {
@@ -159,9 +170,10 @@ export class GitActions {
       this.opts.report.fail('commit', { kind: 'nothing_to_commit', message: 'Select at least one file to commit.', detail: '' });
       return;
     }
-    // Every change ticked: commit all (lets git pick up anything the view
-    // hasn't caught yet, the same as `git commit -a` plus new files).
-    const all = this.excluded.size === 0;
+    // Every commitable file ticked: pass null. When the index has staged
+    // changes the backend commits the index as it is; otherwise it adds the
+    // selected (or every) path, as before.
+    const all = this.selected().length === this.commitable().length;
     await this.run('commit', (confirmed) => api.gitCommit(root, message, all ? null : paths, confirmed), () => {
       this.dom.message.value = '';
       this.excluded.clear();
@@ -253,18 +265,34 @@ export class GitActions {
     const d = this.dom;
     const busy = this.busy !== null;
     const n = this.selected().length;
-    const total = this.changes.length;
+    const total = this.commitable().length;
+    const staged = this.hasStaged();
     const hasMsg = !!d.message.value.trim();
     d.commit.disabled = busy || n === 0 || !hasMsg;
     d.commit.textContent =
-      this.busy === 'commit' ? 'Committing…' : n === total ? 'Commit' : `Commit ${n} of ${total}`;
-    d.commit.title = !hasMsg ? 'Write a commit message first' : n === 0 ? 'Select at least one file' : '';
+      this.busy === 'commit'
+        ? 'Committing…'
+        : staged
+          ? n === total
+            ? 'Commit staged'
+            : `Commit ${n} staged`
+          : n === total
+            ? 'Commit'
+            : `Commit ${n} of ${total}`;
+    d.commit.title = !hasMsg
+      ? 'Write a commit message first'
+      : n === 0
+        ? 'Select at least one file'
+        : staged
+          ? 'Commit only what is staged'
+          : '';
     d.selectAll.checked = total > 0 && n === total;
     d.selectAll.indeterminate = n > 0 && n < total;
     d.selectAll.disabled = busy || total === 0;
     setBusy(d.commitToggle, this.busy === 'commit');
-    d.commitToggle.disabled = busy || (total === 0 && !this.isPanelOpen());
-    d.commitToggle.title = total === 0 ? 'Nothing to commit' : 'Commit…';
+    const any = this.changes.length > 0;
+    d.commitToggle.disabled = busy || (!any && !this.isPanelOpen());
+    d.commitToggle.title = !any ? 'Nothing to commit' : staged ? 'Commit staged changes…' : 'Commit…';
 
     const b = this.branch;
     const canSync = this.canSync();
@@ -294,7 +322,13 @@ export class GitActions {
   }
 
   private renderFiles(): void {
-    this.dom.files.innerHTML = this.changes
+    const list = this.commitable();
+    const note = this.hasStaged()
+      ? '<div class="git-files-note">Only staged changes will be committed. Unstaged hunks stay in the worktree.</div>'
+      : '';
+    this.dom.files.innerHTML =
+      note +
+      list
       .map((c) => {
         // `data-path` must stay the real repo-relative path so the checkbox
         // acts on the file git reported; the visible name and tooltip are

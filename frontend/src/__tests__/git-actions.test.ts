@@ -505,3 +505,46 @@ describe('GitActions: Commit asks before running repo commands', () => {
     expect(confirmRepoCommands).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('GitActions: staged commits', () => {
+  beforeEach(() => {
+    gitCommit.mockReset();
+  });
+
+  it('lists only staged files and commits the index when anything is staged', async () => {
+    gitCommit.mockResolvedValue({ summary: '', output: '', commits: null, target: null });
+    const { ga, $ } = make();
+    ga.setChanges([
+      { path: 'a.md', status: 'modified', staged: true, unstaged: true },
+      { path: 'b.md', status: 'modified', staged: false, unstaged: true },
+      { path: 'c.md', status: 'modified', staged: true, unstaged: false },
+    ]);
+    $('tog').click();
+    const paths = [...$('f').querySelectorAll<HTMLInputElement>('input[data-path]')].map((i) => i.dataset.path);
+    expect(paths).toEqual(['a.md', 'c.md']);
+    expect($('f').textContent).toMatch(/Only staged changes will be committed/);
+    typeMsg($('m'), 'Staged only');
+    expect($('c').textContent).toBe('Commit staged');
+    $('c').click();
+    await flush();
+    expect(gitCommit).toHaveBeenCalledWith('/repo', 'Staged only', null, false);
+  });
+
+  it('commits a subset of staged paths when one is unticked', async () => {
+    gitCommit.mockResolvedValue({ summary: '', output: '', commits: null, target: null });
+    const { ga, $ } = make();
+    ga.setChanges([
+      { path: 'a.md', status: 'modified', staged: true, unstaged: true },
+      { path: 'c.md', status: 'modified', staged: true, unstaged: false },
+    ]);
+    $('tog').click();
+    const b = $('f').querySelector<HTMLInputElement>('input[data-path="c.md"]')!;
+    b.checked = false;
+    b.dispatchEvent(new Event('change', { bubbles: true }));
+    expect($('c').textContent).toBe('Commit 1 staged');
+    typeMsg($('m'), 'Just a');
+    $('c').click();
+    await flush();
+    expect(gitCommit).toHaveBeenCalledWith('/repo', 'Just a', ['a.md'], false);
+  });
+});
