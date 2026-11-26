@@ -14,7 +14,8 @@ for p in sorted(root.rglob("results.json")):
     runs.append(json.loads(p.read_text(encoding="utf-8")))
 order = ["macOS · tmux off", "macOS · tmux on", "Windows · tmux off",
          "Ubuntu (X11, WebKitWebDriver) · tmux off", "Ubuntu (X11, WebKitWebDriver) · tmux on",
-         "Arch + Hyprland (vkms) · tmux off", "Arch + Hyprland (vkms) · tmux on"]
+         "Arch + Hyprland (vkms) · tmux off", "Arch + Hyprland (vkms) · tmux on",
+         "Arch + Hyprland latest (vkms) · tmux off", "Arch + Hyprland latest (vkms) · tmux on"]
 runs.sort(key=lambda r: order.index(r["os"]) if r["os"] in order else 99)
 ids = list(CHECKS)
 extra = []
@@ -30,6 +31,13 @@ md = ["## E2E multi-window must-pass — all OSes", "",
       "| Check | " + " | ".join(r["os"] for r in runs) + " |",
       "|---|" + "---|" * len(runs)]
 fails = 0
+soft = []
+# The live-repo Hyprland 0.57+ leg can still trip geometry-stable on a
+# tiling compositor; record those FAILs in the table but do not fail
+# the summary. Any other FAIL on that leg, or a missing results.json,
+# still fails the workflow.
+SOFT_LATEST = "Arch + Hyprland latest (vkms)"
+SOFT_IDS = {"geometry-stable"}
 for cid in ids + extra:
     cells = []
     seen = False
@@ -37,12 +45,20 @@ for cid in ids + extra:
         c = next((c for c in r["checks"] if c["id"] == cid), None)
         if c:
             seen = True
-            fails += c["status"] == "FAIL"
+            if c["status"] == "FAIL":
+                if r["os"].startswith(SOFT_LATEST) and c["id"] in SOFT_IDS:
+                    soft.append(f"{r['os']}: {c['id']}")
+                else:
+                    fails += 1
         cells.append(f"**{c['status']}**" if c else "n/a")
     if seen:
         md.append(f"| {titles[cid]} | " + " | ".join(cells) + " |")
 md += ["", "| Totals | " + " | ".join(
     " · ".join(f"{k} {v}" for k, v in r["counts"].items() if v) + f" ({r['seconds']}s)" for r in runs) + " |", ""]
+if soft:
+    md.append("**Latest Hyprland geometry-stable failures are recorded but do not fail this summary:** "
+              + ", ".join(soft))
+    md.append("")
 missing = [o for o in order if o not in [r["os"] for r in runs]]
 if missing:
     md.append(f"**Missing results (job failed before reporting): {', '.join(missing)}**")

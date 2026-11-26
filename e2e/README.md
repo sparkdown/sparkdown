@@ -9,7 +9,7 @@ GitHub-hosted runners. It runs on pull requests to `main` and by hand
 | macOS | macos-latest | Unsigned release `.app`; `osascript`/System Events (Accessibility is pre-granted to bash/osascript on hosted runners) for windows, menus, sheets and the Dock |
 | Windows | windows-latest | `sparkdown.exe` built with `--features e2e-webdriver`; msedgedriver attached to WebView2 over CDP for web content and input; UI Automation (`e2e/windows/uia.ps1`) for windows, dialogs and the popup menu |
 | Ubuntu | ubuntu-latest | Release binary (default features) under Xvfb + openbox; tauri-driver + WebKitWebDriver for web content; xdotool for windows; AT-SPI for the GTK quit dialog text and the Window submenu |
-| Arch + Hyprland | ubuntu-latest, `archlinux:latest` container (`--privileged`) | The same Linux binary under Hyprland on a `vkms` virtual DRM device (seatd), with Omarchy's `focus_on_activate = true`; `hyprctl` for windows/focus, `wtype` for keys, `grim` for screenshots, AT-SPI to press the in-app menu button and read dialogs/menus |
+| Arch + Hyprland | ubuntu-latest, `archlinux:latest` container (`--privileged`), two legs: `pinned` (Arch Linux Archive 2026/10/28, Hyprland 0.56.2, `hyprland.conf`) and `latest` (live repos, Hyprland 0.57+, `hyprland.lua`) | The same Linux binary under Hyprland on a `vkms` virtual DRM device (seatd), with Omarchy's `focus_on_activate = true`; `hyprctl` for windows/focus (legacy dispatchers before 0.57, Lua `hl.dsp.*` from 0.57), `wtype` for keys, `grim` for screenshots, AT-SPI to press the in-app menu button and read dialogs/menus |
 
 All jobs use the app's own MCP tools (as an external agent with
 `SPARKDOWN_FOLDER`) to check per-window routing and to read back buffers, so
@@ -21,13 +21,16 @@ table (`e2e-summary`).
 Statuses: **PASS** (fully verified), **FAIL**, **PARTIAL** (verified only in
 part, or blocked by a known app bug; the detail says which), **MANUAL** (not
 automatable here). A job fails if any of its checks is FAIL; the summary job
-fails if any OS has a FAIL or reported nothing.
+fails if any OS has a FAIL or reported nothing. One exception: a
+geometry-stable FAIL on the live-repo Hyprland (`latest`) leg is shown
+in the table but does not fail the summary or the required Hyprland
+job; any other FAIL on that leg, or a missing results file, still does.
 
 App bugs the suite found are in [KNOWN_ISSUES.md](KNOWN_ISSUES.md). Checks
 for open ones stay PARTIAL until the app is fixed (#95 is fixed by #96).
 
 Artifacts per run: `e2e-macos-tmux-{off,on}`, `e2e-windows`, `e2e-ubuntu-tmux-{off,on}`,
-`e2e-omarchy-hyprland-tmux-{off,on}` (screenshots, `e2e.log`, `app.log`, `results.json`,
+`e2e-omarchy-hyprland-{pinned,latest}-tmux-{off,on}` (screenshots, `e2e.log`, `app.log`, `results.json`,
 `summary.md`; Windows adds `msedgedriver.log`, Hyprland adds the compositor
 logs and package versions), `e2e-release-gate` (gate test output),
 `e2e-summary` (all-OS table) and `e2e-linux-binary` (the tested binary, 7 days).
