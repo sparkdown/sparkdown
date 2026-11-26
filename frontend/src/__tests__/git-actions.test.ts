@@ -145,6 +145,19 @@ describe('GitActions header + commit panel (0.4.1)', () => {
     expect(shown($('st'))).toBe(false);
   });
 
+  it('Ctrl+Enter in the same tick as the last typed key commits the whole message', async () => {
+    gitCommit.mockResolvedValue({ summary: '[main abc1234] Fix it', output: '', commits: null, target: null });
+    const { ga, $ } = make();
+    ga.setChanges(changes('a.md'));
+    $('tog').click();
+    typeMsg($('m'), 'Fix i');
+    // The last key changes the value; its input event has not run yet.
+    ($('m') as HTMLTextAreaElement).value = 'Fix it';
+    $('m').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true }));
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(gitCommit).toHaveBeenCalledWith('/repo', 'Fix it', null, false);
+  });
+
   it('an empty message via the keyboard is blocked without calling git', async () => {
     const { ga, $ } = make();
     ga.setChanges(changes('a.md'));

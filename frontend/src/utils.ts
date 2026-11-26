@@ -15,6 +15,15 @@ export function isLinux(): boolean {
   return /linux/i.test(p) && !/android/i.test(navigator.userAgent || '');
 }
 
+/** A text input, text area or select: an element that takes typed text
+ *  (or keys) of its own. The editor's contenteditable is not one. */
+export function isTextField(el: Element | null): boolean {
+  if (!el) return false;
+  if (el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) return true;
+  if (!(el instanceof HTMLInputElement)) return false;
+  return !['checkbox', 'radio', 'button', 'submit', 'reset', 'file', 'image', 'range', 'color'].includes(el.type);
+}
+
 export function isMarkdownFile(path: string | null): boolean {
   return !path || MD_EXT_RE.test(path);
 }

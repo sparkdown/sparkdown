@@ -18,6 +18,7 @@ import { effectiveView } from '../view-mode';
 import {
   debounce,
   isMarkdownFile,
+  isTextField,
   joinPath,
   normalizePathForCompare,
   toRelativePath,
@@ -655,11 +656,14 @@ export class DiffController {
     if (!this.changesMode || !cv?.hasChanges()) return;
     const tab = this.ctx.tabs.activeTab();
     const rel = this.queuePathForTab(tab);
-    this.dom.list?.focus({ preventScroll: true });
+    // The Changes list loads asynchronously. Keys typed in a text field
+    // meanwhile (the commit message, the filter) must stay in that field.
+    const keepField = isTextField(document.activeElement);
+    if (!keepField) this.dom.list?.focus({ preventScroll: true });
     if (rel && tab) {
       cv.select(rel);
       this.showActiveAsDiff();
-      this.dom.list?.focus({ preventScroll: true });
+      if (!keepField) this.dom.list?.focus({ preventScroll: true });
       return;
     }
     const start = cv.startFile();
