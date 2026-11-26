@@ -535,7 +535,94 @@ describe('App integration', () => {
       });
 
       await startApp();
+      await flush();
       expect(tabTitles()).toEqual(['kept.md']);
+    });
+
+    describe('restored tabs load lazily', () => {
+      const restore = (files: string[]) =>
+        setConfigOnDisk({
+          theme: 'system',
+          last_open_files: files,
+          sidebar_width: 220,
+          sidebar_visible: true,
+          preview_visible: true,
+          word_wrap: true,
+          show_hidden_files: false,
+          enable_diagrams: true,
+        });
+      const readsBefore = (cmd: string) => {
+        const end = invokeCalls.findIndex((c) => c.cmd === cmd);
+        return invokeCalls
+          .slice(0, end === -1 ? invokeCalls.length : end)
+          .filter((c) => c.cmd === 'read_file' && String(c.args?.path).startsWith('/notes/'))
+          .map((c) => c.args?.path);
+      };
+
+      it('reads only the active tab before the window shows, tabs keep their order', async () => {
+        vfs.set('/notes/a.md', '# A');
+        vfs.set('/notes/b.md', '# B');
+        vfs.set('/notes/c.md', '# C');
+        restore(['/notes/a.md', '/notes/b.md', '/notes/c.md']);
+
+        const app = await startApp();
+        expect(tabTitles()).toEqual(['a.md', 'b.md', 'c.md']);
+        expect(activeTitle()).toBe('c.md');
+        expect(readsBefore('window_ready')).toEqual(['/notes/c.md']);
+        expect((app as any).editor.getContent()).toBe('# C');
+
+        // The rest load after the window shows, in strip order.
+        await flush();
+        const reads = invokeCalls
+          .filter((c) => c.cmd === 'read_file' && String(c.args?.path).startsWith('/notes/'))
+          .map((c) => c.args?.path);
+        expect(reads).toEqual(['/notes/c.md', '/notes/a.md', '/notes/b.md']);
+        expect((app as any).tabs.getUnloadedTabs()).toEqual([]);
+      });
+
+      it('the first activation shows the file, clean, and edits mark it modified', async () => {
+        vfs.set('/notes/a.md', '# A');
+        vfs.set('/notes/b.md', '# B');
+        restore(['/notes/a.md', '/notes/b.md']);
+        const app = await startApp();
+
+        document.querySelector<HTMLElement>('.tab .tab-title')!.click();
+        await flush();
+        expect(activeTitle()).toBe('a.md');
+        expect((app as any).editor.getContent()).toBe('# A');
+        expect((app as any).tabs.activeTab().modified).toBe(false);
+        expect((app as any).tabs.getModifiedTabs()).toEqual([]);
+
+        (app as any).editor.replaceAll('# A edited');
+        await flush();
+        expect((app as any).tabs.getModifiedTabs().map((t: any) => t.title)).toEqual(['a.md']);
+        // Session order is unchanged for the next launch.
+        expect((app as any).tabs.getOpenPaths(null)).toEqual(['/notes/a.md', '/notes/b.md']);
+      });
+
+      it('falls back to the previous tab when the last file is gone', async () => {
+        vfs.set('/notes/a.md', '# A');
+        restore(['/notes/a.md', '/notes/gone.md']);
+        await startApp();
+        await flush();
+        expect(tabTitles()).toEqual(['a.md']);
+        expect(activeTitle()).toBe('a.md');
+      });
+
+      it('an agent edit of a tab not read yet applies to the file text', async () => {
+        vfs.set('/notes/a.md', '# A');
+        vfs.set('/notes/b.md', '# B');
+        restore(['/notes/a.md', '/notes/b.md']);
+        const app = await startApp();
+        const tab = (app as any).tabs.findByPath('/notes/a.md');
+        expect(tab.unloaded).toBe(true);
+        emitTauriEvent('mcp://edit', { id: 7, path: '/notes/a.md', content: '# A by agent' });
+        await flush();
+        await flush();
+        expect(tab.content).toBe('# A by agent');
+        expect(tab.savedContent).toBe('# A');
+        expect(tab.modified).toBe(true);
+      });
     });
 
     it('falls back to defaults when load_config itself fails', async () => {
