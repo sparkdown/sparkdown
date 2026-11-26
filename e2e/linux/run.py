@@ -451,12 +451,13 @@ class X11(Base):
         import shutil
         if not shutil.which("xclip"):
             return "xclip is not installed on this runner"
+        # No pipes: the forked owner would hold them open and run() would wait.
         p = subprocess.run(["xclip", "-selection", "clipboard", "-t", "image/png", "-i", path],
-                           capture_output=True, text=True, timeout=10)
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
         time.sleep(0.5)
         targets = sh("xclip", "-selection", "clipboard", "-o", "-t", "TARGETS")
         R.log("clipboard targets:", targets.split())
-        return None if p.returncode == 0 and "image/png" in targets else f"xclip rc={p.returncode} {p.stderr.strip()[:200]}"
+        return None if p.returncode == 0 and "image/png" in targets else f"xclip rc={p.returncode}; targets={targets.split()}"
 
     def paste_image(self, title):
         """Caret at the end of the active editor, then a real Ctrl+V (xdotool)."""
@@ -647,12 +648,14 @@ class Hypr(Base):
         import shutil
         if not shutil.which("wl-copy"):
             return "wl-copy (wl-clipboard) is not installed"
+        # No pipes: the forked owner would hold them open and run() would wait.
         with open(path, "rb") as f:
-            p = subprocess.run(["wl-copy", "--type", "image/png"], stdin=f, capture_output=True, text=True, timeout=10)
+            p = subprocess.run(["wl-copy", "--type", "image/png"], stdin=f,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
         time.sleep(0.5)
         types = sh("wl-paste", "--list-types")
         R.log("clipboard types:", types.split())
-        return None if p.returncode == 0 and "image/png" in types else f"wl-copy rc={p.returncode} {p.stderr.strip()[:200]}"
+        return None if p.returncode == 0 and "image/png" in types else f"wl-copy rc={p.returncode}; types={types.split()}"
 
     def paste_image(self, title):
         """No DOM here: the palette's Go to line (past the last line) puts
