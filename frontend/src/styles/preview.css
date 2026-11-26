@@ -405,3 +405,73 @@
 #preview-pane del {
   color: var(--text-muted);
 }
+
+/* Wiki links: [[Note]]. A missing note reads as a dashed, muted link. */
+#preview-pane .wiki-link-missing {
+  color: var(--text-muted, #888);
+  text-decoration-style: dashed;
+  text-decoration-line: underline;
+  text-decoration-color: currentColor;
+}
+
+#preview-pane span.wiki-link-missing {
+  cursor: default;
+}
+
+/* Backlinks strip under the preview. */
+.wiki-backlinks {
+  flex-shrink: 0;
+  max-height: 35%;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.wiki-backlinks.hidden {
+  display: none;
+}
+
+.wiki-backlinks button {
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  padding: 3px 4px;
+  border-radius: 4px;
+  width: 100%;
+}
+
+.wiki-backlinks button:hover {
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.wiki-backlinks-header {
+  font-weight: 600;
+}
+
+.wiki-backlinks-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.wiki-backlink {
+  display: flex;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.wiki-backlink-file {
+  flex-shrink: 0;
+  font-weight: 500;
+}
+
+.wiki-backlink-line {
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

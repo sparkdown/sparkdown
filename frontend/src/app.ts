@@ -34,6 +34,7 @@ import { CockpitController } from './app/cockpit';
 import { registerMenuListeners, registerActionListeners, type ActionTargets } from './app/actions';
 import { registerBuiltinCommands, type ViewMode } from './app/builtin-commands';
 import { Palette } from './palette';
+import { WikiLinks } from './app/wiki-links';
 import { commands } from './commands';
 import { RecentFolderCommands } from './app/recent-folders';
 import { onWindowFocus, onWindowFocusChange } from './window-events';
@@ -128,6 +129,7 @@ export class App {
   private searchView!: SearchView;
   private updates!: UpdateManager;
   private palette!: Palette;
+  private wiki!: WikiLinks;
   /** Remote sessions' folder-open router (remote.ts); null = local only. */
   private remoteHandler: RemoteHandler | null = null;
   private settingsDialog = new SettingsDialog();
@@ -184,7 +186,11 @@ export class App {
       applyScriptsPolicy: () => this.htmlScripts.applyPolicy(),
       openFile: (path, options) => void this.openFile(path, options),
       openDiffFind: () => this.diff.openFind(),
+      resolveWikiLink: (target) => this.wiki.resolve(target),
+      createWikiNote: (path) => void this.wiki.createAndOpen(path),
+      workspaceRootChanged: () => this.wiki?.noteChanged(),
     });
+    this.wiki = this.createWikiLinks();
     this.documents = new DocumentController(this.ctx, {
       renderPreview: (content) => this.panes.renderPreview(content),
       loadPreview: () => this.panes.loadPreview(),
@@ -681,6 +687,36 @@ export class App {
     // Quit persists the config itself right after this; a debounced save
     // still pending would only land late with the same (or staler) state.
     this.debouncedSaveConfig.cancel();
+  }
+
+  /** Wiki links: the file list `[[...]]` resolves against, and Backlinks. */
+  private createWikiLinks(): WikiLinks {
+    const wiki = new WikiLinks({
+      root: () => this.ctx.workspaceRoot,
+      origin: () => this.tabs.getOrigin(),
+      activePath: () => this.tabs.activeTab()?.path ?? null,
+      showHidden: () => this.fileTree.isShowHidden(),
+      listFiles: (root, hidden) => api.listWorkspaceFiles(root, hidden),
+      search: (root, regex, hidden) => api.searchInFiles(root, regex, false, hidden, true),
+      onIndexChanged: () => this.panes.refreshWikiLinks(),
+      openAt: async (path, line) => {
+        await this.openFile(path);
+        this.editor.gotoLine(line);
+        this.panes.focusEditor();
+      },
+      createEntry: (parent, name, isDir) => api.createEntry(parent, name, isDir),
+      openFile: (path) => this.openFile(path, { folderOnly: true }),
+      showError: (text) => void message(text, { title: 'Wiki link', kind: 'error' }),
+    });
+    this.bus.on(EVENTS.TAB_SWITCHED, () => wiki.noteChanged());
+    this.bus.on(EVENTS.TAB_SAVED, () => wiki.noteChanged());
+    // Same rule as Quick open: only a structural change alters the file
+    // list. Any change may add or remove a link, so backlinks refresh.
+    this.ctx.listenTauri<FsChange[]>('watcher://changes', (e) => {
+      if (e.payload.some((c) => c.kind !== 'modify')) wiki.invalidateIndex();
+      else wiki.noteChanged();
+    });
+    return wiki;
   }
 
   /** Quick open / command palette (palette.ts) over the workspace root. */

@@ -455,6 +455,9 @@ export class PreviewPaneStub {
   setDiagramsEnabled(): void {}
   setFrameCallbacks(): void {}
   setOpenFileHandler(): void {}
+  setCreateFileHandler(): void {}
+  setWikiResolver(): void {}
+  refreshWikiLinks(): void {}
   setOriginResolver(): void {}
   setPathResolver(): void {}
   setBaseDir(): void {}
