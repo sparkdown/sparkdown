@@ -758,32 +758,199 @@ function stripPreamble(diff: string): string[] {
   return head.concat(lines.slice(firstHunk));
 }
 
+/** Classify one unified-diff body line for rendering. */
+function classifyDiffLine(
+  line: string,
+): { kind: 'meta'; text: string } | { kind: 'line'; cls: string; mark: string; text: string } {
+  if (line.startsWith('+')) return { kind: 'line', cls: 'diff-add', mark: '+', text: line.slice(1) };
+  if (line.startsWith('-')) return { kind: 'line', cls: 'diff-del', mark: '−', text: line.slice(1) };
+  if (line.startsWith('\\')) return { kind: 'meta', text: line };
+  return { kind: 'line', cls: 'diff-context', mark: ' ', text: line.slice(1) };
+}
+
 /** Render one diff body line (add / del / context) to HTML. The +/− marker
  *  sits in its own gutter span; the text keeps its indentation. */
 function renderDiffLine(line: string): string {
-  let cls = 'diff-context';
-  let mark = ' ';
-  if (line.startsWith('+')) {
-    cls = 'diff-add';
-    mark = '+';
-  } else if (line.startsWith('-')) {
-    cls = 'diff-del';
-    mark = '−';
-  } else if (line.startsWith('\\')) {
+  const classified = classifyDiffLine(line);
+  if (classified.kind === 'meta') {
     // "\ No newline at end of file"
-    return `<div class="diff-line diff-meta">${escapeReviewText(line)}</div>`;
+    return `<div class="diff-line diff-meta">${escapeReviewText(classified.text)}</div>`;
   }
-  const text = line.slice(1);
+  const { cls, mark, text } = classified;
   // Neutralise Unicode bidi overrides and invisible formatting characters in
   // diff text so the reviewer sees exactly what git stored, not what the bidi
   // algorithm redraws. A warning class on the line lets the stylesheet badge
   // it for extra visibility.
   const flagged = hasUnicodeControls(text) ? ' diff-line-bidi' : '';
   return (
-    `<div class="diff-line ${cls}${flagged}"><span class="diff-mark" aria-hidden="true">${mark}</span>` +
+    `<div class="diff-line ${cls}${flagged}"><span class="diff-mark" aria-hidden="true" data-find-skip>${mark}</span>` +
     `<span class="diff-text">${escapeReviewText(text) || '&nbsp;'}</span></div>`
   );
 }
+
+/** How the file diff is laid out. */
+export type DiffLayout = 'inline' | 'split';
+
+/** Read a stored layout preference; anything other than "split" is inline. */
+export function parseDiffLayout(value: unknown): DiffLayout {
+  return value === 'split' ? 'split' : 'inline';
+}
+
+/** One side of a side-by-side row. */
+export interface SplitSide {
+  /** Unified-diff line including its marker, or null when this side is empty. */
+  line: string | null;
+  /** 1-based line number on this side, or null. */
+  lineNo: number | null;
+  /** A `\\ No newline…` marker that follows this side, if any. */
+  meta?: string;
+}
+
+/** One aligned row in a side-by-side hunk. */
+export interface SplitRow {
+  left: SplitSide;
+  right: SplitSide;
+  /** New-file line "Open in editor" jumps to for this row (always ≥ 1). */
+  openLine: number;
+}
+
+/**
+ * Pair a hunk's lines into side-by-side rows: context on both sides, then
+ * each run of removals and additions zipped so a changed line sits across
+ * from its replacement, with leftover lines opposite an empty cell.
+ */
+export function alignHunkRows(hunk: DiffHunk): SplitRow[] {
+  const parsed = parseHunkHeader(hunk.header);
+  let oldLine = parsed?.oldStart ?? 1;
+  let newLine = parsed?.newStart ?? 1;
+  const rows: SplitRow[] = [];
+  const lines = hunk.lines;
+  let i = 0;
+
+  const takeMeta = (): string | undefined => {
+    if (i < lines.length && lines[i].startsWith('\\')) return lines[i++];
+    return undefined;
+  };
+
+  while (i < lines.length) {
+    const raw = lines[i];
+    if (raw.startsWith('\\')) {
+      const meta = lines[i++];
+      const last = rows[rows.length - 1];
+      if (last) {
+        if (last.right.line != null) last.right.meta = last.right.meta ?? meta;
+        else if (last.left.line != null) last.left.meta = last.left.meta ?? meta;
+        else last.right.meta = meta;
+      } else {
+        rows.push({
+          left: { line: null, lineNo: null },
+          right: { line: null, lineNo: null, meta },
+          openLine: Math.max(1, newLine),
+        });
+      }
+      continue;
+    }
+    if (raw.startsWith('+') || raw.startsWith('-')) {
+      const dels: SplitSide[] = [];
+      const adds: SplitSide[] = [];
+      while (i < lines.length && (lines[i].startsWith('+') || lines[i].startsWith('-'))) {
+        if (lines[i].startsWith('-')) {
+          const side: SplitSide = { line: lines[i++], lineNo: oldLine++ };
+          const meta = takeMeta();
+          if (meta) side.meta = meta;
+          dels.push(side);
+        } else {
+          const side: SplitSide = { line: lines[i++], lineNo: newLine++ };
+          const meta = takeMeta();
+          if (meta) side.meta = meta;
+          adds.push(side);
+        }
+      }
+      const upcoming = Math.max(1, newLine);
+      const n = Math.max(dels.length, adds.length);
+      for (let j = 0; j < n; j++) {
+        const left = dels[j] ?? { line: null, lineNo: null };
+        const right = adds[j] ?? { line: null, lineNo: null };
+        rows.push({ left, right, openLine: right.lineNo ?? upcoming });
+      }
+      continue;
+    }
+    i++;
+    const left: SplitSide = { line: raw, lineNo: oldLine };
+    const right: SplitSide = { line: raw, lineNo: newLine };
+    const meta = takeMeta();
+    if (meta) right.meta = meta;
+    const openLine = Math.max(1, newLine);
+    oldLine++;
+    newLine++;
+    rows.push({ left, right, openLine });
+  }
+  return rows;
+}
+
+function renderMetaLine(meta: string): string {
+  return `<div class="diff-line diff-meta">${escapeReviewText(meta)}</div>`;
+}
+
+/** Line-number gutter, optionally the Open-in-editor control for that row. */
+function renderLineNo(
+  lineNo: number | null,
+  open: boolean,
+  openLine: number,
+): string {
+  if (lineNo == null && !open) return '';
+  const n = lineNo ?? openLine;
+  if (open) {
+    return (
+      `<button type="button" class="diff-open-line diff-lnum" data-find-skip data-line="${openLine}" ` +
+      `title="Open in editor" aria-label="Open line ${openLine} in editor">${n}</button>`
+    );
+  }
+  return `<span class="diff-lnum" aria-hidden="true" data-find-skip>${n}</span>`;
+}
+
+function renderSplitCell(
+  side: 'left' | 'right',
+  cell: SplitSide,
+  openLine: number,
+  opts: RenderDiffOptions,
+  skipFind: boolean,
+): string {
+  const canOpen = opts.openInEditor !== false;
+  if (cell.line == null) {
+    return '<div class="diff-line diff-blank"><span class="diff-text">&nbsp;</span></div>';
+  }
+  const classified = classifyDiffLine(cell.line);
+  if (classified.kind === 'meta') {
+    return renderMetaLine(classified.text);
+  }
+  const { cls, mark, text } = classified;
+  const flagged = hasUnicodeControls(text) ? ' diff-line-bidi' : '';
+  const skip = skipFind ? ' data-find-skip' : '';
+  // Right lines (context or added) open their own new-file line. Left
+  // deletions open the place they used to occupy. Left context is not a
+  // control: the matching right number is.
+  const openBtn = canOpen && (side === 'right' || cls === 'diff-del');
+  const target = side === 'right' ? (cell.lineNo ?? openLine) : openLine;
+  const lnum = renderLineNo(cell.lineNo, openBtn, target);
+  return (
+    `<div class="diff-line ${cls}${flagged}"${skip}>${lnum}` +
+    `<span class="diff-mark" aria-hidden="true" data-find-skip>${mark}</span>` +
+    `<span class="diff-text">${escapeReviewText(text) || '&nbsp;'}</span>` +
+    `${cell.meta ? renderMetaLine(cell.meta) : ''}</div>`
+  );
+}
+
+function renderSplitRow(row: SplitRow, opts: RenderDiffOptions): string {
+  const leftSkip = !!row.left.line && !row.left.line.startsWith('+') && !row.left.line.startsWith('-');
+  return (
+    `<div class="diff-split-row">` +
+    renderSplitCell('left', row.left, row.openLine, opts, leftSkip) +
+    renderSplitCell('right', row.right, row.openLine, opts, false) +
+    `</div>`
+  );
+}
+
 
 /** `@@ -a,b +c,d @@ context` → its parts; null for a non-header. */
 export function parseHunkHeader(
@@ -867,6 +1034,8 @@ export interface RenderDiffOptions {
   markdown?: string | null;
   /** Show "Open in editor" per hunk (false for a deleted file). */
   openInEditor?: boolean;
+  /** Inline (unified, the default) or side-by-side columns. */
+  layout?: DiffLayout;
 }
 
 /** One hunk as a box: a header (heading or @@ context · line N, plus
@@ -897,7 +1066,13 @@ function renderHunk(hunk: DiffHunk, opts: RenderDiffOptions): string {
     );
   }
   if (!hunk.header && note) out.push(`<div class="diff-hunk-head">${note}</div>`);
-  for (const line of hunk.lines) out.push(renderDiffLine(line));
+  if (opts.layout === 'split') {
+    out.push('<div class="diff-split">');
+    for (const row of alignHunkRows(hunk)) out.push(renderSplitRow(row, opts));
+    out.push('</div>');
+  } else {
+    for (const line of hunk.lines) out.push(renderDiffLine(line));
+  }
   out.push('</section>');
   return out.join('');
 }
@@ -923,13 +1098,15 @@ export function renderUnifiedDiff(diff: string, opts: RenderDiffOptions = {}): s
   const hunks = parseHunks(body);
 
   if (!reading) {
-    return `<div class="diff">${hunks.map((h) => renderHunk(h, opts)).join('')}</div>`;
+    const cls = opts.layout === 'split' ? 'diff diff-layout-split' : 'diff';
+    return `<div class="${cls}">${hunks.map((h) => renderHunk(h, opts)).join('')}</div>`;
   }
 
   const parts = abridgeHunks(hunks);
   const anyHunks = parts.some((p) => p.kind === 'hunk');
   const anyOmitted = parts.some((p) => p.kind === 'omitted');
-  const out: string[] = ['<div class="diff">'];
+  const cls = opts.layout === 'split' ? 'diff diff-layout-split' : 'diff';
+  const out: string[] = [`<div class="${cls}">`];
   // When every hunk is substantive there's nothing to fold, and Reading
   // renders identically to Full — say so, or the toggle looks broken.
   if (anyHunks && !anyOmitted) {

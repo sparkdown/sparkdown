@@ -172,6 +172,7 @@ export class PreviewSearch {
           if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'HEAD' || tag === 'TITLE' || tag === 'NOSCRIPT') {
             return NodeFilter.FILTER_REJECT;
           }
+          if (a.hasAttribute('data-find-skip')) return NodeFilter.FILTER_REJECT;
           const cs = win?.getComputedStyle(a);
           if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) {
             return NodeFilter.FILTER_REJECT;

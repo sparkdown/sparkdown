@@ -172,6 +172,13 @@ pub struct AppConfig {
     /// never stored.
     #[serde(default)]
     pub git_run_anyway: std::collections::HashMap<String, String>,
+
+    /// How the file diff is laid out: "inline" (unified, the default) or
+    /// "split" (side by side). A plain string on disk so an unknown value
+    /// falls back to inline in the frontend instead of failing the load.
+    #[serde(default = "default_diff_layout")]
+    #[cfg_attr(test, ts(type = "'inline' | 'split'"))]
+    pub diff_layout: String,
 }
 
 /// One node of a persisted terminal split layout (see
@@ -289,6 +296,9 @@ fn default_terminal_height() -> u32 {
 fn default_sidebar_view() -> String {
     "files".to_string()
 }
+fn default_diff_layout() -> String {
+    "inline".to_string()
+}
 fn default_true() -> bool {
     true
 }
@@ -325,6 +335,7 @@ impl Default for AppConfig {
             mcp_external_agents: false,
             git_background_fetch: true,
             git_run_anyway: std::collections::HashMap::new(),
+            diff_layout: default_diff_layout(),
         }
     }
 }
@@ -466,5 +477,17 @@ mod tests {
         let theme: AppConfig =
             serde_json::from_str(r#"{"theme": "solarized"}"#).expect("lenient: parses");
         assert_eq!(theme.theme, ThemeMode::System);
+    }
+
+    #[test]
+    fn diff_layout_defaults_to_inline_for_an_older_config() {
+        let cfg: AppConfig = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+        assert_eq!(cfg.diff_layout, "inline");
+        assert_eq!(AppConfig::default().diff_layout, "inline");
+        let split: AppConfig = serde_json::from_str(r#"{"diff_layout":"split"}"#).unwrap();
+        assert_eq!(split.diff_layout, "split");
+        // An unknown value still loads; the frontend maps it to inline.
+        let other: AppConfig = serde_json::from_str(r#"{"diff_layout":"stacked"}"#).unwrap();
+        assert_eq!(other.diff_layout, "stacked");
     }
 }

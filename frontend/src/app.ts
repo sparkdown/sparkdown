@@ -76,6 +76,7 @@ const DEFAULT_CONFIG: AppConfig = {
   mcp_external_agents: false,
   git_background_fetch: true,
   git_run_anyway: {},
+  diff_layout: 'inline',
 };
 
 /**
@@ -979,6 +980,7 @@ export class App {
         mcp_external_agents: this.config.mcp_external_agents ?? false,
         git_background_fetch: this.config.git_background_fetch ?? true,
         git_run_anyway: this.config.git_run_anyway ?? {},
+        diff_layout: this.config.diff_layout === 'split' ? 'split' : 'inline',
       };
       await api.saveConfig(config);
       this.configSaveFailures = 0;

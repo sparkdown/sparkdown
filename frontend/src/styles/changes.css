@@ -288,6 +288,7 @@
 #diff-header {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   flex-shrink: 0;
   padding: 8px 14px;
@@ -517,6 +518,68 @@
      keeps the logical byte order the user sees matching what git stored. */
   unicode-bidi: isolate;
   isolation: isolate;
+}
+
+/* Side-by-side: two equal columns, each wrapping long lines. An empty
+   opposite cell is a quiet placeholder so added and removed lines stay
+   aligned. Line numbers in the gutter are the per-line Open-in-editor
+   control (the hunk header button remains too). */
+.diff-split {
+  display: flex;
+  flex-direction: column;
+}
+
+.diff-split-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.diff-split-row > .diff-line {
+  min-width: 0;
+  padding-left: 58px;
+  min-height: 20px;
+}
+
+.diff-split-row > .diff-line + .diff-line {
+  border-left: 1px solid var(--border-light);
+}
+
+.diff-lnum {
+  position: absolute;
+  left: 6px;
+  width: 28px;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 20px;
+  color: var(--text-subtle);
+  user-select: none;
+}
+
+button.diff-lnum {
+  cursor: pointer;
+  color: var(--text-subtle);
+}
+
+button.diff-lnum:hover {
+  color: var(--preview-link);
+  text-decoration: underline;
+}
+
+.diff-split-row .diff-mark {
+  left: 40px;
+}
+
+.diff-blank {
+  background: var(--bg-secondary);
+}
+
+.diff-split-row .diff-line .diff-meta {
+  margin-left: -58px;
+  padding-left: 58px;
 }
 
 .diff-text {

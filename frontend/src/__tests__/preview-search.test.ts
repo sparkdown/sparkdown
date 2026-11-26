@@ -97,4 +97,27 @@ describe('PreviewSearch', () => {
     
     document.body.removeChild(host);
   });
+
+  it('skips text inside [data-find-skip] so a side-by-side context copy is not a second hit', () => {
+    const stubRect = { top: 10, left: 10, width: 50, height: 20, bottom: 30, right: 60 } as DOMRect;
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(stubRect);
+    Element.prototype.scrollIntoView = vi.fn();
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const content = document.createElement('div');
+    content.innerHTML =
+      '<div data-find-skip><span>alpha unique</span></div><div><span>alpha unique</span></div>';
+
+    const search = new PreviewSearch(host);
+    search.open(content);
+    const input = host.querySelector('.sd-find-input') as HTMLInputElement;
+    input.value = 'alpha';
+    input.dispatchEvent(new Event('input'));
+
+    expect(content.querySelectorAll('mark.sd-phit')).toHaveLength(1);
+    expect(host.querySelector('.sd-find-count')?.textContent).toContain('1 of 1');
+    document.body.removeChild(host);
+  });
+
 });
