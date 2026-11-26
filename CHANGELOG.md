@@ -22,6 +22,7 @@ requests.
 - **Changes:** conflicted files are listed in their own group, with Accept ours and Accept theirs (a confirmation first, and a copy kept in the Trash).
 - **Changes:** stage or unstage an individual hunk, and commit only what is staged when the index is not empty.
 - **Custom commands** appear in the command palette from your SparkDown user config (Settings → Custom commands, or the `user-run.json` file in the app config directory), never from the opened folder. Each command is a program and its arguments (no shell), run with the local folder as the working directory. Output appears in the new Output tab of the bottom pane. A bad entry is skipped and listed, and the palette still opens. Commands are unavailable in a remote (SSH) folder, or when no folder is open.
+- **On-save hooks** in the same user config (Settings → On save) run a command when you save a file in a local folder. The file path is the last argument, and an optional glob list chooses which files. Each hook is off until you turn it on. A hook that fails never fails the save. Hooks do not run in a remote (SSH) folder, or for files an agent writes on its own; they do run when you save after reviewing an agent edit.
 
 ### Changed
 
