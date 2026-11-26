@@ -51,3 +51,13 @@ export async function onWindowFocus(fn: () => void): Promise<UnlistenFn> {
     return () => {}; // tests / no Tauri runtime
   }
 }
+
+/** Emit an event targeted at this window (queued menu actions, etc.). */
+export async function emitToSelf(event: string): Promise<void> {
+  try {
+    const win = getCurrentWebviewWindow();
+    await win.emitTo(win.label, event);
+  } catch {
+    // tests / no Tauri runtime
+  }
+}
