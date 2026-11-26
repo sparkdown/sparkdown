@@ -1289,6 +1289,7 @@ fn parse_status_sections(raw: &str, root: &str) -> GitStatus {
             branch: None,
             top_level: None,
             changes: vec![],
+            conflict_op: None,
         };
     }
     let clean = |s: Option<&str>| {
@@ -1314,11 +1315,18 @@ fn parse_status_sections(raw: &str, root: &str) -> GitStatus {
     // Porcelain is NUL-separated; strip only the newlines the sentinel
     // echoes added around it.
     let porcelain = sections.next().unwrap_or("").trim_matches('\n');
+    let changes = parse_porcelain(porcelain);
+    let conflict_op = if changes.iter().any(|c| c.status == "conflicted") {
+        Some("other".into())
+    } else {
+        None
+    };
     GitStatus {
         is_repo: true,
         branch,
         top_level,
-        changes: parse_porcelain(porcelain),
+        changes,
+        conflict_op,
     }
 }
 

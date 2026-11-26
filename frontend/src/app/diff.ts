@@ -26,7 +26,10 @@ import {
   toRelativePath,
   neutralizeUnicodeControls,
 } from '../utils';
+import { ask, message } from '@tauri-apps/plugin-dialog';
 import type { AppContext } from './context';
+import { confirmRepoCommandsFor } from '../git-repo-commands';
+import { acceptConflictPrompt } from '../accept-conflict';
 import { syncEditorInput } from './editor-gate';
 import { PreviewSearch } from '../preview-search';
 
@@ -163,6 +166,8 @@ export class DiffController {
         onReviewChange: () => this.syncDiffHeader(),
         onDiscard: (paths) => void this.discard(paths),
         discardDisabledReason: () => (this.isRemote() ? REMOTE_DISCARD_REASON : null),
+        onAcceptConflict: (path, side) => void this.acceptConflict(path, side),
+        acceptDisabledReason: () => (this.isRemote() ? 'Accept ours / Accept theirs is not available in remote sessions yet. Use the terminal on the remote host.' : null),
       },
     );
     $('btn-changes-discard-all')?.addEventListener('click', () => this.changesView?.discardAll());
@@ -527,6 +532,7 @@ export class DiffController {
       deleted: 'D',
       renamed: 'R',
       untracked: 'U',
+      conflicted: 'C',
     };
     const map = new Map<string, string>();
     this.changed.clear();
@@ -551,6 +557,64 @@ export class DiffController {
 
   private isRemote(): boolean {
     return this.ctx.tabs.getOrigin() !== LOCAL_ORIGIN;
+  }
+
+  /** Confirm, write one side of an unmerged file, then refresh. */
+  private async acceptConflict(path: string, side: 'ours' | 'theirs'): Promise<void> {
+    if (this.discarding) return;
+    if (this.isRemote()) {
+      await message(
+        'Accept ours / Accept theirs is not available in remote sessions yet. Use the terminal on the remote host.',
+        { title: 'Changes', kind: 'info' },
+      );
+      return;
+    }
+    const root = this.changesView?.getRepoRoot();
+    const change = this.changesView?.change(path);
+    if (!root || !change || change.status !== 'conflicted') return;
+    const prompt = acceptConflictPrompt({
+      path,
+      side,
+      kind: change.conflict,
+      operation: this.changesView?.getConflictOp(),
+    });
+    const ok = await ask(prompt.message, {
+      title: prompt.title,
+      kind: 'warning',
+      okLabel: prompt.okLabel,
+      cancelLabel: 'Cancel',
+    });
+    if (!ok) return;
+    this.discarding = true;
+    try {
+      let result = await api.gitAcceptConflict(root, path, side, false);
+      if (result.needs_confirmation) {
+        const go = await confirmRepoCommandsFor(root, result.needs_confirmation, {
+          remembered: (r) => this.ctx.config.git_run_anyway?.[r],
+          remember: (r, fingerprint) => {
+            if (!this.ctx.config.git_run_anyway) this.ctx.config.git_run_anyway = {};
+            this.ctx.config.git_run_anyway[r] = fingerprint;
+            this.ctx.saveConfigSoon();
+          },
+        });
+        if (!go) return;
+        result = await api.gitAcceptConflict(root, path, side, true);
+      }
+      const abs = joinPath(root, path);
+      const origin = this.ctx.tabs.getOrigin();
+      for (const tab of this.ctx.tabs.tabsOfOrigin()) {
+        if (tab.path !== abs || tab.origin !== origin) continue;
+        if (result.deleted) this.ctx.tabs.closeTab(tab.id);
+        else await this.reloadDiscardedTab(tab.id, abs, true);
+      }
+      await this.changesView?.refresh();
+      await this.refreshBranch();
+    } catch (err) {
+      const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message: string }).message) : String(err);
+      await message(msg || 'Could not accept that side.', { title: 'Changes', kind: 'error' });
+    } finally {
+      this.discarding = false;
+    }
   }
 
   /** #172: confirm, discard, then sync open tabs and the Changes list. */

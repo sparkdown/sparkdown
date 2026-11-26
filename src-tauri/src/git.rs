@@ -18,8 +18,13 @@ use std::sync::OnceLock;
 #[derive(Serialize, Clone)]
 pub struct GitChange {
     pub path: String,
-    /// "modified" | "added" | "deleted" | "renamed" | "untracked"
+    /// "modified" | "added" | "deleted" | "renamed" | "untracked" | "conflicted"
     pub status: String,
+    /// When `status` is "conflicted", which unmerged case this is:
+    /// "both-modified", "both-added", "both-deleted", "deleted-by-us",
+    /// "deleted-by-them", "added-by-us", or "added-by-them".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<String>,
     /// Whether the path is staged (informational; the diff shows working tree).
     pub staged: bool,
     /// A directory, not a file: git lists an untracked nested repository
@@ -41,6 +46,9 @@ pub struct GitStatus {
     /// so the frontend must resolve and diff against it.
     pub top_level: Option<String>,
     pub changes: Vec<GitChange>,
+    /// When unmerged paths are present: "merge", "rebase", or "other".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict_op: Option<String>,
 }
 
 /// Absolute path to the git binary, resolved once against the login shell's
@@ -410,9 +418,42 @@ pub(crate) fn run_git(root: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Unmerged porcelain letters: any `U`, plus both-added (`AA`) and
+/// both-deleted (`DD`). Checked before the single-letter D/A mapping so
+/// those unmerged codes are not listed as a plain delete or add.
+fn is_unmerged(code: &str) -> bool {
+    let b = code.as_bytes();
+    if b.len() < 2 {
+        return false;
+    }
+    let (x, y) = (b[0], b[1]);
+    x == b'U' || y == b'U' || (x == b'A' && y == b'A') || (x == b'D' && y == b'D')
+}
+
+/// The unmerged case for a porcelain XY code; `None` when the path is not
+/// unmerged.
+pub(crate) fn conflict_kind(code: &str) -> Option<&'static str> {
+    if !is_unmerged(code) {
+        return None;
+    }
+    Some(match code {
+        "UU" => "both-modified",
+        "AA" => "both-added",
+        "DD" => "both-deleted",
+        "DU" => "deleted-by-us",
+        "UD" => "deleted-by-them",
+        "AU" => "added-by-us",
+        "UA" => "added-by-them",
+        _ => "both-modified",
+    })
+}
+
 fn map_status_code(code: &str) -> &'static str {
     // Two-char XY code from `git status --porcelain`; classify by the more
-    // meaningful of the pair.
+    // meaningful of the pair. Unmerged codes are their own status.
+    if is_unmerged(code) {
+        return "conflicted";
+    }
     if code.contains('?') {
         return "untracked";
     }
@@ -426,6 +467,25 @@ fn map_status_code(code: &str) -> &'static str {
         return "renamed";
     }
     "modified"
+}
+
+/// "merge", "rebase", or `None` when neither is in progress. Used to label
+/// Accept ours / Accept theirs (the two sides swap meaning during a rebase).
+pub(crate) fn conflict_op(root: &Path) -> Option<&'static str> {
+    let git_path = |name: &str| -> Option<PathBuf> {
+        let p = run_git(root, &["rev-parse", "--git-path", name]).ok()?;
+        let p = PathBuf::from(p.trim());
+        Some(if p.is_absolute() { p } else { root.join(p) })
+    };
+    for dir in ["rebase-merge", "rebase-apply"] {
+        if git_path(dir).is_some_and(|p| p.is_dir()) {
+            return Some("rebase");
+        }
+    }
+    if run_git(root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok() {
+        return Some("merge");
+    }
+    None
 }
 
 /// Working-tree status for `root`. Returns `is_repo: false` (not an error) when
@@ -466,6 +526,7 @@ pub(crate) fn git_status_impl(root: String) -> Result<GitStatus, String> {
             branch: None,
             top_level: None,
             changes: vec![],
+            conflict_op: None,
         });
     }
 
@@ -485,6 +546,7 @@ pub(crate) fn git_status_impl(root: String) -> Result<GitStatus, String> {
             branch: None,
             top_level: None,
             changes: vec![],
+            conflict_op: None,
         });
     }
     let top_level = top_level.map(|canonical| top_level_in_root_spelling(root_path, canonical));
@@ -506,11 +568,18 @@ pub(crate) fn git_status_impl(root: String) -> Result<GitStatus, String> {
         ],
     )?;
 
+    let changes = parse_porcelain(&raw);
+    let conflict_op = if changes.iter().any(|c| c.status == "conflicted") {
+        Some(conflict_op(root_path).unwrap_or("other").to_string())
+    } else {
+        None
+    };
     Ok(GitStatus {
         is_repo: true,
         branch,
         top_level,
-        changes: parse_porcelain(&raw),
+        changes,
+        conflict_op,
     })
 }
 
@@ -619,9 +688,18 @@ pub(crate) fn parse_porcelain(raw: &str) -> Vec<GitChange> {
         if path.is_empty() {
             continue;
         }
+        let status = map_status_code(code).to_string();
+        let conflict = conflict_kind(code).map(str::to_string);
+        // Unmerged index stages are not "staged" in the Changes sense.
+        let staged = if status == "conflicted" {
+            false
+        } else {
+            staged
+        };
         changes.push(GitChange {
             path: path.to_string(),
-            status: map_status_code(code).to_string(),
+            status,
+            conflict,
             staged,
             is_dir,
         });
@@ -1060,6 +1138,42 @@ mod tests {
         assert_eq!(changes[1].status, "untracked");
         assert_eq!(changes[2].status, "added");
         assert!(changes[2].staged);
+        assert_eq!(changes[0].conflict, None);
+    }
+
+    #[test]
+    fn unmerged_porcelain_codes_are_conflicted() {
+        let raw = "UU both.md\0AA add.md\0DD gone.md\0DU delus.md\0UD delthem.md\0AU addus.md\0UA addthem.md\0 M plain.md\0";
+        let changes = parse_porcelain(raw);
+        assert_eq!(changes.len(), 8);
+        let kind = |p: &str| {
+            let c = changes.iter().find(|c| c.path == p).unwrap();
+            (c.status.as_str(), c.conflict.as_deref(), c.staged)
+        };
+        assert_eq!(
+            kind("both.md"),
+            ("conflicted", Some("both-modified"), false)
+        );
+        assert_eq!(kind("add.md"), ("conflicted", Some("both-added"), false));
+        assert_eq!(kind("gone.md"), ("conflicted", Some("both-deleted"), false));
+        assert_eq!(
+            kind("delus.md"),
+            ("conflicted", Some("deleted-by-us"), false)
+        );
+        assert_eq!(
+            kind("delthem.md"),
+            ("conflicted", Some("deleted-by-them"), false)
+        );
+        assert_eq!(kind("addus.md"), ("conflicted", Some("added-by-us"), false));
+        assert_eq!(
+            kind("addthem.md"),
+            ("conflicted", Some("added-by-them"), false)
+        );
+        assert_eq!(kind("plain.md"), ("modified", None, false));
+        // A regular add or delete is not unmerged.
+        assert_eq!(map_status_code("A "), "added");
+        assert_eq!(map_status_code(" D"), "deleted");
+        assert_eq!(map_status_code("AD"), "deleted"); // staged add, worktree delete — not unmerged
     }
 
     #[test]
