@@ -1104,8 +1104,11 @@ pub fn save_config(
 /// Returns and clears any file paths received via macOS "Open With" or CLI args
 /// before the frontend was ready.
 #[tauri::command]
-pub fn get_pending_files(state: State<'_, PendingFiles>) -> Vec<String> {
-    state.take_startup()
+pub fn get_pending_files(
+    state: State<'_, PendingFiles>,
+    webview_window: tauri::WebviewWindow,
+) -> Vec<String> {
+    state.take_startup(webview_window.label())
 }
 
 /// Terminates the application. The frontend calls this only after the

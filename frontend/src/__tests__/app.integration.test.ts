@@ -391,6 +391,62 @@ describe('App integration', () => {
       expect(tabTitles()).toEqual(['a.md', 'b.md']);
     });
 
+    it('restores the tab that was active at quit, not the last one', async () => {
+      vfs.set('/notes/a.md', '# A');
+      vfs.set('/notes/b.md', '# B');
+      vfs.set('/notes/c.md', '# C');
+      setConfigOnDisk({
+        theme: 'system',
+        last_open_files: ['/notes/a.md', '/notes/b.md', '/notes/c.md'],
+        last_active_file: '/notes/b.md',
+        sidebar_visible: true,
+      });
+
+      await startApp();
+      await flush();
+      expect(tabTitles()).toEqual(['a.md', 'b.md', 'c.md']);
+      expect(activeTitle()).toBe('b.md');
+    });
+
+    it('a saved active tab whose file is gone falls back to the last tab', async () => {
+      vfs.set('/notes/a.md', '# A');
+      vfs.set('/notes/c.md', '# C');
+      setConfigOnDisk({
+        theme: 'system',
+        last_open_files: ['/notes/a.md', '/notes/b.md', '/notes/c.md'],
+        last_active_file: '/notes/b.md',
+        sidebar_visible: true,
+      });
+
+      await startApp();
+      await flush();
+      expect(activeTitle()).toBe('c.md');
+    });
+
+    it('the quit saves which tab is active', async () => {
+      vfs.set('/notes/a.md', '# A');
+      vfs.set('/notes/b.md', '# B');
+      vfs.set('/notes/c.md', '# C');
+      setConfigOnDisk({
+        theme: 'system',
+        last_open_files: ['/notes/a.md', '/notes/b.md', '/notes/c.md'],
+        sidebar_visible: true,
+      });
+
+      await startApp();
+      await flush();
+      Array.from(document.querySelectorAll<HTMLElement>('.tab'))
+        .find((el) => el.querySelector('.tab-title')?.textContent === 'b.md')!
+        .querySelector<HTMLElement>('.tab-title')!
+        .click();
+      await flush();
+      emitTauriEvent('exit-requested');
+      await flush();
+      const last = savedConfigs[savedConfigs.length - 1] as { last_open_files: string[]; last_active_file: string | null };
+      expect(last.last_open_files).toEqual(['/notes/a.md', '/notes/b.md', '/notes/c.md']);
+      expect(last.last_active_file).toBe('/notes/b.md');
+    });
+
     it('prefers pending "Open With" files over session restore', async () => {
       vfs.set('/notes/restored.md', 'old session');
       vfs.set('/inbox/dropped.md', 'from Finder');

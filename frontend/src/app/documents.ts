@@ -154,16 +154,22 @@ export class DocumentController {
 
   /**
    * Session restore: show a tab for every path at once, in order, but read
-   * only the file of the tab that becomes active (the last one, as when every
-   * file was opened in turn; the one before it if that file is gone). The
-   * others load on first activation or through loadRestoredTabs.
+   * only the file of the tab that becomes active: `active`, the tab that was
+   * active when the session was saved, else the last one (as when every file
+   * was opened in turn), stepping back past files that are gone. The others
+   * load on first activation or through loadRestoredTabs.
    */
-  async restoreTabs(paths: string[]): Promise<void> {
+  async restoreTabs(paths: string[], active?: string | null): Promise<void> {
     if (paths.length === 0) return;
     this.closePristineUntitled();
     const ids = paths
       .map((path) => this.ctx.tabs.addUnloaded(path))
       .filter((id): id is string => id !== null);
+    const saved = active ? this.ctx.tabs.findByPath(active)?.id : undefined;
+    if (saved && ids.includes(saved) && (await this.ctx.tabs.ensureLoaded(saved))) {
+      this.ctx.tabs.switchTo(saved);
+      return;
+    }
     for (let i = ids.length - 1; i >= 0; i--) {
       if (await this.ctx.tabs.ensureLoaded(ids[i])) {
         this.ctx.tabs.switchTo(ids[i]);

@@ -7,8 +7,13 @@
 //! - **Preferences** — the [`AppConfig`] fields, shared by all windows. A
 //!   window's save only applies the preferences *it* changed since it last
 //!   loaded or saved, so two windows saving at once never undo each other.
-//! - **Window sections** — `windows.<label>`: the folder, open files and
-//!   geometry of each window, restored on the next launch.
+//! - **Window sections** — `windows.<label>`: the folder, open files,
+//!   active tab and geometry of each window, restored on the next launch.
+//! - **Folder sessions** — `folders.<folder key>`: the same state per local
+//!   folder, kept after a window moves to another folder or closes, so
+//!   `sparkdown <folder>` brings that folder's tabs back. Bounded to the
+//!   [`MAX_FOLDERS`] most recently used folders; a folder that no longer
+//!   exists is dropped at load.
 //!
 //! A 0.3.x file (no `version`) is migrated on first load: one window on the
 //! most recent folder with the saved open files that live under it; with no
@@ -45,6 +50,9 @@ pub struct WindowSession {
     pub display: Option<String>,
     #[serde(default)]
     pub open_files: Vec<String>,
+    /// The active tab, one of `open_files`. `None`: the last one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub geometry: Option<Geometry>,
     /// Focus order (higher = focused more recently); the highest is focused
@@ -53,13 +61,68 @@ pub struct WindowSession {
     pub focus: u64,
 }
 
+/// Local folders whose session is kept in `folders`.
+pub const MAX_FOLDERS: usize = 20;
+
+/// One local folder's saved state, kept per folder (not per window).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FolderSession {
+    pub folder: FolderId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+    #[serde(default)]
+    pub open_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<Geometry>,
+    /// When a window last had this folder open, ms since the Unix epoch.
+    /// The oldest entries go first once there are more than [`MAX_FOLDERS`].
+    #[serde(default)]
+    pub used: u64,
+}
+
+impl FolderSession {
+    fn of(w: &WindowSession, used: u64) -> Option<(String, Self)> {
+        let f = w
+            .folder
+            .as_ref()
+            .filter(|f| matches!(f, FolderId::Local { .. }))?;
+        Some((
+            f.key(),
+            Self {
+                folder: f.clone(),
+                display: w.display.clone(),
+                open_files: w.open_files.clone(),
+                active_file: w.active_file.clone(),
+                geometry: w.geometry,
+                used,
+            },
+        ))
+    }
+
+    /// A window section that reopens this folder.
+    pub fn window(&self) -> WindowSession {
+        WindowSession {
+            folder: Some(self.folder.clone()),
+            display: self.display.clone(),
+            open_files: self.open_files.clone(),
+            active_file: self.active_file.clone(),
+            geometry: self.geometry,
+            focus: 0,
+        }
+    }
+}
+
 /// The whole file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stored {
-    /// Preferences as JSON (an [`AppConfig`] without `last_open_files`).
+    /// Preferences as JSON (an [`AppConfig`] without the window keys).
     /// Kept as a map so keys from a newer build survive a save.
     pub prefs: Map<String, Value>,
     pub windows: BTreeMap<String, WindowSession>,
+    /// Per-folder sessions, keyed by [`FolderId::key`].
+    pub folders: BTreeMap<String, FolderSession>,
     /// `true` when the stored prefs could not be parsed as an `AppConfig`
     /// as a whole (a wrong JSON type, for example) and were filled in per
     /// value by [`normalize_prefs`]. Not saved; worked out on every load.
@@ -71,13 +134,14 @@ impl Default for Stored {
         Self {
             prefs: prefs_of(&AppConfig::default()),
             windows: BTreeMap::new(),
+            folders: BTreeMap::new(),
             prefs_unparsed: false,
         }
     }
 }
 
 /// Window-local fields that are not shared preferences.
-const WINDOW_KEYS: &[&str] = &["last_open_files", "window_folder"];
+const WINDOW_KEYS: &[&str] = &["last_open_files", "last_active_file", "window_folder"];
 
 fn prefs_of(cfg: &AppConfig) -> Map<String, Value> {
     let Value::Object(mut m) = serde_json::to_value(cfg).unwrap_or(Value::Null) else {
@@ -109,6 +173,15 @@ impl Stored {
                     _ => None,
                 })
                 .unwrap_or_default();
+            // A file written before folder sessions: start them from the
+            // window sections, so their folders keep their tabs.
+            let folders = match root.remove("folders") {
+                Some(Value::Object(m)) => m
+                    .into_iter()
+                    .filter_map(|(k, v)| serde_json::from_value(v).ok().map(|s| (k, s)))
+                    .collect(),
+                _ => folders_of(&windows, 0),
+            };
             root.remove("version");
             for k in WINDOW_KEYS {
                 root.remove(*k);
@@ -117,10 +190,55 @@ impl Stored {
             return Self {
                 prefs,
                 windows,
+                folders,
                 prefs_unparsed,
             };
         }
-        migrate_v1(root, window_state)
+        let mut s = migrate_v1(root, window_state);
+        s.folders = folders_of(&s.windows, 0);
+        s
+    }
+
+    /// Copy every window's local folder state into `folders`, then keep
+    /// the [`MAX_FOLDERS`] most recently used. An entry is stamped `now`
+    /// when it changed, or when its window is in `touched` (it just saved).
+    pub fn remember_folders(&mut self, now: u64, touched: &[&str]) {
+        for (label, w) in &self.windows {
+            let Some((k, mut f)) = FolderSession::of(w, now) else {
+                continue;
+            };
+            if let Some(old) = self.folders.get(&k) {
+                if !touched.contains(&label.as_str())
+                    && (FolderSession {
+                        used: old.used,
+                        ..f.clone()
+                    }) == *old
+                {
+                    continue;
+                }
+            }
+            f.used = now.max(self.folders.get(&k).map_or(0, |o| o.used));
+            self.folders.insert(k, f);
+        }
+        if self.folders.len() > MAX_FOLDERS {
+            let mut by_age: Vec<(u64, String)> = self
+                .folders
+                .iter()
+                .map(|(k, f)| (f.used, k.clone()))
+                .collect();
+            by_age.sort();
+            for (_, k) in by_age.into_iter().take(self.folders.len() - MAX_FOLDERS) {
+                self.folders.remove(&k);
+            }
+        }
+    }
+
+    /// Drop the saved sessions of local folders `exists` says are gone.
+    pub fn drop_missing_folders(&mut self, exists: impl Fn(&str) -> bool) {
+        self.folders.retain(|_, f| match &f.folder {
+            FolderId::Local { path } => exists(path),
+            FolderId::Remote { .. } => false,
+        });
     }
 
     pub fn to_json(&self) -> String {
@@ -129,6 +247,10 @@ impl Stored {
         root.insert(
             "windows".into(),
             serde_json::to_value(&self.windows).unwrap_or(Value::Null),
+        );
+        root.insert(
+            "folders".into(),
+            serde_json::to_value(&self.folders).unwrap_or(Value::Null),
         );
         serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_default()
     }
@@ -142,6 +264,10 @@ impl Stored {
             "last_open_files".into(),
             serde_json::to_value(w.map(|w| w.open_files.clone()).unwrap_or_default())
                 .unwrap_or_default(),
+        );
+        v.insert(
+            "last_active_file".into(),
+            serde_json::to_value(w.and_then(|w| w.active_file.clone())).unwrap_or_default(),
         );
         let folder = w.and_then(|w| match &w.folder {
             Some(FolderId::Local { path }) => Some(path.clone()),
@@ -176,6 +302,10 @@ impl Stored {
         }
         let w = self.windows.entry(label.to_string()).or_default();
         w.open_files = cfg.last_open_files.clone();
+        w.active_file = cfg
+            .last_active_file
+            .clone()
+            .filter(|a| cfg.last_open_files.contains(a));
         match folder {
             Some((f, display)) => {
                 w.folder = Some(f);
@@ -187,6 +317,16 @@ impl Stored {
             }
         }
     }
+}
+
+fn folders_of(
+    windows: &BTreeMap<String, WindowSession>,
+    used: u64,
+) -> BTreeMap<String, FolderSession> {
+    windows
+        .values()
+        .filter_map(|w| FolderSession::of(w, used))
+        .collect()
 }
 
 /// Run stored preferences through [`AppConfig`] so missing keys get their
@@ -259,6 +399,7 @@ fn migrate_v1(root: Map<String, Value>, window_state: Option<&str>) -> Stored {
                     open_files: files,
                     geometry,
                     focus: 1,
+                    ..Default::default()
                 },
             )
         }
@@ -275,6 +416,7 @@ fn migrate_v1(root: Map<String, Value>, window_state: Option<&str>) -> Stored {
     Stored {
         prefs,
         windows: BTreeMap::from([(label, session)]),
+        folders: BTreeMap::new(),
         prefs_unparsed,
     }
 }
@@ -343,6 +485,56 @@ pub fn plan_restore(stored: &Stored) -> Vec<RestorePlan> {
         });
     } else {
         out[0].focus = true;
+    }
+    out
+}
+
+/// The windows to open for a launch with `cli_folder` as its only path
+/// (`sparkdown <folder>`), or with no folder (`None`): the saved windows as
+/// [`plan_restore`] has them, with `cli_folder` in one of them, focused. A
+/// saved window that has the folder already is that window. Otherwise the
+/// focused window opens it, with the folder's own saved session (its tabs,
+/// active tab and geometry) instead of the window's previous folder; that
+/// folder's session stays in `folders`.
+pub fn plan_launch(stored: &Stored, cli_folder: Option<&FolderId>) -> Vec<RestorePlan> {
+    let mut out = plan_restore(stored);
+    let Some(f) = cli_folder else {
+        return out;
+    };
+    let key = f.key();
+    let i = match out
+        .iter()
+        .position(|p| p.session.folder.as_ref().is_some_and(|g| g.key() == key))
+    {
+        Some(i) => i,
+        None => {
+            let i = out.iter().position(|p| p.focus).unwrap_or(0);
+            let mut session = stored
+                .folders
+                .get(&key)
+                .map(FolderSession::window)
+                .unwrap_or_else(|| WindowSession {
+                    folder: Some(f.clone()),
+                    display: match f {
+                        FolderId::Local { path } => Some(path.clone()),
+                        FolderId::Remote { .. } => None,
+                    },
+                    ..Default::default()
+                });
+            if session.geometry.is_none() {
+                session.geometry = out[i].session.geometry;
+            }
+            session.focus = out[i].session.focus;
+            out[i] = RestorePlan {
+                label: windows::label_for_folder(f),
+                session,
+                focus: true,
+            };
+            i
+        }
+    };
+    for (j, p) in out.iter_mut().enumerate() {
+        p.focus = j == i;
     }
     out
 }
@@ -443,10 +635,11 @@ impl ConfigStore {
             .parent()
             .map(|d| d.join(".window-state.json"))
             .and_then(|p| std::fs::read_to_string(p).ok());
-        let stored = match &text {
+        let mut stored = match &text {
             Some(t) => Stored::parse(t, ws.as_deref()),
             None => Stored::default(),
         };
+        stored.drop_missing_folders(|p| Path::new(p).is_dir());
         // If the stored prefs could not be parsed, keep a copy of the file
         // before the first save rewrites it, so the values can be recovered.
         // Once per load; errors are ignored.
@@ -556,7 +749,7 @@ impl ConfigStore {
             g.stored.apply_save(label, base.as_ref(), cfg, folder);
             g.given.insert(label.to_string(), prefs_of(cfg));
         }
-        self.write()
+        self.write_with(&[label])
     }
 
     /// Record a window's geometry and focus order (written with the next
@@ -688,12 +881,26 @@ impl ConfigStore {
         self.write()
     }
 
-    /// Serialize under the lock and replace the file atomically.
+    /// Serialize under the lock and replace the file atomically (a reader
+    /// sees the old file or the new one, never part of one). Each window's
+    /// local folder state is copied into the folder sessions first.
     fn write(&self) -> Result<(), String> {
-        let g = self.lock();
+        self.write_with(&[])
+    }
+
+    fn write_with(&self, touched: &[&str]) -> Result<(), String> {
+        let mut g = self.lock();
+        g.stored.remember_folders(now_ms(), touched);
         let json = g.stored.to_json();
         write_atomic(&self.path, json.as_bytes()).map_err(|e| e.to_string())
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -1254,6 +1461,177 @@ mod tests {
         let empty = plan_restore(&Stored::default());
         assert_eq!(empty.len(), 1);
         assert_eq!(empty[0].label, windows::DEFAULT_LABEL);
+    }
+
+    fn save_tabs(
+        store: &ConfigStore,
+        label: &str,
+        folder: &FolderId,
+        files: &[&str],
+        active: Option<&str>,
+    ) {
+        let cfg = AppConfig {
+            last_open_files: files.iter().map(|f| f.to_string()).collect(),
+            last_active_file: active.map(str::to_string),
+            ..Default::default()
+        };
+        let display = match folder {
+            FolderId::Local { path } => Some(path.clone()),
+            FolderId::Remote { .. } => None,
+        };
+        store
+            .save_from(label, &cfg, Some((folder.clone(), display)))
+            .unwrap();
+    }
+
+    /// Open the file the way a new launch does: load, then plan.
+    fn launch(path: &Path, cli: Option<&FolderId>) -> (ConfigStore, Vec<RestorePlan>) {
+        let store = ConfigStore::open(path.to_path_buf());
+        let plan = plan_launch(&store.stored(), cli);
+        store.adopt(&plan);
+        (store, plan)
+    }
+
+    #[test]
+    fn each_folder_keeps_its_own_session_across_launches_with_another_folder() {
+        let d = tmpdir("per-folder");
+        for r in ["good", "images"] {
+            std::fs::create_dir_all(d.join(r)).unwrap();
+        }
+        let path = d.join("config.json");
+        let good = windows::local_folder_id(d.join("good").to_str().unwrap()).unwrap();
+        let images = windows::local_folder_id(d.join("images").to_str().unwrap()).unwrap();
+        let g = |n: &str| d.join("good").join(n).to_string_lossy().into_owned();
+        let (a, b) = (g("a.md"), g("b.md"));
+
+        // `sparkdown good`: two tabs, b active. Quit.
+        let (store, plan) = launch(&path, Some(&good));
+        save_tabs(&store, &plan[0].label, &good, &[&a, &b], Some(&b));
+        store.flush().unwrap();
+        // `sparkdown images`: the window opens images, without good's tabs.
+        let (store, plan) = launch(&path, Some(&images));
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].session.folder.as_ref(), Some(&images));
+        assert!(plan[0].session.open_files.is_empty());
+        save_tabs(&store, &plan[0].label, &images, &[], None);
+        store.flush().unwrap();
+        // `sparkdown good` again: good's tabs and active tab are back.
+        let (_, plan) = launch(&path, Some(&good));
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].label, windows::label_for_folder(&good));
+        assert_eq!(plan[0].session.folder.as_ref(), Some(&good));
+        assert_eq!(plan[0].session.open_files, vec![a.clone(), b.clone()]);
+        assert_eq!(plan[0].session.active_file.as_deref(), Some(b.as_str()));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_launch_without_arguments_still_restores_every_window() {
+        let d = tmpdir("multi-noarg");
+        for r in ["one", "two"] {
+            std::fs::create_dir_all(d.join(r)).unwrap();
+        }
+        let path = d.join("config.json");
+        let one = windows::local_folder_id(d.join("one").to_str().unwrap()).unwrap();
+        let two = windows::local_folder_id(d.join("two").to_str().unwrap()).unwrap();
+        let store = ConfigStore::open(path.clone());
+        let (l1, l2) = (
+            windows::label_for_folder(&one),
+            windows::label_for_folder(&two),
+        );
+        save_tabs(&store, &l1, &one, &["/x/1.md"], None);
+        save_tabs(&store, &l2, &two, &["/x/2.md"], None);
+        store.note_focus(&l2, 7);
+        store.flush().unwrap();
+        let (_, plan) = launch(&path, None);
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0].label, l2);
+        assert!(plan[0].focus && !plan[1].focus);
+        // A folder argument naming the other window's folder goes to that
+        // window (focused), not to the most recently focused one.
+        let (_, plan) = launch(&path, Some(&one));
+        assert_eq!(plan.len(), 2);
+        let focused: Vec<_> = plan.iter().filter(|p| p.focus).collect();
+        assert_eq!(focused.len(), 1);
+        assert_eq!(focused[0].label, l1);
+        assert_eq!(focused[0].session.open_files, vec!["/x/1.md".to_string()]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_file_from_before_folder_sessions_starts_them_from_its_windows() {
+        let d = tmpdir("migrate-folders");
+        std::fs::create_dir_all(d.join("good")).unwrap();
+        let good = d.join("good").to_string_lossy().into_owned();
+        let text = serde_json::json!({
+            "version": 2,
+            "theme": "dark",
+            "windows": {"w-1": {"folder": {"kind": "local", "path": good}, "open_files": [format!("{good}/n.md")], "focus": 1}}
+        })
+        .to_string();
+        let s = Stored::parse(&text, None);
+        let key = FolderId::Local { path: good.clone() }.key();
+        assert_eq!(s.folders[&key].open_files, vec![format!("{good}/n.md")]);
+        assert!(!s.prefs.contains_key("folders"));
+        // And a written file keeps them under `folders`, not in the prefs.
+        let again = Stored::parse(&s.to_json(), None);
+        assert_eq!(again.folders, s.folders);
+        assert!(!again.prefs.contains_key("folders"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn folder_sessions_keep_the_most_recent_and_drop_folders_that_are_gone() {
+        let mut s = Stored::default();
+        for i in 0..(MAX_FOLDERS as u64 + 5) {
+            s.windows.clear();
+            s.windows.insert(
+                "w".into(),
+                WindowSession {
+                    folder: Some(FolderId::Local {
+                        path: format!("/f{i}"),
+                    }),
+                    ..Default::default()
+                },
+            );
+            s.remember_folders(100 + i, &[]);
+        }
+        assert_eq!(s.folders.len(), MAX_FOLDERS);
+        let kept: Vec<u64> = s.folders.values().map(|f| f.used).collect();
+        assert!(kept.iter().all(|u| *u >= 105), "the 5 oldest go: {kept:?}");
+        s.drop_missing_folders(|p| p != "/f24" && p != "/f10");
+        assert_eq!(s.folders.len(), MAX_FOLDERS - 2);
+        assert!(!s.folders.contains_key(
+            &FolderId::Local {
+                path: "/f24".into()
+            }
+            .key()
+        ));
+    }
+
+    #[test]
+    fn the_active_tab_is_kept_only_when_it_is_one_of_the_open_files() {
+        let d = tmpdir("active-tab");
+        let store = ConfigStore::open(d.join("config.json"));
+        let f = FolderId::Local { path: "/p".into() };
+        save_tabs(
+            &store,
+            "w",
+            &f,
+            &["/p/a.md", "/p/b.md", "/p/c.md"],
+            Some("/p/b.md"),
+        );
+        assert_eq!(
+            store.load_for("w").last_active_file.as_deref(),
+            Some("/p/b.md")
+        );
+        assert_eq!(
+            store.stored().folders[&f.key()].active_file.as_deref(),
+            Some("/p/b.md")
+        );
+        save_tabs(&store, "w", &f, &["/p/a.md"], Some("/p/gone.md"));
+        assert_eq!(store.load_for("w").last_active_file, None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -9,6 +9,11 @@ export type AppConfig = { theme: ThemeMode,
  */
 last_open_files: Array<string>, 
 /**
+ * The tab that was active in this window, one of `last_open_files`
+ * (window section, see session.rs). `None`: the last tab.
+ */
+last_active_file?: string | null, 
+/**
  * The local folder this window reopens at launch (window section,
  * read-only for the frontend; see session.rs).
  */

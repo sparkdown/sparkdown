@@ -21,6 +21,11 @@ pub struct AppConfig {
     #[serde(default)]
     pub last_open_files: Vec<String>,
 
+    /// The tab that was active in this window, one of `last_open_files`
+    /// (window section, see session.rs). `None`: the last tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active_file: Option<String>,
+
     /// The local folder this window reopens at launch (window section,
     /// read-only for the frontend; see session.rs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -308,6 +313,7 @@ impl Default for AppConfig {
         Self {
             theme: ThemeMode::System,
             last_open_files: vec![],
+            last_active_file: None,
             window_folder: None,
             recent_folders: vec![],
             terminal_visible: false,

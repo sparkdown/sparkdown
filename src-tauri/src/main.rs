@@ -50,6 +50,9 @@ pub struct PendingFiles {
     /// later arrivals go to it as an `open-paths` event instead (#51).
     /// Only read or written under the `paths` lock.
     pub frontend_took: Arc<std::sync::atomic::AtomicBool>,
+    /// The window the startup queue is for (the focused window of the
+    /// launch). `None`: the first window that asks.
+    pub startup_target: Arc<Mutex<Option<String>>>,
 }
 
 impl PendingFiles {
@@ -80,7 +83,14 @@ impl PendingFiles {
     /// A later webview start (another window, or a reload after macOS ended
     /// its web-content process) gets nothing, so it never opens another
     /// window's folder (#106).
-    pub fn take_startup(&self) -> Vec<String> {
+    pub fn take_startup(&self, label: &str) -> Vec<String> {
+        // Several restored windows start at once: the queue is for one of
+        // them, not for whichever asks first.
+        if let Ok(target) = self.startup_target.lock() {
+            if target.as_deref().is_some_and(|t| t != label) {
+                return Vec::new();
+            }
+        }
         let Ok(mut queue) = self.paths.lock() else {
             return Vec::new();
         };
@@ -689,7 +699,16 @@ fn main() {
             let cwd = std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let cli_files = cli::forwarded_paths(&argv, &cwd);
+            let mut cli_files = cli::forwarded_paths(&argv, &cwd);
+            // `sparkdown <folder>`: the launch plan opens the folder with its
+            // own saved session, so it is not handed to the page as a path.
+            let cli_folder = match cli_files.as_slice() {
+                [one] => windows::local_folder_id(one).ok(),
+                _ => None,
+            };
+            if cli_folder.is_some() {
+                cli_files.clear();
+            }
             if !cli_files.is_empty() {
                 let _ = app.state::<PendingFiles>().offer(cli_files);
             }
@@ -708,8 +727,11 @@ fn main() {
             // (killed, crashed). No window of this run has written one yet.
             context::remove_all_context_dirs();
             let store = session::ConfigStore::open(config_file);
-            let plan = session::plan_restore(&store.stored());
+            let plan = session::plan_launch(&store.stored(), cli_folder.as_ref());
             store.adopt(&plan);
+            if let Ok(mut t) = app.state::<PendingFiles>().startup_target.lock() {
+                *t = plan.iter().find(|p| p.focus).map(|p| p.label.clone());
+            }
             app.manage(store);
             for p in &plan {
                 if let Some(f) = &p.session.folder {
@@ -1195,7 +1217,7 @@ mod tests {
     fn pending_queues_only_until_the_frontend_takes_it() {
         let p = PendingFiles::default();
         assert_eq!(p.offer(v(&["/cli/A"])), None, "before the take: queued");
-        assert_eq!(p.take_startup(), v(&["/cli/A"]));
+        assert_eq!(p.take_startup("main"), v(&["/cli/A"]));
         // #106: an Apple Event (`open -a`, Open With) after the take is
         // routed, never also left in the app-wide queue.
         assert_eq!(p.offer(v(&["/x/A"])), Some(v(&["/x/A"])));
@@ -1211,15 +1233,28 @@ mod tests {
         // window starting must not open A from the startup queue.
         let p = PendingFiles::default();
         let _ = p.offer(v(&["/cli/A"]));
-        assert_eq!(p.take_startup(), v(&["/cli/A"]), "first frontend gets them");
+        assert_eq!(
+            p.take_startup("main"),
+            v(&["/cli/A"]),
+            "first frontend gets them"
+        );
         assert!(
-            p.take_startup().is_empty(),
+            p.take_startup("main").is_empty(),
             "a reload or second window gets none"
         );
         // Even if something were queued behind the flag, a later start drops it.
         p.paths.lock().unwrap().push("/stale/A".into());
-        assert!(p.take_startup().is_empty());
+        assert!(p.take_startup("main").is_empty());
         assert!(p.paths.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_startup_paths_go_to_the_launch_s_focused_window_not_the_first_to_ask() {
+        let p = PendingFiles::default();
+        *p.startup_target.lock().unwrap() = Some("w-b".into());
+        let _ = p.offer(v(&["/cli/file.md"]));
+        assert!(p.take_startup("w-a").is_empty(), "another restored window");
+        assert_eq!(p.take_startup("w-b"), v(&["/cli/file.md"]));
     }
 
     #[test]
@@ -1227,7 +1262,7 @@ mod tests {
         let p = PendingFiles::default();
         let many: Vec<String> = (0..150).map(|i| format!("/f{i}")).collect();
         assert_eq!(p.offer(many), None);
-        assert_eq!(p.take_startup().len(), super::MAX_PENDING_FILES);
+        assert_eq!(p.take_startup("main").len(), super::MAX_PENDING_FILES);
     }
 
     #[test]

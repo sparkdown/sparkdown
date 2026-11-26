@@ -409,7 +409,7 @@ export class App {
     if (pendingFiles.length > 0 && !relaunch) {
       await this.workspace.openDroppedPaths(pendingFiles);
     } else if (this.config.last_open_files.length > 0) {
-      await this.documents.restoreTabs(this.config.last_open_files);
+      await this.documents.restoreTabs(this.config.last_open_files, this.config.last_active_file);
     } else if (!folder && !routed) {
       // Nothing to restore → the welcome screen (an invitation to act),
       // rather than a blank Untitled buffer.
@@ -981,6 +981,12 @@ export class App {
     });
   }
 
+  /** The active tab's file, when it is a local file (what restore reopens). */
+  private activeLocalPath(): string | null {
+    const tab = this.tabs.activeTab();
+    return tab?.path && tab.origin === LOCAL_ORIGIN ? tab.path : null;
+  }
+
   private async persistConfig(): Promise<void> {
     // Close Folder (#127) is reloading this window empty: a late save would
     // write the old folder's tabs back into its (dropped) session section.
@@ -991,6 +997,7 @@ export class App {
         // Local tabs only: the next launch starts local, so a remote path
         // would be read from this machine's disk.
         last_open_files: this.tabs.getOpenPaths(LOCAL_ORIGIN),
+        last_active_file: this.activeLocalPath(),
         recent_folders: this.config.recent_folders,
         terminal_visible: this.cockpit.isVisible(),
         terminal_height: this.cockpit.currentTerminalHeight(),
