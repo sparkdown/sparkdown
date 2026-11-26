@@ -78,6 +78,24 @@ describe('EditorManager text metrics', () => {
     });
   });
 
+  describe('revealLine', () => {
+    it('puts the cursor at the start of the line, clamped to the document', () => {
+      const { editor } = setup('one\ntwo\nthree\n');
+      editor.revealLine(2, null);
+      expect(editor.getCursorLine()).toBe(2);
+      editor.revealLine(99, null);
+      expect(editor.getCursorLine()).toBe(4);
+      editor.revealLine(0, null);
+      expect(editor.getCursorLine()).toBe(1);
+    });
+
+    it('does not take focus from the preview', () => {
+      const { editor, view } = setup('one\ntwo\n');
+      editor.revealLine(2, 0);
+      expect(view.hasFocus).toBe(false);
+    });
+  });
+
   describe('headingSourceLines', () => {
     it('returns 1-based ATX heading lines, skipping fenced code', () => {
       const { editor } = setup('# A\n\ntext\n\n```\n# not a heading\n```\n\n## B\n');
