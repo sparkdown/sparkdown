@@ -227,6 +227,15 @@ export class App {
     this.searchView = new SearchView({
       openAt: (path, line, column) => void this.openAt(path, line, column),
       includeHidden: () => this.fileTree.isShowHidden(),
+      isRemote: () => this.tabs.getOrigin() !== LOCAL_ORIGIN,
+      hasUnsavedChanges: (path) => {
+        const tab = this.tabs.findByPath(path);
+        if (!tab) return false;
+        // The active tab's live text (getContent applies pending input first).
+        const text = tab.id === this.tabs.activeTab()?.id ? this.editor.getContent() : tab.content;
+        return tab.modified || text !== tab.savedContent;
+      },
+      filesWritten: (paths) => this.workspace.syncFilesWithDisk(paths),
     });
     this.activityBar = new ActivityBar(
       {

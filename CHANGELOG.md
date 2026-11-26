@@ -10,6 +10,7 @@ requests.
 ### Added
 
 - Paste or drop an image into a markdown document: it is saved next to the file under a new name and linked as `![](name.png)`.
+- **Search in files** can replace across files: open the replace field with the ⇄ button, then Preview lists every match as before → after. Untick files or single matches to leave them out, then Replace. Files that changed on disk since the preview, files open with unsaved changes, and files that are not UTF-8 text are left alone and listed. **Undo replace** puts the whole batch back. The replacement is plain text (also in regex mode). Not available for remote folders.
 
 ### Changed
 
