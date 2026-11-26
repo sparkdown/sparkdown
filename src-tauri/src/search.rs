@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 mod case_tables;
 mod pattern;
 mod perl_tables;
+pub mod replace;
 
 /// Stop after this many matching lines (the UI says "more results …").
 pub const MAX_RESULTS: usize = 500;
@@ -153,8 +154,61 @@ impl Matcher {
         }
     }
 
+    /// Capture groups written in a regex query: how many, and the number of
+    /// each named one. Numbers are the user's (`1` is the first group they
+    /// wrote), whatever groups [`pattern::translate`] added. A literal query
+    /// has none.
+    fn user_groups(&self) -> (usize, Vec<(String, usize)>) {
+        let Matcher::Regex { re, bounded } = self else {
+            return (0, Vec::new());
+        };
+        // Group 0 is the whole match; a bounded pattern's MATCH_GROUP is 1.
+        let skip = if *bounded { 1 } else { 0 };
+        let count = re.captures_len() - 1 - skip;
+        let names = re
+            .capture_names()
+            .enumerate()
+            .filter_map(|(i, n)| match n {
+                Some(n) if n != pattern::MATCH_GROUP => Some((n.to_owned(), i - skip)),
+                _ => None,
+            })
+            .collect();
+        (count, names)
+    }
+
+    /// Every hit in `line`, like [`Matcher::find_all`], with the byte ranges
+    /// of its capture groups by the user's numbering: index 0 is the hit,
+    /// `i` is group `i` (None when it took no part in the match). A literal
+    /// query gives just the hit.
+    fn find_all_groups(&self, line: &str) -> Vec<Vec<Option<(usize, usize)>>> {
+        let Matcher::Regex { re, bounded } = self else {
+            return self
+                .find_all(line)
+                .into_iter()
+                .map(|h| vec![Some(h)])
+                .collect();
+        };
+        let skip = if *bounded { 1 } else { 0 };
+        let mut hits = Vec::new();
+        let mut from = 0;
+        while let Some(caps) = re.captures_at(line, from) {
+            let span = |i: usize| caps.get(i).map(|m| (m.start(), m.end()));
+            let Some((a, b)) = span(skip) else { break };
+            let mut groups = vec![Some((a, b))];
+            groups.extend((1 + skip..caps.len()).map(span));
+            hits.push(groups);
+            from = b.max(a + 1);
+            while !line.is_char_boundary(from) {
+                from += 1;
+            }
+            if from > line.len() {
+                break;
+            }
+        }
+        hits
+    }
+
     /// Every hit in `line`, restarting at the end of each one.
-    #[cfg(test)]
     fn find_all(&self, line: &str) -> Vec<(usize, usize)> {
         let mut hits = Vec::new();
         let mut from = 0;
@@ -199,8 +253,26 @@ pub(crate) fn match_line(
     line: &str,
     matcher: &Matcher,
 ) -> Option<SearchMatch> {
-    let line_chars: Vec<char> = line.chars().collect();
     let (from_byte, to_byte) = matcher.find(line)?;
+    let (preview, match_start, match_end, column) = preview_around(line, from_byte, to_byte);
+    Some(SearchMatch {
+        path: path.to_string(),
+        line: line_no,
+        column,
+        preview,
+        match_start,
+        match_end,
+    })
+}
+
+/// The preview window around the hit at bytes `from_byte..to_byte` of
+/// `line`: (preview, match start and end in preview chars, 1-based column).
+pub(crate) fn preview_around(
+    line: &str,
+    from_byte: usize,
+    to_byte: usize,
+) -> (String, u32, u32, u32) {
+    let line_chars: Vec<char> = line.chars().collect();
     let start = line[..from_byte].chars().count();
     let end = line[..to_byte].chars().count();
 
@@ -220,14 +292,7 @@ pub(crate) fn match_line(
     let preview = format!("{prefix}{body}");
     let match_start = (start - from + offset) as u32;
     let match_end = ((end - from + offset) as u32).min(preview.chars().count() as u32);
-    Some(SearchMatch {
-        path: path.to_string(),
-        line: line_no,
-        column: start as u32 + 1,
-        preview,
-        match_start,
-        match_end,
-    })
+    (preview, match_start, match_end, start as u32 + 1)
 }
 
 /// Search one file's text, appending at most `room` matches.
@@ -244,6 +309,12 @@ fn search_text(path: &str, text: &str, matcher: &Matcher, room: usize, out: &mut
 
 /// Read a file for searching: None for binaries, large files and read errors.
 fn read_searchable(path: &Path) -> Option<String> {
+    read_text_bytes(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// A file's bytes, or None for binaries (NUL in the first 8 KiB), files over
+/// [`MAX_FILE_BYTES`] and read errors.
+fn read_text_bytes(path: &Path) -> Option<Vec<u8>> {
     let meta = fs::metadata(path).ok()?;
     if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
         return None;
@@ -261,7 +332,7 @@ fn read_searchable(path: &Path) -> Option<String> {
     if sniff.contains(&0) {
         return None;
     }
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    Some(bytes)
 }
 
 /// Walk `root` (already canonical) depth-first in name order and search every
@@ -272,10 +343,39 @@ pub(crate) fn search_local(
     matcher: &Matcher,
 ) -> Result<SearchResults, AppError> {
     let mut matches = Vec::new();
-    let mut truncated = false;
+    let mut truncated = walk_files(root, include_hidden, |path| {
+        let Some(text) = read_searchable(path) else {
+            return true;
+        };
+        search_text(
+            &path.to_string_lossy(),
+            &text,
+            matcher,
+            MAX_RESULTS + 1,
+            &mut matches,
+        );
+        matches.len() <= MAX_RESULTS
+    });
+    if matches.len() > MAX_RESULTS {
+        truncated = true;
+    }
+    matches.truncate(MAX_RESULTS);
+    Ok(SearchResults { matches, truncated })
+}
+
+/// Visit every regular file under `root` (already canonical) depth-first in
+/// name order: files of a folder first, then its subfolders a→z (like the
+/// tree). Skips symlinks, ignored directories and, unless `include_hidden`,
+/// hidden entries. `visit` returns false to stop. Returns true when the walk
+/// stopped early (`visit` said so, or [`MAX_FILES_SCANNED`] was reached).
+pub(crate) fn walk_files(
+    root: &Path,
+    include_hidden: bool,
+    mut visit: impl FnMut(&Path) -> bool,
+) -> bool {
     let mut scanned = 0usize;
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
-    'walk: while let Some(dir) = stack.pop() {
+    while let Some(dir) = stack.pop() {
         let Ok(read) = fs::read_dir(&dir) else {
             continue;
         };
@@ -305,31 +405,13 @@ pub(crate) fn search_local(
                 continue;
             }
             scanned += 1;
-            if scanned > MAX_FILES_SCANNED {
-                truncated = true;
-                break 'walk;
-            }
-            let Some(text) = read_searchable(&path) else {
-                continue;
-            };
-            search_text(
-                &path.to_string_lossy(),
-                &text,
-                matcher,
-                MAX_RESULTS + 1,
-                &mut matches,
-            );
-            if matches.len() > MAX_RESULTS {
-                truncated = true;
-                break 'walk;
+            if scanned > MAX_FILES_SCANNED || !visit(&path) {
+                return true;
             }
         }
-        // Reverse so the stack pops subdirectories in name order: files of a
-        // folder come first, then its subfolders a→z (like the tree).
         stack.extend(subdirs.into_iter().rev());
     }
-    matches.truncate(MAX_RESULTS);
-    Ok(SearchResults { matches, truncated })
+    false
 }
 
 /// The remote search script: POSIX `find` prunes the same directories as the

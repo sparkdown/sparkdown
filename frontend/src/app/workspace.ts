@@ -314,6 +314,16 @@ export class WorkspaceController {
     }
   }
 
+  /** The app itself rewrote these files (replace in files): bring their
+   *  open tabs up to date the same way a watcher event does. */
+  async syncFilesWithDisk(paths: string[]): Promise<void> {
+    const tabs = paths.flatMap((p) => {
+      const tab = this.ctx.tabs.findByPath(p);
+      return tab?.path ? [tab] : [];
+    });
+    await Promise.all(tabs.map((t) => this.syncTabWithDisk(t.id, t.path!)));
+  }
+
   /**
    * Compare one tab with its file on disk after a watcher event. The tab's
    * savedContent is the text we last read from or wrote to disk, so a
