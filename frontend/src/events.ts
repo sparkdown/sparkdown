@@ -33,6 +33,7 @@ export type EventMap = {
   [EVENTS.TOC_GOTO_LINE]: { line: number };
   [EVENTS.TOC_SCROLL_PREVIEW]: { id: string };
   [EVENTS.INSERT_AT_CURSOR]: { text: string };
+  [EVENTS.FOCUS_MODE_CHANGED]: { active: boolean };
   // Actions are payload-less (except SHOW_SIDEBAR_VIEW).
   [ACTIONS.NEW_FILE]: void;
   [ACTIONS.OPEN_FILE]: void;
@@ -59,6 +60,7 @@ export type EventMap = {
   [ACTIONS.IMAGE]: void;
   [ACTIONS.TABLE]: void;
   [ACTIONS.TOGGLE_SIDEBAR]: void;
+  [ACTIONS.TOGGLE_FOCUS_MODE]: void;
   [ACTIONS.TOGGLE_PREVIEW]: void;
   [ACTIONS.TOGGLE_TERMINAL]: void;
   [ACTIONS.TOGGLE_TERMINALS_ONLY]: void;

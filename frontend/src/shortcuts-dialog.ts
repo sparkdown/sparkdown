@@ -54,6 +54,7 @@ function shortcutSections(): Array<{ section: string; items: Array<[string, stri
         [k(ACTIONS.TOGGLE_TERMINAL), 'Toggle Terminal'],
         [k(ACTIONS.TOGGLE_TERMINALS_ONLY), 'Terminals Only'],
         [k(ACTIONS.TOGGLE_SIDEBAR), 'Toggle Sidebar'],
+        [k(ACTIONS.TOGGLE_FOCUS_MODE), 'Focus Mode (Escape to leave)'],
         [k(ACTIONS.TOGGLE_WRAP), 'Toggle Word Wrap'],
       ],
     },

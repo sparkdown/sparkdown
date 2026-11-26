@@ -239,6 +239,10 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
     let toggle_sidebar = MenuItemBuilder::with_id("toggle-sidebar", "Toggle Sidebar")
         .accelerator("CmdOrCtrl+Shift+B")
         .build(app)?;
+    // Hides the sidebar, tabs, status bar and terminal; Escape also leaves.
+    let toggle_focus_mode = MenuItemBuilder::with_id("toggle-focus-mode", "Focus Mode")
+        .accelerator("CmdOrCtrl+Shift+Enter")
+        .build(app)?;
     let toggle_word_wrap = MenuItemBuilder::with_id("toggle-word-wrap", "Toggle Word Wrap")
         .accelerator("Alt+Z")
         .build(app)?;
@@ -265,6 +269,7 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
         .item(&toggle_sidebar)
         .item(&toggle_terminal)
         .item(&toggle_terminals_only)
+        .item(&toggle_focus_mode)
         .separator()
         .item(&toggle_word_wrap)
         .item(&toggle_theme)
