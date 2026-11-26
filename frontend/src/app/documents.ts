@@ -95,9 +95,16 @@ export class DocumentController {
     return at !== undefined && Date.now() - at < withinMs;
   }
 
-  private async writeOwn(path: string, content: string): Promise<void> {
+  /** Write `path` as our own save. `notify: false` leaves the after-save
+   *  work (see notifyWritten) to the caller, for a save that may write once
+   *  more right away: it then runs once, after the last write. */
+  private async writeOwn(path: string, content: string, notify = true): Promise<void> {
     await api.writeFile(path, content);
     this.ownWrites.set(path, Date.now());
+    if (notify) this.notifyWritten(path);
+  }
+
+  private notifyWritten(path: string): void {
     try {
       this.deps.afterWrite?.(path);
     } catch {
@@ -287,7 +294,7 @@ export class DocumentController {
         // meanwhile are not in the text taken above. Take it again right
         // before the write so the file gets what the editor holds now.
         if (id === this.ctx.tabs.activeTab()?.id) content = this.ctx.editor.getContent();
-        await this.writeOwn(originalPath, content);
+        await this.writeOwn(originalPath, content, false);
         if (this.ctx.tabs.getTab(id)?.content !== content) {
           // Typing landed during the write. The file now holds `content`, so
           // that is the baseline: the tab stays dirty and our own write is
@@ -296,6 +303,7 @@ export class DocumentController {
           // Then write once more with the text the tab holds now.
           return await this.writeFollowUp(id, originalPath, content);
         }
+        this.notifyWritten(originalPath);
         return this.ctx.tabs.markSaved(id, content);
       } catch (err) {
         if (this.ctx.tabs.getTab(id)?.content === content) await this.reportSaveError(originalPath, err);
@@ -331,9 +339,16 @@ export class DocumentController {
     // interval out; keys typed meanwhile are in the text taken below.
     await this.waitForWriteInterval(path);
     const tab = this.ctx.tabs.getTab(id);
-    if (!tab || tab.path !== path || tab.origin !== this.ctx.tabs.getOrigin()) return false;
+    if (!tab || tab.path !== path || tab.origin !== this.ctx.tabs.getOrigin()) {
+      // No second write: the first one is what the file holds.
+      this.notifyWritten(path);
+      return false;
+    }
     const content = id === this.ctx.tabs.activeTab()?.id ? this.ctx.editor.getContent() : tab.content;
-    if (content === written) return this.ctx.tabs.markSaved(id, content);
+    if (content === written) {
+      this.notifyWritten(path);
+      return this.ctx.tabs.markSaved(id, content);
+    }
     try {
       await this.writeOwn(path, content);
     } catch (err) {

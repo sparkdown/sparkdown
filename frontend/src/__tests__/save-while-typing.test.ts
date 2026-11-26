@@ -300,4 +300,58 @@ describe('afterWrite follow-up', () => {
     expect(afterWrite).toHaveBeenCalledWith(PATH);
     expect(tabs.activeTab()?.modified).toBe(false);
   });
+
+  it('runs once, after the last write, when typing lands during the save', async () => {
+    writes.length = 0;
+    const seen: string[][] = [];
+    const afterWrite = vi.fn(() => { seen.push([...writes]); });
+    document.body.innerHTML = '';
+    const bus = new EventBus();
+    const tabs = new TabManager(bus);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    tabs.init(container);
+    disk.set(PATH, 'base');
+    tabs.openTab(PATH, 'base');
+    let text = 'base UI';
+    tabs.updateContent(text);
+    tabs.refreshModified();
+    const editor = { getContent: () => text };
+    const fileTree = { getSaveDir: () => '/p' };
+    const ctx = { tabs, editor, fileTree } as never;
+    const docs = new DocumentController(ctx, { afterWrite } as never);
+    beforeWrite = () => {
+      if (writes.length !== 1) return;
+      text = 'base UI test';
+      tabs.updateContent(text);
+      tabs.refreshModified();
+    };
+    expect(await docs.save()).toBe(true);
+    expect(writes).toEqual(['base UI', 'base UI test']);
+    expect(afterWrite).toHaveBeenCalledTimes(1);
+    expect(afterWrite).toHaveBeenCalledWith(PATH);
+    expect(seen).toEqual([['base UI', 'base UI test']]);
+  });
+
+  it('runs once for a save with no typing during the write', async () => {
+    writes.length = 0;
+    const afterWrite = vi.fn();
+    document.body.innerHTML = '';
+    const bus = new EventBus();
+    const tabs = new TabManager(bus);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    tabs.init(container);
+    disk.set(PATH, 'base');
+    tabs.openTab(PATH, 'base');
+    tabs.updateContent('changed');
+    tabs.refreshModified();
+    const editor = { getContent: () => 'changed' };
+    const fileTree = { getSaveDir: () => '/p' };
+    const ctx = { tabs, editor, fileTree } as never;
+    const docs = new DocumentController(ctx, { afterWrite } as never);
+    expect(await docs.save()).toBe(true);
+    expect(writes).toEqual(['changed']);
+    expect(afterWrite).toHaveBeenCalledTimes(1);
+  });
 });
