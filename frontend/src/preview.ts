@@ -1408,6 +1408,11 @@ export class PreviewPane {
     return this.visible;
   }
 
+  /** The element the rendered document lives in (Export PDF prints it). */
+  getRenderRoot(): HTMLElement {
+    return this.container;
+  }
+
   getRenderedHtml(): string {
     // Clone so we can rewrite img src back to original relative paths
     // without disturbing the live preview.

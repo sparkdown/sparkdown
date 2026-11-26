@@ -475,3 +475,81 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Export PDF (app/export-pdf.ts): print only the marked preview. Every
+   element outside the target and its ancestor chain is dropped; the chain
+   loses the app's fixed-height, scrolling layout so the document flows
+   across pages. Colors print as shown, like Export HTML's snapshot of the
+   current theme. `:root` lifts the chain rules above `.hidden`, so a
+   preview hidden by the view mode still prints. */
+@media print {
+  @page {
+    margin: 14mm 12mm;
+  }
+
+  html.print-path body *:not(.print-path):not(.print-target):not(.print-target *) {
+    display: none !important;
+  }
+
+  :root.print-path,
+  :root .print-path {
+    display: block !important;
+    position: static !important;
+    width: auto !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    transform: none !important;
+    background: var(--preview-bg) !important;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  :root .print-target {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  .print-target:not(.html-mode) > * {
+    max-width: none;
+  }
+
+  /* No horizontal scrolling on paper: wrap long code lines. */
+  .print-target pre,
+  .print-target pre code {
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere;
+    overflow: visible !important;
+  }
+
+  .print-target img,
+  .print-target svg {
+    max-width: 100% !important;
+    height: auto;
+  }
+
+  .print-target img,
+  .print-target .mermaid,
+  .print-target tr {
+    break-inside: avoid;
+  }
+
+  .print-target h1,
+  .print-target h2,
+  .print-target h3,
+  .print-target h4,
+  .print-target h5,
+  .print-target h6 {
+    break-after: avoid;
+  }
+}

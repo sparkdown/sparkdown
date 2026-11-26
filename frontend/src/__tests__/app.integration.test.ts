@@ -2896,6 +2896,55 @@ describe('App integration', () => {
     });
   });
 
+  describe('Export PDF', () => {
+    const printCalls = () => invokeCalls.filter((c) => c.cmd === 'print_webview');
+
+    it('renders the document into the preview, marks it for print and opens the print dialog', async () => {
+      const path = '/x/notes.md';
+      vfs.set(path, '# Hello PDF');
+      restoreConfig([path]);
+      const app = await startApp();
+      const titleBefore = document.title;
+
+      await app.exportPdf();
+
+      const pane = document.getElementById('preview-pane')!;
+      expect(printCalls()).toHaveLength(1);
+      expect(pane.textContent).toBe('# Hello PDF');
+      expect(pane.classList.contains('print-target')).toBe(true);
+      expect(document.getElementById('preview-container')!.classList.contains('print-path')).toBe(true);
+      expect(document.documentElement.classList.contains('print-path')).toBe(true);
+      // The PDF destinations suggest the page title as the file name.
+      expect(document.title).toBe('notes');
+
+      window.dispatchEvent(new Event('afterprint'));
+      expect(document.querySelectorAll('.print-target, .print-path')).toHaveLength(0);
+      expect(document.title).toBe(titleBefore);
+    });
+
+    it('runs from the File menu event', async () => {
+      const path = '/x/menu.md';
+      vfs.set(path, 'text');
+      restoreConfig([path]);
+      await startApp();
+      emitTauriEvent('menu:export-pdf');
+      await vi.waitFor(() => expect(printCalls()).toHaveLength(1));
+      window.dispatchEvent(new Event('afterprint'));
+    });
+
+    it('explains instead of printing for a non-Markdown file', async () => {
+      const path = '/x/page.html';
+      vfs.set(path, '<p>hi</p>');
+      restoreConfig([path]);
+      const app = await startApp();
+
+      await app.exportPdf();
+
+      expect(printCalls()).toHaveLength(0);
+      expect(messageLog).toContain('Export PDF works with Markdown documents.');
+    });
+  });
+
   describe('activity bar and sidebar views (UI revamp phase 1)', () => {
     const $ = (id: string) => document.getElementById(id)!;
     const pressed = (id: string) => $(id).getAttribute('aria-pressed');

@@ -2,11 +2,12 @@ import { open, save as nativeSave, message } from '@tauri-apps/plugin-dialog';
 import type { PreviewPane } from '../preview';
 import { LOCAL_ORIGIN } from '../tabs';
 import { RemotePicker, type RemotePickerOptions } from '../remote-picker';
-import { isPreviewable, stripMarkdownExt, dirname, basename, defaultSavePath } from '../utils';
+import { isPreviewable, isMarkdownFile, stripMarkdownExt, dirname, basename, defaultSavePath } from '../utils';
 import { DIALOG_FILTERS } from '../file-types';
 import { api } from '../api';
 import type { AppContext } from './context';
 import { buildExportHtml } from './export-html';
+import { printTarget } from './export-pdf';
 
 type SaveOptions = Parameters<typeof nativeSave>[0];
 
@@ -462,6 +463,38 @@ export class DocumentController {
           kind: 'error',
         });
       }
+    }
+  }
+
+  /**
+   * Export PDF: render the document into the preview (even when the preview
+   * is hidden), wait for its images, then open the platform print dialog;
+   * its PDF destination writes the file. Markdown documents only: HTML and
+   * SVG files preview in a frame that prints as one clipped page.
+   */
+  async exportPdf(): Promise<void> {
+    const tab = this.ctx.tabs.activeTab();
+    if (!tab) return;
+    if (tab.path && !isMarkdownFile(tab.path)) {
+      await message('Export PDF works with Markdown documents.', {
+        title: 'Export PDF',
+        kind: 'info',
+      });
+      return;
+    }
+
+    const preview = await this.deps.loadPreview();
+    await preview.renderImmediateForExport(this.ctx.editor.getContent());
+    await preview.whenImagesResolved();
+    const title = tab.path ? basename(stripMarkdownExt(tab.path, '')) : tab.title || 'Untitled';
+    try {
+      await printTarget(preview.getRenderRoot(), title, () => api.printWebview());
+    } catch (err) {
+      console.error('Failed to export PDF:', err);
+      await message(`Could not open the print dialog.\n\n${String(err)}`, {
+        title: 'Export Failed',
+        kind: 'error',
+      });
     }
   }
 

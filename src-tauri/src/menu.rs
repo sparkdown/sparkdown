@@ -132,6 +132,7 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
         .accelerator("CmdOrCtrl+Shift+S")
         .build(app)?;
     let export_html = MenuItemBuilder::with_id("export-html", "Export HTML...").build(app)?;
+    let export_pdf = MenuItemBuilder::with_id("export-pdf", "Export PDF...").build(app)?;
     let close_tab = MenuItemBuilder::with_id("close-tab", "Close Tab")
         .accelerator("CmdOrCtrl+W")
         .build(app)?;
@@ -164,6 +165,7 @@ pub fn build_menu(app: &AppHandle) -> Result<AppMenu, tauri::Error> {
         .item(&save_as)
         .separator()
         .item(&export_html)
+        .item(&export_pdf)
         .separator()
         .item(&close_tab)
         .build()?;

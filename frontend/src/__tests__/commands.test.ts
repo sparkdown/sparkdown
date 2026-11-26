@@ -90,7 +90,7 @@ describe('built-in commands', () => {
       // Sentence case: after the first word, only acronyms / proper nouns
       // may be capitalised.
       const words = c.title.split(': ')[1].split(' ').slice(1);
-      for (const w of words) expect(/^[a-z(…]|^(HTML|JavaScript)/.test(w), `${c.title}: "${w}"`).toBe(true);
+      for (const w of words) expect(/^[a-z(…]|^(HTML|PDF|JavaScript)/.test(w), `${c.title}: "${w}"`).toBe(true);
     }
   });
 
