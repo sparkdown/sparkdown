@@ -2,6 +2,7 @@ import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon, type ISearchOptions } from '@xterm/addon-search';
 import { loadWebglRenderer } from './terminal-output';
+import { OffscreenOutput, watchInView } from './terminal-offscreen';
 import { listen, type UnlistenFn } from './window-events';
 import { ask } from '@tauri-apps/plugin-dialog';
 import { api, type RemoteSession } from './api';
@@ -166,6 +167,14 @@ export class TerminalPane {
    *  the manager closes the tab automatically. */
   private startFailed = false;
   private resizeObserver: ResizeObserver | null = null;
+  /** Holds output briefly while the pane is out of view (see terminal-offscreen). */
+  private output = new OffscreenOutput(
+    (bytes, done) => this.term.write(bytes, done),
+    (n) => {
+      if (!this.disposed) void api.terminalAck(this.id, n).catch(() => {});
+    },
+  );
+  private stopWatchingView: (() => void) | null = null;
   /** Pending debounced refit (container resize / divider drag). */
   private refitTimer: ReturnType<typeof setTimeout> | null = null;
   private onExit: (() => void) | null = null;
@@ -412,6 +421,7 @@ export class TerminalPane {
     this.session = session;
     if (this.disposed) return;
     this.term.open(container);
+    this.stopWatchingView = watchInView(container, (inView) => this.output.setVisible(inView));
     // Take keys from the first moment: until the shell is up they wait in
     // pendingInput instead of being dropped (see writeInput).
     this.term.onData((data) => this.writeInput(data));
@@ -499,15 +509,13 @@ export class TerminalPane {
    * One batch of pty output (whole UTF-8 sequences, raw bytes). xterm decodes
    * it; once xterm has parsed it, ack the byte count so the backend can send
    * more. The backend stops sending while ~1 MiB is unacked, which pushes
-   * back on a flooding program instead of queueing its output here.
+   * back on a flooding program instead of queueing its output here. While
+   * the pane is out of view, batches are held briefly and written together.
    */
   private onOutput(bytes: Uint8Array): void {
     if (this.disposed) return;
     this.lastOutputAt = performance.now();
-    const n = bytes.length;
-    this.term.write(bytes, () => {
-      if (!this.disposed) void api.terminalAck(this.id, n).catch(() => {});
-    });
+    this.output.push(bytes);
   }
 
   /** Which renderer draws this pane ('webgl' or the 'dom' fallback). */
@@ -736,6 +744,9 @@ export class TerminalPane {
     if (this.refitTimer) clearTimeout(this.refitTimer);
     this.refitTimer = null;
     this.resizeObserver?.disconnect();
+    this.stopWatchingView?.();
+    this.stopWatchingView = null;
+    this.output.dispose();
     for (const un of this.unlisteners) un();
     this.unlisteners = [];
     void api.terminalClose(this.id);
