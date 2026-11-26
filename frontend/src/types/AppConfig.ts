@@ -64,13 +64,13 @@ terminal_scrollback: number,
  * (agent CLIs waiting for input), but only when the window is not focused.
  * On by default.
  */
-terminal_notify: boolean,
+terminal_notify: boolean, 
 /**
  * Show an OS notification when a terminal emits BEL (bell character), but
  * only when the window is not focused. Off by default (shell tab completion
  * rings the bell, which would spam notifications).
  */
-terminal_notify_bell: boolean,
+terminal_notify_bell: boolean, 
 /**
  * Agent context bridge: mirror what the user is viewing (and the live
  * text of unsaved buffers) into a per-workspace temp dir that agents in
@@ -139,4 +139,10 @@ git_background_fetch: boolean,
  * shown. Asked again when the fingerprint no longer matches. Cancel is
  * never stored.
  */
-git_run_anyway: { [key in string]: string }, };
+git_run_anyway: { [key in string]: string }, 
+/**
+ * How the file diff is laid out: "inline" (unified, the default) or
+ * "split" (side by side). A plain string on disk so an unknown value
+ * falls back to inline in the frontend instead of failing the load.
+ */
+diff_layout: 'inline' | 'split', };

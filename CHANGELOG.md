@@ -16,6 +16,10 @@ requests.
 - **Export PDF** (File menu and command palette) prints the rendered Markdown document, with Mermaid diagrams, highlighted code and local images, through the system print dialog; choose its PDF destination to save the file. The PDF uses the preview's current theme.
 - **Focus mode** (View → Focus Mode, `⌘⇧↩` / `Ctrl+Shift+Enter`) hides the sidebar, tabs, status bar and terminal so only the document is left; `Esc` or the same key brings back the layout exactly as it was. The status bar also shows an estimated reading time next to the word count (200 words per minute).
 
+### New
+
+- **Changes:** the file diff can switch between the inline view and a side-by-side view. The choice is remembered.
+
 ### Changed
 
 - **Startup** with many restored tabs is faster: every tab appears right away, but only the active tab's file is read before the window shows. The other tabs read their files in the background after the window shows, or as soon as you click one, keeping their order and unsaved-changes behavior.

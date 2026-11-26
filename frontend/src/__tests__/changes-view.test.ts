@@ -1,11 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
-  renderUnifiedDiff,
+  alignHunkRows,
   firstChangedLine,
   nearestHeading,
+  parseDiffLayout,
   parseHunkHeader,
-  summarizeDiff,
+  renderUnifiedDiff,
+  summarizeDiff
 } from '../changes-view';
+import type { DiffHunk } from '../meat';
 
 /**
  * Tests for the dependency-free unified-diff renderer. It must classify each
@@ -201,5 +204,174 @@ describe('hunk helpers (open in editor, hunk labels)', () => {
     ].join('\n');
     expect(summarizeDiff(diff)).toEqual({ hunks: 2, adds: 3, dels: 1, firstLine: 2 });
     expect(summarizeDiff('')).toEqual({ hunks: 0, adds: 0, dels: 0, firstLine: 1 });
+  });
+});
+
+
+describe('parseDiffLayout', () => {
+  it('treats only "split" as side-by-side; everything else is inline', () => {
+    expect(parseDiffLayout('split')).toBe('split');
+    expect(parseDiffLayout('inline')).toBe('inline');
+    expect(parseDiffLayout(undefined)).toBe('inline');
+    expect(parseDiffLayout('stacked')).toBe('inline');
+    expect(parseDiffLayout(null)).toBe('inline');
+  });
+});
+
+describe('alignHunkRows', () => {
+  const hunk = (header: string, lines: string[]): DiffHunk => ({ header, lines });
+
+  it('puts context on both sides with matching line numbers', () => {
+    const rows = alignHunkRows(
+      hunk('@@ -10,3 +12,3 @@', [' a', '-x', '+y', ' b']),
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toEqual({
+      left: { line: ' a', lineNo: 10 },
+      right: { line: ' a', lineNo: 12 },
+      openLine: 12,
+    });
+    expect(rows[1]).toEqual({
+      left: { line: '-x', lineNo: 11 },
+      right: { line: '+y', lineNo: 13 },
+      openLine: 13,
+    });
+    expect(rows[2]).toEqual({
+      left: { line: ' b', lineNo: 12 },
+      right: { line: ' b', lineNo: 14 },
+      openLine: 14,
+    });
+  });
+
+  it('zips a run of removals and additions, leaving empty cells for leftovers', () => {
+    const rows = alignHunkRows(
+      hunk('@@ -1,4 +1,3 @@', ['-a', '-b', '-c', '+A', '+B']),
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows[0].left.line).toBe('-a');
+    expect(rows[0].right.line).toBe('+A');
+    expect(rows[0].openLine).toBe(1);
+    expect(rows[1].left.line).toBe('-b');
+    expect(rows[1].right.line).toBe('+B');
+    expect(rows[2].left.line).toBe('-c');
+    expect(rows[2].right.line).toBeNull();
+    expect(rows[2].openLine).toBe(3);
+  });
+
+  it('aligns leftover additions opposite an empty left cell', () => {
+    const rows = alignHunkRows(hunk('@@ -9 +9,2 @@', ['+c', '+d']));
+    expect(rows).toEqual([
+      {
+        left: { line: null, lineNo: null },
+        right: { line: '+c', lineNo: 9 },
+        openLine: 9,
+      },
+      {
+        left: { line: null, lineNo: null },
+        right: { line: '+d', lineNo: 10 },
+        openLine: 10,
+      },
+    ]);
+  });
+
+  it('points a pure deletion at the new-file line that now sits there', () => {
+    const rows = alignHunkRows(
+      hunk('@@ -5,3 +5,1 @@', [' keep', '-x', '-y']),
+    );
+    expect(rows[0].openLine).toBe(5);
+    expect(rows[1].left.line).toBe('-x');
+    expect(rows[1].right.line).toBeNull();
+    expect(rows[1].openLine).toBe(6);
+    expect(rows[2].left.line).toBe('-y');
+    expect(rows[2].openLine).toBe(6);
+  });
+
+  it('attaches a no-newline marker to the side it follows', () => {
+    const rows = alignHunkRows(
+      hunk('@@ -1 +1 @@', ['-old', '\\ No newline at end of file', '+new']),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].left.meta).toBe('\\ No newline at end of file');
+    expect(rows[0].right.line).toBe('+new');
+    expect(rows[0].right.meta).toBeUndefined();
+  });
+});
+
+describe('renderUnifiedDiff side-by-side layout', () => {
+  const diff = [
+    'diff --git a/x.ts b/x.ts',
+    '--- a/x.ts',
+    '+++ b/x.ts',
+    '@@ -1,3 +1,3 @@',
+    ' context',
+    '-removed',
+    '+added',
+  ].join('\n');
+
+  it('aligns added and removed lines in the same row, with context on both sides', () => {
+    const html = renderUnifiedDiff(diff, { reading: false, layout: 'split' });
+    expect(html).toContain('diff-layout-split');
+    expect(html).toContain('diff-split-row');
+    // One row has both the removal and the addition.
+    expect(html).toMatch(/diff-del[\s\S]*removed[\s\S]*diff-add[\s\S]*added/);
+    expect(html).toContain('context');
+    // File-header preamble is still dropped.
+    expect(html).not.toContain('diff --git');
+    expect((html.match(/diff-add/g) || []).length).toBe(1);
+    expect((html.match(/diff-del/g) || []).length).toBe(1);
+    // Context appears twice (left and right); left context is skipped by find.
+    expect((html.match(/data-find-skip/g) || []).length).toBeGreaterThan(0);
+  });
+
+  it('keeps meat folding and the Open in editor control in split layout', () => {
+    const mixed = [
+      '@@ -1 +1 @@',
+      "+import { x } from './x';",
+      '@@ -10 +10 @@',
+      '-old()',
+      '+new()',
+    ].join('\n');
+    const reading = renderUnifiedDiff(mixed, { reading: true, layout: 'split' });
+    expect(reading).toContain('diff-omitted');
+    expect(reading).not.toContain('import { x }');
+    expect(reading).toContain('diff-split-row');
+    expect(reading).toContain('new()');
+    expect(reading).toContain('Open in editor');
+    expect(reading).toContain('data-line="10"');
+    const full = renderUnifiedDiff(mixed, { reading: false, layout: 'split' });
+    expect(full).not.toContain('diff-omitted');
+    expect(full).toContain('import { x }');
+  });
+
+  it('escapes markup in split-layout content and drops Open in editor when asked', () => {
+    const html = renderUnifiedDiff(['@@ -1 +1 @@', '+<script>alert(1)</script>'].join('\n'), {
+      reading: false,
+      layout: 'split',
+    });
+    expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).toContain('&lt;script&gt;');
+    const noLink = renderUnifiedDiff(diff, {
+      reading: false,
+      layout: 'split',
+      openInEditor: false,
+    });
+    expect(noLink).not.toContain('Open in editor');
+    expect(noLink).not.toContain('diff-open-line');
+  });
+
+  it('renders an empty cell opposite a leftover added or removed line', () => {
+    const leftover = ['@@ -1,2 +1 @@', '-a', '-b', '+A'].join('\n');
+    const html = renderUnifiedDiff(leftover, { reading: false, layout: 'split' });
+    expect(html).toContain('diff-blank');
+    expect((html.match(/diff-del/g) || []).length).toBe(2);
+    expect((html.match(/diff-add/g) || []).length).toBe(1);
+  });
+
+  it('still renders the inline layout when layout is omitted or inline', () => {
+    const inline = renderUnifiedDiff(diff, { reading: false, layout: 'inline' });
+    const def = renderUnifiedDiff(diff, { reading: false });
+    expect(inline).not.toContain('diff-split-row');
+    expect(inline).not.toContain('diff-layout-split');
+    expect(def).toBe(inline);
   });
 });
