@@ -13,6 +13,7 @@ import type { HtmlScriptsController } from './html-scripts';
 import type { LifecycleController } from './lifecycle';
 import type { Palette } from '../palette';
 import type { ViewModeController } from './view-mode';
+import type { FocusMode } from '../focus-mode';
 import { isWrapMenuEcho } from '../shortcuts';
 
 /** Everything a native-menu item or keyboard shortcut can trigger. */
@@ -38,6 +39,7 @@ export interface ActionTargets {
   htmlScripts: Pick<HtmlScriptsController, 'toggle'>;
   lifecycle: Pick<LifecycleController, 'requestQuit' | 'closeFolder'>;
   palette: Pick<Palette, 'open'>;
+  focusMode: Pick<FocusMode, 'toggle' | 'exit'>;
   newFile(): void;
   openFile(path: string): Promise<void>;
   openFileDialog(): Promise<void>;
@@ -69,6 +71,16 @@ function openFindForFocus(t: ActionTargets): void {
   t.panes.openFind();
 }
 
+/**
+ * Sidebar and terminal toggles in focus mode: the press leaves focus mode
+ * (showing the layout from before) instead of changing chrome nobody can see.
+ */
+function chromeToggle(t: ActionTargets, run: () => void): () => void {
+  return () => {
+    if (!t.focusMode.exit()) run();
+  };
+}
+
 /** Native menu items (Rust emits one Tauri event per item). */
 export function registerMenuListeners(t: ActionTargets): void {
   const reg = (event: string, handler: (e?: any) => void) => {
@@ -86,9 +98,10 @@ export function registerMenuListeners(t: ActionTargets): void {
   reg(MENU.VIEW_SPLIT, () => t.viewMode.setViewMode('split'));
   reg(MENU.VIEW_PREVIEW, () => t.viewMode.setViewMode('preview'));
   reg(MENU.VIEW_DIFF, () => t.viewMode.setViewMode('diff'));
-  reg(MENU.TOGGLE_TERMINAL, () => void t.cockpit.toggleTerminal());
-  reg(MENU.TOGGLE_TERMINALS_ONLY, () => void t.cockpit.toggleTerminalsOnly());
-  reg(MENU.TOGGLE_SIDEBAR, () => t.fileTree.toggle());
+  reg(MENU.TOGGLE_TERMINAL, chromeToggle(t, () => void t.cockpit.toggleTerminal()));
+  reg(MENU.TOGGLE_TERMINALS_ONLY, chromeToggle(t, () => void t.cockpit.toggleTerminalsOnly()));
+  reg(MENU.TOGGLE_SIDEBAR, chromeToggle(t, () => t.fileTree.toggle()));
+  reg(MENU.TOGGLE_FOCUS_MODE, () => t.focusMode.toggle());
   reg(MENU.TOGGLE_WORD_WRAP, () => {
     // ⌥Z may arrive both as a keydown and as the menu's key equivalent.
     if (!isWrapMenuEcho()) t.editor.toggleWordWrap();
@@ -159,10 +172,11 @@ export function registerActionListeners(t: ActionTargets): void {
   t.bus.on(ACTIONS.TABLE, () =>
     t.editor.insertAtCursor('| Header | Header | Header |\n| --- | --- | --- |\n| Cell | Cell | Cell |\n| Cell | Cell | Cell |\n')
   );
-  t.bus.on(ACTIONS.TOGGLE_SIDEBAR, () => t.fileTree.toggle());
+  t.bus.on(ACTIONS.TOGGLE_SIDEBAR, chromeToggle(t, () => t.fileTree.toggle()));
+  t.bus.on(ACTIONS.TOGGLE_FOCUS_MODE, () => t.focusMode.toggle());
   t.bus.on(ACTIONS.TOGGLE_PREVIEW, () => t.viewMode.togglePreview());
-  t.bus.on(ACTIONS.TOGGLE_TERMINAL, () => void t.cockpit.toggleTerminal());
-  t.bus.on(ACTIONS.TOGGLE_TERMINALS_ONLY, () => void t.cockpit.toggleTerminalsOnly());
+  t.bus.on(ACTIONS.TOGGLE_TERMINAL, chromeToggle(t, () => void t.cockpit.toggleTerminal()));
+  t.bus.on(ACTIONS.TOGGLE_TERMINALS_ONLY, chromeToggle(t, () => void t.cockpit.toggleTerminalsOnly()));
   t.bus.on(ACTIONS.TOGGLE_EDITOR, () => t.viewMode.toggleEditor());
   t.bus.on(ACTIONS.SET_VIEW_MODE, ({ mode }) => t.viewMode.setViewMode(mode));
   t.bus.on(ACTIONS.TOGGLE_WRAP, () => t.editor.toggleWordWrap());

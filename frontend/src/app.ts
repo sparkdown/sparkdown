@@ -44,6 +44,7 @@ import { initPerfTrace, span } from './perf-trace';
 import { GitFeedback } from './git-output';
 import { ImageInserter, clipboardImageFiles, isImagePath } from './image-insert';
 import { TERMINAL_SCROLLBACK_DEFAULT } from './terminal-scrollback';
+import { FocusMode } from './focus-mode';
 
 const DEFAULT_CONFIG: AppConfig = {
   theme: 'system',
@@ -130,6 +131,7 @@ export class App {
   private updates!: UpdateManager;
   private palette!: Palette;
   private wiki!: WikiLinks;
+  private focusMode!: FocusMode;
   /** Remote sessions' folder-open router (remote.ts); null = local only. */
   private remoteHandler: RemoteHandler | null = null;
   private settingsDialog = new SettingsDialog();
@@ -179,6 +181,13 @@ export class App {
     );
     this.toc = new TOC(this.bus);
     this.shortcuts = new ShortcutManager(this.bus);
+    this.focusMode = new FocusMode({
+      bus: this.bus,
+      focusContent: () => {
+        if (this.viewMode.current() === 'preview') (document.activeElement as HTMLElement | null)?.blur();
+        else this.panes.focusEditor();
+      },
+    });
     this.ctx = this.createContext();
     this.htmlScripts = new HtmlScriptsController(this.tabs, () => this.panes.preview);
     this.panes = new PaneController(this.ctx, {
@@ -265,6 +274,7 @@ export class App {
         // shortcut closes the sidebar, like a click.
         hasFocus: (view) => (view === 'search' ? this.searchView.hasFocus() : true),
         saveConfigSoon: () => this.debouncedSaveConfig(),
+        revealChrome: () => this.focusMode.exit(),
         listenTauri: this.ctx.listenTauri,
       },
       parseSidebarView(this.config.sidebar_view),
@@ -316,6 +326,7 @@ export class App {
     });
     this.toc.init(document.getElementById('app')!);
     this.shortcuts.init();
+    this.focusMode.init();
     // Static HTML tooltips and hints (index.html) in this platform's keys.
     applyShortcutLabels();
 
@@ -431,6 +442,7 @@ export class App {
       htmlScripts: this.htmlScripts,
       lifecycle: this.lifecycle,
       palette: this.palette,
+      focusMode: this.focusMode,
       newFile: () => this.newFile(),
       openFile: (path) => this.openFile(path),
       openFileDialog: () => this.openFileDialog(),
@@ -804,6 +816,7 @@ export class App {
       setViewMode: (mode) => this.setViewMode(mode),
       // "Show", not toggle: a view that is already open stays open.
       showSidebarView: (view) => {
+        this.focusMode.exit();
         if (this.fileTree.isVisible() && this.activityBar.getView() === view) {
           if (view === 'search') this.searchView.focus();
         } else {
