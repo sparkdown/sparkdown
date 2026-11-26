@@ -94,6 +94,7 @@ import {
   reviewStore,
   changePrints,
   previewThemeCalls,
+  failingWrites,
   systemClipboard,
 } from './helpers/tauri-mocks';
 import { App } from '../app';
@@ -909,6 +910,69 @@ describe('App integration', () => {
       expect(quitCalls.count).toBe(0);
       // Both the startup Untitled tab and the modified doc survive the abort.
       expect(tabTitles()).toContain('doc.md');
+    });
+
+    /** The calls to any of `names`, in call order. */
+    const callOrder = (...names: string[]) =>
+      invokeCalls.map((c) => c.cmd).filter((c) => names.includes(c));
+
+    it('Save then quit: the write and the session are on disk before the quit', async () => {
+      await startWithModifiedDoc();
+      invokeCalls.length = 0;
+
+      dialogResponses.message.push('Yes'); // "Save"
+      emitTauriEvent('exit-requested');
+      await flush();
+
+      expect(vfs.get('/docs/doc.md')).toBe('modified!');
+      const order = callOrder('write_file', 'save_config', 'quit');
+      expect(order[0]).toBe('write_file');
+      expect(order[order.length - 1]).toBe('quit');
+      expect(order.indexOf('save_config')).toBeGreaterThan(0);
+      const last = savedConfigs[savedConfigs.length - 1] as { last_open_files: string[] };
+      expect(last.last_open_files).toEqual(['/docs/doc.md']);
+    });
+
+    it("Don't Save still saves the session (open tabs) before the quit", async () => {
+      await startWithModifiedDoc();
+      invokeCalls.length = 0;
+
+      dialogResponses.message.push('No'); // "Don't Save"
+      emitTauriEvent('exit-requested');
+      await flush();
+
+      expect(vfs.get('/docs/doc.md')).toBe('original');
+      expect(callOrder('save_config', 'quit').slice(-2)).toEqual(['save_config', 'quit']);
+      const last = savedConfigs[savedConfigs.length - 1] as { last_open_files: string[] };
+      expect(last.last_open_files).toEqual(['/docs/doc.md']);
+    });
+
+    it('a failed write on Save keeps the app open and shows the error', async () => {
+      await startWithModifiedDoc();
+      failingWrites.add('/docs/doc.md');
+
+      dialogResponses.message.push('Yes'); // "Save"
+      emitTauriEvent('exit-requested');
+      await flush();
+
+      expect(quitCalls.count).toBe(0);
+      expect(messageLog.some((t) => t.includes('No space left on device'))).toBe(true);
+      expect(tabTitles()).toContain('doc.md');
+    });
+
+    it('closing one of several windows: Save writes, then the session, then the close', async () => {
+      await startWithModifiedDoc();
+      invokeCalls.length = 0;
+
+      dialogResponses.message.push('Yes'); // "Save"
+      emitTauriEvent('close-requested', { mode: 'close' });
+      await flush();
+
+      expect(vfs.get('/docs/doc.md')).toBe('modified!');
+      const order = callOrder('write_file', 'save_config', 'window_close');
+      expect(order[0]).toBe('write_file');
+      expect(order[order.length - 1]).toBe('window_close');
+      expect(order).toContain('save_config');
     });
 
     it('quits cleanly with no prompt when nothing is modified', async () => {

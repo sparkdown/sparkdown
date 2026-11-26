@@ -382,21 +382,12 @@ export class DocumentController {
     const tab = this.ctx.tabs.getTab(tabId);
     if (!tab) return 'cancel';
     if (disk === tab.savedContent) return 'write';
-    let choice: string;
-    try {
-      choice = await message(
-        `"${tab.title}" changed on disk after you started editing it.\n\n` +
-          'Overwrite it with your version, or reload the version on disk (your unsaved edits are lost)?',
-        {
-          title: 'File Changed on Disk',
-          kind: 'warning',
-          buttons: { yes: 'Overwrite', no: 'Reload', cancel: 'Cancel' },
-        },
-      );
-    } catch (err) {
-      console.error('Disk-conflict prompt failed:', err);
-      return 'cancel';
-    }
+    const choice = await askThreeWay(
+      `"${tab.title}" changed on disk after you started editing it.\n\n` +
+        'Overwrite it with your version, or reload the version on disk (your unsaved edits are lost)?',
+      'File Changed on Disk',
+      { yes: 'Overwrite', no: 'Reload', cancel: 'Cancel' },
+    );
     if (choice === 'Yes') return 'write';
     if (choice !== 'No' || !this.ctx.tabs.getTab(tabId)) return 'cancel';
     this.ctx.tabs.reloadFromDisk(tabId, disk);
@@ -600,20 +591,48 @@ export class DocumentController {
    * dialog plugin's YesNoCancel message dialog. Returns 'Yes' | 'No' | 'Cancel'
    * ('Cancel' on any failure, so work is never discarded silently).
    */
-  private async promptUnsaved(filename: string): Promise<'Yes' | 'No' | 'Cancel'> {
-    try {
-      const result = await message(
-        `"${filename}" has unsaved changes. Do you want to save them?`,
-        {
-          title: 'Unsaved Changes',
-          kind: 'warning',
-          buttons: { yes: 'Save', no: "Don't Save", cancel: 'Cancel' },
-        },
-      );
-      return result as 'Yes' | 'No' | 'Cancel';
-    } catch (err) {
-      console.error('Unsaved-changes prompt failed:', err);
-      return 'Cancel';
-    }
+  private promptUnsaved(filename: string): Promise<PromptChoice> {
+    return askThreeWay(
+      `"${filename}" has unsaved changes. Do you want to save them?`,
+      'Unsaved Changes',
+      { yes: 'Save', no: "Don't Save", cancel: 'Cancel' },
+    );
+  }
+}
+
+/** The answer of a three-button prompt: its first (yes), second (no) or
+ *  third (cancel) button. */
+export type PromptChoice = 'Yes' | 'No' | 'Cancel';
+
+/** Button labels of a three-button prompt, in yes / no / cancel order. */
+export interface PromptLabels {
+  yes: string;
+  no: string;
+  cancel: string;
+}
+
+/**
+ * Which button a three-button message() answer stands for. With custom
+ * labels the dialog plugin answers with the label of the clicked button
+ * ("Save", "Don't Save") on Linux, macOS and Windows alike, not with 'Yes'
+ * or 'No'; the standard names are accepted too. Anything else (the dialog
+ * closed with Escape or its close button, an unknown answer) is Cancel, so
+ * nothing is saved or dropped without a clear answer.
+ */
+export function promptChoice(result: unknown, labels: PromptLabels): PromptChoice {
+  if (result === labels.yes || result === 'Yes') return 'Yes';
+  if (result === labels.no || result === 'No') return 'No';
+  return 'Cancel';
+}
+
+/** A native warning with three buttons (see promptChoice). A failed dialog
+ *  answers Cancel. */
+async function askThreeWay(text: string, title: string, labels: PromptLabels): Promise<PromptChoice> {
+  try {
+    const result: unknown = await message(text, { title, kind: 'warning', buttons: labels });
+    return promptChoice(result, labels);
+  } catch (err) {
+    console.error(`${title} prompt failed:`, err);
+    return 'Cancel';
   }
 }

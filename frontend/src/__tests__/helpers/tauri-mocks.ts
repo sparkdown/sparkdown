@@ -48,6 +48,9 @@ export const searchState: { results: { matches: unknown[]; truncated: boolean } 
   results: null,
 };
 /** Raw log of every invoke() for asserting on backend traffic. */
+/** Local paths whose `write_file` fails (a full disk, a read-only file). */
+export const failingWrites = new Set<string>();
+
 export const invokeCalls: Array<{ cmd: string; args: Record<string, unknown> | undefined }> = [];
 export const quitCalls = { count: 0 };
 export const quitGate = { busy: false };
@@ -100,7 +103,8 @@ export const userRun = {
 
 /**
  * Scripted dialog answers, consumed FIFO. `message` feeds the 3-button
- * unsaved-changes prompt; `save`/`open` feed the file dialogs (null = user
+ * prompts by button ('Yes' = first, 'No' = second, 'Cancel' = third; the mock
+ * answers with that button's label, as the plugin does); `save`/`open` feed the file dialogs (null = user
  * cancelled). An empty queue answers Cancel/null, the safe default.
  */
 export const dialogResponses = {
@@ -146,6 +150,7 @@ export function resetTauriMocks(): void {
   configOnDisk = null;
   pendingFiles = [];
   invokeCalls.length = 0;
+  failingWrites.clear();
   quitCalls.count = 0;
   quitGate.busy = false;
   dialogResponses.message.length = 0;
@@ -232,6 +237,9 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       return fs.get(path);
     }
     case 'write_file': {
+      if (!remote.session && failingWrites.has(args?.path as string)) {
+        throw new Error('No space left on device (os error 28)');
+      }
       (remote.session ? remoteVfs : vfs).set(args?.path as string, args?.content as string);
       return;
     }
@@ -296,6 +304,8 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       return pendingFiles;
     case 'quit':
       quitCalls.count++;
+      return;
+    case 'window_close':
       return;
     // #88: the core's one-quit gate (lifecycle.rs QuitGate).
     case 'quit_begin':
@@ -525,7 +535,12 @@ export const dialogMock = {
     // scripted answer; plain informational alerts resolve to nothing.
     if (opts && 'buttons' in opts && opts.buttons) {
       messageCalls.push({ text, title: opts.title });
-      return dialogResponses.message.shift() ?? 'Cancel';
+      const answer = dialogResponses.message.shift() ?? 'Cancel';
+      // Like the real dialog plugin: with custom labels it answers with the
+      // clicked button's label ("Save"), not 'Yes' / 'No' / 'Cancel'.
+      const labels = opts.buttons as Partial<Record<'yes' | 'no' | 'cancel', string>>;
+      const key = answer === 'Yes' ? 'yes' : answer === 'No' ? 'no' : 'cancel';
+      return typeof labels === 'object' && labels[key] ? labels[key] : answer;
     }
     return undefined;
   },
