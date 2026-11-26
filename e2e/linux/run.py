@@ -125,6 +125,29 @@ def hypr_dispatch(action, address, version):
     return True
 
 
+def hypr_send_shortcut(mods, key, address, version):
+    """Send `mods`+`key` to the window at `address` through Hyprland itself
+    (sendshortcut). The key goes out with the compositor's own keymap, so the
+    app sees the real key (KeyboardEvent.code "KeyV"). wtype uploads its own
+    keymap in which its first keysym sits on the Escape keycode: the app sees
+    key "v" with code "Escape", and WebKitGTK's native paste binding (matched
+    by hardware keycode) never runs."""
+    if not address or not _ADDR.fullmatch(address):
+        R.log(f"hyprctl sendshortcut: no window address ({address!r})")
+        return False
+    if version and version >= HYPR_LUA:
+        args = ["hyprctl", "dispatch",
+                f'hl.dsp.send_shortcut({{ mods = "{mods}", key = "{key}", window = "address:{address}" }})']
+    else:
+        args = ["hyprctl", "dispatch", "sendshortcut", f"{mods}, {key}, address:{address}"]
+    p = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    out = (p.stdout + p.stderr).strip()
+    if p.returncode != 0 or out != "ok":
+        R.log(f"hyprctl sendshortcut failed (rc={p.returncode}): {args[2:]} -> {out[:300]!r}")
+        return False
+    return True
+
+
 def is_main(t):
     return t.endswith(SUF) or t == "SparkDown"
 
@@ -671,7 +694,9 @@ class Hypr(Base):
         self.wtype("999")
         self.wtype("-k", "Return")
         time.sleep(1)
-        self.wtype("-M", "ctrl", "v", "-m", "ctrl")
+        # A real Ctrl+V: see hypr_send_shortcut for why not wtype.
+        if not hypr_send_shortcut("CTRL", "V", self._addr(title), self.ver):
+            self.wtype("-M", "ctrl", "v", "-m", "ctrl")
         time.sleep(1)
 
     def new_untitled(self, title):
