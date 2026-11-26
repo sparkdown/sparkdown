@@ -88,6 +88,21 @@ class Session:
         except WebDriverError:
             pass
 
+    def type_then_chord(self, text, *keys):
+        """Type `text`, then press `keys` together, in one action sequence
+        (no round trip between the last key and the chord)."""
+        seq = [KEYS.get(k, k) for k in keys]
+        actions = []
+        for ch in text:
+            actions += [{"type": "keyDown", "value": ch}, {"type": "keyUp", "value": ch}]
+        actions += [{"type": "keyDown", "value": k} for k in seq]
+        actions += [{"type": "keyUp", "value": k} for k in reversed(seq)]
+        self.cmd("POST", "/actions", {"actions": [{"type": "key", "id": "kbd", "actions": actions}]})
+        try:
+            self.cmd("DELETE", "/actions")
+        except WebDriverError:
+            pass
+
     def screenshot(self, path):
         try:
             png = self.cmd("GET", "/screenshot", timeout=30)

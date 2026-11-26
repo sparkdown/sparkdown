@@ -88,6 +88,7 @@ export class TabManager {
 
       if (target.classList.contains('tab-close')) {
         e.stopPropagation();
+        this.flushPendingInput();
         if (tab.modified) {
           this.bus.emit(EVENTS.CONFIRM_CLOSE_TAB, { tabId });
         } else {
@@ -154,6 +155,7 @@ export class TabManager {
 
   closeCurrent(): void {
     if (!this.activeTabId) return;
+    this.flushPendingInput();
     const tab = this.activeTab();
     if (tab?.modified) {
       this.bus.emit(EVENTS.CONFIRM_CLOSE_TAB, { tabId: this.activeTabId });
@@ -185,6 +187,14 @@ export class TabManager {
       this.revealTab(this.elements.get(id));
       this.bus.emit(EVENTS.TAB_SWITCHED, { tab });
     }
+  }
+
+  /** Set by the app: applies the editor's not yet applied keystrokes, so
+   *  the modified flags read below include them. */
+  private flushPendingInput: () => void = () => {};
+
+  setPendingInputFlush(flush: () => void): void {
+    this.flushPendingInput = flush;
   }
 
   markSaved(tabId: string | null = this.activeTabId, expectedContent?: string): boolean {
@@ -340,6 +350,7 @@ export class TabManager {
   }
 
   getModifiedTabs(): Tab[] {
+    this.flushPendingInput();
     return this.tabs.filter((t) => t.modified);
   }
 

@@ -308,6 +308,21 @@ class X11(Base):
         self.keys(title, "ctrl+s", "ctrl", "s")
         time.sleep(1)
 
+    def type_and_save(self, title, text):
+        """Type `text` at the end of the editor and press Ctrl+S right after
+        the last key. Returns whether the unsaved dot is gone afterwards, or
+        None when WebDriver can't reach the window."""
+        if not self._wd_handle(title):
+            return None
+        self.wd.click(self.wd.find(".cm-content"))
+        self.wd.js("const v = document.querySelector('.cm-content');"
+                   "const s = getSelection(); s.selectAllChildren(v); s.collapseToEnd(); return 1;")
+        time.sleep(0.3)
+        self.wd.type_then_chord(text, "ctrl", "s")
+        time.sleep(1.5)
+        return not self.wd.js("return Array.from(document.querySelectorAll('*'))"
+                              ".some(e => e.children.length===0 && e.textContent==='\u25cf')")
+
     def close_window(self, title):
         if self._wd_handle(title):
             self.wd.click(self.wd.find("#btn-window-close"))

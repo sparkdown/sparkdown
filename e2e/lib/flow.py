@@ -417,6 +417,20 @@ def run(R, D):
         R.run("terminal-clipboard", terminal_clipboard)
     if D.wd is not None and hasattr(D, "explorer_delete"):
         R.run("explorer-delete", lambda: D.explorer_delete("alpha" + SUF, A))
+    if D.wd is not None and hasattr(D, "type_and_save"):
+        def type_then_save():
+            """Ctrl+S pressed right after the last typed key saves that
+            key too, and the unsaved dot clears."""
+            mark = " e2e-last-key-Q"
+            clean = D.type_and_save("alpha" + SUF, mark)
+            if clean is None:
+                return "MANUAL", "WebDriver can't reach the window"
+            saved = wait_for(lambda: mark in pathlib.Path(note).read_text(encoding="utf-8"), 10)
+            tail = pathlib.Path(note).read_text(encoding="utf-8")[-40:]
+            ok = bool(saved) and clean
+            return ("PASS" if ok else "FAIL"), (f"file has the last key={bool(saved)}; "
+                                                f"unsaved dot cleared={clean}; file ends {tail!r}")
+        R.run("type-then-save", type_then_save)
 
     def restore():
         D.kill_job()
