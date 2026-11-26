@@ -43,6 +43,9 @@ import { ACTIONS, EVENTS } from './event-names';
 import { initPerfTrace, span } from './perf-trace';
 import { GitFeedback } from './git-output';
 import { ImageInserter, clipboardImageFiles, isImagePath } from './image-insert';
+import { UserRunOutputLog } from './user-run-output';
+import { UserRunController } from './user-run';
+import type { UserCommand } from './api';
 import { TERMINAL_SCROLLBACK_DEFAULT } from './terminal-scrollback';
 import { changesFileList } from './file-list-changes';
 import { FocusMode } from './focus-mode';
@@ -107,6 +110,7 @@ export class App {
   private agent!: AgentContextBridge;
   private cockpit!: CockpitController;
   private gitFeedback!: GitFeedback;
+  private userRun!: UserRunController;
   private diff!: DiffController;
   private viewMode!: ViewModeController;
   private workspace!: WorkspaceController;
@@ -205,6 +209,7 @@ export class App {
     this.documents = new DocumentController(this.ctx, {
       renderPreview: (content) => this.panes.renderPreview(content),
       loadPreview: () => this.panes.loadPreview(),
+      afterWrite: (path) => this.userRun?.afterSave(path),
     });
     this.lifecycle = new LifecycleController(this.ctx, {
       resolveUnsavedChanges: () => this.documents.resolveUnsavedChanges(),
@@ -229,6 +234,14 @@ export class App {
       { status: document.getElementById('status-git'), output: document.getElementById('git-output') },
       () => this.cockpit.showGitOutput(),
     );
+    this.userRun = new UserRunController({
+      registry: commands,
+      root: () => this.ctx.workspaceRoot ?? this.fileTree.getRoot(),
+      origin: () => this.tabs.getOrigin(),
+      openFile: (path) => this.openFile(path),
+      showOutput: () => this.cockpit.showOutput(),
+      output: new UserRunOutputLog(document.getElementById('run-output')),
+    });
     this.diff = new DiffController(this.ctx, {
       gitReporter: this.gitFeedback,
       applyTabSwitch: (tab) => this.applyTabSwitch(tab),
@@ -343,6 +356,7 @@ export class App {
     registerMenuListeners(this.actionTargets());
     this.registerBusListeners();
     this.registerCommands();
+    void this.userRun.load();
     this.lifecycle.registerCloseGuard();
     this.initUpdates();
     this.workspace.registerFileDrop();
@@ -915,6 +929,14 @@ export class App {
   private openSettings(section?: 'agents'): void {
     const host = {
       config: this.config,
+      userRun: {
+        view: () => this.userRun.view,
+        saveCommands: async (cmds: UserCommand[]) => { await this.userRun.saveCommands(cmds); },
+        openFile: () => {
+          this.settingsDialog.close();
+          void this.userRun.openConfigFile();
+        },
+      },
       onChange: () => {
         this.cockpit.applySettings();
         // Bridge switched off → remove what it already wrote, now.

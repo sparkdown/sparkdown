@@ -407,3 +407,85 @@ describe('agent MCP row actions (#49)', () => {
   });
 
 });
+
+describe('Custom commands in Settings', () => {
+  let config: AppConfig;
+  let commands: { name: string; argv: string[] }[];
+  let saved: { name: string; argv: string[] }[] | null;
+  let opened: number;
+
+  const userRun = () => ({
+    view: () => ({
+      commands,
+      save_hooks: [],
+      problems: commands.length ? [] : ['Command 2 has no name; it was ignored.'],
+      path: '/cfg/user-run.json',
+    }),
+    saveCommands: async (next: { name: string; argv: string[] }[]) => {
+      saved = next;
+      commands = next.map((c) => ({ ...c, argv: [...c.argv] }));
+    },
+    openFile: () => { opened++; },
+  });
+
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="app"></div>';
+    config = { use_tmux: false, agent_context_enabled: false } as AppConfig;
+    commands = [{ name: 'Format', argv: ['prettier', '--write', '.'] }];
+    saved = null;
+    opened = 0;
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    document.body.innerHTML = '';
+  });
+
+  it('lists commands and saves an edit', async () => {
+    const dialog = new SettingsDialog();
+    dialog.toggle({ config, onChange: () => {}, userRun: userRun() });
+    const section = document.querySelector('[data-section="commands"]')!;
+    expect(section.textContent).toContain('Custom commands');
+    expect(section.querySelector<HTMLInputElement>('input[data-run-field="name"]')!.value).toBe('Format');
+    const run = section.querySelector<HTMLInputElement>('input[data-run-field="run"]')!;
+    expect(run.value).toBe('prettier --write .');
+    run.value = 'prettier --write src';
+    run.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(saved?.[0]?.argv).toEqual(['prettier', '--write', 'src']);
+    dialog.close();
+  });
+
+  it('adds and removes a command, and opens the file', async () => {
+    const dialog = new SettingsDialog();
+    dialog.toggle({ config, onChange: () => {}, userRun: userRun() });
+    const section = document.querySelector('[data-section="commands"]')!;
+    const add = [...section.querySelectorAll('button')].find((b) => b.textContent === 'Add command')!;
+    add.click();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(saved?.some((c) => c.name === 'New command')).toBe(true);
+    expect(section.querySelectorAll('.settings-run-item')).toHaveLength(2);
+    const remove = [...section.querySelectorAll('button')].find((b) => b.textContent === 'Remove')!;
+    remove.click();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(section.querySelectorAll('.settings-run-item')).toHaveLength(1);
+    const open = [...section.querySelectorAll('button')].find((b) => b.textContent === 'Open user-run.json')!;
+    open.click();
+    expect(opened).toBe(1);
+    dialog.close();
+  });
+
+  it('shows skipped-entry notes and does not appear without userRun', () => {
+    commands = [];
+    const dialog = new SettingsDialog();
+    dialog.toggle({ config, onChange: () => {}, userRun: userRun() });
+    const problems = document.querySelector('.settings-run-problems') as HTMLElement;
+    expect(problems.hidden).toBe(false);
+    expect(problems.textContent).toContain('no name');
+    dialog.close();
+
+    dialog.toggle({ config, onChange: () => {} });
+    expect(document.querySelector('[data-section="commands"]')).toBeNull();
+    dialog.close();
+  });
+});

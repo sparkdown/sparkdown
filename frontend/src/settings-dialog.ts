@@ -1,5 +1,6 @@
 import { api } from './api';
-import type { AgentMcpStatus, AppConfig } from './api';
+import type { AgentMcpStatus, AppConfig, UserCommand, UserRunView } from './api';
+import { joinCommandLine, trySplitCommandLine } from './user-run-argv';
 import { trapFocus, type ModalHandle } from './modal';
 import {
   TERMINAL_SCROLLBACK_DEFAULT,
@@ -20,6 +21,14 @@ export interface SettingsHost {
   config: AppConfig;
   /** Called after a setting changes so the app can persist + apply it. */
   onChange: () => void;
+  /** User-level custom commands (absent in tests that don't cover them). */
+  userRun?: UserRunSettings;
+}
+
+export interface UserRunSettings {
+  view(): UserRunView;
+  saveCommands(commands: UserCommand[]): Promise<void>;
+  openFile(): void;
 }
 
 interface OpenSettings {
@@ -199,6 +208,10 @@ function buildSettingsOverlay(host: SettingsHost, close: () => void): HTMLElemen
     }),
   );
   dialog.appendChild(git);
+
+  if (host.userRun) {
+    dialog.appendChild(buildCommandsSection(host.userRun));
+  }
 
   const agents = document.createElement('div');
   agents.className = 'settings-section';
@@ -564,6 +577,159 @@ function scrollbackRow(spec: { value: number; onChange: (value: number) => void 
     if (e.key === 'Enter') save();
   });
   row.append(text, input);
+  return row;
+}
+
+function buildCommandsSection(userRun: UserRunSettings): HTMLElement {
+  const section = document.createElement('div');
+  section.className = 'settings-section';
+  section.dataset.section = 'commands';
+  const heading = document.createElement('h3');
+  heading.textContent = 'Custom commands';
+  section.appendChild(heading);
+
+  const desc = document.createElement('p');
+  desc.className = 'settings-run-desc';
+  desc.textContent =
+    'These appear in the command palette. They are stored in your SparkDown ' +
+    'user config, not in the opened folder. Each command is a program and ' +
+    'its arguments (no shell), run with the folder as the working directory. ' +
+    'Output appears in the Output tab.';
+  section.appendChild(desc);
+
+  const problems = document.createElement('p');
+  problems.className = 'settings-run-problems';
+  problems.hidden = true;
+  section.appendChild(problems);
+
+  const list = document.createElement('div');
+  section.appendChild(list);
+
+  let draft: UserCommand[] = userRun.view().commands.map((c) => ({ ...c, argv: [...c.argv] }));
+  let saveTimer: number | null = null;
+
+  const showProblems = () => {
+    const notes = userRun.view().problems;
+    problems.hidden = notes.length === 0;
+    problems.textContent = notes.join('\n');
+  };
+
+  const scheduleSave = () => {
+    if (saveTimer !== null) window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(() => {
+      saveTimer = null;
+      void userRun.saveCommands(draft).then(showProblems);
+    }, 400);
+  };
+
+  const render = () => {
+    list.replaceChildren();
+    draft.forEach((cmd, i) => {
+      list.appendChild(commandRow(cmd, {
+        onChange: (next) => {
+          draft[i] = next;
+          scheduleSave();
+        },
+        onRemove: () => {
+          draft.splice(i, 1);
+          render();
+          scheduleSave();
+        },
+      }));
+    });
+    showProblems();
+  };
+  render();
+
+  const actions = document.createElement('div');
+  actions.className = 'settings-run-actions';
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'settings-btn';
+  add.textContent = 'Add command';
+  add.addEventListener('click', () => {
+    draft.push({ name: 'New command', argv: ['echo', 'hello'] });
+    render();
+    scheduleSave();
+    const inputs = list.querySelectorAll<HTMLInputElement>('input[data-run-field="name"]');
+    inputs[inputs.length - 1]?.focus();
+    inputs[inputs.length - 1]?.select();
+  });
+  const open = document.createElement('button');
+  open.type = 'button';
+  open.className = 'settings-btn';
+  open.textContent = 'Open user-run.json';
+  open.addEventListener('click', () => userRun.openFile());
+  actions.append(add, open);
+  section.appendChild(actions);
+  return section;
+}
+
+interface CommandRowHandlers {
+  onChange: (cmd: UserCommand) => void;
+  onRemove: () => void;
+}
+
+function commandRow(cmd: UserCommand, handlers: CommandRowHandlers): HTMLElement {
+  const item = document.createElement('div');
+  item.className = 'settings-run-item';
+  let current: UserCommand = { ...cmd, argv: [...cmd.argv] };
+  const emit = (next: UserCommand) => {
+    current = next;
+    handlers.onChange(next);
+  };
+
+  const nameRow = labeledField('Name', 'name', current.name, (value) => {
+    emit({ ...current, name: value.trim() || current.name });
+  });
+  const line = joinCommandLine(current.argv);
+  const runRow = labeledField('Run', 'run', line, (value) => {
+    const argv = trySplitCommandLine(value);
+    if (!argv) return;
+    emit({ ...current, argv });
+  }, 'prettier --write .');
+  const timeout = current.timeout_ms != null ? String(current.timeout_ms) : '';
+  const timeRow = labeledField('Timeout (ms)', 'timeout', timeout, (value) => {
+    const n = Number.parseInt(value, 10);
+    emit({
+      ...current,
+      timeout_ms: Number.isFinite(n) && n > 0 ? n : null,
+    });
+  }, '30000');
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'settings-btn';
+  remove.textContent = 'Remove';
+  remove.addEventListener('click', () => handlers.onRemove());
+  timeRow.appendChild(remove);
+
+  item.append(nameRow, runRow, timeRow);
+  return item;
+}
+
+function labeledField(
+  labelText: string,
+  field: string,
+  value: string,
+  onInput: (value: string) => void,
+  placeholder = '',
+): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'settings-run-row';
+  const label = document.createElement('label');
+  label.textContent = labelText;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'settings-text';
+  input.dataset.runField = field;
+  input.value = value;
+  input.placeholder = placeholder;
+  input.spellcheck = false;
+  input.autocapitalize = 'off';
+  input.addEventListener('input', () => onInput(input.value));
+  input.addEventListener('change', () => onInput(input.value));
+  row.append(label, input);
   return row;
 }
 
