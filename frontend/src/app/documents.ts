@@ -45,6 +45,8 @@ export class DocumentController {
   // Tabs with a save in progress: a watcher event that lands between our
   // write and markSaved() would otherwise look like a foreign change.
   private savesInFlight = new Set<string>();
+  /** Follow-up writes in progress, by tab (see writeFollowUp). */
+  private followUps = new Map<string, Promise<boolean>>();
   /** Tabs the user chose "Don't Save" for in prepareOriginSwitch; only these
    *  dirty tabs may be dropped by commitOriginSwitch. */
   private discardOnOriginSwitch = new Set<string>();
@@ -224,7 +226,8 @@ export class DocumentController {
           // that is the baseline: the tab stays dirty and our own write is
           // not mistaken for a foreign change by the watcher or the next save.
           this.ctx.tabs.recordWritten(id, content);
-          return false;
+          // Then write once more with the text the tab holds now.
+          return await this.writeFollowUp(id, originalPath, content);
         }
         return this.ctx.tabs.markSaved(id, content);
       } catch (err) {
@@ -235,6 +238,41 @@ export class DocumentController {
       }
     }
     return this.saveAs(id);
+  }
+
+  /**
+   * Typing landed in a tab while save() wrote it. Write once more, right
+   * away, with the text the tab holds now. One such write per tab at a time:
+   * a request while one is running joins it. Text typed during this write is
+   * not written again; the tab stays modified, as after any write that typing
+   * overtakes. No write when the tab is gone, moved to another file, belongs
+   * to a machine that is no longer the active session, or no longer differs
+   * from what was written.
+   */
+  private writeFollowUp(id: string, path: string, written: string): Promise<boolean> {
+    const pending = this.followUps.get(id);
+    if (pending) return pending;
+    const run = this.runFollowUp(id, path, written).finally(() => this.followUps.delete(id));
+    this.followUps.set(id, run);
+    return run;
+  }
+
+  private async runFollowUp(id: string, path: string, written: string): Promise<boolean> {
+    const tab = this.ctx.tabs.getTab(id);
+    if (!tab || tab.path !== path || tab.origin !== this.ctx.tabs.getOrigin()) return false;
+    const content = id === this.ctx.tabs.activeTab()?.id ? this.ctx.editor.getContent() : tab.content;
+    if (content === written) return this.ctx.tabs.markSaved(id, content);
+    try {
+      await this.writeOwn(path, content);
+    } catch (err) {
+      if (this.ctx.tabs.getTab(id)?.content === content) await this.reportSaveError(path, err);
+      return false;
+    }
+    if (this.ctx.tabs.getTab(id)?.content !== content) {
+      this.ctx.tabs.recordWritten(id, content);
+      return false;
+    }
+    return this.ctx.tabs.markSaved(id, content);
   }
 
   /**
