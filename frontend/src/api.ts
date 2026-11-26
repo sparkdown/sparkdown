@@ -32,7 +32,14 @@ export interface UserRunView {
   commands: UserCommand[];
   save_hooks: SaveHook[];
   problems: string[];
+  /** Set when the file as a whole could not be read (for example, it is
+   *  not valid JSON). Settings shows it and does not write the file. */
+  file_error?: string | null;
   path: string;
+  /** Settings lists that could not be saved as they are (for example, two
+   *  entries with the same name). Kept in memory so Settings shows them as
+   *  drafts instead of dropping them; set by the frontend only. */
+  drafts?: { commands?: UserCommand[]; save_hooks?: SaveHook[] };
 }
 
 /** Result of running one user-level program. */

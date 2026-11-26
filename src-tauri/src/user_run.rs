@@ -45,7 +45,8 @@ pub struct SaveHook {
     pub name: String,
     pub argv: Vec<String>,
     /// If empty, the hook matches every file inside the local folder.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Always written (also when empty): the frontend reads it as a list.
+    #[serde(default)]
     pub globs: Vec<String>,
     #[serde(default)]
     pub enabled: bool,
@@ -60,6 +61,9 @@ pub struct UserRunView {
     pub commands: Vec<UserCommand>,
     pub save_hooks: Vec<SaveHook>,
     pub problems: Vec<String>,
+    /// The file as a whole could not be read; Settings shows this and does
+    /// not write the file until it is fixed by hand.
+    pub file_error: Option<String>,
     pub path: String,
 }
 
@@ -86,219 +90,357 @@ pub fn path(app: &AppHandle) -> Result<PathBuf, AppError> {
     Ok(dir.join(FILE_NAME))
 }
 
+/// Result of reading a user-run document: accepted entries, a note for
+/// every entry that was skipped, and what a Settings save must keep.
+#[derive(Debug, Default)]
+pub struct Parsed {
+    pub file: UserRunFile,
+    /// One line per skipped entry (or ignored field), with the reason.
+    pub problems: Vec<String>,
+    /// Set when the document as a whole could not be read (not JSON, not an
+    /// object, or a list that is not an array). Settings does not write the
+    /// file while this is set, so a hand edit is never replaced.
+    pub file_error: Option<String>,
+    /// Skipped entries exactly as written, kept when Settings saves.
+    skipped_commands: Vec<serde_json::Value>,
+    skipped_hooks: Vec<serde_json::Value>,
+    /// Top-level fields other than `commands` / `save_hooks`, kept on save.
+    other_fields: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Parsed {
+    fn file_level(&mut self, msg: String) {
+        self.problems.push(msg.clone());
+        if self.file_error.is_none() {
+            self.file_error = Some(msg);
+        }
+    }
+}
+
+const COMMAND_FIELDS: &[&str] = &["name", "argv", "command", "timeout_ms"];
+const HOOK_FIELDS: &[&str] = &["name", "argv", "command", "globs", "enabled", "timeout_ms"];
+
 /// Load `path`, skipping bad entries instead of failing the whole file.
-pub fn load_from(path: &Path) -> (UserRunFile, Vec<String>) {
-    let mut problems = Vec::new();
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return (UserRunFile::default(), problems);
-        }
+/// A missing or empty file is an empty list with no problems.
+pub fn load_from(path: &Path) -> Parsed {
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse_user_run(&text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Parsed::default(),
         Err(e) => {
-            problems.push(format!("Could not read {}: {e}", path.display()));
-            return (UserRunFile::default(), problems);
+            let mut out = Parsed::default();
+            out.file_level(format!("Could not read {}: {e}", path.display()));
+            out
         }
-    };
-    parse_user_run(&text, &mut problems)
+    }
 }
 
-/// Parse a user-run document from `text`.
-pub fn parse_user_run(text: &str, problems: &mut Vec<String>) -> (UserRunFile, Vec<String>) {
-    // `problems` is updated in place and also returned so callers can
-    // `let (file, problems) = parse_user_run(...)`.
-    let value: serde_json::Value = match serde_json::from_str(text) {
-        Ok(v) => v,
+/// Parse a user-run document from `text`. Never fails: every problem is a
+/// line in [`Parsed::problems`].
+pub fn parse_user_run(text: &str) -> Parsed {
+    if text.trim().is_empty() {
+        return Parsed::default();
+    }
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(value) => parse_document(value),
         Err(e) => {
-            problems.push(format!("user-run.json is not valid JSON: {e}"));
-            return (UserRunFile::default(), problems.clone());
+            let mut out = Parsed::default();
+            out.file_level(format!("user-run.json is not valid JSON: {e}"));
+            out
         }
-    };
-    let obj = match value.as_object() {
-        Some(o) => o,
-        None => {
-            problems.push("user-run.json must be a JSON object.".to_string());
-            return (UserRunFile::default(), problems.clone());
-        }
-    };
-    let commands = parse_command_list(obj.get("commands"), problems);
-    let save_hooks = parse_hook_list(obj.get("save_hooks"), problems);
-    (
-        UserRunFile {
-            commands,
-            save_hooks,
-        },
-        problems.clone(),
-    )
+    }
 }
 
-fn parse_command_list(
-    value: Option<&serde_json::Value>,
+fn parse_document(value: serde_json::Value) -> Parsed {
+    let mut out = Parsed::default();
+    let serde_json::Value::Object(mut obj) = value else {
+        out.file_level("user-run.json must be a JSON object.".to_string());
+        return out;
+    };
+    let commands = obj.remove("commands");
+    let hooks = obj.remove("save_hooks");
+    for key in obj.keys() {
+        out.problems.push(format!(
+            "Unknown top-level field \"{key}\" in user-run.json was ignored."
+        ));
+    }
+    out.other_fields = obj;
+    if let Some(items) = entry_list(commands, "commands", &mut out) {
+        let (ok, skipped) = parse_entries(
+            &items,
+            parse_command,
+            |c| &c.name,
+            "Command",
+            &mut out.problems,
+        );
+        out.file.commands = ok;
+        out.skipped_commands = skipped;
+    }
+    if let Some(items) = entry_list(hooks, "save_hooks", &mut out) {
+        let (ok, skipped) = parse_entries(
+            &items,
+            parse_hook,
+            |h| &h.name,
+            "On-save hook",
+            &mut out.problems,
+        );
+        out.file.save_hooks = ok;
+        out.skipped_hooks = skipped;
+    }
+    out
+}
+
+/// The entries of one top-level list. Missing or null is an empty list;
+/// any other non-array value is a file-level problem.
+fn entry_list(
+    value: Option<serde_json::Value>,
+    key: &str,
+    out: &mut Parsed,
+) -> Option<Vec<serde_json::Value>> {
+    match value {
+        None | Some(serde_json::Value::Null) => Some(Vec::new()),
+        Some(serde_json::Value::Array(items)) => Some(items),
+        Some(_) => {
+            out.file_level(format!(
+                "\"{key}\" in user-run.json must be an array; it was ignored."
+            ));
+            None
+        }
+    }
+}
+
+fn parse_entries<T>(
+    items: &[serde_json::Value],
+    parse: fn(&serde_json::Value, usize) -> Result<T, String>,
+    name_of: fn(&T) -> &String,
+    kind: &str,
     problems: &mut Vec<String>,
-) -> Vec<UserCommand> {
-    let Some(value) = value else {
-        return Vec::new();
-    };
-    let Some(arr) = value.as_array() else {
-        problems.push("\"commands\" must be an array; it was ignored.".to_string());
-        return Vec::new();
-    };
-    let mut out = Vec::new();
+) -> (Vec<T>, Vec<serde_json::Value>) {
+    let mut ok = Vec::new();
+    let mut skipped = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for (i, item) in arr.iter().enumerate() {
-        match parse_command(item, i) {
-            Ok(cmd) => {
-                if !seen.insert(cmd.name.clone()) {
+    for (i, item) in items.iter().enumerate() {
+        match parse(item, i) {
+            Ok(entry) => {
+                if seen.insert(name_of(&entry).clone()) {
+                    ok.push(entry);
+                } else {
                     problems.push(format!(
-                        "Command \"{}\" is duplicated; the later entry was ignored.",
-                        cmd.name
+                        "{kind} \"{}\" is duplicated; the later entry was skipped.",
+                        name_of(&entry)
                     ));
-                    continue;
+                    skipped.push(item.clone());
                 }
-                out.push(cmd);
             }
-            Err(msg) => problems.push(msg),
+            Err(msg) => {
+                problems.push(msg);
+                skipped.push(item.clone());
+            }
         }
     }
-    out
+    (ok, skipped)
 }
 
-fn parse_hook_list(value: Option<&serde_json::Value>, problems: &mut Vec<String>) -> Vec<SaveHook> {
-    let Some(value) = value else {
-        return Vec::new();
+type JsonObject = serde_json::Map<String, serde_json::Value>;
+
+/// The object of entry `index`, its display label, and its checked name.
+fn entry_head<'a>(
+    item: &'a serde_json::Value,
+    index: usize,
+    kind: &str,
+    allowed: &[&str],
+) -> Result<(&'a JsonObject, String), String> {
+    let obj = item
+        .as_object()
+        .ok_or_else(|| format!("{kind} {} is not an object; it was skipped.", index + 1))?;
+    let label = match obj
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+    {
+        Some(n) if !n.is_empty() => format!("{kind} \"{n}\""),
+        _ => format!("{kind} {}", index + 1),
     };
-    let Some(arr) = value.as_array() else {
-        problems.push("\"save_hooks\" must be an array; it was ignored.".to_string());
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for (i, item) in arr.iter().enumerate() {
-        match parse_hook(item, i) {
-            Ok(hook) => {
-                if !seen.insert(hook.name.clone()) {
-                    problems.push(format!(
-                        "On-save hook \"{}\" is duplicated; the later entry was ignored.",
-                        hook.name
-                    ));
-                    continue;
-                }
-                out.push(hook);
-            }
-            Err(msg) => problems.push(msg),
-        }
+    if let Some(key) = obj.keys().find(|k| !allowed.contains(&k.as_str())) {
+        return Err(format!(
+            "{label} has an unknown field \"{key}\"; it was skipped."
+        ));
     }
-    out
+    let name = match obj.get("name") {
+        None | Some(serde_json::Value::Null) => {
+            return Err(format!("{label} has no name; it was skipped."));
+        }
+        Some(serde_json::Value::String(s)) if s.trim().is_empty() => {
+            return Err(format!("{label} has an empty name; it was skipped."));
+        }
+        Some(serde_json::Value::String(s)) => s.trim().to_string(),
+        Some(_) => {
+            return Err(format!(
+                "{label} has a name that is not text; it was skipped."
+            ));
+        }
+    };
+    Ok((obj, name))
 }
 
 fn parse_command(item: &serde_json::Value, index: usize) -> Result<UserCommand, String> {
-    let obj = item
-        .as_object()
-        .ok_or_else(|| format!("Command {} is not an object; it was ignored.", index + 1))?;
-    let name = required_name(obj, "Command", index)?;
-    let argv = required_argv(obj, "Command", &name)?;
+    let (obj, name) = entry_head(item, index, "Command", COMMAND_FIELDS)?;
+    let label = format!("Command \"{name}\"");
     Ok(UserCommand {
+        argv: required_argv(obj, &label)?,
+        timeout_ms: timeout_field(obj, &label)?,
         name,
-        argv,
-        timeout_ms: timeout_field(obj),
     })
 }
 
 fn parse_hook(item: &serde_json::Value, index: usize) -> Result<SaveHook, String> {
-    let obj = item.as_object().ok_or_else(|| {
-        format!(
-            "On-save hook {} is not an object; it was ignored.",
-            index + 1
-        )
-    })?;
-    let name = required_name(obj, "On-save hook", index)?;
-    let argv = required_argv(obj, "On-save hook", &name)?;
+    let (obj, name) = entry_head(item, index, "On-save hook", HOOK_FIELDS)?;
+    let label = format!("On-save hook \"{name}\"");
+    let argv = required_argv(obj, &label)?;
     let globs = match obj.get("globs") {
-        None => Vec::new(),
-        Some(serde_json::Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .filter(|s| !s.is_empty())
-            .collect(),
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(arr)) => {
+            let globs: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if globs.len() != arr.len() {
+                return Err(format!(
+                    "{label} has a file pattern that is empty or not text; it was skipped."
+                ));
+            }
+            globs
+        }
         Some(_) => {
             return Err(format!(
-                "On-save hook \"{name}\" has a globs value that is not an array; it was ignored."
+                "{label} has a globs value that is not a list of patterns; it was skipped."
             ));
         }
     };
-    let enabled = obj
-        .get("enabled")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    let enabled = match obj.get("enabled") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(_) => {
+            return Err(format!(
+                "{label} has an enabled value that is not true or false; it was skipped."
+            ));
+        }
+    };
     Ok(SaveHook {
+        timeout_ms: timeout_field(obj, &label)?,
         name,
         argv,
         globs,
         enabled,
-        timeout_ms: timeout_field(obj),
     })
 }
 
-fn required_name(
-    obj: &serde_json::Map<String, serde_json::Value>,
-    kind: &str,
-    index: usize,
-) -> Result<String, String> {
-    let name = obj
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| format!("{kind} {} has no name; it was ignored.", index + 1))?;
-    Ok(name.to_string())
+fn required_argv(obj: &JsonObject, label: &str) -> Result<Vec<String>, String> {
+    match obj.get("argv") {
+        Some(serde_json::Value::Array(arr)) => {
+            let argv: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            if argv.len() != arr.len() {
+                return Err(format!(
+                    "{label} has an argv entry that is not text; it was skipped."
+                ));
+            }
+            if argv.is_empty() || argv[0].trim().is_empty() {
+                return Err(format!("{label} has an empty argv; it was skipped."));
+            }
+            Ok(argv)
+        }
+        Some(serde_json::Value::Null) | None => match obj.get("command") {
+            Some(serde_json::Value::String(line)) => split_command_line(line).map_err(|e| {
+                format!("{label} has a command that could not be split ({e}); it was skipped.")
+            }),
+            Some(serde_json::Value::Null) | None => Err(format!(
+                "{label} needs an argv list or a command string; it was skipped."
+            )),
+            Some(_) => Err(format!(
+                "{label} has a command that is not text; it was skipped."
+            )),
+        },
+        Some(_) => Err(format!(
+            "{label} has an argv that is not a list of strings; it was skipped."
+        )),
+    }
 }
 
-fn required_argv(
-    obj: &serde_json::Map<String, serde_json::Value>,
-    kind: &str,
-    name: &str,
-) -> Result<Vec<String>, String> {
-    if let Some(arr) = obj.get("argv").and_then(serde_json::Value::as_array) {
-        let argv: Vec<String> = arr
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect();
-        if argv.is_empty() || argv[0].trim().is_empty() {
-            return Err(format!(
-                "{kind} \"{name}\" has an empty argv; it was ignored."
-            ));
-        }
-        if argv.len() != arr.len() {
-            return Err(format!(
-                "{kind} \"{name}\" has a non-string argv entry; it was ignored."
-            ));
-        }
-        return Ok(argv);
+fn timeout_field(obj: &JsonObject, label: &str) -> Result<Option<u64>, String> {
+    match obj.get("timeout_ms") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => match v.as_u64() {
+            Some(ms) if ms > 0 => Ok(Some(clamp_timeout(ms))),
+            _ => Err(format!(
+                "{label} has a timeout_ms that is not a positive whole number; it was skipped."
+            )),
+        },
     }
-    if let Some(line) = obj.get("command").and_then(serde_json::Value::as_str) {
-        return split_command_line(line).map_err(|e| {
-            format!(
-                "{kind} \"{name}\" has a command that could not be split ({e}); it was ignored."
-            )
-        });
-    }
-    Err(format!(
-        "{kind} \"{name}\" needs an argv array or a command string; it was ignored."
-    ))
-}
-
-fn timeout_field(obj: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
-    obj.get("timeout_ms")
-        .and_then(serde_json::Value::as_u64)
-        .map(clamp_timeout)
 }
 
 fn clamp_timeout(ms: u64) -> u64 {
     ms.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)
 }
 
-/// Write `file` to `path` (owner-only, like other SparkDown config files).
-pub fn save_to(path: &Path, file: &UserRunFile) -> Result<(), AppError> {
-    let json = serde_json::to_string_pretty(file).map_err(|e| AppError::Config(e.to_string()))?;
+/// Write the entries Settings edited to `path` (owner-only, like other
+/// SparkDown config files). Entries from `file` are checked the same way a
+/// hand edit is read; any that would be skipped are not written and come
+/// back as "Not saved" lines. Entries the file already had that are skipped
+/// (and unknown top-level fields) are kept as written, so Settings never
+/// deletes a hand edit. Refuses to write over a file it cannot read.
+pub fn save_merged(path: &Path, file: &UserRunFile) -> Result<Vec<String>, AppError> {
+    let current = load_from(path);
+    if let Some(err) = &current.file_error {
+        return Err(AppError::Config(format!(
+            "{err} Fix user-run.json in the editor first; Settings did not change it."
+        )));
+    }
+    let payload = serde_json::to_value(file).map_err(|e| AppError::Config(e.to_string()))?;
+    let checked = parse_document(payload);
+    let not_saved = checked
+        .problems
+        .iter()
+        .map(|p| format!("Not saved: {p}"))
+        .collect();
+    let to_values = |v: Vec<serde_json::Value>, keep: &[serde_json::Value]| {
+        let mut all = v;
+        all.extend(keep.iter().cloned());
+        serde_json::Value::Array(all)
+    };
+    let commands = checked
+        .file
+        .commands
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| AppError::Config(e.to_string()))?;
+    let hooks = checked
+        .file
+        .save_hooks
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| AppError::Config(e.to_string()))?;
+    let mut doc = serde_json::Map::new();
+    doc.insert(
+        "commands".into(),
+        to_values(commands, &current.skipped_commands),
+    );
+    doc.insert(
+        "save_hooks".into(),
+        to_values(hooks, &current.skipped_hooks),
+    );
+    doc.extend(current.other_fields);
+    save_to(path, &serde_json::Value::Object(doc))?;
+    Ok(not_saved)
+}
+
+fn save_to(path: &Path, doc: &serde_json::Value) -> Result<(), AppError> {
+    let json = serde_json::to_string_pretty(doc).map_err(|e| AppError::Config(e.to_string()))?;
     crate::fsio::write_private(path, format!("{json}\n").as_bytes()).map_err(AppError::from)
 }
 
@@ -556,6 +698,17 @@ pub fn run_argv(
             error: Some("The command is empty.".to_string()),
         };
     }
+    if !cwd.is_absolute() || !cwd.is_dir() {
+        return RunOutcome {
+            name: name.to_string(),
+            argv: full,
+            cwd: cwd_s.clone(),
+            exit_code: None,
+            timed_out: false,
+            output: String::new(),
+            error: Some(format!("The folder {cwd_s} is not available.")),
+        };
+    }
     let mut cmd = crate::proc::command(&full[0]);
     cmd.args(&full[1..])
         .current_dir(cwd)
@@ -698,11 +851,12 @@ fn local_folder_of(label: &str) -> Result<PathBuf, AppError> {
     }
 }
 
-fn view_from(path: PathBuf, file: UserRunFile, problems: Vec<String>) -> UserRunView {
+fn view_from(path: PathBuf, parsed: Parsed) -> UserRunView {
     UserRunView {
-        commands: file.commands,
-        save_hooks: file.save_hooks,
-        problems,
+        commands: parsed.file.commands,
+        save_hooks: parsed.file.save_hooks,
+        problems: parsed.problems,
+        file_error: parsed.file_error,
         path: path.display().to_string(),
     }
 }
@@ -717,23 +871,18 @@ pub fn user_run_path(app: AppHandle) -> Result<String, AppError> {
 #[tauri::command]
 pub fn load_user_run(app: AppHandle) -> Result<UserRunView, AppError> {
     let path = path(&app)?;
-    let (file, problems) = load_from(&path);
-    Ok(view_from(path, file, problems))
+    let parsed = load_from(&path);
+    Ok(view_from(path, parsed))
 }
 
 /// Replace the user-level run file with `file` and return the reloaded view.
 #[tauri::command]
 pub fn save_user_run(app: AppHandle, file: UserRunFile) -> Result<UserRunView, AppError> {
     let path = path(&app)?;
-    // Re-validate names/argv the same way a hand edit is read, so a bad
-    // payload cannot persist a command the palette would then skip.
-    let json = serde_json::to_string(&file).map_err(|e| AppError::Config(e.to_string()))?;
-    let mut problems = Vec::new();
-    let (clean, parse_problems) = parse_user_run(&json, &mut problems);
-    let _ = parse_problems;
-    save_to(&path, &clean)?;
-    let (loaded, load_problems) = load_from(&path);
-    Ok(view_from(path, loaded, load_problems))
+    let not_saved = save_merged(&path, &file)?;
+    let mut parsed = load_from(&path);
+    parsed.problems.extend(not_saved);
+    Ok(view_from(path, parsed))
 }
 
 /// Run the named custom command with the window's local folder as cwd.
@@ -747,7 +896,7 @@ pub async fn run_user_command(
     let label = webview_window.label().to_string();
     crate::windows::spawn_scoped(label.clone(), move || {
         let folder = local_folder_of(&label)?;
-        let (file, _) = load_from(&path);
+        let file = load_from(&path).file;
         let cmd = file
             .commands
             .iter()
@@ -779,7 +928,7 @@ pub async fn run_save_hooks(
             Some(f) => f,
             None => return Ok(Vec::new()),
         };
-        let (file, _) = load_from(&path);
+        let file = load_from(&path).file;
         let hooks: Vec<SaveHook> = hooks_for_save(&file, &folder, &saved_path)
             .into_iter()
             .cloned()
@@ -810,8 +959,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn problems_of(json: &str) -> (UserRunFile, Vec<String>) {
-        let mut p = Vec::new();
-        parse_user_run(json, &mut p)
+        let p = parse_user_run(json);
+        (p.file, p.problems)
     }
 
     #[test]
@@ -905,7 +1054,7 @@ mod tests {
     fn missing_file_is_empty_and_a_folder_file_is_never_consulted() {
         let dir = tempfile::tempdir().unwrap();
         let user = dir.path().join(FILE_NAME);
-        let (file, problems) = load_from(&user);
+        let Parsed { file, problems, .. } = load_from(&user);
         assert!(file.commands.is_empty());
         assert!(problems.is_empty());
 
@@ -917,7 +1066,7 @@ mod tests {
             r#"{"commands":[{"name":"FromFolder","argv":["echo"]}]}"#,
         )
         .unwrap();
-        let (file, problems) = load_from(&user);
+        let Parsed { file, problems, .. } = load_from(&user);
         assert!(file.commands.is_empty());
         assert!(problems.is_empty());
         assert!(!file.commands.iter().any(|c| c.name == "FromFolder"));
@@ -932,7 +1081,7 @@ mod tests {
             r#"{"commands":[{"name":"Hi","argv":["echo","hi"]}],"save_hooks":[{"name":"Fmt","argv":["prettier","--write"],"enabled":true,"globs":["*.md"]}]}"#,
         )
         .unwrap();
-        let (file, problems) = load_from(&user);
+        let Parsed { file, problems, .. } = load_from(&user);
         assert!(problems.is_empty());
         assert_eq!(file.commands[0].name, "Hi");
         assert_eq!(file.save_hooks[0].name, "Fmt");
@@ -1030,7 +1179,7 @@ mod tests {
     }
 
     #[test]
-    fn save_to_round_trips_and_is_owner_only() {
+    fn save_merged_round_trips_and_is_owner_only() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
         let file = UserRunFile {
@@ -1047,7 +1196,7 @@ mod tests {
                 timeout_ms: None,
             }],
         };
-        save_to(&path, &file).unwrap();
+        assert!(save_merged(&path, &file).unwrap().is_empty());
         #[cfg(unix)]
         {
             assert_eq!(
@@ -1055,9 +1204,277 @@ mod tests {
                 0o600
             );
         }
-        let (loaded, problems) = load_from(&path);
-        assert!(problems.is_empty());
-        assert_eq!(loaded, file);
+        let loaded = load_from(&path);
+        assert!(loaded.problems.is_empty());
+        assert_eq!(loaded.file, file);
+    }
+
+    fn hook(name: &str, globs: &[&str]) -> SaveHook {
+        SaveHook {
+            name: name.into(),
+            argv: vec!["echo".into()],
+            globs: globs.iter().map(|g| g.to_string()).collect(),
+            enabled: false,
+            timeout_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_hook_with_no_globs_is_sent_and_saved_with_an_empty_list() {
+        // The frontend reads `globs` as a list; it must be present even
+        // when empty, in the view and in the file Settings writes.
+        let json = serde_json::to_value(hook("New hook", &[])).unwrap();
+        assert_eq!(json["globs"], serde_json::json!([]));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let file = UserRunFile {
+            commands: vec![],
+            save_hooks: vec![hook("New hook", &[])],
+        };
+        assert!(save_merged(&path, &file).unwrap().is_empty());
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk["save_hooks"][0]["globs"], serde_json::json!([]));
+        let loaded = load_from(&path);
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        assert_eq!(loaded.file.save_hooks, file.save_hooks);
+        let view = serde_json::to_value(view_from(path, loaded)).unwrap();
+        assert_eq!(view["save_hooks"][0]["globs"], serde_json::json!([]));
+        assert_eq!(view["file_error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn each_bad_entry_is_skipped_with_a_reason_and_the_rest_load() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("commands", r#"{"argv":["a"]}"#, "has no name"),
+            ("commands", r#"{"name":"","argv":["a"]}"#, "empty name"),
+            ("commands", r#"{"name":"  ","argv":["a"]}"#, "empty name"),
+            (
+                "commands",
+                r#"{"name":5,"argv":["a"]}"#,
+                "name that is not text",
+            ),
+            ("commands", r#"{"name":"Ok","argv":["b"]}"#, "duplicated"),
+            ("commands", r#"{"name":"X","argv":[]}"#, "empty argv"),
+            ("commands", r#"{"name":"X","argv":[""]}"#, "empty argv"),
+            (
+                "commands",
+                r#"{"name":"X","argv":"echo hi"}"#,
+                "argv that is not a list",
+            ),
+            (
+                "commands",
+                r#"{"name":"X","argv":["a",1]}"#,
+                "argv entry that is not text",
+            ),
+            ("commands", r#"{"name":"X"}"#, "needs an argv list"),
+            (
+                "commands",
+                r#"{"name":"X","command":7}"#,
+                "command that is not text",
+            ),
+            (
+                "commands",
+                r#"{"name":"X","command":"\"open"}"#,
+                "could not be split",
+            ),
+            (
+                "commands",
+                r#"{"name":"X","argv":["a"],"colour":"red"}"#,
+                "unknown field \"colour\"",
+            ),
+            (
+                "commands",
+                r#"{"name":"X","argv":["a"],"cwd":"sub"}"#,
+                "unknown field \"cwd\"",
+            ),
+            (
+                "commands",
+                r#"{"name":"X","argv":["a"],"timeout_ms":"5"}"#,
+                "timeout_ms",
+            ),
+            (
+                "commands",
+                r#"{"name":"X","argv":["a"],"timeout_ms":-1}"#,
+                "timeout_ms",
+            ),
+            (
+                "commands",
+                r#"{"name":"X","argv":["a"],"timeout_ms":0}"#,
+                "timeout_ms",
+            ),
+            ("commands", r#""just text""#, "not an object"),
+            (
+                "save_hooks",
+                r#"{"name":"H","argv":["a"],"globs":"*.md"}"#,
+                "not a list of patterns",
+            ),
+            (
+                "save_hooks",
+                r#"{"name":"H","argv":["a"],"globs":["*.md",""]}"#,
+                "empty or not text",
+            ),
+            (
+                "save_hooks",
+                r#"{"name":"H","argv":["a"],"globs":[3]}"#,
+                "empty or not text",
+            ),
+            (
+                "save_hooks",
+                r#"{"name":"H","argv":["a"],"enabled":"yes"}"#,
+                "not true or false",
+            ),
+            (
+                "save_hooks",
+                r#"{"name":"H","argv":["a"],"glob":["*.md"]}"#,
+                "unknown field \"glob\"",
+            ),
+            ("save_hooks", r#"{"argv":["a"]}"#, "has no name"),
+            ("save_hooks", r#"{"name":"Ok","argv":["b"]}"#, "duplicated"),
+        ];
+        for (list, entry, reason) in cases {
+            let json = format!(r#"{{"{list}":[{{"name":"Ok","argv":["echo"]}},{entry}]}}"#);
+            let parsed = parse_user_run(&json);
+            assert_eq!(parsed.problems.len(), 1, "{entry}: {:?}", parsed.problems);
+            assert!(
+                parsed.problems[0].contains(reason) && parsed.problems[0].contains("skipped"),
+                "{entry}: {:?}",
+                parsed.problems
+            );
+            assert!(parsed.file_error.is_none(), "{entry}");
+            let names: Vec<&str> = if *list == "commands" {
+                parsed
+                    .file
+                    .commands
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect()
+            } else {
+                parsed
+                    .file
+                    .save_hooks
+                    .iter()
+                    .map(|h| h.name.as_str())
+                    .collect()
+            };
+            assert_eq!(names, ["Ok"], "{entry}");
+        }
+    }
+
+    #[test]
+    fn hook_globs_missing_null_or_empty_load_as_an_empty_list() {
+        for globs in ["", r#","globs":null"#, r#","globs":[]"#] {
+            let parsed = parse_user_run(&format!(
+                r#"{{"save_hooks":[{{"name":"H","argv":["echo"]{globs}}}]}}"#
+            ));
+            assert!(parsed.problems.is_empty(), "{globs}: {:?}", parsed.problems);
+            assert!(parsed.file.save_hooks[0].globs.is_empty());
+        }
+    }
+
+    #[test]
+    fn empty_missing_and_unreadable_files() {
+        for text in ["", "  \n"] {
+            let parsed = parse_user_run(text);
+            assert!(parsed.problems.is_empty());
+            assert!(parsed.file_error.is_none());
+        }
+        for text in [
+            "{ not json",
+            "[]",
+            "null",
+            r#"{"commands":{"name":"x"}}"#,
+            r#"{"save_hooks":"x"}"#,
+        ] {
+            let parsed = parse_user_run(text);
+            assert!(parsed.file_error.is_some(), "{text}");
+            assert_eq!(parsed.problems.len(), 1, "{text}: {:?}", parsed.problems);
+        }
+        // One list of the wrong shape does not drop the other list.
+        let parsed = parse_user_run(r#"{"commands":"x","save_hooks":[{"name":"H","argv":["a"]}]}"#);
+        assert_eq!(parsed.file.save_hooks.len(), 1);
+        let parsed = parse_user_run(r#"{"commands":[],"extra":1}"#);
+        assert!(parsed.file_error.is_none());
+        assert!(parsed.problems[0].contains("Unknown top-level field \"extra\""));
+    }
+
+    #[test]
+    fn settings_save_keeps_hand_edits_and_rejects_bad_payload_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        fs::write(
+            &path,
+            r#"{"commands":[{"name":"Hi","argv":["echo"]},{"argv":["no-name"]}],"save_hooks":[{"name":"H","argv":["a"],"globs":"*.md"}],"note":"mine"}"#,
+        )
+        .unwrap();
+        let payload = UserRunFile {
+            commands: vec![
+                UserCommand {
+                    name: "Hi".into(),
+                    argv: vec!["echo".into(), "hi".into()],
+                    timeout_ms: None,
+                },
+                UserCommand {
+                    name: "Hi".into(),
+                    argv: vec!["dup".into()],
+                    timeout_ms: None,
+                },
+                UserCommand {
+                    name: "Empty".into(),
+                    argv: vec![],
+                    timeout_ms: None,
+                },
+            ],
+            save_hooks: vec![hook("New hook", &[])],
+        };
+        let not_saved = save_merged(&path, &payload).unwrap();
+        assert_eq!(not_saved.len(), 2, "{not_saved:?}");
+        assert!(not_saved.iter().all(|p| p.starts_with("Not saved: ")));
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk["commands"][1],
+            serde_json::json!({"argv":["no-name"]})
+        );
+        assert_eq!(on_disk["save_hooks"][1]["globs"], serde_json::json!("*.md"));
+        assert_eq!(on_disk["note"], serde_json::json!("mine"));
+        let loaded = load_from(&path);
+        assert_eq!(loaded.file.commands.len(), 1);
+        assert_eq!(loaded.file.commands[0].argv, ["echo", "hi"]);
+        assert_eq!(loaded.file.save_hooks, vec![hook("New hook", &[])]);
+        // still listed: the no-name command, the bad hook, the extra field
+        assert_eq!(loaded.problems.len(), 3, "{:?}", loaded.problems);
+    }
+
+    #[test]
+    fn settings_save_does_not_write_over_a_file_it_cannot_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let text = "{ \"commands\": [ {\"name\": \"A\", ";
+        fs::write(&path, text).unwrap();
+        let err = save_merged(&path, &UserRunFile::default()).unwrap_err();
+        assert!(err.to_string().contains("not valid JSON"), "{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        let view = view_from(path.clone(), load_from(&path));
+        assert!(view.file_error.is_some());
+    }
+
+    #[test]
+    fn run_argv_reports_a_relative_or_missing_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone");
+        for cwd in [Path::new("relative/dir"), missing.as_path()] {
+            let out = run_argv("X", &["echo".into()], cwd, Duration::from_secs(2), &[]);
+            assert_eq!(out.exit_code, None);
+            assert!(
+                out.error
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("is not available"),
+                "{out:?}"
+            );
+        }
     }
 
     #[cfg(unix)]

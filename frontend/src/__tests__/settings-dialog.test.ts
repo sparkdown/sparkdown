@@ -414,16 +414,21 @@ describe('Custom commands in Settings', () => {
   let saved: { name: string; argv: string[] }[] | null;
   let opened: number;
 
+  let hooks: { name: string; argv: string[]; globs: string[]; enabled: boolean }[];
+
   const userRun = () => ({
     view: () => ({
       commands,
-      save_hooks: [],
+      save_hooks: hooks,
       problems: commands.length ? [] : ['Command 2 has no name; it was ignored.'],
       path: '/cfg/user-run.json',
     }),
     saveCommands: async (next: { name: string; argv: string[] }[]) => {
       saved = next;
       commands = next.map((c) => ({ ...c, argv: [...c.argv] }));
+    },
+    saveHooks: async (next: { name: string; argv: string[]; globs: string[]; enabled: boolean }[]) => {
+      hooks = next.map((h) => ({ ...h, argv: [...h.argv], globs: [...h.globs] }));
     },
     openFile: () => { opened++; },
   });
@@ -432,6 +437,7 @@ describe('Custom commands in Settings', () => {
     document.body.innerHTML = '<div id="app"></div>';
     config = { use_tmux: false, agent_context_enabled: false } as AppConfig;
     commands = [{ name: 'Format', argv: ['prettier', '--write', '.'] }];
+    hooks = [];
     saved = null;
     opened = 0;
     vi.useFakeTimers();
@@ -487,5 +493,144 @@ describe('Custom commands in Settings', () => {
     dialog.toggle({ config, onChange: () => {} });
     expect(document.querySelector('[data-section="commands"]')).toBeNull();
     dialog.close();
+  });
+});
+
+describe('On-save hooks in Settings', () => {
+  let config: AppConfig;
+  const hooks = [
+    { name: 'Format', argv: ['prettier', '--write'], globs: ['*.md'], enabled: false },
+  ];
+  let savedHooks: typeof hooks | null;
+
+  const userRun = () => ({
+    view: () => ({ commands: [], save_hooks: hooks, problems: [], path: '/cfg/user-run.json' }),
+    saveCommands: async () => {},
+    saveHooks: async (next: typeof hooks) => { savedHooks = next; },
+    openFile: () => {},
+  });
+
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="app"></div>';
+    config = { use_tmux: false, agent_context_enabled: false } as AppConfig;
+    hooks[0] = { name: 'Format', argv: ['prettier', '--write'], globs: ['*.md'], enabled: false };
+    savedHooks = null;
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    document.body.innerHTML = '';
+  });
+
+  it('turns a hook on and edits its file filter', async () => {
+    const dialog = new SettingsDialog();
+    dialog.toggle({ config, onChange: () => {}, userRun: userRun() });
+    const section = document.querySelector('[data-section="hooks"]')!;
+    expect(section.textContent).toContain('On save');
+    const enabled = section.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(enabled.checked).toBe(false);
+    enabled.checked = true;
+    enabled.dispatchEvent(new Event('change'));
+    const files = section.querySelector<HTMLInputElement>('input[data-run-field="hook-globs"]')!;
+    expect(files.value).toBe('*.md');
+    files.value = '*.md, **/*.ts';
+    files.dispatchEvent(new Event('input'));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(savedHooks?.[0]?.enabled).toBe(true);
+    expect(savedHooks?.[0]?.globs).toEqual(['*.md', '**/*.ts']);
+    dialog.close();
+  });
+});
+
+describe('user-run.json problems never keep Settings from opening', () => {
+  const config = { use_tmux: false, agent_context_enabled: false } as AppConfig;
+  afterEach(() => { document.body.innerHTML = ''; });
+  const base = {
+    saveCommands: async () => {},
+    saveHooks: async () => {},
+    openFile: vi.fn(),
+  };
+
+  it('stands in a notice with Open user-run.json when the sections cannot be built', () => {
+    const dialog = new SettingsDialog();
+    const openFile = vi.fn();
+    dialog.toggle({
+      config,
+      onChange: () => {},
+      userRun: { ...base, openFile, view: () => { throw new Error('bad view'); } },
+    });
+    expect(dialog.isOpen).toBe(true);
+    expect(document.querySelector('[data-section="terminal"], .settings-dialog h3')?.textContent).toBeTruthy();
+    const notice = document.querySelector<HTMLElement>('[data-run-notice]')!;
+    expect(notice.textContent).toContain('bad view');
+    [...notice.querySelectorAll('button')].find((b) => b.textContent === 'Open user-run.json')!.click();
+    expect(openFile).toHaveBeenCalled();
+    // Agents section still rendered after the user-run area.
+    expect(document.querySelector('[data-section="agents"]')).toBeTruthy();
+    dialog.close();
+  });
+
+  it('hides the notice for a missing or empty file', () => {
+    const dialog = new SettingsDialog();
+    dialog.toggle({
+      config,
+      onChange: () => {},
+      userRun: { ...base, view: () => ({ commands: [], save_hooks: [], problems: [], path: '/cfg/user-run.json' }) },
+    });
+    expect(document.querySelector<HTMLElement>('[data-run-notice]')!.hidden).toBe(true);
+    expect(document.querySelector('[data-section="hooks"]')).toBeTruthy();
+    dialog.close();
+  });
+});
+
+describe('Escape closes Settings', () => {
+  afterEach(() => { document.body.innerHTML = ''; });
+  const config = () => ({ use_tmux: false, agent_context_enabled: false }) as AppConfig;
+  const esc = (target: EventTarget) =>
+    target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  const userRun = () => ({
+    view: () => ({
+      commands: [],
+      save_hooks: [{ name: 'New hook', argv: ['echo'], globs: [], enabled: false }],
+      problems: [],
+      path: '/cfg/user-run.json',
+    }),
+    saveCommands: async () => {},
+    saveHooks: async () => {},
+    openFile: () => {},
+  });
+
+  it('with focus on a hook Enabled switch, even if a handler there stops the key', () => {
+    const dialog = new SettingsDialog();
+    dialog.toggle({ config: config(), onChange: () => {}, userRun: userRun() });
+    const toggle = document.querySelector<HTMLInputElement>('[data-section="hooks"] input[type="checkbox"]')!;
+    toggle.focus();
+    toggle.addEventListener('keydown', (e) => e.stopPropagation());
+    esc(toggle);
+    expect(dialog.isOpen).toBe(false);
+    expect(document.querySelector('.settings-overlay')).toBeNull();
+  });
+
+  it('when the user-run area fell back to a notice', () => {
+    const dialog = new SettingsDialog();
+    dialog.toggle({
+      config: config(),
+      onChange: () => {},
+      userRun: { ...userRun(), view: () => { throw new Error('bad view'); } },
+    });
+    expect(document.querySelector('[data-run-notice]')).toBeTruthy();
+    esc(document.querySelector<HTMLButtonElement>('[data-run-notice] button')!);
+    expect(dialog.isOpen).toBe(false);
+  });
+
+  it('when the dialog could not be built at all', () => {
+    const dialog = new SettingsDialog();
+    const broken = { onChange: () => {}, get config(): AppConfig { throw new Error('no config'); } };
+    dialog.toggle(broken);
+    expect(dialog.isOpen).toBe(true);
+    expect(document.querySelector('.settings-dialog')!.textContent).toContain('no config');
+    esc(document.activeElement ?? document.body);
+    expect(dialog.isOpen).toBe(false);
+    expect(document.querySelector('.settings-overlay')).toBeNull();
   });
 });

@@ -45,7 +45,7 @@ import { GitFeedback } from './git-output';
 import { ImageInserter, isImagePath } from './image-insert';
 import { UserRunOutputLog } from './user-run-output';
 import { UserRunController } from './user-run';
-import type { UserCommand } from './api';
+import type { SaveHook, UserCommand } from './api';
 import { TERMINAL_SCROLLBACK_DEFAULT } from './terminal-scrollback';
 import { changesFileList } from './file-list-changes';
 import { FocusMode } from './focus-mode';
@@ -354,6 +354,9 @@ export class App {
     this.registerBusListeners();
     this.registerCommands();
     void this.userRun.load();
+    // Coming back from another app (often: editing user-run.json there)
+    // re-reads the file, so the palette and the Output tab are current.
+    window.addEventListener('focus', () => void this.userRun.load());
     this.lifecycle.registerCloseGuard();
     this.initUpdates();
     this.workspace.registerFileDrop();
@@ -929,6 +932,8 @@ export class App {
       userRun: {
         view: () => this.userRun.view,
         saveCommands: async (cmds: UserCommand[]) => { await this.userRun.saveCommands(cmds); },
+        saveHooks: async (hooks: SaveHook[]) => { await this.userRun.saveHooks(hooks); },
+        reload: async () => { await this.userRun.load(); },
         openFile: () => {
           this.settingsDialog.close();
           void this.userRun.openConfigFile();
