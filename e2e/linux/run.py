@@ -144,6 +144,11 @@ class Base:
     def procs(self):
         return len(sh("pgrep", "-x", "sparkdown").split())
 
+    def press_dialog(self, button):
+        """Press `button` in the open SparkDown prompt over AT-SPI. True when
+        a prompt with that button was there."""
+        return any(button in [b.replace("_", "") for b in d.get("buttons", [])] for d in atspi_dialogs(button))
+
     def job_alive(self):
         return bool(sh("pgrep", "-x", "sleep"))
 
