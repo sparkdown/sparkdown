@@ -43,6 +43,7 @@ CHECKS = {
     "git-actions": "Changes view Commit / Pull / Push against a local bare remote: empty message blocked, commit, rejected push leaves the remote untouched, pull merges, push lands (#122)",
     "terminal-clipboard": "Linux terminal: Ctrl+V and Shift+Insert paste, Ctrl+C with no selection interrupts (#130)",
     "explorer-delete": "Explorer Delete… asks, then moves the file to the trash (#121)",
+    "image-paste": "A real PNG on the system clipboard, Ctrl/Cmd+V into a saved markdown document: image-*.png beside it with the PNG's bytes and the ![](…) link inserted; into an untitled document: \"Save this document first\" and nothing written",
 }
 
 

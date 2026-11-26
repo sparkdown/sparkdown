@@ -11,6 +11,7 @@ import git_actions
 import explorer_menu
 import save_dialog
 import mcp
+import image_paste
 
 SUF = " — SparkDown"
 EDIT = "E2E unsaved edit."
@@ -432,6 +433,18 @@ def run(R, D):
             return ("PASS" if ok else "FAIL"), (f"file has the last key={bool(saved)}; "
                                                 f"unsaved dot cleared={clean}; file ends {tail!r}")
         R.run("type-then-save", type_then_save)
+
+    if hasattr(D, "put_image"):
+        def image_paste_check():
+            """A real PNG on the system clipboard, Ctrl+V into a saved
+            markdown document, then into an untitled one."""
+            try:
+                return image_paste.run(D, "alpha" + SUF, A, D.exe, R.log)
+            finally:
+                # Back to alpha's note: later checks save and quit with it active.
+                mcp.call(D.exe, A, "sparkdown_open_file", {"path": note})
+                time.sleep(1)
+        R.run("image-paste", image_paste_check)
 
     quit_state = {"before": None}
 
