@@ -657,6 +657,13 @@ class Hypr(Base):
         R.log("clipboard types:", types.split())
         return None if p.returncode == 0 and "image/png" in types else f"wl-copy rc={p.returncode}; types={types.split()}"
 
+    def put_text(self, text):
+        """PROBE ONLY: plain text on the Wayland clipboard."""
+        p = subprocess.run(["wl-copy", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        time.sleep(0.5)
+        R.log("clipboard types (text control):", sh("wl-paste", "--list-types").split())
+        return None if p.returncode == 0 else f"wl-copy rc={p.returncode}"
+
     def paste_image(self, title):
         """No DOM here: the palette's Go to line (past the last line) puts
         the caret at the end with the editor focused, then a real Ctrl+V."""

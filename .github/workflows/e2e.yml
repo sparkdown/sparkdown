@@ -13,6 +13,11 @@ on:
         description: Arch Linux Archive day (YYYY/MM/DD) for the pinned Hyprland leg, or "live" (the latest leg always uses live)
         required: false
         default: "2026/10/28"
+      only_hyprland:
+        description: PROBE ONLY - run just the Arch + Hyprland legs
+        type: boolean
+        required: false
+        default: false
   pull_request:
     branches: [main]
 
@@ -28,6 +33,7 @@ env:
 
 jobs:
   release-gate:
+    if: ${{ !inputs.only_hyprland }}
     name: Release gate (e2e-webdriver never ships)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -106,6 +112,7 @@ jobs:
           retention-days: 7
 
   macos:
+    if: ${{ !inputs.only_hyprland }}
     name: E2E macOS (System Events, tmux ${{ matrix.tmux }})
     runs-on: macos-latest
     timeout-minutes: 45
@@ -146,6 +153,7 @@ jobs:
           path: e2e-out
 
   windows:
+    if: ${{ !inputs.only_hyprland }}
     name: E2E Windows (WebDriver + UIA)
     runs-on: windows-latest
     timeout-minutes: 50
@@ -195,6 +203,7 @@ jobs:
           path: e2e-out
 
   ubuntu-webdriver:
+    if: ${{ !inputs.only_hyprland }}
     name: E2E Ubuntu (tauri-driver + WebKitWebDriver, X11, tmux ${{ matrix.tmux }})
     needs: linux-build
     runs-on: ubuntu-24.04

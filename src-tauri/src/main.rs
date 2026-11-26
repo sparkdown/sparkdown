@@ -804,6 +804,7 @@ fn main() {
             images::save_image,
             images::import_image,
             images::read_clipboard_paste,
+            images::paste_diag,
             commands::window_ready,
             terminal::terminal_start,
             terminal::terminal_write,

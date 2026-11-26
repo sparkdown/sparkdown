@@ -61,6 +61,13 @@ def run(D, title, folder, exe, log):
     ok, r = mcp.call(exe, str(folder), "sparkdown_open_file", {"path": str(doc)})
     log("image-paste: open pasted.md over MCP:", ok, str(r)[:200])
     time.sleep(2)
+    if hasattr(D, "put_text"):
+        # PROBE ONLY: text-paste control through the same keys and clipboard tool.
+        perr = D.put_text("SDTEXTCONTROL")
+        D.paste_image(title)
+        time.sleep(2)
+        okt, tbuf = mcp.call(exe, str(folder), "sparkdown_read_buffer", {"path": str(doc)})
+        log(f"image-paste: text control put_err={perr} pasted={'SDTEXTCONTROL' in str(tbuf)} buffer={str(tbuf)[-80:]!r}")
     err = D.put_image(str(src))
     if err:
         return "FAIL", f"could not put the PNG on the system clipboard: {err}"

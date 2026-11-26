@@ -310,7 +310,11 @@ export class EditorManager {
       ),
       this.inputCompartment.of(this.inputExtension()),
       EditorView.domEventHandlers({
-        paste: (e) => this.inputEnabled && (this.pasteHandler?.(e) ?? false),
+        paste: (e) => {
+          const r = this.inputEnabled && (this.pasteHandler?.(e) ?? false);
+          void import('@tauri-apps/api/core').then((c) => c.invoke('paste_diag', { msg: `editor paste handler inputEnabled=${this.inputEnabled} claimed=${r}` }).catch(() => {}));
+          return r;
+        },
       }),
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {

@@ -373,6 +373,10 @@ async fn read_system_clipboard(
     // asynchronously, so the main loop keeps running while the owner replies.
     app.run_on_main_thread(move || {
         let cb = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+        eprintln!(
+            "[paste-diag] core: read start; display={:?}",
+            gtk::gdk::Display::default().map(|d| d.name().to_string())
+        );
         cb.request_contents(&gtk::gdk::Atom::intern("TARGETS"), move |cb, sd| {
             let names: Vec<String> = sd
                 .targets()
@@ -380,11 +384,17 @@ async fn read_system_clipboard(
                 .iter()
                 .map(|t| t.name().to_string())
                 .collect();
+            eprintln!(
+                "[paste-diag] core: TARGETS reply len={} targets={names:?} pick={:?}",
+                sd.length(),
+                pick_clipboard_read(&names)
+            );
             match pick_clipboard_read(&names) {
                 None => {
                     let _ = tx.send(None);
                 }
                 Some(ClipboardRead::Text) => cb.request_text(move |_, text| {
+                    eprintln!("[paste-diag] core: text len={:?}", text.map(str::len));
                     let text = text
                         .filter(|t| !t.is_empty())
                         .map(|t| SystemClipboard::Text(t.to_string()));
@@ -393,6 +403,7 @@ async fn read_system_clipboard(
                 Some(ClipboardRead::Image(kind)) => {
                     cb.request_contents(&gtk::gdk::Atom::intern(kind), move |_, sd| {
                         let data = sd.data();
+                        eprintln!("[paste-diag] core: {kind} bytes={}", data.len());
                         let _ = tx.send((!data.is_empty()).then_some(SystemClipboard::Image(data)));
                     })
                 }
@@ -401,7 +412,17 @@ async fn read_system_clipboard(
     })
     .map_err(|e| AppError::Other(format!("clipboard read failed: {e}")))?;
     tauri::async_runtime::spawn_blocking(move || {
-        rx.recv_timeout(Duration::from_secs(5)).ok().flatten()
+        let got = rx.recv_timeout(Duration::from_secs(5));
+        eprintln!(
+            "[paste-diag] core: result {}",
+            match &got {
+                Err(_) => "timeout".to_string(),
+                Ok(None) => "none".to_string(),
+                Ok(Some(SystemClipboard::Text(t))) => format!("text {}", t.len()),
+                Ok(Some(SystemClipboard::Image(b))) => format!("image {}", b.len()),
+            }
+        );
+        got.ok().flatten()
     })
     .await
     .map_err(|e| AppError::Other(format!("clipboard task failed: {e}")))
@@ -628,4 +649,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&src_dir);
     }
+}
+
+/// PROBE ONLY (wip/047-paste-probe): paste diagnostics from the frontend to stderr.
+#[tauri::command]
+pub fn paste_diag(msg: String) {
+    eprintln!("[paste-diag] web: {msg}");
 }

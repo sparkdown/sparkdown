@@ -322,6 +322,27 @@ export class App {
     this.palette = this.createPalette();
 
     this.editor.init(document.getElementById('editor-container')!);
+    // PROBE ONLY (wip/047-paste-probe): paste diagnostics to the app's stderr.
+    {
+      const diag = (msg: string) => void import('@tauri-apps/api/core').then((c) => c.invoke('paste_diag', { msg }).catch(() => {}));
+      const desc = (el: EventTarget | Element | null) => {
+        const e = el as HTMLElement | null;
+        return e ? `${e.tagName}.${String(e.className).slice(0, 60)}` : 'null';
+      };
+      document.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V' || e.code === 'KeyV')) {
+          diag(`keydown key=${e.key} code=${e.code} target=${desc(e.target)} active=${desc(document.activeElement)} focus=${document.hasFocus()}`);
+        }
+      }, true);
+      document.addEventListener('paste', (e) => {
+        const d = e.clipboardData;
+        diag(`paste event target=${desc(e.target)} active=${desc(document.activeElement)} types=${JSON.stringify(d ? [...d.types] : null)} items=${JSON.stringify(d ? [...d.items].map((i) => i.kind + ':' + i.type) : null)} files=${d ? d.files.length : -1} textlen=${d ? d.getData('text/plain').length : -1}`);
+      }, true);
+      document.addEventListener('beforeinput', (e) => {
+        if (e.inputType.startsWith('insertFromPaste')) diag(`beforeinput ${e.inputType}`);
+      }, true);
+      diag('diag listeners installed');
+    }
     this.editor.setPasteHandler((e) => {
       if (!this.images.handlePaste(e.clipboardData)) return false;
       e.preventDefault();
