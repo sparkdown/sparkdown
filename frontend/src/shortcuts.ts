@@ -28,6 +28,7 @@ export const KEYBINDINGS: Partial<Record<ActionName, string>> = {
   [ACTIONS.BOLD]: 'CmdOrCtrl+B',
   [ACTIONS.ITALIC]: 'CmdOrCtrl+I',
   [ACTIONS.TOGGLE_SIDEBAR]: 'CmdOrCtrl+Shift+B',
+  [ACTIONS.TOGGLE_FOCUS_MODE]: 'CmdOrCtrl+Shift+Enter',
   [ACTIONS.TOGGLE_WRAP]: 'Alt+Z',
   [ACTIONS.TOGGLE_TERMINAL]: 'Ctrl+`',
   [ACTIONS.TOGGLE_TERMINALS_ONLY]: 'Ctrl+Shift+`',
@@ -138,8 +139,8 @@ export function isBacktickKey(e: Pick<KeyboardEvent, 'key' | 'code'>): boolean {
  * Only app-level keys a shell has no real use for pass: the terminal
  * toggles (Ctrl+` / Ctrl+Shift+`), Open Folder (Ctrl+Alt+O), Open Remote
  * (Ctrl+Shift+O), Command Palette (Ctrl+Shift+P), Shortcuts
- * (Ctrl+Shift+H), Settings (Ctrl+,), Quit (Ctrl+Q) and tab switching
- * (Ctrl+Alt+←/→). Other plain Ctrl+letter, the clipboard (Ctrl+Shift+C/V) and the pane keys
+ * (Ctrl+Shift+H), Focus Mode (Ctrl+Shift+Enter), Settings (Ctrl+,), Quit
+ * (Ctrl+Q) and tab switching (Ctrl+Alt+←/→). Other plain Ctrl+letter, the clipboard (Ctrl+Shift+C/V) and the pane keys
  * (Ctrl+Shift+D/E/W/[/]) stay with the terminal.
  */
 export function terminalPassesToApp(
@@ -153,7 +154,7 @@ export function terminalPassesToApp(
     if (e.shiftKey) return false;
     return key === 'o' || key === 'arrowleft' || key === 'arrowright';
   }
-  if (e.shiftKey) return key === 'o' || key === 'p' || key === 'h';
+  if (e.shiftKey) return key === 'o' || key === 'p' || key === 'h' || key === 'enter';
   // Ctrl+Q always quits, even from a focused terminal (as in VS Code): the
   // shell loses XON, which nobody types by hand. Same quit flow and prompt.
   return key === ',' || key === 'q';
@@ -312,6 +313,10 @@ export class ShortcutManager {
       // Mirrors View → Edit / Split / Preview / Diff (CmdOrCtrl+1–4).
       e.preventDefault();
       this.bus.emit(ACTIONS.SET_VIEW_MODE, { mode: viewForDigit(key)! });
+    } else if (key === 'enter' && e.shiftKey && !e.altKey) {
+      // Mirrors View → Focus Mode (CmdOrCtrl+Shift+Enter).
+      e.preventDefault();
+      this.bus.emit(ACTIONS.TOGGLE_FOCUS_MODE);
     } else if (key === 'h' && e.shiftKey) {
       e.preventDefault();
       this.bus.emit(ACTIONS.SHOW_SHORTCUTS);

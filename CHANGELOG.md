@@ -14,6 +14,7 @@ requests.
 - **Wiki links**: `[[Note]]`, `[[folder/Note]]` and `[[Note|label]]` render as links in Preview and open the note; a link to a note that doesn't exist yet is shown dashed and creates it (next to the current file) when clicked. Markdown files that link to the open note are listed under the preview (Linked from …). Quick Open stays the note switcher.
 - **Preview** scroll sync follows source lines in both directions: every rendered block (paragraphs, list items, tables, code, diagrams, images) lines up with the text it came from, and clicking text in the preview puts the editor cursor on that block's line. Links, text selection and double-click still work as before.
 - **Export PDF** (File menu and command palette) prints the rendered Markdown document, with Mermaid diagrams, highlighted code and local images, through the system print dialog; choose its PDF destination to save the file. The PDF uses the preview's current theme.
+- **Focus mode** (View → Focus Mode, `⌘⇧↩` / `Ctrl+Shift+Enter`) hides the sidebar, tabs, status bar and terminal so only the document is left; `Esc` or the same key brings back the layout exactly as it was. The status bar also shows an estimated reading time next to the word count (200 words per minute).
 
 ### Changed
 

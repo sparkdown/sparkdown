@@ -1,0 +1,46 @@
+/* Focus mode (focus-mode.ts): <html class="focus-mode"> hides the chrome
+   around the document. Only display rules change, never the state behind
+   them, so leaving focus mode shows the layout exactly as it was. */
+html.focus-mode #activity-bar,
+html.focus-mode #sidebar,
+html.focus-mode #sidebar-resize-handle,
+html.focus-mode #status-bar,
+html.focus-mode #center-column:not(.terminals-only) #terminal-panel,
+html.focus-mode #center-column:not(.terminals-only) #terminal-resize-handle {
+  display: none !important;
+}
+
+/* The title strip stays (window drag, traffic lights / caption buttons),
+   without tabs, the view control or the terminal button. */
+html.focus-mode .tab-strip,
+html.focus-mode #view-mode,
+html.focus-mode #btn-terminal,
+html.focus-mode .toolbar-separator-window {
+  visibility: hidden;
+}
+
+html.focus-mode #toolbar {
+  background: var(--canvas);
+  border-bottom-color: transparent;
+}
+
+html.focus-mode .toolbar-end::before {
+  content: 'Esc to leave focus mode';
+  align-self: center;
+  font-size: 11px;
+  color: var(--text-subtle);
+  white-space: nowrap;
+}
+
+/* With the sidebar gone, keep the card off the window edge. */
+html.focus-mode #center-column {
+  padding-left: var(--panel-gap);
+}
+
+/* Editor alone (no preview beside it), wrapped lines: a centered column of
+   about 80 characters (80ch of the editor font plus the 8px of line padding).
+   Unwrapped text keeps the full width so long lines scroll. */
+html.focus-mode #editor-area:has(> #preview-container.hidden) .cm-content.cm-lineWrapping {
+  max-width: calc(80ch + 8px);
+  margin-inline: auto;
+}

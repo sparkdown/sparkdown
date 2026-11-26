@@ -19,6 +19,7 @@ export const EVENTS = {
   TOC_GOTO_LINE: 'toc-goto-line',
   TOC_SCROLL_PREVIEW: 'toc-scroll-preview',
   INSERT_AT_CURSOR: 'insert-at-cursor',
+  FOCUS_MODE_CHANGED: 'focus-mode-changed',
 } as const;
 
 // Tauri events sent from the Rust menu handler. Mirror of menu IDs in
@@ -49,6 +50,7 @@ export const MENU = {
   TERMINAL_FOCUS_NEXT: 'menu:terminal-focus-next',
   TERMINAL_FOCUS_PREV: 'menu:terminal-focus-prev',
   TOGGLE_SIDEBAR: 'menu:toggle-sidebar',
+  TOGGLE_FOCUS_MODE: 'menu:toggle-focus-mode',
   TOGGLE_WORD_WRAP: 'menu:toggle-word-wrap',
   TOGGLE_THEME: 'menu:toggle-theme',
   TOGGLE_HTML_JS: 'menu:toggle-html-js',
@@ -92,6 +94,7 @@ export const ACTIONS = {
   IMAGE: 'action:image',
   TABLE: 'action:table',
   TOGGLE_SIDEBAR: 'action:toggle-sidebar',
+  TOGGLE_FOCUS_MODE: 'action:toggle-focus-mode',
   TOGGLE_PREVIEW: 'action:toggle-preview',
   TOGGLE_TERMINAL: 'action:toggle-terminal',
   TOGGLE_TERMINALS_ONLY: 'action:toggle-terminals-only',

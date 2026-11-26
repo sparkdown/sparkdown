@@ -50,6 +50,9 @@ export interface ActivityBarDeps {
   /** True if keyboard focus is inside `view`. */
   hasFocus(view: SidebarView): boolean;
   saveConfigSoon(): void;
+  /** Called before a view request is handled: leaves focus mode, so the
+   *  view opens (or closes) where the user can see it. */
+  revealChrome?(): void;
   listenTauri<T>(event: string, handler: EventCallback<T>): void;
 }
 
@@ -127,6 +130,7 @@ export class ActivityBar {
    * showing but not focused moves focus into it instead of closing.
    */
   request(view: SidebarView, source: 'click' | 'shortcut'): void {
+    this.deps.revealChrome?.();
     const visible = this.deps.sidebar.isVisible();
     if (visible && view === this.view) {
       if (source === 'shortcut' && !this.deps.hasFocus(view)) {

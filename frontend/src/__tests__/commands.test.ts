@@ -105,6 +105,7 @@ describe('built-in commands', () => {
     expect(label('tabs.next')).toBe('⌘⌥→');
     expect(label('view.toggleTheme')).toBe('');
     expect(label('view.search')).toBe('⌘⇧F');
+    expect(label('view.focusMode')).toBe('⌘⇧↩');
     // Every key comes from one of the two tables (bus actions, activity bar).
     const known = [...Object.values(KEYBINDINGS), ...SIDEBAR_VIEWS.map(viewAccelerator)];
     for (const c of reg.list()) {

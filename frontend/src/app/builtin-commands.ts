@@ -100,6 +100,9 @@ export function registerBuiltinCommands(reg: CommandRegistry, t: BuiltinCommandT
     format('format.table', 'Format: Table', ACTIONS.TABLE),
 
     act('view.toggleSidebar', 'View: Toggle sidebar', ACTIONS.TOGGLE_SIDEBAR),
+    act('view.focusMode', 'View: Toggle focus mode', ACTIONS.TOGGLE_FOCUS_MODE, {
+      keywords: 'zen distraction free writing hide chrome',
+    }),
     {
       id: 'view.files',
       title: 'View: Show files',

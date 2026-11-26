@@ -2859,6 +2859,81 @@ describe('App integration', () => {
     });
   });
 
+  describe('focus mode', () => {
+    const $ = (id: string) => document.getElementById(id)!;
+    const on = () => document.documentElement.classList.contains('focus-mode');
+    const waitUntil = async (pred: () => boolean, label: string) => {
+      for (let i = 0; i < 40; i++) {
+        if (pred()) return;
+        await flush();
+      }
+      throw new Error(`timed out waiting for ${label}`);
+    };
+    /** Sidebar, view, split and terminal state: what leaving must restore. */
+    const layout = () =>
+      ['sidebar', 'center-column', 'editor-container', 'preview-container', 'resize-handle', 'terminal-panel']
+        .map((id) => `${id}|${$(id).className}|${$(id).getAttribute('style') ?? ''}`)
+        .join('\n');
+
+    it('hides the chrome and Escape brings back the exact layout', async () => {
+      await startApp();
+      emitTauriEvent(MENU.TOGGLE_TERMINAL);
+      await waitUntil(() => !$('terminal-panel').classList.contains('hidden'), 'terminal drawer');
+      $('editor-container').style.width = '333px';
+      const before = layout();
+
+      emitTauriEvent(MENU.TOGGLE_FOCUS_MODE);
+      expect(on()).toBe(true);
+      expect(layout()).toBe(before);
+      const content = document.querySelector('#editor-container .cm-content')!;
+      content.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      expect(on()).toBe(false);
+      expect(layout()).toBe(before);
+
+      // Ctrl+Shift+Enter toggles it too (Windows/Linux keydown path).
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+      expect(on()).toBe(true);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+      expect(on()).toBe(false);
+    });
+
+    it('sidebar and terminal toggles leave focus mode without changing the layout', async () => {
+      await startApp();
+      const before = layout();
+      for (const toggle of [MENU.TOGGLE_SIDEBAR, MENU.TOGGLE_TERMINAL, MENU.TOGGLE_TERMINALS_ONLY]) {
+        emitTauriEvent(MENU.TOGGLE_FOCUS_MODE);
+        expect(on()).toBe(true);
+        emitTauriEvent(toggle);
+        await flush();
+        expect(on(), toggle).toBe(false);
+        expect(layout(), toggle).toBe(before);
+      }
+    });
+
+    it('a sidebar view shortcut leaves focus mode and opens that view', async () => {
+      await startApp();
+      emitTauriEvent(MENU.TOGGLE_FOCUS_MODE);
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'G', ctrlKey: true, shiftKey: true, bubbles: true }));
+      expect(on()).toBe(false);
+      expect($('sidebar').classList.contains('hidden')).toBe(false);
+      expect($('sidebar-changes').hidden).toBe(false);
+    });
+
+    it('is not saved to the config (each launch starts with the normal layout)', async () => {
+      vi.useFakeTimers();
+      try {
+        await startApp();
+        const saves = savedConfigs.length;
+        emitTauriEvent(MENU.TOGGLE_FOCUS_MODE);
+        await vi.advanceTimersByTimeAsync(2500);
+        expect(savedConfigs.length).toBe(saves);
+        emitTauriEvent(MENU.TOGGLE_FOCUS_MODE);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe('status bar items', () => {
     const el = (id: string) => document.getElementById(id)!;
 
