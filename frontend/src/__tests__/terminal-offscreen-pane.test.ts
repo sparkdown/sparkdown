@@ -125,4 +125,25 @@ describe('TerminalPane out of view', () => {
     expect(written.refreshes).toEqual([[0, 23]]);
     pane.destroy();
   });
+
+  it('draws every row again after a print, a focus change or the page being shown', async () => {
+    api.terminalStart.mockImplementation(async () => 'shell');
+    const pane = new TerminalPane('t3', () => {});
+    await pane.init(document.createElement('div'), '/cwd');
+    for (const fire of [
+      () => window.dispatchEvent(new Event('afterprint')),
+      () => window.dispatchEvent(new Event('focus')),
+      () => window.dispatchEvent(new Event('blur')),
+      () => window.dispatchEvent(new Event('pageshow')),
+      () => document.dispatchEvent(new Event('visibilitychange')),
+    ]) {
+      written.refreshes = [];
+      fire();
+      expect(written.refreshes).toEqual([[0, 23]]);
+    }
+    pane.destroy();
+    written.refreshes = [];
+    window.dispatchEvent(new Event('afterprint'));
+    expect(written.refreshes).toEqual([]);
+  });
 });

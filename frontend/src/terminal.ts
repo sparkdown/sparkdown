@@ -142,6 +142,9 @@ function openTerminalUrl(url: string): void {
   void api.openExternal(url).catch((err) => console.error('Failed to open link:', err));
 }
 
+/** Window events after which every pane draws again (see redrawOnWebviewChanges). */
+const REDRAW_WINDOW_EVENTS = ['afterprint', 'focus', 'blur', 'pageshow'] as const;
+
 /**
  * One embedded terminal pane: an xterm.js view over a
  * backend pty keyed by `id`. Up to four run side by side in the
@@ -425,6 +428,7 @@ export class TerminalPane {
       this.output.setVisible(inView);
       if (inView) this.redraw();
     });
+    this.redrawOnWebviewChanges();
     // Take keys from the first moment: until the shell is up they wait in
     // pendingInput instead of being dropped (see writeInput).
     this.term.onData((data) => this.writeInput(data));
@@ -530,6 +534,22 @@ export class TerminalPane {
   private redraw(): void {
     if (this.disposed) return;
     this.term.refresh(0, this.term.rows - 1);
+  }
+
+  /**
+   * Draw every row again after the webview printed, gained or lost focus,
+   * or was shown again. WebKitGTK can drop a WebGL canvas's contents then
+   * too (after Export PDF every pane was blank), while the pane itself
+   * never left the view, so the in-view watcher does not fire.
+   */
+  private redrawOnWebviewChanges(): void {
+    const redraw = () => this.redraw();
+    for (const name of REDRAW_WINDOW_EVENTS) window.addEventListener(name, redraw);
+    document.addEventListener('visibilitychange', redraw);
+    this.unlisteners.push(() => {
+      for (const name of REDRAW_WINDOW_EVENTS) window.removeEventListener(name, redraw);
+      document.removeEventListener('visibilitychange', redraw);
+    });
   }
 
   /** Which renderer draws this pane ('webgl' or the 'dom' fallback). */
