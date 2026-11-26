@@ -109,6 +109,20 @@ export const api = {
   writeFile: (path: string, content: string) =>
     invoke<void>("write_file", { path, content }),
   isDirectory: (path: string) => invoke<boolean>("is_directory", { path }),
+  /** Store base64 image data beside the markdown document `docPath`, named
+   *  after `name`; returns the new file's name. Never replaces a file. */
+  saveImage: (docPath: string, name: string, data: string) =>
+    invoke<string>("save_image", { docPath, name, data }),
+  /** What the system clipboard holds for a paste whose event carried no
+   *  data: its text when it offers any, else its image as base64 (PNG, JPEG,
+   *  GIF or WebP), else null. Linux only (WebKitGTK gives an image paste no
+   *  data); elsewhere always null. */
+  readClipboardPaste: () =>
+    invoke<{ kind: "image" | "text"; data: string } | null>("read_clipboard_paste"),
+  /** Copy the image file `source` beside `docPath` (or keep it when it is
+   *  already there); returns the file name to link. */
+  importImage: (docPath: string, source: string) =>
+    invoke<string>("import_image", { docPath, source }),
   /** Append a crash-log entry; the backend picks the platform log dir. */
   appendCrashLog: (entry: string) =>
     invoke<void>("append_crash_log", { entry }),

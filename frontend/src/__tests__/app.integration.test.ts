@@ -93,6 +93,7 @@ import {
   mcp,
   reviewStore,
   changePrints,
+  systemClipboard,
 } from './helpers/tauri-mocks';
 import { App } from '../app';
 import { FileTree } from '../file-tree';
@@ -1986,6 +1987,155 @@ describe('App integration', () => {
 
       dragDropHandler!({ payload: { type: 'leave' } });
       expect(appEl.classList.contains('drag-over')).toBe(false);
+    });
+  });
+
+  describe('images pasted or dropped into a markdown document', () => {
+    // jsdom has no layout: the drop point's element is stubbed per test.
+    if (!document.elementFromPoint) document.elementFromPoint = () => null;
+    /** A paste event carrying `files` (and optional plain text). */
+    function pasteEvent(files: File[], text = ''): Event {
+      const ev = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(ev, 'clipboardData', {
+        value: {
+          getData: (type: string) => (type === 'text/plain' ? text : ''),
+          items: files.map((f) => ({ kind: 'file', type: f.type, getAsFile: () => f })),
+          files,
+        },
+      });
+      return ev;
+    }
+    const png = () => new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'x.png', { type: 'image/png' });
+
+    async function openDoc(path: string, content: string): Promise<void> {
+      vfs.set(path, content);
+      emitTauriEvent(MENU.OPEN_FILE_PATH, { path });
+      await until(() => activeTitle() === path.slice(path.lastIndexOf('/') + 1), `${path} open`);
+      await flush();
+    }
+
+    it('pasted image data is stored beside the document and linked at the caret', async () => {
+      await startApp();
+      await openDoc('/docs/notes.md', 'Intro\n');
+      const view = await editorView();
+      view.dispatch({ selection: { anchor: view.state.doc.length } });
+      document.querySelector('.cm-content')!.dispatchEvent(pasteEvent([png()]));
+      await until(() => view.state.doc.toString().includes('![]('), 'the image link');
+      const call = invokeCalls.find((c) => c.cmd === 'save_image')!;
+      expect(call.args?.docPath).toBe('/docs/notes.md');
+      expect(String(call.args?.name)).toMatch(/^image-\d{8}-\d{6}$/);
+      expect(view.state.doc.toString()).toBe(`Intro\n![](${call.args?.name}.png)`);
+    });
+
+    it('a paste that also carries text stays a text paste', async () => {
+      await startApp();
+      await openDoc('/docs/notes.md', '');
+      const view = await editorView();
+      document.querySelector('.cm-content')!.dispatchEvent(pasteEvent([png()], 'cell text'));
+      await flush();
+      expect(invokeCalls.some((c) => c.cmd === 'save_image')).toBe(false);
+      expect(view.state.doc.toString()).not.toContain('![](');
+    });
+
+    it('an unsaved document asks to be saved first and writes nothing', async () => {
+      const app = await startApp();
+      app.newFile();
+      await flush();
+      document.querySelector('.cm-content')!.dispatchEvent(pasteEvent([png()]));
+      await until(() => messageLog.some((m) => m.includes('Save this document first')), 'the message');
+      expect(invokeCalls.some((c) => c.cmd === 'save_image')).toBe(false);
+    });
+
+    /** A paste as WebKitGTK delivers a copied image: no types, items or files. */
+    function emptyPasteEvent(): Event {
+      const ev = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(ev, 'clipboardData', {
+        value: { getData: () => '', items: [], files: [], types: [] },
+      });
+      return ev;
+    }
+
+    it('an image paste with no data on the event reads the system clipboard (WebKitGTK)', async () => {
+      await startApp();
+      await openDoc('/docs/notes.md', 'Intro\n');
+      systemClipboard.paste = { kind: 'image', data: 'iVBORw0KGgo=' };
+      const view = await editorView();
+      view.dispatch({ selection: { anchor: view.state.doc.length } });
+      const ev = emptyPasteEvent();
+      document.querySelector('.cm-content')!.dispatchEvent(ev);
+      expect(ev.defaultPrevented).toBe(true);
+      await until(() => view.state.doc.toString().includes('![]('), 'the image link');
+      const call = invokeCalls.find((c) => c.cmd === 'save_image')!;
+      expect(call.args?.docPath).toBe('/docs/notes.md');
+      expect(call.args?.data).toBe('iVBORw0KGgo=');
+      expect(view.state.doc.toString()).toBe(`Intro\n![](${call.args?.name}.png)`);
+    });
+
+    it('an empty paste with no image on the system clipboard changes nothing', async () => {
+      await startApp();
+      await openDoc('/docs/notes.md', 'Keep me');
+      const view = await editorView();
+      view.dispatch({ selection: { anchor: 0, head: 4 } });
+      document.querySelector('.cm-content')!.dispatchEvent(emptyPasteEvent());
+      await until(() => invokeCalls.some((c) => c.cmd === 'read_clipboard_paste'), 'the clipboard read');
+      await flush();
+      expect(invokeCalls.some((c) => c.cmd === 'save_image')).toBe(false);
+      expect(view.state.doc.toString()).toBe('Keep me');
+      expect(messageLog).toEqual([]);
+    });
+
+    it('an unsaved document asks to be saved first when the system clipboard holds an image', async () => {
+      const app = await startApp();
+      app.newFile();
+      await flush();
+      systemClipboard.paste = { kind: 'image', data: 'iVBORw0KGgo=' };
+      document.querySelector('.cm-content')!.dispatchEvent(emptyPasteEvent());
+      await until(() => messageLog.some((m) => m.includes('Save this document first')), 'the message');
+      expect(invokeCalls.some((c) => c.cmd === 'save_image')).toBe(false);
+    });
+
+    it('image files dropped onto the editor are linked; other files still open', async () => {
+      await startApp();
+      await openDoc('/docs/notes.md', 'Hello\n');
+      vfs.set('/inbox/other.md', 'other');
+      const content = document.querySelector('.cm-content')!;
+      const spy = vi.spyOn(document, 'elementFromPoint').mockReturnValue(content);
+      try {
+        dragDropHandler!({
+          payload: {
+            type: 'drop',
+            paths: ['/pics/shot.png', '/inbox/other.md'],
+            position: { x: 10, y: 10 },
+          },
+        });
+        await until(() => tabTitles().includes('other.md'), 'the dropped markdown tab');
+      } finally {
+        spy.mockRestore();
+      }
+      const call = invokeCalls.find((c) => c.cmd === 'import_image')!;
+      expect(call.args).toEqual({ docPath: '/docs/notes.md', source: '/pics/shot.png' });
+      expect(tabTitles()).not.toContain('shot.png');
+      emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/docs/notes.md' });
+      await until(() => activeTitle() === 'notes.md', 'notes.md active');
+      expect((await editorView()).state.doc.toString()).toContain('![](shot.png)');
+    });
+
+    it('images dropped outside the editor keep the usual open behavior', async () => {
+      await startApp();
+      await openDoc('/docs/notes.md', 'Hello\n');
+      const sidebar = document.getElementById('sidebar')!;
+      const spy = vi.spyOn(document, 'elementFromPoint').mockReturnValue(sidebar);
+      try {
+        dragDropHandler!({
+          payload: { type: 'drop', paths: ['/pics/shot.png'], position: { x: 10, y: 10 } },
+        });
+        await flush();
+        await flush();
+      } finally {
+        spy.mockRestore();
+      }
+      expect(invokeCalls.some((c) => c.cmd === 'import_image')).toBe(false);
+      expect((await editorView()).state.doc.toString()).toBe('Hello\n');
     });
   });
 

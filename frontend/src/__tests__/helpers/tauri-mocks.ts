@@ -102,10 +102,16 @@ export function emitTauriEvent(name: string, payload?: unknown): void {
 }
 
 /** The app's drag-drop callback, captured from onDragDropEvent. */
+/** What read_clipboard_paste answers (WebKitGTK's empty paste fallback). */
+export const systemClipboard: { paste: { kind: 'image' | 'text'; data: string } | null } = {
+  paste: null,
+};
+
 export let dragDropHandler: ((event: { payload: unknown }) => void) | null = null;
 
 export function resetTauriMocks(): void {
   vfs.clear();
+  systemClipboard.paste = null;
   for (const k of Object.keys(reviewStore)) delete reviewStore[k];
   for (const k of Object.keys(changePrints)) delete changePrints[k];
   remoteVfs.clear();
@@ -328,6 +334,18 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       return 'bash';
     case 'window_ready':
       return undefined;
+    case 'save_image': {
+      const doc = args?.docPath as string;
+      const name = `${args?.name as string}.png`;
+      vfs.set(`${doc.slice(0, doc.lastIndexOf('/'))}/${name}`, '<png>');
+      return name;
+    }
+    case 'read_clipboard_paste':
+      return systemClipboard.paste;
+    case 'import_image': {
+      const source = args?.source as string;
+      return source.slice(source.lastIndexOf('/') + 1);
+    }
     default:
       throw new Error(`tauri-mocks: unmocked command "${cmd}"`);
   }

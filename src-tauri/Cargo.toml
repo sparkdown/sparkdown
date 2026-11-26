@@ -61,6 +61,12 @@ regex-lite = "0.1"
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
 
+# Linux: gtk is the crate tauri itself is built on (same version). Paste:
+# WebKitGTK's paste event carries no image data, so a pasted image is read
+# from the GTK clipboard.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [target.'cfg(windows)'.dependencies]
 interprocess = "2"
 widestring = "1"
