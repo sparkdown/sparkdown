@@ -826,6 +826,7 @@ fn main() {
             git_write::git_fetch,
             git_write::git_discard_preview,
             git_write::git_discard,
+            git_write::git_accept_conflict,
             review::git_change_stats,
             review::review_state_load,
             review::review_state_save,
