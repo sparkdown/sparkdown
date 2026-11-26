@@ -67,7 +67,15 @@ export class DocumentController {
   constructor(
     private readonly ctx: AppContext,
     private readonly deps: DocumentDeps,
-  ) {}
+  ) {
+    // Unloaded tabs (session restore) read their file on first use, from the
+    // machine they belong to only.
+    ctx.tabs.setContentLoader((tab) =>
+      tab.path && tab.origin === ctx.tabs.getOrigin()
+        ? api.readFile(tab.path).catch(() => null)
+        : Promise.resolve(null),
+    );
+  }
 
   /** When we last wrote each path ourselves (ms since epoch). */
   private ownWrites = new Map<string, number>();
@@ -126,6 +134,34 @@ export class DocumentController {
         this.ctx.tabs.openTab(r.path, r.content);
       }
     }
+  }
+
+  /**
+   * Session restore: show a tab for every path at once, in order, but read
+   * only the file of the tab that becomes active (the last one, as when every
+   * file was opened in turn; the one before it if that file is gone). The
+   * others load on first activation or through loadRestoredTabs.
+   */
+  async restoreTabs(paths: string[]): Promise<void> {
+    if (paths.length === 0) return;
+    this.closePristineUntitled();
+    const ids = paths
+      .map((path) => this.ctx.tabs.addUnloaded(path))
+      .filter((id): id is string => id !== null);
+    for (let i = ids.length - 1; i >= 0; i--) {
+      if (await this.ctx.tabs.ensureLoaded(ids[i])) {
+        this.ctx.tabs.switchTo(ids[i]);
+        return;
+      }
+    }
+  }
+
+  /** Read every still unloaded tab, one at a time, in strip order. */
+  async loadRestoredTabs(): Promise<void> {
+    const pending = this.ctx.tabs.getUnloadedTabs();
+    if (pending.length === 0) return;
+    for (const tab of pending) await this.ctx.tabs.ensureLoaded(tab.id);
+    this.ctx.publishContextSoon();
   }
 
   async openFileDialog(): Promise<void> {

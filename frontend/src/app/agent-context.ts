@@ -1,5 +1,6 @@
 import { api } from '../api';
 import { debounce } from '../utils';
+import type { Tab } from '../tabs';
 import type { AppContext } from './context';
 import type { OpenFileOptions } from './documents';
 
@@ -68,6 +69,21 @@ export class AgentContextBridge {
     this.publishSoon();
   }
 
+  /** An agent's whole-buffer edit of an open tab (mcp://edit). */
+  private applyBufferEdit(tab: Tab, content: string, reply: (ok: boolean) => void): void {
+    if (tab === this.ctx.tabs.activeTab()) {
+      // Through the editor: one undoable change; docChanged marks dirty.
+      this.ctx.editor.replaceAll(content);
+    } else {
+      // Not on screen: update the model and drop the cached editor state so
+      // switching to it loads the new text instead of the stale snapshot.
+      this.ctx.tabs.setContentExternally(tab.id, content);
+      this.ctx.editor.forgetState(tab.id);
+    }
+    this.publishSoon();
+    reply(true);
+  }
+
   registerMcpListeners(): void {
     // MCP round trips from an agent (mcp.rs): edit an open buffer, or open a
     // file. Each carries an id we must answer with mcp_reply.
@@ -78,17 +94,15 @@ export class AgentContextBridge {
       // kept tab from another machine that happens to share the path.
       const tab = this.ctx.tabs.findByPath(path, this.ctx.tabs.getOrigin());
       if (!tab) return reply(false, `${path} is not open in SparkDown.`);
-      if (tab === this.ctx.tabs.activeTab()) {
-        // Through the editor: one undoable change; docChanged marks dirty.
-        this.ctx.editor.replaceAll(content);
-      } else {
-        // Not on screen: update the model and drop the cached editor state so
-        // switching to it loads the new text instead of the stale snapshot.
-        this.ctx.tabs.setContentExternally(tab.id, content);
-        this.ctx.editor.forgetState(tab.id);
+      // A restored tab whose file is not read yet: read it first, so the
+      // edit is measured against the file's text, not the empty placeholder.
+      if (tab.unloaded) {
+        void this.ctx.tabs.ensureLoaded(tab.id).then((ok) =>
+          ok ? this.applyBufferEdit(tab, content, reply) : reply(false, `${path} is not open in SparkDown.`),
+        );
+        return;
       }
-      this.publishSoon();
-      reply(true);
+      this.applyBufferEdit(tab, content, reply);
     });
 
     this.ctx.listenTauri<{ id: number; path: string; line: number | null }>('mcp://open', (e) => {
@@ -144,6 +158,8 @@ export class AgentContextBridge {
     const nextHashes = new Map<string, string>();
     const tabInfos = enabled
       ? tabs.map((t) => {
+          // Not read yet: listed without text until it loads.
+          if (t.unloaded) return { path: t.path, title: t.title, dirty: false, content: null };
           const content = liveContent(t);
           if (t.path) {
             const hash = hashContent(content);
