@@ -11,12 +11,27 @@ import { attachResizeDrag } from '../resize-drag';
  * lives with the terminal in cockpit.ts.)
  */
 
+/**
+ * Split the editor area between the editor and the preview in the ratio
+ * `editor` : `preview` (the two widths in pixels from a drag). They are kept
+ * as flex grow factors, not as a pixel width, so the split keeps its
+ * proportion when the area changes width (focus mode, the sidebar, the
+ * window) and comes back to the same pixels at the same width. A pane shown
+ * alone (Edit or Preview view) still fills the area, since each factor is at
+ * least 1.
+ */
+export function setEditorSplit(editorEl: HTMLElement, previewEl: HTMLElement, editor: number, preview: number): void {
+  editorEl.style.flex = `${Math.max(1, editor)} 1 0px`;
+  previewEl.style.flex = `${Math.max(1, preview)} 1 0px`;
+}
+
 /** Drag-to-resize the editor/preview split. */
 export function initResizeHandle(): void {
   const handle = document.getElementById('resize-handle');
   const editorContainer = document.getElementById('editor-container');
+  const previewContainer = document.getElementById('preview-container');
   const editorArea = document.getElementById('editor-area');
-  if (!handle || !editorContainer || !editorArea) return;
+  if (!handle || !editorContainer || !previewContainer || !editorArea) return;
 
   let startX = 0;
   let startWidth = 0;
@@ -28,10 +43,12 @@ export function initResizeHandle(): void {
       startWidth = editorContainer.clientWidth;
     },
     onMove: (e) => {
+      // The width both panes share: the area minus the handle between them.
+      const room = editorArea.clientWidth - handle.offsetWidth;
+      if (room <= 0) return;
       const dx = e.clientX - startX;
-      const newWidth = Math.max(200, Math.min(startWidth + dx, editorArea.clientWidth - 200));
-      editorContainer.style.width = `${newWidth}px`;
-      editorContainer.style.flex = 'none';
+      const newWidth = Math.max(200, Math.min(startWidth + dx, room - 200));
+      setEditorSplit(editorContainer, previewContainer, newWidth, room - newWidth);
     },
   });
 }
