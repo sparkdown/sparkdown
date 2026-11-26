@@ -2,8 +2,10 @@ import type { GitReporter } from '../git-output';
 import type { Tab } from '../tabs';
 import {
   ChangesView,
+  parseDiffLayout,
   renderUnifiedDiff,
   summarizeDiff,
+  type DiffLayout,
   type OpenHow,
 } from '../changes-view';
 import { api, type GitBranchStatus, type GitChange } from '../api';
@@ -57,6 +59,8 @@ interface DiffDom {
   review: HTMLElement | null;
   reading: HTMLElement | null;
   full: HTMLElement | null;
+  layoutInline: HTMLElement | null;
+  layoutSplit: HTMLElement | null;
   editorArea: HTMLElement | null;
 }
 
@@ -67,8 +71,8 @@ const isDiff = (tab: Tab | null | undefined): boolean =>
  * Git changes: the sidebar Changes review queue (and its badge), the
  * per-file git letters in the explorer, the status bar's branch +
  * ahead/behind, and the diff pane — the Diff view of a file tab (see
- * ViewModeController) — with its header (path, hunks, +/−, Reading | Full,
- * previous / next file, Mark reviewed).
+ * ViewModeController) — with its header (path, hunks, +/−, Inline | Side by
+ * side, Reading | Full, previous / next file, Mark reviewed).
  */
 export class DiffController {
   private changesView: ChangesView | null = null;
@@ -86,8 +90,10 @@ export class DiffController {
   private changesMode = false; // the sidebar is showing the Changes view
   // Diff pane: "reading" (meat-abridged) vs full verbatim. Reading by default,
   // matching the meat philosophy; the header control flips it (sticky across
-  // diff tabs for the session).
+  // diff tabs for the session). Layout (inline vs side-by-side) is remembered
+  // in the user config.
   private diffReading = true;
+  private diffLayout: DiffLayout = 'inline';
   private debouncedChangesRefresh = debounce(() => void this.changesView?.refresh(), 400);
   private debouncedChangesCount = debounce(() => void this.changesView?.refreshCount(), 600);
   /** Root git status was last pointed at (see setRoot). */
@@ -118,6 +124,8 @@ export class DiffController {
     review: null,
     reading: null,
     full: null,
+    layoutInline: null,
+    layoutSplit: null,
     editorArea: null,
   };
 
@@ -139,6 +147,8 @@ export class DiffController {
       review: $('diff-review'),
       reading: $('diff-mode-reading'),
       full: $('diff-mode-full'),
+      layoutInline: $('diff-layout-inline'),
+      layoutSplit: $('diff-layout-split'),
       editorArea: $('editor-area'),
     };
     const list = this.dom.list;
@@ -203,8 +213,11 @@ export class DiffController {
         },
       );
     }
+    this.diffLayout = parseDiffLayout(this.ctx.config.diff_layout);
     this.dom.reading?.addEventListener('click', () => this.setDiffReading(true));
     this.dom.full?.addEventListener('click', () => this.setDiffReading(false));
+    this.dom.layoutInline?.addEventListener('click', () => this.setDiffLayout('inline'));
+    this.dom.layoutSplit?.addEventListener('click', () => this.setDiffLayout('split'));
     this.dom.prev?.addEventListener('click', () => this.stepFile(-1));
     this.dom.next?.addEventListener('click', () => this.stepFile(1));
     this.dom.review?.addEventListener('click', () => this.toggleActiveReviewed());
@@ -274,6 +287,18 @@ export class DiffController {
   private setDiffReading(reading: boolean): void {
     if (this.diffReading === reading) return;
     this.diffReading = reading;
+    const tab = this.ctx.tabs.activeTab();
+    if (tab && isDiff(tab)) void this.showDiffForTab(tab);
+    else this.updateDiffModeToggle();
+  }
+
+  /** Inline vs side-by-side layout, remembered in the user config, then
+   *  re-render if the diff view is showing. */
+  private setDiffLayout(layout: DiffLayout): void {
+    if (this.diffLayout === layout) return;
+    this.diffLayout = layout;
+    this.ctx.config.diff_layout = layout;
+    this.ctx.saveConfigSoon();
     const tab = this.ctx.tabs.activeTab();
     if (tab && isDiff(tab)) void this.showDiffForTab(tab);
     else this.updateDiffModeToggle();
@@ -726,6 +751,7 @@ export class DiffController {
       const deleted = change?.status === 'deleted';
       body.innerHTML = renderUnifiedDiff(diff, {
         reading: this.diffReading,
+        layout: this.diffLayout,
         markdown: !deleted && isMarkdownFile(tab.path) ? tab.content : null,
         openInEditor: !deleted && !!this.deps.openAt,
       });
@@ -788,10 +814,13 @@ export class DiffController {
     }
   }
 
-  /** Sync the diff header's Reading | Full control to the current mode. */
+  /** Sync the diff header's layout and Reading | Full controls. */
   private updateDiffModeToggle(): void {
     this.dom.reading?.setAttribute('aria-pressed', String(this.diffReading));
     this.dom.full?.setAttribute('aria-pressed', String(!this.diffReading));
+    const split = this.diffLayout === 'split';
+    this.dom.layoutInline?.setAttribute('aria-pressed', String(!split));
+    this.dom.layoutSplit?.setAttribute('aria-pressed', String(split));
   }
 
   /** Hide the diff pane and restore the editor/preview split. */

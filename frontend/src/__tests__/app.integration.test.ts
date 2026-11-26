@@ -207,6 +207,7 @@ const APP_SHELL = `
         <div id="diff-view" class="hidden" tabindex="-1">
           <div id="diff-header">
             <div id="diff-path"><b id="diff-title"></b><span id="diff-meta"></span></div>
+            <div id="diff-layout-toggle"><button id="diff-layout-inline"></button><button id="diff-layout-split"></button></div>
             <div id="diff-mode-toggle"><button id="diff-mode-reading"></button><button id="diff-mode-full"></button></div>
             <button id="diff-prev" hidden></button>
             <button id="diff-next" hidden></button>
