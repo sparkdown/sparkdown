@@ -5,23 +5,20 @@ All notable user-visible changes to SparkDown. The format follows
 [Semantic Versioning](https://semver.org/). Numbers in parentheses are pull
 requests.
 
-## [Unreleased]
+## [0.4.7] — 2026-11-26
 
 ### Added
 
 - Paste or drop an image into a markdown document: it is saved next to the file under a new name and linked as `![](name.png)`.
-- **Search in files** can replace across files: open the replace field with the ⇄ button, then Preview lists every match as before → after. Untick files or single matches to leave them out, then Replace. Files that changed on disk since the preview, files open with unsaved changes, and files that are not UTF-8 text are left alone and listed. **Undo replace** puts the whole batch back. The replacement is plain text (also in regex mode). Not available for remote folders.
+- **Search in files** can replace across files: open the replace field with the ⇄ button, then Preview lists every match as before → after. Untick files or single matches to leave them out, then Replace. Files that changed on disk since the preview, files open with unsaved changes (also when only the unsaved text has a match), and files that are not UTF-8 text are left alone and listed in the preview. **Undo replace** puts the whole batch back. In regex mode the replacement can use capture groups: `$1`, `${name}`, `$0` for the whole match, and `$$` for a literal `$`; without regex it is plain text. Not available for remote folders.
 - **Wiki links**: `[[Note]]`, `[[folder/Note]]` and `[[Note|label]]` render as links in Preview and open the note; a link to a note that doesn't exist yet is shown dashed and creates it (next to the current file) when clicked. Markdown files that link to the open note are listed under the preview (Linked from …). Quick Open stays the note switcher.
 - **Preview** scroll sync follows source lines in both directions: every rendered block (paragraphs, list items, tables, code, diagrams, images) lines up with the text it came from, and clicking text in the preview puts the editor cursor on that block's line. Links, text selection and double-click still work as before.
-- **Export PDF** (File menu and command palette) prints the rendered Markdown document, with Mermaid diagrams, highlighted code and local images, through the system print dialog; choose its PDF destination to save the file. The PDF uses the preview's current theme.
+- **Export PDF** (File menu and command palette) prints the rendered Markdown document, with Mermaid diagrams, highlighted code and local images, through the system print dialog; choose its PDF destination to save the file. The PDF is always light (Mermaid diagrams too) with white margins, whatever the app theme. On Linux the print dialog suggests the document's name with `.pdf`, next to the document.
 - **Focus mode** (View → Focus Mode, `⌘⇧↩` / `Ctrl+Shift+Enter`) hides the sidebar, tabs, status bar and terminal so only the document is left; `Esc` or the same key brings back the layout exactly as it was. With the editor alone and wrapping on, the text sits in a centered column of about 80 characters; with Split, the editor and preview keep their proportions. A failed on-save hook doesn't end focus mode: the title bar names it until you click it, which opens the Output tab. The status bar also shows an estimated reading time next to the word count (200 words per minute).
-
-### New
-
 - **Changes:** the file diff can switch between the inline view and a side-by-side view. The choice is remembered.
 - **Changes:** conflicted files are listed in their own group, with Accept ours and Accept theirs (a confirmation first, and a copy kept in the Trash).
 - **Changes:** stage or unstage an individual hunk, and commit only what is staged when the index is not empty.
-- **Custom commands** appear in the command palette from your SparkDown user config (Settings → Custom commands, or the `user-run.json` file in the app config directory), never from the opened folder. Each command is a program and its arguments (no shell), run with the local folder as the working directory. Output appears in the new Output tab of the bottom pane. A bad entry is skipped and listed, and the palette still opens. Commands are unavailable in a remote (SSH) folder, or when no folder is open.
+- **Custom commands** appear in the command palette from your SparkDown user config (Settings → Custom commands, or the `user-run.json` file in the app config directory), never from the opened folder. Each command is a program and its arguments (no shell), run with the local folder as the working directory. Output appears in the new Output tab of the bottom pane. A bad entry is skipped and listed, and the palette still opens. Commands are unavailable in a remote (SSH) folder, or when no folder is open. Settings saves each change as you make it.
 - **On-save hooks** in the same user config (Settings → On save) run a command when you save a file in a local folder. The file path is the last argument, and an optional glob list chooses which files. Each hook is off until you turn it on. A hook that fails never fails the save. Hooks do not run in a remote (SSH) folder, or for files an agent writes on its own; they do run when you save after reviewing an agent edit.
 - **Next / previous tab** also with `Ctrl+Tab` / `Ctrl+Shift+Tab` and `Ctrl+PageDown` / `Ctrl+PageUp` (Control on macOS too; Window menu: Next Tab, Previous Tab). `⌘⌥→` / `⌘⌥←` (`Ctrl+Alt+→` / `←`) still work, and a focused terminal keeps the new keys.
 
