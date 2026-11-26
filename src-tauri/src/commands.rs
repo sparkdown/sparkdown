@@ -419,6 +419,18 @@ fn is_directory_impl(path: &str) -> bool {
     Path::new(path).is_dir()
 }
 
+/// Open the platform print dialog for the calling webview (Export PDF). The
+/// page's print stylesheet limits the output to the rendered document; the
+/// dialog's own PDF destination writes the file (macOS: PDF > Save as PDF,
+/// Windows: Save as PDF / Microsoft Print to PDF, Linux: Print to File).
+/// Native rather than `window.print()`, which does nothing in WKWebView.
+#[tauri::command]
+pub fn print_webview(webview: tauri::Webview) -> Result<(), AppError> {
+    webview
+        .print()
+        .map_err(|e| AppError::Other(format!("Could not open the print dialog: {e}")))
+}
+
 /// Copy plain text to the system clipboard (file name / path menu actions).
 #[tauri::command]
 pub fn copy_text(text: String) -> Result<(), AppError> {

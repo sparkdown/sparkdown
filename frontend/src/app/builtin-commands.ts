@@ -73,6 +73,7 @@ export function registerBuiltinCommands(reg: CommandRegistry, t: BuiltinCommandT
     act('file.save', 'File: Save', ACTIONS.SAVE, { enabled: hasTab }),
     act('file.saveAs', 'File: Save as…', ACTIONS.SAVE_AS, { enabled: hasTab }),
     act('file.exportHtml', 'File: Export HTML…', ACTIONS.EXPORT_HTML, { enabled: hasTab }),
+    act('file.exportPdf', 'File: Export PDF…', ACTIONS.EXPORT_PDF, { enabled: hasTab }),
     act('file.closeTab', 'File: Close tab', ACTIONS.CLOSE_TAB, { enabled: hasTab }),
 
     act('go.file', 'Go: Go to file…', ACTIONS.QUICK_OPEN),

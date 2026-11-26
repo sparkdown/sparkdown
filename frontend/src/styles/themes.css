@@ -113,88 +113,92 @@
 
 /* Dark theme — "Silver / Charcoal": platinum on warm charcoal.
    Lifted from the old near-black (#101013) to reduce contrast fatigue;
-   text is dialed down a step for the same reason. */
-[data-theme='dark'] {
-  --bg: #191b21;
-  --fg: #dde1e8;
-  --bg-secondary: #1f222a;
-  --bg-tertiary: #2a2e38;
-  --border: #2e323c;
-  --border-light: #262a32;
-  --accent: #c3c8d2;
-  --accent-hover: #d6dae2;
-  --accent-fg: #191b21;
-  --status-warning: #f0b45a;
-  --text-muted: #99a0ad;
-  --text-subtle: #6b7280;
+   text is dialed down a step for the same reason.
+   Screens only: Export PDF (and any print) always uses the light palette
+   above, which prints well and keeps white page margins. */
+@media not print {
+  [data-theme='dark'] {
+    --bg: #191b21;
+    --fg: #dde1e8;
+    --bg-secondary: #1f222a;
+    --bg-tertiary: #2a2e38;
+    --border: #2e323c;
+    --border-light: #262a32;
+    --accent: #c3c8d2;
+    --accent-hover: #d6dae2;
+    --accent-fg: #191b21;
+    --status-warning: #f0b45a;
+    --text-muted: #99a0ad;
+    --text-subtle: #6b7280;
 
-  /* Editor */
-  --editor-bg: #191b21;
-  --editor-fg: #dde1e8;
-  --editor-caret: #c3c8d2;
-  --editor-gutter-bg: #191b21;
-  --editor-gutter-fg: #6b7280;
-  --editor-active-line: #1f222a;
-  --editor-active-line-gutter: #22252e;
-  --editor-selection: #323848cc;
-  --editor-search-match: #454b59;
-  --editor-search-match-selected: #67708a;
+    /* Editor */
+    --editor-bg: #191b21;
+    --editor-fg: #dde1e8;
+    --editor-caret: #c3c8d2;
+    --editor-gutter-bg: #191b21;
+    --editor-gutter-fg: #6b7280;
+    --editor-active-line: #1f222a;
+    --editor-active-line-gutter: #22252e;
+    --editor-selection: #323848cc;
+    --editor-search-match: #454b59;
+    --editor-search-match-selected: #67708a;
 
-  /* Editor syntax colors — SparkDown palette (dark): the light inks,
-     raised to sit comfortably on charcoal. Same hue story, no borrowing. */
-  --syn-keyword: #c0a8e0;      /* dusk violet */
-  --syn-atom: #8ab4dd;         /* steel blue */
-  --syn-number: #cdb694;       /* sand */
-  --syn-string: #a8c49a;       /* sage */
-  --syn-regexp: #d4a08c;       /* clay */
-  --syn-variable-def: #9fc6d4; /* slate teal */
-  --syn-variable-local: #9fc6d4;
-  --syn-type: #8fc7bb;         /* seafoam */
-  --syn-class: #8fc7bb;
-  --syn-special: #d8c89a;      /* olive gold */
-  --syn-property-def: #a8bede; /* ink blue */
-  --syn-comment: #6d7383;      /* quiet gray, italic via style */
-  --syn-meta: #8a8f9c;
-  --syn-invalid: #d47a7a;
+    /* Editor syntax colors — SparkDown palette (dark): the light inks,
+       raised to sit comfortably on charcoal. Same hue story, no borrowing. */
+    --syn-keyword: #c0a8e0;      /* dusk violet */
+    --syn-atom: #8ab4dd;         /* steel blue */
+    --syn-number: #cdb694;       /* sand */
+    --syn-string: #a8c49a;       /* sage */
+    --syn-regexp: #d4a08c;       /* clay */
+    --syn-variable-def: #9fc6d4; /* slate teal */
+    --syn-variable-local: #9fc6d4;
+    --syn-type: #8fc7bb;         /* seafoam */
+    --syn-class: #8fc7bb;
+    --syn-special: #d8c89a;      /* olive gold */
+    --syn-property-def: #a8bede; /* ink blue */
+    --syn-comment: #6d7383;      /* quiet gray, italic via style */
+    --syn-meta: #8a8f9c;
+    --syn-invalid: #d47a7a;
 
-  /* Markdown prose highlighting (editor) */
-  --md-heading: #9fb6dd;
-  --md-quote: #99a0ad;
-  --md-code-fg: #c0a8e0;
-  --md-code-bg: #22252e;
+    /* Markdown prose highlighting (editor) */
+    --md-heading: #9fb6dd;
+    --md-quote: #99a0ad;
+    --md-code-fg: #c0a8e0;
+    --md-code-bg: #22252e;
 
-  /* Preview */
-  --preview-bg: #191b21;
-  --preview-fg: #c6cbd4;
-  --preview-code-bg: #21242d;
-  --preview-code-fg: #dde1e8;
-  --preview-blockquote-border: #3e4350;
-  --preview-blockquote-fg: #99a0ad;
-  /* Links: brighter steel-blue that stands clear of the platinum body text. */
-  --preview-link: #7bb0e8;
-  --preview-link-hover: #9cc6f2;
-  --preview-table-border: #323641;
-  --preview-table-header-bg: #21242d;
-  --preview-hr: #323641;
+    /* Preview */
+    --preview-bg: #191b21;
+    --preview-fg: #c6cbd4;
+    --preview-code-bg: #21242d;
+    --preview-code-fg: #dde1e8;
+    --preview-blockquote-border: #3e4350;
+    --preview-blockquote-fg: #99a0ad;
+    /* Links: brighter steel-blue that stands clear of the platinum body text. */
+    --preview-link: #7bb0e8;
+    --preview-link-hover: #9cc6f2;
+    --preview-table-border: #323641;
+    --preview-table-header-bg: #21242d;
+    --preview-hr: #323641;
 
-  /* Panel / Chrome */
-  --panel-bg: #1f222a;
-  --toolbar-bg: #1d2027;
-  --toolbar-border: #2e323c;
-  --tab-bg: #171920;
-  --tab-active-bg: #191b21;
-  --tab-hover-bg: #232630;
-  --statusbar-bg: #1d2027;
-  --statusbar-fg: #99a0ad;
-  --sidebar-bg: #1c1f26;
-  --sidebar-hover: #242833;
-  --sidebar-active: #2c3140;
-  --scrollbar-thumb: #3a3f4b;
-  --scrollbar-track: transparent;
+    /* Panel / Chrome */
+    --panel-bg: #1f222a;
+    --toolbar-bg: #1d2027;
+    --toolbar-border: #2e323c;
+    --tab-bg: #171920;
+    --tab-active-bg: #191b21;
+    --tab-hover-bg: #232630;
+    --statusbar-bg: #1d2027;
+    --statusbar-fg: #99a0ad;
+    --sidebar-bg: #1c1f26;
+    --sidebar-hover: #242833;
+    --sidebar-active: #2c3140;
+    --scrollbar-thumb: #3a3f4b;
+    --scrollbar-track: transparent;
 
-  /* Floating-panels layout: charcoal canvas behind lifted panels */
-  --canvas: #121317;
-  --panel-shadow: 0 6px 24px -8px rgba(0, 0, 0, 0.55);
+    /* Floating-panels layout: charcoal canvas behind lifted panels */
+    --canvas: #121317;
+    --panel-shadow: 0 6px 24px -8px rgba(0, 0, 0, 0.55);
+  }
 }
 
 /* ---------------------------------------------------------------------------

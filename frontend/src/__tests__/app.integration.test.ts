@@ -93,6 +93,7 @@ import {
   mcp,
   reviewStore,
   changePrints,
+  previewThemeCalls,
 } from './helpers/tauri-mocks';
 import { App } from '../app';
 import { FileTree } from '../file-tree';
@@ -2900,6 +2901,84 @@ describe('App integration', () => {
       const out = vfs.get('/out.html') ?? '';
       expect(out).not.toContain('<img src=x onerror=alert(1)>');
       expect(out).toContain('&lt;img src=x onerror=alert(1)&gt;');
+    });
+  });
+
+  describe('Export PDF', () => {
+    const printCalls = () => invokeCalls.filter((c) => c.cmd === 'print_webview');
+
+    it('renders the document into the preview, marks it for print and opens the print dialog', async () => {
+      const path = '/x/notes.md';
+      vfs.set(path, '# Hello PDF');
+      restoreConfig([path]);
+      const app = await startApp();
+      const titleBefore = document.title;
+
+      await app.exportPdf();
+
+      const pane = document.getElementById('preview-pane')!;
+      expect(printCalls()).toHaveLength(1);
+      expect(pane.textContent).toBe('# Hello PDF');
+      expect(pane.classList.contains('print-target')).toBe(true);
+      expect(document.getElementById('preview-container')!.classList.contains('print-path')).toBe(true);
+      expect(document.documentElement.classList.contains('print-path')).toBe(true);
+      // The PDF destinations suggest the page title as the file name.
+      expect(document.title).toBe('notes');
+
+      window.dispatchEvent(new Event('afterprint'));
+      expect(document.querySelectorAll('.print-target, .print-path')).toHaveLength(0);
+      expect(document.title).toBe(titleBefore);
+    });
+
+    it('draws diagrams light for the PDF in the dark theme, and back in the app theme after printing', async () => {
+      const path = '/x/dark.md';
+      vfs.set(path, '# Dark');
+      restoreConfig([path]);
+      const app = await startApp();
+      document.documentElement.dataset.theme = 'dark';
+      previewThemeCalls.length = 0;
+      try {
+        await app.exportPdf();
+        expect(previewThemeCalls).toEqual(['export:light']);
+        window.dispatchEvent(new Event('afterprint'));
+        expect(previewThemeCalls).toEqual(['export:light', 'theme:dark']);
+      } finally {
+        document.documentElement.dataset.theme = 'light';
+      }
+    });
+
+    it('keeps light diagrams with nothing to switch back in the light theme', async () => {
+      const path = '/x/light.md';
+      vfs.set(path, '# Light');
+      restoreConfig([path]);
+      const app = await startApp();
+      document.documentElement.dataset.theme = 'light';
+      previewThemeCalls.length = 0;
+      await app.exportPdf();
+      window.dispatchEvent(new Event('afterprint'));
+      expect(previewThemeCalls).toEqual(['export:light']);
+    });
+
+    it('runs from the File menu event', async () => {
+      const path = '/x/menu.md';
+      vfs.set(path, 'text');
+      restoreConfig([path]);
+      await startApp();
+      emitTauriEvent('menu:export-pdf');
+      await vi.waitFor(() => expect(printCalls()).toHaveLength(1));
+      window.dispatchEvent(new Event('afterprint'));
+    });
+
+    it('explains instead of printing for a non-Markdown file', async () => {
+      const path = '/x/page.html';
+      vfs.set(path, '<p>hi</p>');
+      restoreConfig([path]);
+      const app = await startApp();
+
+      await app.exportPdf();
+
+      expect(printCalls()).toHaveLength(0);
+      expect(messageLog).toContain('Export PDF works with Markdown documents.');
     });
   });
 
