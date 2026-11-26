@@ -17,7 +17,7 @@
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 24px 28px;
-  max-width: 460px;
+  max-width: 520px;
   width: 90vw;
   max-height: 80vh;
   overflow-y: auto;
@@ -305,4 +305,52 @@
 
 .settings-number {
   width: 7rem;
+}
+
+/* Custom commands / on-save hooks editor. */
+.settings-run-desc {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  margin: 0 0 10px;
+}
+.settings-run-problems {
+  font-size: 11.5px;
+  color: var(--status-warning);
+  line-height: 1.45;
+  margin: 0 0 10px;
+  white-space: pre-wrap;
+}
+.settings-run-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 0 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.settings-run-item .settings-text {
+  width: 100%;
+}
+.settings-run-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-run-row label {
+  flex: 0 0 72px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.settings-run-row .settings-text {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+.settings-run-actions {
+  display: flex;
+  gap: 8px;
+  margin: 8px 0 0;
+  flex-wrap: wrap;
 }
