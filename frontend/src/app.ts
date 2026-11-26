@@ -42,7 +42,7 @@ import { api, type AppConfig, type FsChange } from './api';
 import { ACTIONS, EVENTS } from './event-names';
 import { initPerfTrace, span } from './perf-trace';
 import { GitFeedback } from './git-output';
-import { ImageInserter, clipboardImageFiles, isImagePath } from './image-insert';
+import { ImageInserter, isImagePath } from './image-insert';
 import { UserRunOutputLog } from './user-run-output';
 import { UserRunController } from './user-run';
 import type { SaveHook, UserCommand } from './api';
@@ -323,11 +323,8 @@ export class App {
 
     this.editor.init(document.getElementById('editor-container')!);
     this.editor.setPasteHandler((e) => {
-      if (!this.images.wantsImages()) return false;
-      const files = clipboardImageFiles(e.clipboardData);
-      if (files.length === 0) return false;
+      if (!this.images.handlePaste(e.clipboardData)) return false;
       e.preventDefault();
-      void this.images.pasteFiles(files);
       return true;
     });
     this.documents.initUntitledOnEditorFocus();

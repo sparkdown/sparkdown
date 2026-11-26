@@ -37,8 +37,7 @@ export function pastedImageStem(now: Date = new Date()): string {
  * the text next to the text itself; the text wins there.
  */
 export function clipboardImageFiles(data: DataTransfer | null): File[] {
-  if (!data) return [];
-  if (data.getData('text/plain').trim() !== '') return [];
+  if (!data || pasteHasText(data)) return [];
   const files: File[] = [];
   for (const item of Array.from(data.items ?? [])) {
     if (item.kind !== 'file' || !item.type.startsWith('image/')) continue;
@@ -51,6 +50,12 @@ export function clipboardImageFiles(data: DataTransfer | null): File[] {
     }
   }
   return files;
+}
+
+/** True when a paste carries text (or a link list) for the editor's own
+ *  text paste. */
+export function pasteHasText(data: DataTransfer): boolean {
+  return data.getData('text/plain').trim() !== '' || data.getData('text/uri-list').trim() !== '';
 }
 
 /** The base64 payload of a blob (no `data:` prefix). */
@@ -103,16 +108,65 @@ export class ImageInserter {
     return !!t && isMarkdownFile(t.path);
   }
 
+  /**
+   * A paste into the editor. True when it is an image paste, which the
+   * caller then keeps from the editor's text paste. A paste that carries
+   * text stays a text paste.
+   *
+   * WebKitGTK (Linux) hands the paste event no image data: a copied image
+   * arrives as a paste with no types, items or files. Such an empty paste
+   * reads the image from the system clipboard through the core instead;
+   * WebView2 and WKWebView put the image on the event itself.
+   */
+  handlePaste(data: DataTransfer | null): boolean {
+    const target = this.deps.activeTarget();
+    if (!data || !target || !isMarkdownFile(target.path)) return false;
+    if (pasteHasText(data)) return false;
+    const files = clipboardImageFiles(data);
+    if (files.length > 0) {
+      void this.pasteFilesInto(target, files);
+    } else {
+      void this.pasteSystemImage(target);
+    }
+    return true;
+  }
+
   /** Clipboard image data (paste). */
   async pasteFiles(files: File[]): Promise<void> {
-    const target = await this.savedTarget();
-    if (!target?.path) return;
-    const docPath = target.path;
+    const target = this.deps.activeTarget();
+    if (target) await this.pasteFilesInto(target, files);
+  }
+
+  private async pasteFilesInto(target: ImageTarget, files: File[]): Promise<void> {
+    if (!(await this.checkTarget(target))) return;
+    const docPath = target.path!;
     const stem = pastedImageStem();
     await this.store(target, null, files, async (file) => {
       if (file.size > MAX_IMAGE_BYTES) throw tooLarge();
       return api.saveImage(docPath, stem, await blobToBase64(file));
     });
+  }
+
+  /** The system clipboard, when the paste event had no data. Its text
+   *  (WebKitGTK drops the text offered next to an image too) goes in as a
+   *  text paste; nothing happens when it holds neither. */
+  private async pasteSystemImage(target: ImageTarget): Promise<void> {
+    let got: { kind: 'image' | 'text'; data: string } | null;
+    try {
+      got = await api.readClipboardPaste();
+    } catch (e) {
+      await this.deps.notify(String(e), "Couldn't Add Image");
+      return;
+    }
+    if (!got || !got.data) return;
+    if (got.kind === 'text') {
+      this.deps.insert(target.tabId, got.data, null);
+      return;
+    }
+    if (!(await this.checkTarget(target))) return;
+    const docPath = target.path!;
+    const stem = pastedImageStem();
+    await this.store(target, null, [got.data], (b64) => api.saveImage(docPath, stem, b64));
   }
 
   /** Image files dropped at document offset `at`. */
@@ -125,16 +179,20 @@ export class ImageInserter {
 
   private async savedTarget(): Promise<ImageTarget | null> {
     const target = this.deps.activeTarget();
-    if (!target) return null;
+    return target && (await this.checkTarget(target)) ? target : null;
+  }
+
+  /** False (after telling the user why) when images can't go into `target`. */
+  private async checkTarget(target: ImageTarget): Promise<boolean> {
     if (target.origin !== null) {
       await this.deps.notify(REMOTE_MESSAGE, 'Remote Folder');
-      return null;
+      return false;
     }
     if (!target.path) {
       await this.deps.notify(UNSAVED_MESSAGE, 'Save Document First');
-      return null;
+      return false;
     }
-    return target;
+    return true;
   }
 
   private async store<T>(

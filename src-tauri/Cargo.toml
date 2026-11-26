@@ -56,6 +56,11 @@ regex-lite = "0.1"
 # windows-sys + widestring (both already in the tree via interprocess, same
 # versions) build the pipe's per-user security descriptor: the current
 # user's SID from the process token, as SDDL.
+# Paste: WebKitGTK's paste event carries no image data, so a pasted image
+# is read from the GTK clipboard (the gtk tauri itself is built on).
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 # #130: system clipboard for the terminal on Linux / Windows (WebKitGTK's
 # navigator.clipboard can't read it without a user gesture).
 [target.'cfg(not(target_os = "macos"))'.dependencies]

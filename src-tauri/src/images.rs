@@ -286,6 +286,134 @@ pub async fn save_image(
     .map_err(|e| AppError::Other(format!("image task failed: {e}")))?
 }
 
+/// What an empty paste event stands for, read from the system clipboard.
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "data", rename_all = "lowercase")]
+pub enum ClipboardPaste {
+    /// PNG, JPEG, GIF or WebP data, base64-encoded.
+    Image(String),
+    /// Text: a clipboard that offers text stays a text paste.
+    Text(String),
+}
+
+/// Paste fallback. WebKitGTK hands the paste event no data when the
+/// clipboard holds an image: no types, items or files, and not even the
+/// text offered next to the image. So on Linux the frontend asks here for
+/// what the clipboard holds: its text when it offers any (a paste that also
+/// carries text stays a text paste), else its image. WebView2 and WKWebView
+/// put the image on the paste event; there this returns None.
+#[tauri::command]
+pub async fn read_clipboard_paste(
+    app: tauri::AppHandle,
+) -> Result<Option<ClipboardPaste>, AppError> {
+    let got = read_system_clipboard(&app).await?;
+    match got {
+        Some(SystemClipboard::Image(b)) => {
+            check_size(b.len() as u64)?;
+            Ok(Some(ClipboardPaste::Image(
+                base64::engine::general_purpose::STANDARD.encode(b),
+            )))
+        }
+        Some(SystemClipboard::Text(t)) => Ok(Some(ClipboardPaste::Text(t))),
+        None => Ok(None),
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum SystemClipboard {
+    Image(Vec<u8>),
+    Text(String),
+}
+
+/// Clipboard image types, in the order a paste prefers them.
+#[cfg(any(target_os = "linux", test))]
+const CLIPBOARD_IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+/// Clipboard types that carry text (X11 and Wayland names).
+#[cfg(any(target_os = "linux", test))]
+const CLIPBOARD_TEXT_TYPES: [&str; 5] = [
+    "UTF8_STRING",
+    "text/plain;charset=utf-8",
+    "text/plain",
+    "STRING",
+    "TEXT",
+];
+
+/// What to read from a clipboard that offers `offered` types.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, PartialEq, Eq)]
+enum ClipboardRead {
+    Text,
+    Image(&'static str),
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn pick_clipboard_read<S: AsRef<str>>(offered: &[S]) -> Option<ClipboardRead> {
+    let has = |want: &str| {
+        offered
+            .iter()
+            .any(|o| o.as_ref().eq_ignore_ascii_case(want))
+    };
+    if CLIPBOARD_TEXT_TYPES.into_iter().any(has) {
+        return Some(ClipboardRead::Text);
+    }
+    CLIPBOARD_IMAGE_TYPES
+        .into_iter()
+        .find(|t| has(t))
+        .map(ClipboardRead::Image)
+}
+
+#[cfg(target_os = "linux")]
+async fn read_system_clipboard(
+    app: &tauri::AppHandle,
+) -> Result<Option<SystemClipboard>, AppError> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let (tx, rx) = mpsc::channel::<Option<SystemClipboard>>();
+    // GTK's clipboard lives on the main thread; the requests answer there
+    // asynchronously, so the main loop keeps running while the owner replies.
+    app.run_on_main_thread(move || {
+        let cb = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
+        cb.request_contents(&gtk::gdk::Atom::intern("TARGETS"), move |cb, sd| {
+            let names: Vec<String> = sd
+                .targets()
+                .unwrap_or_default()
+                .iter()
+                .map(|t| t.name().to_string())
+                .collect();
+            match pick_clipboard_read(&names) {
+                None => {
+                    let _ = tx.send(None);
+                }
+                Some(ClipboardRead::Text) => cb.request_text(move |_, text| {
+                    let text = text
+                        .filter(|t| !t.is_empty())
+                        .map(|t| SystemClipboard::Text(t.to_string()));
+                    let _ = tx.send(text);
+                }),
+                Some(ClipboardRead::Image(kind)) => {
+                    cb.request_contents(&gtk::gdk::Atom::intern(kind), move |_, sd| {
+                        let data = sd.data();
+                        let _ = tx.send((!data.is_empty()).then_some(SystemClipboard::Image(data)));
+                    })
+                }
+            }
+        });
+    })
+    .map_err(|e| AppError::Other(format!("clipboard read failed: {e}")))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        rx.recv_timeout(Duration::from_secs(5)).ok().flatten()
+    })
+    .await
+    .map_err(|e| AppError::Other(format!("clipboard task failed: {e}")))
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn read_system_clipboard(
+    _app: &tauri::AppHandle,
+) -> Result<Option<SystemClipboard>, AppError> {
+    Ok(None)
+}
+
 /// Drop: copy the image file `source` beside the document `doc_path`.
 /// Returns the file name to link.
 #[tauri::command]
@@ -336,6 +464,35 @@ mod tests {
         let doc = dir.join("notes.md");
         fs::write(&doc, "# notes\n").unwrap();
         doc.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn clipboard_text_wins_then_png_first() {
+        use ClipboardRead::*;
+        assert_eq!(pick_clipboard_read(&["TARGETS", "TIMESTAMP"]), None);
+        assert_eq!(pick_clipboard_read::<&str>(&[]), None);
+        assert_eq!(
+            pick_clipboard_read(&["image/bmp", "image/jpeg", "image/png"]),
+            Some(Image("image/png"))
+        );
+        assert_eq!(
+            pick_clipboard_read(&["image/tiff", "IMAGE/WEBP"]),
+            Some(Image("image/webp"))
+        );
+        // A browser's "Copy image" offers HTML next to the picture: an image.
+        assert_eq!(
+            pick_clipboard_read(&["text/html", "image/png"]),
+            Some(Image("image/png"))
+        );
+        // An office app's cells offer text and a picture of them: text.
+        assert_eq!(
+            pick_clipboard_read(&["image/png", "UTF8_STRING"]),
+            Some(Text)
+        );
+        assert_eq!(
+            pick_clipboard_read(&["text/plain;charset=utf-8", "image/png"]),
+            Some(Text)
+        );
     }
 
     #[test]

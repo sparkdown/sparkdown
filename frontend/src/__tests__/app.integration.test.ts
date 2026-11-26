@@ -95,6 +95,7 @@ import {
   changePrints,
   previewThemeCalls,
   failingWrites,
+  systemClipboard,
 } from './helpers/tauri-mocks';
 import { App } from '../app';
 import { FileTree } from '../file-tree';
@@ -2195,6 +2196,54 @@ describe('App integration', () => {
       app.newFile();
       await flush();
       document.querySelector('.cm-content')!.dispatchEvent(pasteEvent([png()]));
+      await until(() => messageLog.some((m) => m.includes('Save this document first')), 'the message');
+      expect(invokeCalls.some((c) => c.cmd === 'save_image')).toBe(false);
+    });
+
+    /** A paste as WebKitGTK delivers a copied image: no types, items or files. */
+    function emptyPasteEvent(): Event {
+      const ev = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(ev, 'clipboardData', {
+        value: { getData: () => '', items: [], files: [], types: [] },
+      });
+      return ev;
+    }
+
+    it('an image paste with no data on the event reads the system clipboard (WebKitGTK)', async () => {
+      await startApp();
+      await openDoc('/docs/notes.md', 'Intro\n');
+      systemClipboard.paste = { kind: 'image', data: 'iVBORw0KGgo=' };
+      const view = await editorView();
+      view.dispatch({ selection: { anchor: view.state.doc.length } });
+      const ev = emptyPasteEvent();
+      document.querySelector('.cm-content')!.dispatchEvent(ev);
+      expect(ev.defaultPrevented).toBe(true);
+      await until(() => view.state.doc.toString().includes('![]('), 'the image link');
+      const call = invokeCalls.find((c) => c.cmd === 'save_image')!;
+      expect(call.args?.docPath).toBe('/docs/notes.md');
+      expect(call.args?.data).toBe('iVBORw0KGgo=');
+      expect(view.state.doc.toString()).toBe(`Intro\n![](${call.args?.name}.png)`);
+    });
+
+    it('an empty paste with no image on the system clipboard changes nothing', async () => {
+      await startApp();
+      await openDoc('/docs/notes.md', 'Keep me');
+      const view = await editorView();
+      view.dispatch({ selection: { anchor: 0, head: 4 } });
+      document.querySelector('.cm-content')!.dispatchEvent(emptyPasteEvent());
+      await until(() => invokeCalls.some((c) => c.cmd === 'read_clipboard_paste'), 'the clipboard read');
+      await flush();
+      expect(invokeCalls.some((c) => c.cmd === 'save_image')).toBe(false);
+      expect(view.state.doc.toString()).toBe('Keep me');
+      expect(messageLog).toEqual([]);
+    });
+
+    it('an unsaved document asks to be saved first when the system clipboard holds an image', async () => {
+      const app = await startApp();
+      app.newFile();
+      await flush();
+      systemClipboard.paste = { kind: 'image', data: 'iVBORw0KGgo=' };
+      document.querySelector('.cm-content')!.dispatchEvent(emptyPasteEvent());
       await until(() => messageLog.some((m) => m.includes('Save this document first')), 'the message');
       expect(invokeCalls.some((c) => c.cmd === 'save_image')).toBe(false);
     });

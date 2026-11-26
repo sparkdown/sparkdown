@@ -1,8 +1,12 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { saveImage, importImage } = vi.hoisted(() => ({ saveImage: vi.fn(), importImage: vi.fn() }));
-vi.mock('../api', () => ({ api: { saveImage, importImage } }));
+const { saveImage, importImage, readClipboardPaste } = vi.hoisted(() => ({
+  saveImage: vi.fn(),
+  importImage: vi.fn(),
+  readClipboardPaste: vi.fn(),
+}));
+vi.mock('../api', () => ({ api: { saveImage, importImage, readClipboardPaste } }));
 
 import {
   ImageInserter,
@@ -16,9 +20,9 @@ import {
 
 const file = (type: string, bytes = 4) => new File([new Uint8Array(bytes)], 'f', { type });
 
-function clipboard(files: File[], text = ''): DataTransfer {
+function clipboard(files: File[], text = '', uris = ''): DataTransfer {
   return {
-    getData: (t: string) => (t === 'text/plain' ? text : ''),
+    getData: (t: string) => (t === 'text/plain' ? text : t === 'text/uri-list' ? uris : ''),
     items: files.map((f) => ({ kind: 'file', type: f.type, getAsFile: () => f })),
     files,
   } as unknown as DataTransfer;
@@ -47,6 +51,7 @@ const doc: ImageTarget = { tabId: 't1', path: '/docs/notes.md', origin: null };
 beforeEach(() => {
   saveImage.mockReset();
   importImage.mockReset();
+  readClipboardPaste.mockReset();
 });
 
 describe('image helpers', () => {
@@ -134,5 +139,58 @@ describe('ImageInserter', () => {
     expect(harness({ ...doc, path: null }).inserter.wantsImages()).toBe(true);
     expect(harness({ ...doc, path: '/a/data.json' }).inserter.wantsImages()).toBe(false);
     expect(harness(null).inserter.wantsImages()).toBe(false);
+  });
+
+  it('claims a paste with image files and keeps text pastes', async () => {
+    saveImage.mockResolvedValue('image-1.png');
+    const h = harness(doc);
+    expect(h.inserter.handlePaste(clipboard([file('image/png')]))).toBe(true);
+    expect(h.inserter.handlePaste(clipboard([file('image/png')], 'text'))).toBe(false);
+    expect(h.inserter.handlePaste(clipboard([], '', 'file:///a/b.md'))).toBe(false);
+    expect(h.inserter.handlePaste(null)).toBe(false);
+    expect(harness({ ...doc, path: '/a/data.json' }).inserter.handlePaste(clipboard([file('image/png')]))).toBe(false);
+    await vi.waitFor(() => expect(h.inserted).toHaveLength(1));
+    expect(readClipboardPaste).not.toHaveBeenCalled();
+  });
+
+  it('reads the system clipboard when the paste event carries nothing (WebKitGTK)', async () => {
+    readClipboardPaste.mockResolvedValue({ kind: 'image', data: 'iVBORw0KGgo=' });
+    saveImage.mockResolvedValue('image-2.png');
+    const h = harness(doc);
+    expect(h.inserter.handlePaste(clipboard([]))).toBe(true);
+    await vi.waitFor(() => expect(h.inserted).toHaveLength(1));
+    expect(saveImage.mock.calls[0][0]).toBe('/docs/notes.md');
+    expect(saveImage.mock.calls[0][2]).toBe('iVBORw0KGgo=');
+    expect(h.inserted[0].text).toBe('![](image-2.png)');
+  });
+
+  it('says to save an untitled document only when the clipboard holds an image', async () => {
+    const h = harness({ ...doc, path: null });
+    readClipboardPaste.mockResolvedValueOnce(null);
+    expect(h.inserter.handlePaste(clipboard([]))).toBe(true);
+    await vi.waitFor(() => expect(readClipboardPaste).toHaveBeenCalledTimes(1));
+    await Promise.resolve();
+    expect(h.notes).toEqual([]);
+    readClipboardPaste.mockResolvedValueOnce({ kind: 'image', data: 'iVBORw0KGgo=' });
+    h.inserter.handlePaste(clipboard([]));
+    await vi.waitFor(() => expect(h.notes[0]).toContain('Save this document first'));
+    expect(saveImage).not.toHaveBeenCalled();
+  });
+
+  it('reports a clipboard image over the size cap', async () => {
+    readClipboardPaste.mockRejectedValue('File too large (21 MB). Maximum supported size is 20 MB.');
+    const h = harness(doc);
+    h.inserter.handlePaste(clipboard([]));
+    await vi.waitFor(() => expect(h.notes[0]).toContain('20 MB'));
+    expect(saveImage).not.toHaveBeenCalled();
+  });
+
+  it('pastes the text a WebKitGTK clipboard offers next to an image', async () => {
+    readClipboardPaste.mockResolvedValue({ kind: 'text', data: 'A\tB' });
+    const h = harness({ ...doc, path: null });
+    expect(h.inserter.handlePaste(clipboard([]))).toBe(true);
+    await vi.waitFor(() => expect(h.inserted).toEqual([{ tabId: 't1', text: 'A\tB', at: null }]));
+    expect(h.notes).toEqual([]);
+    expect(saveImage).not.toHaveBeenCalled();
   });
 });

@@ -803,6 +803,7 @@ fn main() {
             commands::remote_read_image,
             images::save_image,
             images::import_image,
+            images::read_clipboard_paste,
             commands::window_ready,
             terminal::terminal_start,
             terminal::terminal_write,
