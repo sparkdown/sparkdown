@@ -16,7 +16,7 @@ import { EventBus } from './events';
 import { SettingsDialog } from './settings-dialog';
 import { UpdateManager } from './updater';
 import type { RemoteHandler } from './remote';
-import { isMarkdownFile, isPreviewable, debounce, createRafBatch } from './utils';
+import { isMarkdownFile, isPreviewable, debounce, createRafBatch, basename } from './utils';
 import { effectiveView } from './view-mode';
 import { TIMING, LAYOUT } from './constants';
 import { initResizeHandle, initSidebarResize, initToolbarDrag } from './app/layout';
@@ -710,7 +710,8 @@ export class App {
       root: () => this.ctx.workspaceRoot ?? this.fileTree.getRoot(),
       origin: () => this.tabs.getOrigin(),
       showHidden: () => this.fileTree.isShowHidden(),
-      listFiles: (root, hidden) => api.listWorkspaceFiles(root, hidden),
+      listFiles: (root, hidden, onPartial) =>
+        api.listWorkspaceFilesStream(root, hidden, onPartial ?? (() => {})),
       openFile: (path) => this.openFile(path),
       // No editor groups yet, so "to the side" = open and show the split.
       openToSide: async (path) => {
@@ -726,9 +727,10 @@ export class App {
     });
     for (const path of this.config.last_open_files) palette.noteOpened(path, LOCAL_ORIGIN);
     // Same rule as the backend cache (file_index.rs): only a structural
-    // change (not a content write) can change the file list.
+    // change (not a content write), or a changed .gitignore, can change the
+    // file list.
     this.ctx.listenTauri<FsChange[]>('watcher://changes', (e) => {
-      if (e.payload.some((c) => c.kind !== 'modify')) palette.invalidateFiles();
+      if (e.payload.some((c) => c.kind !== 'modify' || basename(c.path) === '.gitignore')) palette.invalidateFiles();
     });
     return palette;
   }

@@ -273,7 +273,10 @@ export class WorkspaceController {
     this.debouncedFsChanges();
   }
 
-  private async handleFsChanges(changes: FsChange[]): Promise<void> {
+  private async handleFsChanges(all: FsChange[]): Promise<void> {
+    // A write to a .gitignore'd file only re-syncs its open tab (below): no
+    // explorer refresh, flash, or Changes refresh.
+    const changes = all.filter((c) => !c.ignored);
     // Content-only writes do not change the directory structure. Avoid
     // remounting the virtualized tree for them: the flash and git badge are
     // enough, and preserving the existing DOM eliminates explorer blink.
@@ -290,7 +293,7 @@ export class WorkspaceController {
         .map((c) => c.path),
     );
     // Keep the Changes list live if it's showing; otherwise just the badge.
-    this.deps.diff.refreshSoon();
+    if (changes.length > 0) this.deps.diff.refreshSoon();
 
     // Re-check every open file tab the batch may cover. The local watcher
     // reports file paths; the remote poller reports only the workspace
@@ -299,7 +302,7 @@ export class WorkspaceController {
     // disk, and a kept tab from another machine must not sync against it.
     const origin = this.ctx.tabs.getOrigin();
     const touched = (path: string) =>
-      changes.some((c) => c.path === path || isUnderRoot(path, c.path));
+      all.some((c) => c.path === path || isUnderRoot(path, c.path));
     const tabs = this.ctx.tabs
       .getAllTabs()
       .filter((t) => t.path && t.origin === origin && touched(t.path));

@@ -2342,6 +2342,35 @@ describe('App integration', () => {
       expect(diffCalls()).toBe(2);
     });
 
+    it('a write to a gitignored file re-syncs its tab without refreshing Changes', async () => {
+      vfs.set('/repo/a.md', '# A');
+      vfs.set('/repo/notes.local.md', 'old');
+      gitChanges.push({ path: 'a.md', status: 'modified', staged: false });
+      restoreConfig(['/repo/a.md', '/repo/notes.local.md']);
+      const app = await startApp();
+      await watcherSettle();
+      await watcherSettle();
+      const flashed = (path: string) => (app as any).fileTree.flashedPaths.has(path) as boolean;
+      const statusCalls = () => invokeCalls.filter((c) => c.cmd === 'git_status').length;
+      const reads = () =>
+        invokeCalls.filter((c) => c.cmd === 'read_file' && c.args?.path === '/repo/notes.local.md').length;
+      const before = statusCalls();
+      const readsBefore = reads();
+
+      vfs.set('/repo/notes.local.md', 'new');
+      emitTauriEvent('watcher://changes', [{ path: '/repo/notes.local.md', kind: 'modify', ignored: true }]);
+      await watcherSettle();
+      await watcherSettle();
+      expect(statusCalls()).toBe(before);
+      expect(flashed('/repo/notes.local.md')).toBe(false);
+      expect(reads()).toBeGreaterThan(readsBefore);
+
+      // The same write to a file that is not ignored flashes its row.
+      emitTauriEvent('watcher://changes', [{ path: '/repo/a.md', kind: 'modify' }]);
+      await watcherSettle();
+      expect(flashed('/repo/a.md')).toBe(true);
+    });
+
     it('does not re-render the diff for an unrelated file', async () => {
       vfs.set('/repo/a.md', '# A');
       vfs.set('/repo/b.md', '# B');
@@ -3228,8 +3257,8 @@ describe('App integration', () => {
 
       expect(document.querySelector('.palette')).toBeNull();
       expect(tabTitles()).toContain('agent-context-design.md');
-      const list = invokeCalls.find((c) => c.cmd === 'list_workspace_files');
-      expect(list?.args).toEqual({ root: '/ws', includeHidden: false });
+      const list = invokeCalls.find((c) => c.cmd === 'list_workspace_files_stream');
+      expect(list?.args).toEqual(expect.objectContaining({ root: '/ws', includeHidden: false }));
     });
 
     it('Cmd+Shift+P (menu) runs a command', async () => {
@@ -3311,8 +3340,8 @@ describe('App integration', () => {
       await typeInPalette('todo');
       await pressInPalette('Enter');
 
-      const list = invokeCalls.find((c) => c.cmd === 'list_workspace_files');
-      expect(list?.args).toEqual({ root: '/home/u/proj', includeHidden: false });
+      const list = invokeCalls.find((c) => c.cmd === 'list_workspace_files_stream');
+      expect(list?.args).toEqual(expect.objectContaining({ root: '/home/u/proj', includeHidden: false }));
       expect(tabTitles()).toEqual(['todo.md']);
     });
   });

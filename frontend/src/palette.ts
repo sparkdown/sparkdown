@@ -33,8 +33,9 @@ export interface PaletteDeps {
   origin(): string | null;
   /** The explorer's show-hidden setting. */
   showHidden(): boolean;
-  /** Root-relative paths (api.listWorkspaceFiles). */
-  listFiles(root: string, includeHidden: boolean): Promise<FileListing>;
+  /** Root-relative paths (api.listWorkspaceFilesStream). `onPartial` gets
+   *  new paths while the walk runs, before the promise resolves. */
+  listFiles(root: string, includeHidden: boolean, onPartial?: (files: string[]) => void): Promise<FileListing>;
   openFile(path: string): void | Promise<void>;
   /** ⌘↩. No side-by-side groups yet: open, then show edit + preview. */
   openToSide(path: string): void | Promise<void>;
@@ -86,6 +87,8 @@ export class Palette {
   private fileIndex: FuzzyIndex<string> | null = null;
   private filesLoading: Promise<void> | null = null;
   private filesError: string | null = null;
+  /** `files` holds what a running walk has found so far. */
+  private filesPartial = false;
   private loadToken = 0;
 
   constructor(
@@ -133,6 +136,7 @@ export class Palette {
     this.fileIndex = null;
     this.filesLoading = null;
     this.filesError = null;
+    this.filesPartial = false;
     this.loadToken++;
     if (this.layer && this.mode === 'files') this.ensureFiles();
   }
@@ -229,10 +233,11 @@ export class Palette {
           ? [`${k('↑')} ${k('↓')} choose`, `${k('↩')} run`, `${k('⌫')} back to files`]
           : [`${k('↩')} go to line`, `${k('Esc')} close`];
     this.foot.innerHTML = parts.map((p) => `<span>${p}</span>`).join('');
-    if (this.mode === 'files' && this.files?.truncated) {
+    if (this.mode === 'files' && this.files && (this.files.truncated || this.filesPartial)) {
       const note = document.createElement('span');
       note.className = 'pal-note';
-      note.textContent = `First ${this.files.files.length.toLocaleString('en-US')} files only`;
+      const n = this.files.files.length.toLocaleString('en-US');
+      note.textContent = this.filesPartial ? `Listing files… ${n} so far` : `First ${n} files only`;
       this.foot.appendChild(note);
     }
   }
@@ -486,16 +491,34 @@ export class Palette {
     this.files = null;
     this.fileIndex = null;
     this.filesError = null;
+    this.filesPartial = false;
     const token = ++this.loadToken;
+    // Results so far, searchable while the walk goes on (first level first).
+    const found: string[] = [];
+    const onPartial = (batch: string[]) => {
+      if (token !== this.loadToken || !this.filesLoading) return;
+      found.push(...batch);
+      this.files = { files: [...found].sort(), truncated: false };
+      this.fileIndex = new FuzzyIndex(this.files.files, (p) => p, true);
+      this.filesPartial = true;
+      if (this.layer && this.mode === 'files') {
+        this.renderFoot();
+        this.refresh();
+      }
+    };
     this.filesLoading = this.deps
-      .listFiles(root, hidden)
+      .listFiles(root, hidden, onPartial)
       .then((listing) => {
         if (token !== this.loadToken) return;
         this.files = listing;
+        this.filesPartial = false;
         this.fileIndex = new FuzzyIndex(listing.files, (p) => p, true);
       })
       .catch((err) => {
         if (token !== this.loadToken) return;
+        this.files = null;
+        this.fileIndex = null;
+        this.filesPartial = false;
         this.filesError = `Could not list files: ${String(err)}`;
         this.filesKey = null;
       })

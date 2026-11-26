@@ -18,6 +18,15 @@
 //! the stack, so it never calls `read_dir` inside it or registers a watch
 //! there.
 //!
+//! Paths a `.gitignore` covers (nested files included, see `gitignore.rs`)
+//! are treated the same way: their directories get no watch and their events
+//! are dropped. One exception keeps open tabs current: a content write
+//! (`modify`) to an ignored file in a watched directory is still sent, marked
+//! `ignored`, so the frontend only re-syncs tabs for it. A changed
+//! `.gitignore` is read again and directories it no longer covers get
+//! watched; directories it newly covers keep their watch until the folder is
+//! opened again.
+//!
 //! macOS is the exception: FSEvents is recursive in the kernel and costs one
 //! stream no matter how big the tree is, whereas one NonRecursive watch per
 //! directory restarts the stream per directory (O(N^2), events lost during
@@ -30,6 +39,7 @@
 //! event callback therefore only *queues* new directories; a registrar thread
 //! owned by the watch session calls `watch()`.
 
+use crate::gitignore::{Ignorer, IGNORE_FILE};
 use notify::{
     event::{EventKind, ModifyKind, RenameMode},
     RecursiveMode,
@@ -87,10 +97,14 @@ impl WatcherStates {
 /// files in response to changes; forwarding them would create a read -> event
 /// -> read loop. Mutation kinds let the frontend avoid remounting the tree for
 /// content-only edits.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug, Default)]
 pub struct FsChange {
     pub path: String,
     pub kind: String,
+    /// The path is `.gitignore`d: only open tabs should react (no explorer
+    /// refresh, flash, or Changes refresh). Omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ignored: bool,
 }
 
 /// Directory names that are VCS / dependency / build noise. Not the agent's
@@ -129,12 +143,13 @@ pub(crate) fn is_ignored_under(root: &Path, path: &Path) -> bool {
     is_ignored(path.strip_prefix(root).unwrap_or(path))
 }
 
-/// Directories under `root` that should get a NonRecursive watch.
-/// Does not descend into ignored names and does not follow symlinks.
-pub(crate) fn collect_watch_dirs(root: &Path) -> Vec<PathBuf> {
+/// Directories at and under `start` that should get a NonRecursive watch.
+/// Does not descend into ignored names or `.gitignore`d directories and does
+/// not follow symlinks.
+pub(crate) fn collect_watch_dirs(start: &Path, ign: &Ignorer) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    let mut stack = vec![(start.to_path_buf(), ign.rules_for_dir(start))];
+    while let Some((dir, rules)) = stack.pop() {
         out.push(dir.clone());
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
@@ -150,7 +165,12 @@ pub(crate) fn collect_watch_dirs(root: &Path) -> Vec<PathBuf> {
             if ignored_dir_name(&name.to_string_lossy()) {
                 continue;
             }
-            stack.push(entry.path());
+            let path = entry.path();
+            if rules.is_ignored(&path, true) {
+                continue;
+            }
+            let child = rules.child(&path);
+            stack.push((path, child));
         }
     }
     out
@@ -162,11 +182,15 @@ fn is_real_dir(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn collect_unwatched_dirs(path: &Path, watched_dirs: &HashSet<PathBuf>) -> Vec<PathBuf> {
+fn collect_unwatched_dirs(
+    path: &Path,
+    watched_dirs: &HashSet<PathBuf>,
+    ign: &Ignorer,
+) -> Vec<PathBuf> {
     if watched_dirs.contains(path) || !is_real_dir(path) {
         return Vec::new();
     }
-    collect_watch_dirs(path)
+    collect_watch_dirs(path, ign)
         .into_iter()
         .filter(|dir| !watched_dirs.contains(dir))
         .collect()
@@ -233,6 +257,7 @@ fn process_event(
     root: &Path,
     event: &notify::Event,
     watched_dirs: &Mutex<HashSet<PathBuf>>,
+    ign: &Ignorer,
 ) -> (Vec<FsChange>, Vec<PathBuf>) {
     let mut changes: Vec<FsChange> = Vec::new();
     let mut new_dirs: Vec<PathBuf> = Vec::new();
@@ -241,6 +266,33 @@ fn process_event(
     };
     for (index, path) in event.paths.iter().enumerate() {
         if is_ignored_under(root, path) {
+            continue;
+        }
+        if path.file_name().is_some_and(|n| n == IGNORE_FILE) {
+            if let Some(parent) = path.parent() {
+                ign.clear_cached(parent);
+                // Directories the changed file no longer ignores get watched.
+                let watched = lock(watched_dirs);
+                if watched.contains(parent) {
+                    new_dirs.extend(
+                        collect_watch_dirs(parent, ign)
+                            .into_iter()
+                            .filter(|d| !watched.contains(d)),
+                    );
+                }
+            }
+        }
+        if ign.is_ignored_on_disk(path) {
+            // A content write to an ignored file (an open `.env`, a log)
+            // still reaches its tab; nothing else reacts to it.
+            let parent_watched = path.parent().is_some_and(|p| !ign.is_ignored(p, true));
+            if kind == "modify" && parent_watched && !is_real_dir(path) {
+                changes.push(FsChange {
+                    path: path.to_string_lossy().into_owned(),
+                    kind: kind.to_string(),
+                    ignored: true,
+                });
+            }
             continue;
         }
         {
@@ -253,11 +305,12 @@ fn process_event(
             if watched.contains(path) && is_real_dir(path) {
                 continue;
             }
-            new_dirs.extend(collect_unwatched_dirs(path, &watched));
+            new_dirs.extend(collect_unwatched_dirs(path, &watched, ign));
         }
         changes.push(FsChange {
             path: path.to_string_lossy().into_owned(),
             kind: kind.to_string(),
+            ignored: false,
         });
     }
     (changes, new_dirs)
@@ -340,6 +393,8 @@ fn run_session(
 ) {
     let watched_dirs: Arc<Mutex<HashSet<PathBuf>>> = Arc::default();
     let (dir_tx, dir_rx) = mpsc::channel::<Vec<PathBuf>>();
+    let ign = Arc::new(Ignorer::new(&root));
+    let ign_for_events = ign.clone();
 
     let watched_for_events = watched_dirs.clone();
     let generation_for_events = generation.clone();
@@ -349,7 +404,12 @@ fn run_session(
         if generation_for_events.load(Ordering::SeqCst) != my_gen {
             return;
         }
-        let (changes, new_dirs) = process_event(&root_for_events, &event, &watched_for_events);
+        let (changes, new_dirs) = process_event(
+            &root_for_events,
+            &event,
+            &watched_for_events,
+            &ign_for_events,
+        );
         if !new_dirs.is_empty() {
             if RECURSIVE_ROOT {
                 // Already covered by the Recursive root watch; just track them.
@@ -372,7 +432,7 @@ fn run_session(
         }
     };
 
-    let dirs = collect_watch_dirs(&root);
+    let dirs = collect_watch_dirs(&root, &ign);
     if RECURSIVE_ROOT {
         if let Err(e) = notify::Watcher::watch(&mut watcher, &root, RecursiveMode::Recursive) {
             eprintln!("watch failed for {}: {e}", root.display());
@@ -450,7 +510,7 @@ pub fn watch_start(
         for c in &mut changes {
             c.path = respell_under(&c.path, &canonical, &spelled);
         }
-        crate::file_index::invalidate_for_kinds(changes.iter().map(|c| c.kind.as_str()));
+        crate::file_index::invalidate_for_changes(&changes);
         let _ = app.emit_to(label.as_str(), "watcher://changes", changes);
     });
     Ok(())
@@ -550,7 +610,7 @@ mod tests {
     #[test]
     fn collect_watch_dirs_skips_ignored_trees() {
         let dir = test_tree("sparkdown_test_watch_dirs");
-        let watched = collect_watch_dirs(&dir);
+        let watched = collect_watch_dirs(&dir, &Ignorer::new(&dir));
         let as_str: Vec<String> = watched
             .iter()
             .map(|p| {
@@ -591,7 +651,7 @@ mod tests {
         let _ = fs::remove_dir_all(&parent);
         fs::create_dir_all(dir.join("debug")).unwrap();
         fs::create_dir_all(dir.join("node_modules")).unwrap();
-        let watched = collect_watch_dirs(&dir);
+        let watched = collect_watch_dirs(&dir, &Ignorer::new(&dir));
         assert!(watched.contains(&dir));
         assert!(watched.iter().any(|p| p.ends_with("debug")));
         assert!(!watched.iter().any(|p| p.ends_with("node_modules")));
@@ -612,7 +672,7 @@ mod tests {
 
         assert!(is_real_dir(&real));
         assert!(!is_real_dir(&link));
-        assert!(collect_unwatched_dirs(&link, &HashSet::new()).is_empty());
+        assert!(collect_unwatched_dirs(&link, &HashSet::new(), &Ignorer::new(&parent)).is_empty());
 
         let _ = fs::remove_dir_all(&parent);
     }
@@ -654,15 +714,108 @@ mod tests {
         let mut watched = HashSet::new();
 
         watched.insert(dir.clone());
-        assert!(collect_unwatched_dirs(&dir, &watched).is_empty());
+        assert!(collect_unwatched_dirs(&dir, &watched, &Ignorer::new(&dir)).is_empty());
 
         watched.clear();
         watched.insert(child.clone());
-        let extra = collect_unwatched_dirs(&dir, &watched);
+        let extra = collect_unwatched_dirs(&dir, &watched, &Ignorer::new(&dir));
         assert!(!extra.contains(&child));
         assert!(extra.contains(&dir));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gitignored_dirs_get_no_watch_and_their_events_are_dropped() {
+        use notify::event::{CreateKind, DataChange};
+
+        let dir = test_tree("sparkdown_test_watch_gitignore");
+        fs::write(dir.join(".gitignore"), "out/\n*.log\n").unwrap();
+        fs::create_dir_all(dir.join("out/deep")).unwrap();
+        fs::create_dir_all(dir.join("src/gen")).unwrap();
+        fs::write(dir.join("src/.gitignore"), "gen/\n").unwrap();
+        fs::write(dir.join("src/run.log"), "x").unwrap();
+        let ign = Ignorer::new(&dir);
+        let dirs = collect_watch_dirs(&dir, &ign);
+        assert!(dirs.contains(&dir.join("src")));
+        assert!(!dirs.iter().any(|p| p.starts_with(dir.join("out"))));
+        assert!(!dirs.contains(&dir.join("src/gen")));
+
+        let watched = Mutex::new(dirs.into_iter().collect::<HashSet<_>>());
+        let event = |kind: EventKind, path: PathBuf| notify::Event::new(kind).add_path(path);
+        // A new file in an ignored folder: nothing.
+        let (changes, new_dirs) = process_event(
+            &dir,
+            &event(EventKind::Create(CreateKind::File), dir.join("out/new.md")),
+            &watched,
+            &ign,
+        );
+        assert!(changes.is_empty() && new_dirs.is_empty());
+        // Creating an ignored file: nothing; writing to it: a marked change.
+        let log = dir.join("src/run.log");
+        let (changes, _) = process_event(
+            &dir,
+            &event(EventKind::Create(CreateKind::File), log.clone()),
+            &watched,
+            &ign,
+        );
+        assert!(changes.is_empty());
+        let (changes, _) = process_event(
+            &dir,
+            &event(
+                EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+                log.clone(),
+            ),
+            &watched,
+            &ign,
+        );
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0].ignored);
+        // A normal file is not marked.
+        fs::write(dir.join("src/a.md"), "x").unwrap();
+        let (changes, _) = process_event(
+            &dir,
+            &event(
+                EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+                dir.join("src/a.md"),
+            ),
+            &watched,
+            &ign,
+        );
+        assert_eq!(changes.len(), 1);
+        assert!(!changes[0].ignored);
+
+        // Dropping `gen/` from src/.gitignore queues src/gen for a watch.
+        fs::write(dir.join("src/.gitignore"), "").unwrap();
+        let (_, new_dirs) = process_event(
+            &dir,
+            &event(
+                EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+                dir.join("src/.gitignore"),
+            ),
+            &watched,
+            &ign,
+        );
+        assert_eq!(new_dirs, vec![dir.join("src/gen")]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ignored_flag_is_omitted_when_false() {
+        let plain = serde_json::to_string(&FsChange {
+            path: "/a".into(),
+            kind: "modify".into(),
+            ignored: false,
+        })
+        .unwrap();
+        assert_eq!(plain, r#"{"path":"/a","kind":"modify"}"#);
+        let marked = serde_json::to_string(&FsChange {
+            path: "/a".into(),
+            kind: "modify".into(),
+            ignored: true,
+        })
+        .unwrap();
+        assert!(marked.contains(r#""ignored":true"#));
     }
 
     #[test]
@@ -694,10 +847,14 @@ mod tests {
         // is queued for a fresh watch.
         let dir = test_tree("sparkdown_test_watch_recreate");
         let docs = dir.join("src");
-        let watched = Mutex::new(collect_watch_dirs(&dir).into_iter().collect());
+        let watched = Mutex::new(
+            collect_watch_dirs(&dir, &Ignorer::new(&dir))
+                .into_iter()
+                .collect(),
+        );
         let event =
             notify::Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(docs.clone());
-        let (changes, new_dirs) = process_event(&dir, &event, &watched);
+        let (changes, new_dirs) = process_event(&dir, &event, &watched, &Ignorer::new(&dir));
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].kind, "remove");
         assert!(new_dirs.contains(&docs));
@@ -711,7 +868,12 @@ mod tests {
             Mutex::new([PathBuf::from("/proj"), PathBuf::from("/proj/old")].into());
         let event = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
             .add_path(PathBuf::from("/proj/old"));
-        let (changes, new_dirs) = process_event(Path::new("/proj"), &event, &watched);
+        let (changes, new_dirs) = process_event(
+            Path::new("/proj"),
+            &event,
+            &watched,
+            &Ignorer::new(Path::new("/proj")),
+        );
         assert_eq!(changes[0].kind, "rename");
         assert!(new_dirs.is_empty());
         assert!(!lock(&watched).contains(Path::new("/proj/old")));
