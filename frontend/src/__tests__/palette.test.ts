@@ -106,7 +106,7 @@ describe('Palette', () => {
     const deps = makeDeps();
     const p = new Palette(deps, reg);
     await openFiles(p);
-    expect(deps.listFiles).toHaveBeenCalledWith('/ws', false);
+    expect(deps.listFiles).toHaveBeenCalledWith('/ws', false, expect.any(Function));
     type('agcon');
     const first = items()[0];
     expect(labelOf(first)).toBe('agent-context-design.md');
@@ -176,6 +176,42 @@ describe('Palette', () => {
     expect(labelOf(items()[0])).toBe('todo.md');
   });
 
+  it('searches the first level while the rest of the walk runs', async () => {
+    let resolve!: (l: FileListing) => void;
+    let partial!: (files: string[]) => void;
+    const deps = makeDeps({
+      listFiles: vi.fn((_root: string, _hidden: boolean, onPartial: (f: string[]) => void) => {
+        partial = onPartial;
+        return new Promise<FileListing>((r) => (resolve = r));
+      }) as any,
+    });
+    const p = new Palette(deps, reg);
+    p.open('files');
+    type('read');
+    expect(items()[0].textContent).toContain('Loading files');
+
+    partial(['README.md', 'notes.md']);
+    expect(labelOf(items()[0])).toBe('README.md');
+    expect(document.querySelector('.pal-note')?.textContent).toBe('Listing files… 2 so far');
+
+    // Deeper batches add to what is searchable.
+    type('todo');
+    expect(items()[0].textContent).toContain('No matching files');
+    partial(['notes/todo.md']);
+    expect(labelOf(items()[0])).toBe('todo.md');
+
+    resolve({ files: FILES, truncated: false });
+    await p.whenFilesLoaded();
+    expect(document.querySelector('.pal-note')).toBeNull();
+    type('agcon');
+    expect(labelOf(items()[0])).toBe('agent-context-design.md');
+
+    // A batch from a replaced walk is ignored.
+    partial(['late.md']);
+    type('late');
+    expect(items()[0].textContent).toContain('No matching files');
+  });
+
   it('caches the listing per root and refetches after invalidateFiles', async () => {
     const deps = makeDeps();
     const p = new Palette(deps, reg);
@@ -191,14 +227,14 @@ describe('Palette', () => {
   it('asks for hidden files when the explorer shows them', async () => {
     const deps = makeDeps({ showHidden: () => true });
     await openFiles(new Palette(deps, reg));
-    expect(deps.listFiles).toHaveBeenCalledWith('/ws', true);
+    expect(deps.listFiles).toHaveBeenCalledWith('/ws', true, expect.any(Function));
   });
 
   it('lists the remote workspace root when a remote folder is open', async () => {
     const deps = makeDeps({ root: () => '/home/u/proj', origin: () => 'ssh://box' });
     const p = new Palette(deps, reg);
     await openFiles(p);
-    expect(deps.listFiles).toHaveBeenCalledWith('/home/u/proj', false);
+    expect(deps.listFiles).toHaveBeenCalledWith('/home/u/proj', false, expect.any(Function));
     type('todo');
     key('Enter');
     expect(deps.openFile).toHaveBeenCalledWith('/home/u/proj/notes/todo.md');

@@ -11,6 +11,7 @@ mod file_index;
 mod fsio;
 mod git;
 mod git_write;
+mod gitignore;
 mod images;
 mod lifecycle;
 #[cfg(target_os = "macos")]
@@ -784,6 +785,7 @@ fn main() {
             commands::reveal_path,
             commands::list_directory,
             file_index::list_workspace_files,
+            file_index::list_workspace_files_stream,
             commands::load_config,
             commands::save_config,
             commands::get_pending_files,
