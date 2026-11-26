@@ -129,6 +129,7 @@ export class DocumentController {
    */
   async prepareOriginSwitch(target: string | null): Promise<boolean> {
     this.discardOnOriginSwitch.clear();
+    this.ctx.editor.flushPendingInput();
     for (const tab of this.ctx.tabs.getTabsNotFrom(target)) {
       if (!tab.modified) continue;
       this.ctx.tabs.switchTo(tab.id);

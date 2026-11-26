@@ -254,6 +254,7 @@ export class App {
     this.titlebar.init();
     this.statusbar.init();
     this.tabs.init(document.getElementById('tab-bar')!);
+    this.tabs.setPendingInputFlush(() => this.editor.flushPendingInput());
     this.fileTree.init(
       document.getElementById('file-tree')!,
       document.getElementById('sidebar')!

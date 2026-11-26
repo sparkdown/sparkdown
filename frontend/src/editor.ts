@@ -363,7 +363,28 @@ export class EditorManager {
     });
   }
 
+  /**
+   * Apply typed text that is in the editor's DOM but not yet in its state.
+   * CodeMirror reads keystrokes from DOM mutations, which it applies from a
+   * MutationObserver callback; it applies them early on its own only for a
+   * keydown it handles itself. A save or tab switch that arrives another way
+   * (a native menu item, a keydown it skips during composition, a click
+   * elsewhere) would otherwise read the text without the last keystroke.
+   * Can be called at any time: a no-op when nothing is pending or while the
+   * view is in the middle of an update.
+   */
+  flushPendingInput(): void {
+    const view = this.view as unknown as
+      | { updateState?: number; observer?: { forceFlush?: () => void } }
+      | undefined;
+    // 0 is CodeMirror's idle update state; flushing dispatches a transaction,
+    // which is not allowed while an update is running.
+    if (!view || view.updateState !== 0) return;
+    view.observer?.forceFlush?.();
+  }
+
   getContent(): string {
+    this.flushPendingInput();
     return this.view.state.doc.toString();
   }
 
@@ -565,6 +586,7 @@ export class EditorManager {
   private static readonly MAX_CACHED_STATES = 20;
 
   saveStateFor(tabId: string): void {
+    this.flushPendingInput();
     // Re-insert to make this the most recently used entry (Map preserves
     // insertion order), then evict from the least recently used end.
     this.states.delete(tabId);

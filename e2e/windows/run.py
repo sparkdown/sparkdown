@@ -204,7 +204,7 @@ class Desktop:
         self.handle(title)
         text = self.wd.js("return document.body.innerText")
         content = self.wd.js("return (document.querySelector('.cm-content')||{}).innerText || ''")
-        dot = self.wd.js("return Array.from(document.querySelectorAll('*')).some(e => e.children.length===0 && e.textContent==='●')")
+        dot = self.wd.js(wd.UNSAVED_DOT_JS)
         self.wd.screenshot(str(pathlib.Path(OUT) / "webview-alpha.png"))
         ok = folder in text and "notes.md" in text and edit in content and dot
         return ("PASS" if ok else "FAIL"), f"sidebar shows {folder}={folder in text}; editor has the edit={edit in content}; unsaved dot={dot}"

@@ -2,11 +2,14 @@
 import base64
 import http.client
 import json
+import pathlib
 import time
 import urllib.error
 import urllib.request
 
 ELEM = "element-6066-11e4-a52e-4f735466cecf"
+# Script for Session.js: is the active tab's unsaved dot shown?
+UNSAVED_DOT_JS = pathlib.Path(__file__).with_name("unsaved_dot.js").read_text(encoding="utf-8")
 KEYS = {"enter": "\ue007", "ctrl": "\ue009", "shift": "\ue008", "esc": "\ue00c", "meta": "\ue03d"}
 
 
@@ -82,6 +85,21 @@ class Session:
         """Press keys together, e.g. chord('ctrl', 'q')."""
         seq = [KEYS.get(k, k) for k in keys]
         actions = [{"type": "keyDown", "value": k} for k in seq] + [{"type": "keyUp", "value": k} for k in reversed(seq)]
+        self.cmd("POST", "/actions", {"actions": [{"type": "key", "id": "kbd", "actions": actions}]})
+        try:
+            self.cmd("DELETE", "/actions")
+        except WebDriverError:
+            pass
+
+    def type_then_chord(self, text, *keys):
+        """Type `text`, then press `keys` together, in one action sequence
+        (no round trip between the last key and the chord)."""
+        seq = [KEYS.get(k, k) for k in keys]
+        actions = []
+        for ch in text:
+            actions += [{"type": "keyDown", "value": ch}, {"type": "keyUp", "value": ch}]
+        actions += [{"type": "keyDown", "value": k} for k in seq]
+        actions += [{"type": "keyUp", "value": k} for k in reversed(seq)]
         self.cmd("POST", "/actions", {"actions": [{"type": "key", "id": "kbd", "actions": actions}]})
         try:
             self.cmd("DELETE", "/actions")
