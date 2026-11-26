@@ -421,7 +421,10 @@ export class TerminalPane {
     this.session = session;
     if (this.disposed) return;
     this.term.open(container);
-    this.stopWatchingView = watchInView(container, (inView) => this.output.setVisible(inView));
+    this.stopWatchingView = watchInView(container, (inView) => {
+      this.output.setVisible(inView);
+      if (inView) this.redraw();
+    });
     // Take keys from the first moment: until the shell is up they wait in
     // pendingInput instead of being dropped (see writeInput).
     this.term.onData((data) => this.writeInput(data));
@@ -516,6 +519,17 @@ export class TerminalPane {
     if (this.disposed) return;
     this.lastOutputAt = performance.now();
     this.output.push(bytes);
+  }
+
+  /**
+   * Draw every row again. A pane coming back into view needs this: WebKitGTK
+   * drops a WebGL canvas's contents while the panel is `display: none`, and
+   * xterm only redraws on show when output arrived while it was out of view.
+   * Without it an idle pane that does not have focus came back blank.
+   */
+  private redraw(): void {
+    if (this.disposed) return;
+    this.term.refresh(0, this.term.rows - 1);
   }
 
   /** Which renderer draws this pane ('webgl' or the 'dom' fallback). */

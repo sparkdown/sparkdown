@@ -11,7 +11,7 @@ const api = vi.hoisted(() => ({
   terminalWrite: vi.fn(async () => {}),
   terminalResize: vi.fn(async () => {}),
 }));
-const written = vi.hoisted(() => ({ chunks: [] as string[], parse: [] as (() => void)[] }));
+const written = vi.hoisted(() => ({ chunks: [] as string[], parse: [] as (() => void)[], refreshes: [] as [number, number][] }));
 
 vi.mock('../api', () => ({ api }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: async () => () => {} }));
@@ -42,6 +42,9 @@ vi.mock('@xterm/xterm', () => ({
       written.chunks.push(typeof data === 'string' ? data : new TextDecoder().decode(data));
       if (done) written.parse.push(done);
     }
+    refresh(start: number, end: number) {
+      written.refreshes.push([start, end]);
+    }
     focus() {}
     dispose() {}
   },
@@ -60,6 +63,7 @@ import { TerminalPane } from '../terminal';
 beforeEach(() => {
   written.chunks = [];
   written.parse = [];
+  written.refreshes = [];
   io = null;
   window.IntersectionObserver = class {
     constructor(cb: IntersectionObserverCallback) {
@@ -106,6 +110,19 @@ describe('TerminalPane out of view', () => {
     await Promise.resolve();
     const acked = api.terminalAck.mock.calls.reduce((n, c) => n + (c as unknown as [string, number])[1], 0);
     expect(acked).toBe(enc.encode(want).length);
+    pane.destroy();
+  });
+
+  it('draws every row again when an idle pane comes back into view', async () => {
+    api.terminalStart.mockImplementation(async () => 'shell');
+    const pane = new TerminalPane('t2', () => {});
+    await pane.init(document.createElement('div'), '/cwd');
+    written.refreshes = [];
+
+    setInView(false);
+    expect(written.refreshes).toEqual([]);
+    setInView(true);
+    expect(written.refreshes).toEqual([[0, 23]]);
     pane.destroy();
   });
 });
