@@ -419,6 +419,88 @@ fn is_directory_impl(path: &str) -> bool {
     Path::new(path).is_dir()
 }
 
+/// Open the platform print dialog for the calling webview (Export PDF). The
+/// page's print stylesheet limits the output to the rendered document; the
+/// dialog's own PDF destination writes the file (macOS: PDF > Save as PDF,
+/// Windows: Save as PDF / Microsoft Print to PDF, Linux: Print to File).
+/// Native rather than `window.print()`, which does nothing in WKWebView.
+///
+/// `pdf_path` is the file to suggest (see [`pdf_output_path`]). Only the
+/// Linux dialog takes it: GTK's Print to File otherwise offers `output.pdf`
+/// in the process's working folder, often `/`. macOS and Windows suggest the
+/// page title as the name in a folder they pick themselves.
+#[tauri::command]
+pub fn print_webview(webview: tauri::Webview, pdf_path: Option<String>) -> Result<(), AppError> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = webview.app_handle().path();
+        let fallback = path
+            .document_dir()
+            .ok()
+            .filter(|d| d.is_dir())
+            .or_else(|| path.home_dir().ok());
+        let target = pdf_output_path(pdf_path.as_deref().unwrap_or(""), fallback.as_deref());
+        let uri = target.and_then(|t| tauri::Url::from_file_path(t).ok());
+        webview
+            .with_webview(move |platform| linux_print::run_dialog(&platform.inner(), uri))
+            .map_err(|e| AppError::Other(format!("Could not open the print dialog: {e}")))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pdf_path;
+        webview
+            .print()
+            .map_err(|e| AppError::Other(format!("Could not open the print dialog: {e}")))
+    }
+}
+
+/// The PDF file Export PDF suggests. An absolute `suggested` path is kept
+/// (with `.pdf` added if it has another extension); anything else counts as
+/// a file name only and goes in `fallback_dir`. `None` when there is no
+/// name or no folder to put it in, so the dialog keeps its own default.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn pdf_output_path(suggested: &str, fallback_dir: Option<&Path>) -> Option<PathBuf> {
+    let suggested = Path::new(suggested.trim());
+    let mut out = if suggested.is_absolute() {
+        suggested.to_path_buf()
+    } else {
+        let name = suggested.file_name()?;
+        fallback_dir?.join(name)
+    };
+    let is_pdf = out
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+    if !is_pdf {
+        let mut name = out.file_name()?.to_os_string();
+        name.push(".pdf");
+        out.set_file_name(name);
+    }
+    Some(out)
+}
+
+#[cfg(target_os = "linux")]
+mod linux_print {
+    use gtk::prelude::*;
+    use webkit2gtk::{PrintOperation, PrintOperationExt};
+
+    /// Run WebKit's print dialog with Print to File set to `uri` (PDF), as
+    /// a child of the webview's window. Blocks until the dialog closes, as
+    /// wry's own `print` does.
+    pub fn run_dialog(webview: &webkit2gtk::WebView, uri: Option<tauri::Url>) {
+        let op = PrintOperation::new(webview);
+        if let Some(uri) = uri {
+            let settings = gtk::PrintSettings::new();
+            settings.set("output-uri", Some(uri.as_str()));
+            settings.set("output-file-format", Some("pdf"));
+            op.set_print_settings(&settings);
+        }
+        let parent = webview
+            .toplevel()
+            .and_then(|w| w.downcast::<gtk::Window>().ok());
+        op.run_dialog(parent.as_ref());
+    }
+}
+
 /// Copy plain text to the system clipboard (file name / path menu actions).
 #[tauri::command]
 pub fn copy_text(text: String) -> Result<(), AppError> {
@@ -1451,6 +1533,65 @@ pub fn window_ready(app: tauri::AppHandle, webview_window: tauri::WebviewWindow)
 mod tests {
     use super::*;
     use std::fs;
+
+    #[cfg(unix)] // Unix-style absolute paths
+    #[test]
+    fn pdf_output_path_keeps_an_absolute_path_next_to_the_document() {
+        assert_eq!(
+            pdf_output_path(
+                "/home/me/notes/long.pdf",
+                Some(Path::new("/home/me/Documents"))
+            ),
+            Some(PathBuf::from("/home/me/notes/long.pdf"))
+        );
+        // Spaces and non-ASCII names stay as they are; the URI escapes them.
+        assert_eq!(
+            pdf_output_path("/tmp/my notes/résumé.pdf", None),
+            Some(PathBuf::from("/tmp/my notes/résumé.pdf"))
+        );
+    }
+
+    #[cfg(unix)] // Unix-style absolute paths
+    #[test]
+    fn pdf_output_path_puts_a_bare_name_in_the_fallback_folder() {
+        assert_eq!(
+            pdf_output_path("Untitled.pdf", Some(Path::new("/home/me/Documents"))),
+            Some(PathBuf::from("/home/me/Documents/Untitled.pdf"))
+        );
+        // A relative path only contributes its file name.
+        assert_eq!(
+            pdf_output_path("sub/dir/long.pdf", Some(Path::new("/home/me"))),
+            Some(PathBuf::from("/home/me/long.pdf"))
+        );
+        assert_eq!(pdf_output_path("Untitled.pdf", None), None);
+        assert_eq!(pdf_output_path("", Some(Path::new("/home/me"))), None);
+        assert_eq!(pdf_output_path("   ", Some(Path::new("/home/me"))), None);
+    }
+
+    #[cfg(unix)] // Unix-style absolute paths
+    #[test]
+    fn pdf_output_path_ends_in_pdf() {
+        assert_eq!(
+            pdf_output_path("/d/v1.2 notes", None),
+            Some(PathBuf::from("/d/v1.2 notes.pdf"))
+        );
+        assert_eq!(
+            pdf_output_path("/d/a.PDF", None),
+            Some(PathBuf::from("/d/a.PDF"))
+        );
+        assert_eq!(
+            pdf_output_path("report", Some(Path::new("/h"))),
+            Some(PathBuf::from("/h/report.pdf"))
+        );
+    }
+
+    #[cfg(unix)] // Unix-style absolute paths
+    #[test]
+    fn pdf_output_uri_escapes_the_path() {
+        let path = pdf_output_path("/tmp/my notes/a#b.pdf", None).unwrap();
+        let uri = tauri::Url::from_file_path(path).unwrap();
+        assert_eq!(uri.as_str(), "file:///tmp/my%20notes/a%23b.pdf");
+    }
 
     #[test]
     fn has_image_extension_accepts_only_image_types() {

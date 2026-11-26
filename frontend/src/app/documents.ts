@@ -2,11 +2,12 @@ import { open, save as nativeSave, message } from '@tauri-apps/plugin-dialog';
 import type { PreviewPane } from '../preview';
 import { LOCAL_ORIGIN } from '../tabs';
 import { RemotePicker, type RemotePickerOptions } from '../remote-picker';
-import { isPreviewable, stripMarkdownExt, dirname, basename, defaultSavePath } from '../utils';
+import { isPreviewable, isMarkdownFile, stripMarkdownExt, dirname, basename, defaultSavePath } from '../utils';
 import { DIALOG_FILTERS } from '../file-types';
 import { api } from '../api';
 import type { AppContext } from './context';
 import { buildExportHtml } from './export-html';
+import { printTarget } from './export-pdf';
 
 type SaveOptions = Parameters<typeof nativeSave>[0];
 
@@ -489,6 +490,55 @@ export class DocumentController {
           kind: 'error',
         });
       }
+    }
+  }
+
+  /**
+   * Export PDF: render the document into the preview (even when the preview
+   * is hidden), wait for its images, then open the platform print dialog;
+   * its PDF destination writes the file. Markdown documents only: HTML and
+   * SVG files preview in a frame that prints as one clipped page.
+   *
+   * The PDF is always light, whatever the app theme: the print styles use the
+   * light palette, and Mermaid diagrams are drawn light for the export and
+   * redrawn in the app theme when the print ends.
+   */
+  async exportPdf(): Promise<void> {
+    const tab = this.ctx.tabs.activeTab();
+    if (!tab) return;
+    if (tab.path && !isMarkdownFile(tab.path)) {
+      await message('Export PDF works with Markdown documents.', {
+        title: 'Export PDF',
+        kind: 'info',
+      });
+      return;
+    }
+
+    const preview = await this.deps.loadPreview();
+    await preview.renderImmediateForExport(this.ctx.editor.getContent(), 'light');
+    await preview.whenImagesResolved();
+    const title = tab.path ? basename(stripMarkdownExt(tab.path, '')) : tab.title || 'Untitled';
+    const appTheme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+    const restoreDiagrams = () => {
+      if (appTheme === 'light') return;
+      preview.notifyThemeChanged(appTheme);
+      void preview.rerenderForTheme(this.ctx.editor.getContent());
+    };
+    // Linux print dialogs suggest `<doc name>.pdf` in the document's folder
+    // (or the open folder for an Untitled tab). A tab from another machine
+    // has no local folder, so it gets the bare name.
+    const local = tab.origin === LOCAL_ORIGIN && this.ctx.tabs.getOrigin() === LOCAL_ORIGIN;
+    const pdfPath = local
+      ? defaultSavePath(tab.path ? stripMarkdownExt(tab.path, '.pdf') : null, this.ctx.fileTree.getSaveDir(), `${title}.pdf`)
+      : `${title}.pdf`;
+    try {
+      await printTarget(preview.getRenderRoot(), title, () => api.printWebview(pdfPath), restoreDiagrams);
+    } catch (err) {
+      console.error('Failed to export PDF:', err);
+      await message(`Could not open the print dialog.\n\n${String(err)}`, {
+        title: 'Export Failed',
+        kind: 'error',
+      });
     }
   }
 

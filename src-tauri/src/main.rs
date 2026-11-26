@@ -778,6 +778,7 @@ fn main() {
             commands::append_crash_log,
             commands::is_directory,
             commands::copy_text,
+            commands::print_webview,
             commands::read_clipboard_text,
             commands::copy_file,
             commands::delete_path,

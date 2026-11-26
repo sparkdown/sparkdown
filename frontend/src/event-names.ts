@@ -33,6 +33,7 @@ export const MENU = {
   SAVE: 'menu:save',
   SAVE_AS: 'menu:save-as',
   EXPORT_HTML: 'menu:export-html',
+  EXPORT_PDF: 'menu:export-pdf',
   CLOSE_TAB: 'menu:close-tab',
   FIND: 'menu:find',
   // View menu: the per-document view (title bar Edit | Split | Preview | Diff).
@@ -74,6 +75,7 @@ export const ACTIONS = {
   SAVE_AS: 'action:save-as',
   CLOSE_TAB: 'action:close-tab',
   EXPORT_HTML: 'action:export-html',
+  EXPORT_PDF: 'action:export-pdf',
   FIND: 'action:find',
   QUIT: 'action:quit',
   NEW_WINDOW: 'action:new-window',

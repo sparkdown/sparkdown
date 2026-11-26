@@ -127,6 +127,10 @@ export const api = {
   appendCrashLog: (entry: string) =>
     invoke<void>("append_crash_log", { entry }),
   copyText: (text: string) => invoke<void>("copy_text", { text }),
+  /** Open the platform print dialog for this window (Export PDF).
+   *  `pdfPath` is the file the dialog suggests: an absolute path, or a bare
+   *  name the core puts in the user's Documents (or home) folder. */
+  printWebview: (pdfPath: string) => invoke<void>("print_webview", { pdfPath }),
   /** #130: the system clipboard via the core (WebKitGTK can't read it). */
   readClipboardText: () => invoke<string>("read_clipboard_text"),
   copyFile: (path: string) => invoke<void>("copy_file", { path }),

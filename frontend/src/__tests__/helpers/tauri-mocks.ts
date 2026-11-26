@@ -278,6 +278,7 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
     case 'quit_status':
       return { busy: [], unsaved: [] };
     case 'copy_text':
+    case 'print_webview':
     case 'copy_file':
     case 'set_html_preview':
     case 'set_html_js_checked':
@@ -458,6 +459,10 @@ export const dialogMock = {
   open: async () => dialogResponses.open.shift() ?? null,
 };
 
+/** Diagram themes asked of the stub preview, in order: `export:<theme>` for
+ *  renderImmediateForExport, `theme:<theme>` for notifyThemeChanged. */
+export const previewThemeCalls: string[] = [];
+
 /** No-op PreviewPane; rendering itself is covered by preview.test.ts. */
 export class PreviewPaneStub {
   init(): void {}
@@ -480,7 +485,16 @@ export class PreviewPaneStub {
   setWorkspaceRoot(): void {}
   setRenderMode(): void {}
   render(): void {}
-  async renderImmediateForExport(): Promise<void> {}
+  /** Writes the source into #preview-pane as text, standing in for a render. */
+  async renderImmediateForExport(content = '', diagramTheme?: string): Promise<void> {
+    previewThemeCalls.push(`export:${diagramTheme ?? 'current'}`);
+    const pane = document.getElementById('preview-pane');
+    if (pane) pane.textContent = content;
+  }
+  async whenImagesResolved(): Promise<void> {}
+  getRenderRoot(): HTMLElement {
+    return document.getElementById('preview-pane')!;
+  }
   getRenderedHtml(): string {
     return '';
   }
@@ -489,5 +503,8 @@ export class PreviewPaneStub {
   }
   scrollToRatio(): void {}
   scrollToId(): void {}
-  notifyThemeChanged(): void {}
+  notifyThemeChanged(theme?: string): void {
+    previewThemeCalls.push(`theme:${theme}`);
+  }
+  async rerenderForTheme(): Promise<void> {}
 }

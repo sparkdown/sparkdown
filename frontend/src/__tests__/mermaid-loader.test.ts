@@ -310,6 +310,25 @@ describe('MermaidLoader cache', () => {
     expect(mermaid._runCalls().length).toBe(1);
   });
 
+  it('renderImmediateForExport draws diagrams in the requested theme, and rerenderForTheme draws them back', async () => {
+    const { pane } = makeLivePane();
+    const md = '```mermaid\ngraph TD\nA-->B\n```';
+    pane.notifyThemeChanged('dark');
+    await pane.renderImmediateForExport(md);
+    expect(mermaid.initialize).toHaveBeenLastCalledWith(expect.objectContaining({ theme: 'dark' }));
+    mermaid._clearRunCalls();
+
+    await pane.renderImmediateForExport(md, 'light');
+    expect(mermaid.initialize).toHaveBeenLastCalledWith(expect.objectContaining({ theme: 'default' }));
+    expect(mermaid._runCalls().length).toBe(1);
+
+    mermaid._clearRunCalls();
+    pane.notifyThemeChanged('dark');
+    await pane.rerenderForTheme(md);
+    expect(mermaid.initialize).toHaveBeenLastCalledWith(expect.objectContaining({ theme: 'dark' }));
+    expect(mermaid._runCalls().length).toBe(1);
+  });
+
   it('setBaseDir resets cache in PreviewPane', async () => {
     const { pane } = makeLivePane();
     pane.setBaseDir('/tmp/proj1');

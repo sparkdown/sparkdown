@@ -435,6 +435,7 @@ export class App {
       save: () => this.save(),
       saveAs: () => this.saveAs(),
       exportHtml: () => this.exportHtml(),
+      exportPdf: () => this.exportPdf(),
       openSettings: () => this.openSettings(),
       openAgentSettings: () => this.openSettings('agents'),
       openRemoteDialog: () => this.remoteHandler?.openRemoteDialog?.(),
@@ -614,6 +615,10 @@ export class App {
 
   exportHtml(): Promise<void> {
     return this.documents.exportHtml();
+  }
+
+  exportPdf(): Promise<void> {
+    return this.documents.exportPdf();
   }
 
   /**

@@ -42,6 +42,7 @@ export type EventMap = {
   [ACTIONS.SAVE_AS]: void;
   [ACTIONS.CLOSE_TAB]: void;
   [ACTIONS.EXPORT_HTML]: void;
+  [ACTIONS.EXPORT_PDF]: void;
   [ACTIONS.FIND]: void;
   [ACTIONS.QUIT]: void;
   [ACTIONS.NEW_WINDOW]: void;

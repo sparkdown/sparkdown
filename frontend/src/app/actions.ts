@@ -45,6 +45,7 @@ export interface ActionTargets {
   save(): Promise<boolean>;
   saveAs(): Promise<boolean>;
   exportHtml(): Promise<void>;
+  exportPdf(): Promise<void>;
   openSettings(): void;
   /** Settings, scrolled to Agents (status bar "Agent tools"). */
   openAgentSettings(): void;
@@ -94,6 +95,7 @@ export function registerMenuListeners(t: ActionTargets): void {
   });
   reg(MENU.TOGGLE_HTML_JS, () => t.htmlScripts.toggle(false));
   reg(MENU.EXPORT_HTML, () => t.exportHtml());
+  reg(MENU.EXPORT_PDF, () => t.exportPdf());
   reg(MENU.FIND, () => openFindForFocus(t));
   reg(MENU.SHOW_SHORTCUTS, () => showShortcutsDialog());
   reg(MENU.SHOW_SETTINGS, () => t.openSettings());
@@ -132,6 +134,7 @@ export function registerActionListeners(t: ActionTargets): void {
   t.bus.on(ACTIONS.SAVE_AS, () => t.saveAs());
   t.bus.on(ACTIONS.CLOSE_TAB, () => closeTabOrPane(t));
   t.bus.on(ACTIONS.EXPORT_HTML, () => t.exportHtml());
+  t.bus.on(ACTIONS.EXPORT_PDF, () => t.exportPdf());
   t.bus.on(ACTIONS.FIND, () => openFindForFocus(t));
   // Ctrl+Q (Windows/Linux) must take the same guarded path as Cmd+Q.
   t.bus.on(ACTIONS.QUIT, () => void t.lifecycle.requestQuit());

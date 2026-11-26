@@ -584,8 +584,18 @@ export class PreviewPane {
     this.renderDebounced(markdownContent);
   }
 
-  async renderImmediateForExport(markdownContent: string): Promise<void> {
+  /**
+   * Render now, even while hidden, for an export. `diagramTheme` draws the
+   * Mermaid diagrams in that theme (all blocks are rebuilt when it differs
+   * from the current one); notifyThemeChanged + rerenderForTheme switch back.
+   */
+  async renderImmediateForExport(markdownContent: string, diagramTheme?: 'light' | 'dark'): Promise<void> {
     this.lastRendered = null;
+    if (diagramTheme && diagramTheme !== this.mermaidLoader.getTheme()) {
+      this.mermaidLoader.updateTheme(diagramTheme);
+      this.prevBlocks = [];
+      this.prevNodeCounts = [];
+    }
     const wasVisible = this.visible;
     this.visible = true;
     try {
@@ -1406,6 +1416,11 @@ export class PreviewPane {
 
   isVisible(): boolean {
     return this.visible;
+  }
+
+  /** The element the rendered document lives in (Export PDF prints it). */
+  getRenderRoot(): HTMLElement {
+    return this.container;
   }
 
   getRenderedHtml(): string {

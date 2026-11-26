@@ -136,6 +136,11 @@ export class MermaidLoader {
     }
   }
 
+  /** The theme diagrams are drawn with. */
+  getTheme(): 'light' | 'dark' {
+    return this.theme;
+  }
+
   updateTheme(theme: 'light' | 'dark'): void {
     this.theme = theme;
     this.svgCache.clear();
