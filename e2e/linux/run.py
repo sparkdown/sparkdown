@@ -210,7 +210,7 @@ class X11(Base):
 
     def _xwins(self):
         out = []
-        for wid in sh("xdotool", "search", "--onlyvisible", "--name", "SparkDown|Unsaved Changes|Close Folder").split():
+        for wid in sh("xdotool", "search", "--onlyvisible", "--name", "SparkDown|Unsaved Changes|Close Folder|Save Document First").split():
             out.append((wid, sh("xdotool", "getwindowname", wid)))
         return out
 
