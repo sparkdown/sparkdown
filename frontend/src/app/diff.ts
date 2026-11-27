@@ -27,6 +27,7 @@ import {
   normalizePathForCompare,
   toRelativePath,
   neutralizeUnicodeControls,
+  sameText,
 } from '../utils';
 import { ask, message } from '@tauri-apps/plugin-dialog';
 import type { AppContext } from './context';
@@ -736,7 +737,7 @@ export class DiffController {
     if (!tab || tab.path !== path || tab.origin !== this.ctx.tabs.getOrigin()) return 'skipped';
     const isActive = tab.id === this.ctx.tabs.activeTab()?.id;
     const current = isActive ? this.ctx.editor.getContent() : tab.content;
-    if (!force && (tab.modified || current !== tab.savedContent)) {
+    if (!force && (tab.modified || !sameText(current, tab.savedContent))) {
       this.ctx.tabs.setDiskConflict(id, true);
       return 'conflict';
     }

@@ -23,7 +23,7 @@ import {
   toRelativePath,
   joinPath,
   isUnderRoot,
-  type SyncPoint, defaultSavePath } from '../utils';
+  type SyncPoint, defaultSavePath, sameText } from '../utils';
 
 describe('isMarkdownFile', () => {
   it('treats null/empty (untitled buffers) as markdown', () => {
@@ -538,5 +538,16 @@ describe('defaultSavePath (Save dialog start, #Mac 16e9543 test)', () => {
   it('never returns a folder path (the plugin would treat it as the dir and drop the name) or a relative dir', () => {
     expect(defaultSavePath(null, null, 'untitled.md')).toBe('untitled.md');
     expect(defaultSavePath(null, 'relative/dir', 'untitled.md')).toBe('untitled.md');
+  });
+});
+
+describe('sameText', () => {
+  it('ignores only line-end differences', () => {
+    expect(sameText('a\nb\n', 'a\r\nb\r\n')).toBe(true);
+    expect(sameText('a\nb', 'a\rb')).toBe(true);
+    expect(sameText('a\nb', 'a\nb')).toBe(true);
+    expect(sameText('a\nb', 'a\r\nc')).toBe(false);
+    expect(sameText('a\n', 'a')).toBe(false);
+    expect(sameText('a\r\n', 'a\r\n\r\n')).toBe(false);
   });
 });

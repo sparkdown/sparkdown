@@ -2,7 +2,7 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open } from '@tauri-apps/plugin-dialog';
 import type { Tab } from '../tabs';
 import { parseRemoteRecent } from '../remote';
-import { dirname, debounce, isUnderRoot } from '../utils';
+import { dirname, debounce, isUnderRoot, sameText } from '../utils';
 import { api, type FsChange } from '../api';
 import type { AppContext } from './context';
 import type { DocumentController } from './documents';
@@ -359,7 +359,7 @@ export class WorkspaceController {
     // Compare the live editor text for the active tab: tab.content lags
     // behind typing only by the event loop, but be exact.
     const current = isActive ? this.ctx.editor.getContent() : tab.content;
-    if (tab.modified || current !== expectedContent) {
+    if (tab.modified || !sameText(current, expectedContent)) {
       this.ctx.tabs.setDiskConflict(tabId, true);
       return;
     }

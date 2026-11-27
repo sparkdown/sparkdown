@@ -1,5 +1,5 @@
 import { EventBus } from './events';
-import { basename, normalizePathForCompare } from './utils';
+import { basename, normalizePathForCompare, sameText } from './utils';
 import { EVENTS } from './event-names';
 import type { ViewMode } from './view-mode';
 import type { DefaultViewMode } from './types/DefaultViewMode';
@@ -322,7 +322,7 @@ export class TabManager {
     if (!tab) return;
     tab.savedContent = content;
     tab.diskConflict = false;
-    tab.modified = tab.content !== content;
+    tab.modified = !sameText(tab.content, content);
     this.updateModifiedState(tab);
   }
 
@@ -351,7 +351,7 @@ export class TabManager {
   refreshModified(): boolean {
     const tab = this.activeTab();
     if (!tab) return false;
-    const nowModified = tab.content !== tab.savedContent;
+    const nowModified = !sameText(tab.content, tab.savedContent);
     if (nowModified === tab.modified) return false;
     tab.modified = nowModified;
     this.updateModifiedState(tab);
@@ -417,7 +417,7 @@ export class TabManager {
     const tab = this.tabs.find((t) => t.id === tabId);
     if (!tab) return;
     tab.content = content;
-    tab.modified = tab.content !== tab.savedContent;
+    tab.modified = !sameText(tab.content, tab.savedContent);
     this.updateModifiedState(tab);
   }
 

@@ -437,3 +437,16 @@ export function onlyNamesFolder(paths: readonly string[], folder: string): boole
   const norm = (p: string) => p.replace(/\\/g, '/').replace(/(.)\/+$/, '$1');
   return paths.length > 0 && paths.every((p) => norm(p) === norm(folder));
 }
+
+/**
+ * The same document text, line ends aside. The editor keeps `\n` line ends
+ * whatever the file uses, so its text of a `\r\n` (or `\r`) file never
+ * equals what was read from disk; compare a buffer with its disk baseline
+ * through this.
+ */
+export function sameText(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (!a.includes('\r') && !b.includes('\r')) return false;
+  const lf = (t: string) => t.replace(/\r\n?/g, '\n');
+  return lf(a) === lf(b);
+}

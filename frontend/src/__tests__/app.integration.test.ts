@@ -886,6 +886,29 @@ describe('App integration', () => {
       expect(activeTabDot().style.display).toBe('none');
     });
 
+    it('replace in files does not skip a clean open tab of a CRLF file', async () => {
+      directories.add('/proj');
+      vfs.set('/proj/b.md', 'a cat\r\n');
+      await startApp();
+      emitTauriEvent('open-paths', { paths: ['/proj'] });
+      await flush();
+      emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/proj/b.md' });
+      await flush();
+
+      const $ = (id: string) => document.getElementById(id)!;
+      $('act-search').click();
+      $('search-replace-btn').click();
+      ($('search-input') as HTMLInputElement).value = 'cat';
+      ($('search-replace-input') as HTMLInputElement).value = 'dog';
+      $('search-replace-preview-btn').click();
+      await until(() => !!document.querySelector('[data-action="apply"]'), 'the preview');
+      expect([...document.querySelectorAll('.replace-skipped')]).toHaveLength(0);
+      const previewCall = invokeCalls.filter((c) => c.cmd === 'replace_preview').pop()!;
+      expect((previewCall.args as { unsaved: unknown }).unsaved).toEqual([]);
+      document.querySelector<HTMLElement>('[data-action="apply"]')!.click();
+      await until(() => vfs.get('/proj/b.md') === 'a dog\r\n', 'the replace');
+    });
+
     it('clears the modified dot when the edit is undone back to saved content', async () => {
       vfs.set('/docs/doc.md', 'original');
       await startApp();
@@ -1207,6 +1230,29 @@ describe('App integration', () => {
       emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/docs/b.md' });
       await flush();
     }
+
+    it('reloads a clean tab of a CRLF file when the file changes on disk', async () => {
+      // The editor holds the text with \n line ends; the file has \r\n.
+      vfs.set('/docs/crlf.md', 'a cat\r\n');
+      await startApp();
+      emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/docs/crlf.md' });
+      await flush();
+      expect(activeTabDot().style.display).toBe('none');
+
+      vfs.set('/docs/crlf.md', 'a dog\r\n');
+      await fsChange('/docs/crlf.md');
+      expect((await editorView()).state.doc.toString()).toBe('a dog\n');
+      expect(activeTabDot().style.display).toBe('none');
+
+      // A real edit is still unsaved, and an outside change then keeps it.
+      const view = await editorView();
+      view.dispatch({ changes: { from: view.state.doc.length, insert: '!' } });
+      await flush();
+      expect(activeTabDot().style.display).not.toBe('none');
+      vfs.set('/docs/crlf.md', 'a bird\r\n');
+      await fsChange('/docs/crlf.md');
+      expect((await editorView()).state.doc.toString()).toBe('a dog\n!');
+    });
 
     it('refreshes a clean background tab so switching shows the disk text', async () => {
       await openTwo();

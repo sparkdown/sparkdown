@@ -16,7 +16,7 @@ import { EventBus } from './events';
 import { SettingsDialog } from './settings-dialog';
 import { UpdateManager } from './updater';
 import type { RemoteHandler } from './remote';
-import { isMarkdownFile, isPreviewable, debounce, createRafBatch, onlyNamesFolder } from './utils';
+import { isMarkdownFile, isPreviewable, debounce, createRafBatch, onlyNamesFolder, sameText } from './utils';
 import { effectiveView } from './view-mode';
 import { TIMING, LAYOUT } from './constants';
 import { initResizeHandle, initSidebarResize, initToolbarDrag } from './app/layout';
@@ -272,7 +272,7 @@ export class App {
         if (!tab) return false;
         // The active tab's live text (getContent applies pending input first).
         const text = tab.id === this.tabs.activeTab()?.id ? this.editor.getContent() : tab.content;
-        return tab.modified || text !== tab.savedContent;
+        return tab.modified || !sameText(text, tab.savedContent);
       },
       unsavedFiles: () => {
         const activeId = this.tabs.activeTab()?.id;
@@ -280,7 +280,7 @@ export class App {
         for (const tab of this.tabs.getAllTabs()) {
           if (!tab.path || tab.unloaded) continue;
           const text = tab.id === activeId ? this.editor.getContent() : tab.content;
-          if (tab.modified || text !== tab.savedContent) out.push({ path: tab.path, text });
+          if (tab.modified || !sameText(text, tab.savedContent)) out.push({ path: tab.path, text });
         }
         return out;
       },
