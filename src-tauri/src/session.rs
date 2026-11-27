@@ -879,6 +879,19 @@ impl ConfigStore {
         let _ = self.write();
     }
 
+    /// The saved tabs and active tab of local folder `folder`, for a window
+    /// that opens it from Recent folders or Open Folder.
+    pub fn folder_tabs(&self, folder: &FolderId) -> Option<FolderTabs> {
+        self.lock()
+            .stored
+            .folders
+            .get(&folder.key())
+            .map(|f| FolderTabs {
+                open_files: f.open_files.clone(),
+                active_file: f.active_file.clone(),
+            })
+    }
+
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn has_closed(&self) -> bool {
         !self.lock().closed.is_empty()
@@ -929,6 +942,13 @@ impl ConfigStore {
         g.written = Some(json);
         Ok(())
     }
+}
+
+/// A folder's saved tabs (`folder_session` command).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FolderTabs {
+    pub open_files: Vec<String>,
+    pub active_file: Option<String>,
 }
 
 // --- Quit lock -------------------------------------------------------------------
@@ -1822,6 +1842,26 @@ mod tests {
             s.prefs["recent_folders"],
             serde_json::json!([gp, "ssh://host/srv"]),
             "a missing local recent goes, a remote one stays"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_folder_s_saved_tabs_are_there_for_a_window_that_opens_it() {
+        let d = tmpdir("folder-tabs");
+        let store = ConfigStore::open(d.join("config.json"));
+        let f = FolderId::Local { path: "/p".into() };
+        save_tabs(&store, "w", &f, &["/p/a.md", "/p/b.md"], Some("/p/a.md"));
+        assert_eq!(
+            store.folder_tabs(&f),
+            Some(FolderTabs {
+                open_files: vec!["/p/a.md".into(), "/p/b.md".into()],
+                active_file: Some("/p/a.md".into()),
+            })
+        );
+        assert_eq!(
+            store.folder_tabs(&FolderId::Local { path: "/q".into() }),
+            None
         );
         let _ = std::fs::remove_dir_all(&d);
     }

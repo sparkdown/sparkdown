@@ -113,6 +113,9 @@ export const api = {
     invoke<void>("window_set_folder", { folder, display }),
   windowSetDirty: (dirty: boolean) =>
     invoke<void>("window_set_dirty", { dirty }),
+  /** A local folder's saved tabs (session.rs folder sessions), or null. */
+  folderSession: (dir: string) =>
+    invoke<{ open_files: string[]; active_file: string | null } | null>("folder_session", { dir }),
   /** Open Folder routing (#62): where `dir` (local, on this window's
    *  session, or ssh://host/path) opens. `here` = this window opens it. */
   routeFolder: (dir: string, newWindow = false) =>

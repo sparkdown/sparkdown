@@ -685,7 +685,10 @@ export class App {
       .routeFolder(dir, !!opts.newWindow)
       .catch(() => ({ action: 'here' as const }));
     if (route.action !== 'here') return;
-    const openResolved = (path: string) => this.workspace.openFolder(path);
+    const openResolved = async (path: string) => {
+      await this.workspace.openFolder(path);
+      await this.restoreFolderTabs(path);
+    };
     return this.remoteHandler
       ? this.remoteHandler.openFolder(dir, openResolved)
       : openResolved(dir);
@@ -979,6 +982,18 @@ export class App {
       // Missing in a partial config = the Rust default (on).
       enabled: this.config.agent_context_enabled !== false,
     });
+  }
+
+  /** A window with no file tabs that opens a local folder (Recent folders,
+   *  Open Folder, a routed new window) gets that folder's saved tabs back,
+   *  as `sparkdown <folder>` does. A window with tabs keeps its own. */
+  private async restoreFolderTabs(dir: string): Promise<void> {
+    if (this.tabs.getOrigin() !== LOCAL_ORIGIN || this.tabs.getOpenPaths().length > 0) return;
+    const saved = await api.folderSession(dir).catch(() => null);
+    if (!saved || saved.open_files.length === 0) return;
+    await this.documents.restoreTabs(saved.open_files, saved.active_file);
+    this.welcome.hide();
+    void this.documents.loadRestoredTabs();
   }
 
   /** The active tab's file, when it is a local file (what restore reopens). */

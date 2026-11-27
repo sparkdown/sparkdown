@@ -840,6 +840,7 @@ fn main() {
             file_index::list_workspace_files,
             file_index::list_workspace_files_stream,
             commands::load_config,
+            commands::folder_session,
             commands::save_config,
             commands::get_pending_files,
             terminal::tmux_window_sessions,

@@ -41,6 +41,7 @@ requests.
 - **Quit:** the session is written before the windows close, and starting SparkDown while the previous one is still closing now waits for it to finish and then opens with that session.
 - **Startup:** a window whose folder no longer exists (renamed, moved or deleted) is not reopened, and that folder is removed from the recent folders. No message is shown.
 - **Quit:** starting SparkDown right after Ctrl+Q, even a few milliseconds later or from another D-Bus session where the running instance can't be reached, opens with the tabs and active tab of that quit. Before, the new instance could read the previous session and later write it back over the one the quit saved.
+- **Recent folders:** opening a folder from Recent folders or Open Folder in a window with no tabs (for example a new window from Ctrl+Shift+N) restores that folder's saved tabs and active tab, as starting SparkDown with that folder does.
 - **Agent tools under WSL (Windows):** a `wsl` shell in a SparkDown terminal keeps the terminal's agent-tool routing (`WSLENV`), and `$SPARKDOWN_MCP_SHIM` names SparkDown's program for registering it in Linux agents. See docs/windows.md.
 
 ## [0.4.6] — 2026-11-23

@@ -53,6 +53,8 @@ export const failingWrites = new Set<string>();
 
 export const invokeCalls: Array<{ cmd: string; args: Record<string, unknown> | undefined }> = [];
 export const quitCalls = { count: 0 };
+/** Saved tabs per local folder (`folder_session`, session.rs folder sessions). */
+export const folderSessions = new Map<string, { open_files: string[]; active_file: string | null }>();
 export const quitGate = { busy: false };
 
 /** Scriptable branch answer for `git_branch_status` (the working-tree
@@ -139,6 +141,7 @@ export const systemClipboard: { paste: { kind: 'image' | 'text'; data: string } 
 export let dragDropHandler: ((event: { payload: unknown }) => void) | null = null;
 
 export function resetTauriMocks(): void {
+  folderSessions.clear();
   vfs.clear();
   systemClipboard.paste = null;
   for (const k of Object.keys(reviewStore)) delete reviewStore[k];
@@ -302,6 +305,8 @@ async function mockInvoke(cmd: string, args?: Record<string, unknown>): Promise<
       return;
     case 'get_pending_files':
       return pendingFiles;
+    case 'folder_session':
+      return folderSessions.get(String(args?.dir ?? '').replace(/\/+$/, '')) ?? null;
     case 'quit':
       quitCalls.count++;
       return;

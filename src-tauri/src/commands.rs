@@ -1121,6 +1121,17 @@ pub fn load_config(
     Ok(store.load_for(webview_window.label()))
 }
 
+/// The saved tabs of local folder `dir` (opened from Recent folders or
+/// Open Folder in an empty window), or `None` when it has none.
+#[tauri::command]
+pub fn folder_session(
+    dir: String,
+    store: State<'_, crate::session::ConfigStore>,
+) -> Option<crate::session::FolderTabs> {
+    let folder = crate::windows::local_folder_id(&dir).ok()?;
+    store.folder_tabs(&folder)
+}
+
 /// Save this window's configuration (debounced by the frontend). The core
 /// merges it: only preferences this window changed are written, and its
 /// session goes to its own section.

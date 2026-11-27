@@ -70,7 +70,7 @@ vi.mock('../terminal', () => ({
   },
 }));
 
-import {
+import { folderSessions,
   vfs,
   directories,
   savedConfigs,
@@ -488,6 +488,40 @@ describe('App integration', () => {
       await flush();
       const last = savedConfigs[savedConfigs.length - 1] as { last_open_files: string[] };
       expect(last.last_open_files).toEqual(['/notes/a.md', '/notes/b.md']);
+    });
+
+    it('opening a folder from Recents in an empty window restores its saved tabs', async () => {
+      vfs.set('/projects/site/a.md', '# A');
+      vfs.set('/projects/site/b.md', '# B');
+      directories.add('/projects/site');
+      folderSessions.set('/projects/site', {
+        open_files: ['/projects/site/a.md', '/projects/site/b.md'],
+        active_file: '/projects/site/a.md',
+      });
+      setConfigOnDisk({ theme: 'system', last_open_files: [], recent_folders: ['/projects/site'] });
+
+      await startApp();
+      await flush();
+      expect(tabTitles()).toEqual([]);
+      (document.querySelector('[data-recent="/projects/site"]') as HTMLElement).click();
+      await flush();
+      await flush();
+      expect(tabTitles()).toEqual(['a.md', 'b.md']);
+      expect(activeTitle()).toBe('a.md');
+    });
+
+    it('opening a folder in a window that has tabs keeps its own tabs', async () => {
+      vfs.set('/notes/n.md', '# N');
+      vfs.set('/projects/site/a.md', '# A');
+      directories.add('/projects/site');
+      folderSessions.set('/projects/site', { open_files: ['/projects/site/a.md'], active_file: null });
+      setConfigOnDisk({ theme: 'system', last_open_files: ['/notes/n.md'] });
+
+      const app = await startApp();
+      await flush();
+      await app.openFolder('/projects/site');
+      await flush();
+      expect(tabTitles()).toEqual(['n.md']);
     });
 
     it('a CLI folder other than the last one opens without the old tabs', async () => {
