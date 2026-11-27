@@ -178,21 +178,54 @@ describe('save while the user keeps typing', () => {
     expect(tabs.activeTab()?.modified).toBe(false);
   });
 
-  it('typing during the follow-up write is not written a third time; the tab stays dirty', async () => {
+  it('keeps writing until the buffer matches what was last written', async () => {
     const { docs, tabs, type } = setup('base');
     type('base UI');
     beforeWrite = () => {
       if (writes.length === 1) type('base UI test');
       else if (writes.length === 2) type('base UI test 2');
     };
-    expect(await docs.save()).toBe(false);
+    expect(await docs.save()).toBe(true);
+    expect(writes).toEqual(['base UI', 'base UI test', 'base UI test 2']);
+    expect(disk.get(PATH)).toBe('base UI test 2');
+    const tab = tabs.activeTab()!;
+    expect(tab.modified).toBe(false);
+    expect(tab.content).toBe('base UI test 2');
+    expect(tab.savedContent).toBe('base UI test 2');
+    expect(messageMock).not.toHaveBeenCalled();
+  });
+
+  it('writes keys that land just after the first write ends', async () => {
+    // A fast first write can finish before a burst typed right after Ctrl+S.
+    // The follow-up used to run only when keys landed during the write, so
+    // those later keys stayed off disk until the next Save.
+    writeMs = 0;
+    const { docs, tabs, type } = setup('base');
+    type('base UI');
+    beforeWrite = () => {
+      if (writes.length !== 1) return;
+      setTimeout(() => type('base UI test'), 10);
+    };
+    expect(await docs.save()).toBe(true);
     expect(writes).toEqual(['base UI', 'base UI test']);
     expect(disk.get(PATH)).toBe('base UI test');
-    const tab = tabs.activeTab()!;
-    expect(tab.modified).toBe(true);
-    expect(tab.content).toBe('base UI test 2');
-    // What is on disk is our own write, so it is the baseline.
-    expect(tab.savedContent).toBe('base UI test');
+    expect(tabs.activeTab()?.modified).toBe(false);
+    expect(messageMock).not.toHaveBeenCalled();
+  });
+
+  it('retries a follow-up write that was asked for too soon', async () => {
+    // Backend interval is longer than the frontend wait, so the first
+    // follow-up is turned down; a further wait then lands the buffer.
+    intervalMs = WRITE_INTERVAL_MS * 2;
+    const { docs, tabs, type } = setup('base');
+    type('base UI');
+    beforeWrite = () => {
+      if (writes.length === 1) type('base UI test');
+    };
+    expect(await docs.save()).toBe(true);
+    expect(disk.get(PATH)).toBe('base UI test');
+    expect(tabs.activeTab()?.modified).toBe(false);
+    expect(messageMock).not.toHaveBeenCalled();
   });
 
   it('a failed follow-up write is reported like any failed save and the tab stays dirty', async () => {

@@ -22,6 +22,10 @@ export const WRITE_INTERVAL_MS = 50;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+function writeAskedTooSoon(err: unknown): boolean {
+  return String(err).includes('Rate limit exceeded');
+}
+
 /**
  * The native Save dialog. The E2E suite (e2e/lib/save_dialog.py) installs
  * `window.__sparkdownE2eSave` over WebDriver to see the options we pass and
@@ -306,11 +310,10 @@ export class DocumentController {
           // that is the baseline: the tab stays dirty and our own write is
           // not mistaken for a foreign change by the watcher or the next save.
           this.ctx.tabs.recordWritten(id, content);
-          // Then write once more with the text the tab holds now.
-          return await this.writeFollowUp(id, originalPath, content);
         }
-        this.notifyWritten(originalPath);
-        return this.ctx.tabs.markSaved(id, content);
+        // Always re-check after the per-file interval: keys that land just
+        // after the write ends (a short burst after Ctrl+S) still reach disk.
+        return await this.writeFollowUp(id, originalPath, content);
       } catch (err) {
         if (this.ctx.tabs.getTab(id)?.content === content) await this.reportSaveError(originalPath, err);
         return false;
@@ -322,13 +325,12 @@ export class DocumentController {
   }
 
   /**
-   * Typing landed in a tab while save() wrote it. Write once more, right
-   * away, with the text the tab holds now. One such write per tab at a time:
-   * a request while one is running joins it. Text typed during this write is
-   * not written again; the tab stays modified, as after any write that typing
-   * overtakes. No write when the tab is gone, moved to another file, belongs
-   * to a machine that is no longer the active session, or no longer differs
-   * from what was written.
+   * After a write, wait out the per-file interval and write again if the
+   * buffer has moved on, until it matches what was last written. One such
+   * chain per tab at a time: a request while one is running joins it. No
+   * further write when the tab is gone, moved to another file, or belongs to
+   * a machine that is no longer the active session. Tries again if a write
+   * was asked for too soon.
    */
   private writeFollowUp(id: string, path: string, written: string): Promise<boolean> {
     const pending = this.followUps.get(id);
@@ -341,31 +343,37 @@ export class DocumentController {
   private async runFollowUp(id: string, path: string, written: string): Promise<boolean> {
     // The first write just finished. A larger file takes long enough to write
     // that typing lands during it, yet the write can finish within the
-    // backend's per-file interval, which would refuse this write. Wait the
-    // interval out; keys typed meanwhile are in the text taken below.
-    await this.waitForWriteInterval(path);
-    const tab = this.ctx.tabs.getTab(id);
-    if (!tab || tab.path !== path || tab.origin !== this.ctx.tabs.getOrigin()) {
-      // No second write: the first one is what the file holds.
-      this.notifyWritten(path);
-      return false;
+    // backend's per-file interval, which would turn down this write. Wait the
+    // interval out; keys typed meanwhile are in the text taken below. If more
+    // keys land during a later write, wait and write again until the file
+    // matches the buffer.
+    let tooSoon = 0;
+    for (;;) {
+      await this.waitForWriteInterval(path);
+      const tab = this.ctx.tabs.getTab(id);
+      if (!tab || tab.path !== path || tab.origin !== this.ctx.tabs.getOrigin()) {
+        // No further write: the last successful one is what the file holds.
+        this.notifyWritten(path);
+        return false;
+      }
+      const content = id === this.ctx.tabs.activeTab()?.id ? this.ctx.editor.getContent() : tab.content;
+      if (content === written) {
+        this.notifyWritten(path);
+        return this.ctx.tabs.markSaved(id, content);
+      }
+      try {
+        await this.writeOwn(path, content, false);
+      } catch (err) {
+        if (writeAskedTooSoon(err) && tooSoon++ < 10) {
+          await sleep(WRITE_INTERVAL_MS);
+          continue;
+        }
+        if (this.ctx.tabs.getTab(id)?.content === content) await this.reportSaveError(path, err);
+        return false;
+      }
+      tooSoon = 0;
+      written = content;
     }
-    const content = id === this.ctx.tabs.activeTab()?.id ? this.ctx.editor.getContent() : tab.content;
-    if (content === written) {
-      this.notifyWritten(path);
-      return this.ctx.tabs.markSaved(id, content);
-    }
-    try {
-      await this.writeOwn(path, content);
-    } catch (err) {
-      if (this.ctx.tabs.getTab(id)?.content === content) await this.reportSaveError(path, err);
-      return false;
-    }
-    if (this.ctx.tabs.getTab(id)?.content !== content) {
-      this.ctx.tabs.recordWritten(id, content);
-      return false;
-    }
-    return this.ctx.tabs.markSaved(id, content);
   }
 
   /**
