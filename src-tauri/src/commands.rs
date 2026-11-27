@@ -1170,6 +1170,13 @@ pub fn quit(app_handle: AppHandle, webview_window: tauri::WebviewWindow) -> Resu
         return Err("no quit in progress for this window".into());
     }
     crate::windows::set_quitting();
+    if let Ok(config) = crate::config::config_path(&app_handle) {
+        crate::session::hold_quit_lock(&config);
+    }
+    #[cfg(target_os = "linux")]
+    for (paths, new_window) in crate::lifecycle::take_deferred_launches() {
+        let _ = crate::proc::spawn_self_after_exit(&paths, new_window);
+    }
     // The session is on disk before any window closes: a launch right
     // after the windows disappear reads this quit's tabs. The flush at
     // exit then has nothing new to write.

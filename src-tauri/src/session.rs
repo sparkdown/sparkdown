@@ -931,6 +931,85 @@ impl ConfigStore {
     }
 }
 
+// --- Quit lock -------------------------------------------------------------------
+
+/// The open `session.lock` while this process is quitting.
+static QUIT_LOCK: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+/// `session.lock` next to `config.json`.
+pub fn quit_lock_path(config: &Path) -> PathBuf {
+    config.with_file_name("session.lock")
+}
+
+fn open_quit_lock(config: &Path) -> std::io::Result<std::fs::File> {
+    let path = quit_lock_path(config);
+    if let Some(dir) = path.parent() {
+        crate::fsio::create_private_dir_all(dir)?;
+    }
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(path)
+}
+
+/// A quit started: hold `session.lock` until the quit is cancelled
+/// ([`release_quit_lock`]) or the process ends. A launch that this instance
+/// does not get through the single-instance check (one started in another
+/// D-Bus session, for example) waits for it in [`wait_for_quit`], so it reads
+/// the session this quit writes instead of the one before.
+pub fn hold_quit_lock(config: &Path) {
+    let mut g = QUIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if g.is_some() {
+        return;
+    }
+    let Ok(f) = open_quit_lock(config) else {
+        return;
+    };
+    // A starting process checks the lock with a short shared lock; retry
+    // past such a check instead of quitting without the lock.
+    for _ in 0..20 {
+        if f.try_lock().is_ok() {
+            *g = Some(f);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// The quit was cancelled: let a waiting launch go on.
+pub fn release_quit_lock() {
+    if let Some(f) = QUIT_LOCK.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let _ = f.unlock();
+    }
+}
+
+/// Before reading `config.json`: wait (at most `timeout`) while another
+/// process is quitting. Returns whether it waited.
+pub fn wait_for_quit(config: &Path, timeout: std::time::Duration) -> bool {
+    let Ok(f) = open_quit_lock(config) else {
+        return false;
+    };
+    let until = std::time::Instant::now() + timeout;
+    let mut waited = false;
+    loop {
+        match f.try_lock_shared() {
+            Ok(()) => {
+                let _ = f.unlock();
+                return waited;
+            }
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
+                waited = true;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => return waited,
+        }
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1744,6 +1823,33 @@ mod tests {
             serde_json::json!([gp, "ssh://host/srv"]),
             "a missing local recent goes, a remote one stays"
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_launch_waits_for_another_process_s_quit_before_it_reads_the_session() {
+        let d = tmpdir("quit-lock");
+        let config = d.join("config.json");
+        // Another process is quitting: it holds the lock until its session
+        // is written. (A second open file stands in for the other process.)
+        let other = super::open_quit_lock(&config).unwrap();
+        other.lock().unwrap();
+        let t0 = std::time::Instant::now();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::fs::write(d.join("config.json"), "the quit's session").unwrap();
+            other.unlock().unwrap();
+            d
+        });
+        assert!(wait_for_quit(&config, std::time::Duration::from_secs(10)));
+        assert!(t0.elapsed() >= std::time::Duration::from_millis(250));
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "the quit's session"
+        );
+        let d = releaser.join().unwrap();
+        // Nobody quitting: no wait. A cancelled quit lets it go at once.
+        assert!(!wait_for_quit(&config, std::time::Duration::from_secs(10)));
         let _ = std::fs::remove_dir_all(&d);
     }
 

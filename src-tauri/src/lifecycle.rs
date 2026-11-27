@@ -417,13 +417,48 @@ pub fn request_quit(app: &AppHandle) {
 /// The frontend starts a quit flow (any entry: native or keyboard).
 #[tauri::command]
 pub fn quit_begin(webview_window: tauri::WebviewWindow) -> bool {
-    quit_gate().begin(webview_window.label())
+    let began = quit_gate().begin(webview_window.label());
+    if began {
+        if let Ok(config) = crate::config::config_path(webview_window.app_handle()) {
+            crate::session::hold_quit_lock(&config);
+        }
+    }
+    began
 }
 
 /// The frontend's quit flow was cancelled or failed.
 #[tauri::command]
 pub fn quit_end(webview_window: tauri::WebviewWindow) {
     quit_gate().end(webview_window.label());
+    if quit_gate().owner().is_none() {
+        crate::session::release_quit_lock();
+        // Launches that arrived while the quit was asking: open them now.
+        for (paths, new_window) in take_deferred_launches() {
+            crate::open_forwarded_paths(webview_window.app_handle(), paths, new_window);
+        }
+    }
+}
+
+/// A forwarded launch: its paths and whether it asked for a new window.
+type Launch = (Vec<String>, bool);
+
+/// Launches handed to this instance while a quit was asking (save
+/// prompts, the running-terminals confirm): opened if the quit is
+/// cancelled, started again after the exit otherwise.
+fn deferred_launches() -> std::sync::MutexGuard<'static, Vec<Launch>> {
+    static D: OnceLock<Mutex<Vec<Launch>>> = OnceLock::new();
+    D.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn defer_launch(paths: Vec<String>, new_window: bool) {
+    deferred_launches().push((paths, new_window));
+}
+
+pub fn take_deferred_launches() -> Vec<Launch> {
+    std::mem::take(&mut *deferred_launches())
 }
 
 type Pending = HashMap<u64, (String, Sender<bool>)>;

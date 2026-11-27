@@ -164,6 +164,13 @@ fn open_forwarded_argv(
         }
         return;
     }
+    // A quit is asking (save prompts): if it goes on, this launch starts
+    // after the exit; if it is cancelled, it opens here then.
+    #[cfg(target_os = "linux")]
+    if lifecycle::quit_gate().owner().is_some() {
+        lifecycle::defer_launch(paths, new_window);
+        return;
+    }
     open_forwarded_paths(app, paths, new_window);
 }
 
@@ -741,6 +748,12 @@ fn main() {
             // Context dirs left by a run that ended without clearing them
             // (killed, crashed). No window of this run has written one yet.
             context::remove_all_context_dirs();
+            // Another instance that is quitting (and that this launch did
+            // not reach through the single-instance check) writes its
+            // session first: read config.json after that, never before.
+            if session::wait_for_quit(&config_file, std::time::Duration::from_secs(30)) {
+                eprintln!("waited for another instance to finish quitting");
+            }
             let store = session::ConfigStore::open(config_file);
             let plan = session::plan_launch(&store.stored(), cli_folder.as_ref());
             store.adopt(&plan);
@@ -939,6 +952,10 @@ fn main() {
             // offline).
             if let tauri::RunEvent::Exit = &event {
                 windows::set_quitting();
+                #[cfg(target_os = "linux")]
+                for (paths, new_window) in lifecycle::take_deferred_launches() {
+                    let _ = proc::spawn_self_after_exit(&paths, new_window);
+                }
                 let _ = app.state::<session::ConfigStore>().flush_if_changed();
                 remote::shutdown();
                 mcp::shutdown();
