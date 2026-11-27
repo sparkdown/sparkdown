@@ -897,6 +897,35 @@ pub fn create_window(
             }
             let _ = window.maximize();
         }
+    } else {
+        // No saved geometry (a new window, or a first launch): the size from
+        // tauri.conf.json can be larger than a small screen, and the window
+        // manager may place it partly off screen. Fit and place it in the
+        // work area of the primary monitor.
+        let area = window
+            .primary_monitor()
+            .ok()
+            .flatten()
+            .or_else(|| window.current_monitor().ok().flatten())
+            .map(|m| {
+                let a = m.work_area();
+                crate::session::Area {
+                    x: a.position.x,
+                    y: a.position.y,
+                    width: a.size.width,
+                    height: a.size.height,
+                }
+            });
+        if let (Some(area), Ok(size)) = (area, window.inner_size()) {
+            let open = app.webview_windows().len().saturating_sub(1) as u32;
+            let g = crate::session::new_window_geometry((size.width, size.height), area, open % 8);
+            if (g.width, g.height) != (size.width, size.height) {
+                let _ = window.set_size(tauri::PhysicalSize::new(g.width, g.height));
+            }
+            if crate::session::positions_supported() {
+                let _ = window.set_position(tauri::PhysicalPosition::new(g.x, g.y));
+            }
+        }
     }
     registry().register(label);
     // #214: if the frontend never calls window_ready, show after 3s.

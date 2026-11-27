@@ -1030,6 +1030,27 @@ pub fn wait_for_quit(config: &Path, timeout: std::time::Duration) -> bool {
     }
 }
 
+/// Where a new window goes when it has no saved geometry: `size` (inner,
+/// physical) fitted into the monitor's work area `area`, centered, shifted
+/// down-right by 32 px per window already open (`index`) so new windows
+/// don't cover each other exactly, and kept fully inside the area.
+pub fn new_window_geometry(size: (u32, u32), area: Area, index: u32) -> Geometry {
+    let width = size.0.min(area.width).max(1);
+    let height = size.1.min(area.height).max(1);
+    let free_x = (area.width - width) as i64;
+    let free_y = (area.height - height) as i64;
+    let step = 32 * index as i64;
+    let x = (free_x / 2 + step).clamp(0, free_x);
+    let y = (free_y / 2 + step).clamp(0, free_y);
+    Geometry {
+        x: area.x + x as i32,
+        y: area.y + y as i32,
+        width,
+        height,
+        maximized: false,
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1891,6 +1912,30 @@ mod tests {
         // Nobody quitting: no wait. A cancelled quit lets it go at once.
         assert!(!wait_for_quit(&config, std::time::Duration::from_secs(10)));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_new_window_fits_and_stays_inside_a_small_screen() {
+        let area = Area {
+            x: 0,
+            y: 0,
+            width: 1200,
+            height: 768,
+        };
+        let g = new_window_geometry((1200, 800), area, 0);
+        assert_eq!((g.x, g.y, g.width, g.height), (0, 0, 1200, 768));
+        let big = Area {
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1040,
+        };
+        let g = new_window_geometry((1200, 800), big, 0);
+        assert_eq!((g.x, g.y), (1920 + 360, 120));
+        // Later windows step down-right but never past the edge.
+        let g = new_window_geometry((1200, 800), big, 7);
+        assert!(g.x + g.width as i32 <= 1920 + 1920 && g.y + g.height as i32 <= 1040);
+        assert_eq!((g.x, g.y), (1920 + 360 + 224, 240));
     }
 
     #[test]
