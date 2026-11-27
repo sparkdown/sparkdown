@@ -419,11 +419,20 @@ fn is_directory_impl(path: &str) -> bool {
     Path::new(path).is_dir()
 }
 
+/// Sent to the webview when a Linux Export PDF dialog is done with: the
+/// print finished or failed, or the dialog was cancelled. WebKitGTK sends
+/// no `afterprint` for a cancelled dialog.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub const PRINT_ENDED_EVENT: &str = "print://ended";
+
 /// Open the platform print dialog for the calling webview (Export PDF). The
 /// page's print stylesheet limits the output to the rendered document; the
 /// dialog's own PDF destination writes the file (macOS: PDF > Save as PDF,
 /// Windows: Save as PDF / Microsoft Print to PDF, Linux: Print to File).
 /// Native rather than `window.print()`, which does nothing in WKWebView.
+///
+/// On Linux the dialog opens after this returns and the webview gets
+/// [`PRINT_ENDED_EVENT`] once it is done (printed, failed or cancelled).
 ///
 /// `pdf_path` is the file to suggest (see [`pdf_output_path`]). Only the
 /// Linux dialog takes it: GTK's Print to File otherwise offers `output.pdf`
@@ -433,6 +442,7 @@ fn is_directory_impl(path: &str) -> bool {
 pub fn print_webview(webview: tauri::Webview, pdf_path: Option<String>) -> Result<(), AppError> {
     #[cfg(target_os = "linux")]
     {
+        use tauri::Emitter;
         let path = webview.app_handle().path();
         let fallback = path
             .document_dir()
@@ -441,8 +451,13 @@ pub fn print_webview(webview: tauri::Webview, pdf_path: Option<String>) -> Resul
             .or_else(|| path.home_dir().ok());
         let target = pdf_output_path(pdf_path.as_deref().unwrap_or(""), fallback.as_deref());
         let uri = target.and_then(|t| tauri::Url::from_file_path(t).ok());
+        let ended = webview.clone();
+        let notify = move || {
+            let label = ended.label().to_string();
+            let _ = ended.emit_to(label.as_str(), PRINT_ENDED_EVENT, ());
+        };
         webview
-            .with_webview(move |platform| linux_print::run_dialog(&platform.inner(), uri))
+            .with_webview(move |platform| linux_print::open_dialog(&platform.inner(), uri, notify))
             .map_err(|e| AppError::Other(format!("Could not open the print dialog: {e}")))
     }
     #[cfg(not(target_os = "linux"))]
@@ -480,13 +495,27 @@ pub(crate) fn pdf_output_path(suggested: &str, fallback_dir: Option<&Path>) -> O
 
 #[cfg(target_os = "linux")]
 mod linux_print {
-    use gtk::prelude::*;
-    use webkit2gtk::{PrintOperation, PrintOperationExt};
+    use std::cell::Cell;
+    use std::rc::Rc;
 
-    /// Run WebKit's print dialog with Print to File set to `uri` (PDF), as
-    /// a child of the webview's window. Blocks until the dialog closes, as
-    /// wry's own `print` does.
-    pub fn run_dialog(webview: &webkit2gtk::WebView, uri: Option<tauri::Url>) {
+    use gtk::glib;
+    use gtk::prelude::*;
+    use webkit2gtk::{PrintOperation, PrintOperationExt, PrintOperationResponse};
+
+    /// Open WebKit's print dialog with Print to File set to `uri` (PDF), as
+    /// a child of the webview's window, and return at once. `ended` runs
+    /// once when the dialog is cancelled or the print finishes or fails.
+    ///
+    /// The dialog runs a nested main loop until it closes. It starts from an
+    /// idle callback rather than here: this runs inside `with_webview`,
+    /// which holds the webview's window-id lock while it calls us, and any
+    /// command reply during the nested loop takes that lock again. Running
+    /// the dialog here left the app waiting on itself.
+    pub fn open_dialog(
+        webview: &webkit2gtk::WebView,
+        uri: Option<tauri::Url>,
+        ended: impl FnOnce() + 'static,
+    ) {
         let op = PrintOperation::new(webview);
         if let Some(uri) = uri {
             let settings = gtk::PrintSettings::new();
@@ -497,7 +526,27 @@ mod linux_print {
         let parent = webview
             .toplevel()
             .and_then(|w| w.downcast::<gtk::Window>().ok());
-        op.run_dialog(parent.as_ref());
+
+        let ended = once(ended);
+        let on_finished = ended.clone();
+        op.connect_finished(move |_| on_finished());
+        let on_failed = ended.clone();
+        op.connect_failed(move |_, _| on_failed());
+        glib::idle_add_local_once(move || {
+            if op.run_dialog(parent.as_ref()) != PrintOperationResponse::Print {
+                ended();
+            }
+        });
+    }
+
+    /// `f` behind a guard so only the first of several callers runs it.
+    fn once(f: impl FnOnce() + 'static) -> Rc<dyn Fn()> {
+        let slot = Cell::new(Some(Box::new(f) as Box<dyn FnOnce()>));
+        Rc::new(move || {
+            if let Some(f) = slot.take() {
+                f();
+            }
+        })
     }
 }
 
