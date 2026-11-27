@@ -714,13 +714,26 @@ button.diff-lnum:hover {
 .git-output-entry[data-state='error'] .git-output-msg { color: var(--status-warning); }
 .git-output-text { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font-size: 11px; }
 
-/* --- Discard (#172) ------------------------------------------------------ */
+/* --- Conflicted rows ---------------------------------------------------- */
 
-/* The row's Discard icon: shown on hover / selection, keeps its column so
-   the counts don't jump. */
+/* Ours / Theirs sit on a second line under the name, so the name keeps its
+   width and the row grows instead of spilling into the next one. */
+.change-row-conflict {
+  height: auto;
+  min-height: 30px;
+  padding-top: 4px;
+  padding-bottom: 5px;
+  row-gap: 3px;
+}
+.change-accepts {
+  grid-row: 2;
+  grid-column: 3 / -1;
+  display: flex;
+  gap: 4px;
+  white-space: nowrap;
+}
 .change-accept {
   flex-shrink: 0;
-  margin-left: 2px;
   padding: 1px 6px;
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -739,6 +752,10 @@ button.diff-lnum:hover {
   cursor: not-allowed;
 }
 
+/* --- Discard (#172) ------------------------------------------------------ */
+
+/* The row's Discard icon: shown on hover / selection, keeps its column so
+   the counts don't jump. */
 .change-discard {
   display: inline-flex;
   align-items: center;

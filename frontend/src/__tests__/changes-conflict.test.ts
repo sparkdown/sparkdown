@@ -95,3 +95,42 @@ describe('ChangesView conflicted group', () => {
     expect(noise.some((c) => c.path === 'package-lock.json')).toBe(false);
   });
 });
+
+const { readFileSync } = (await import('node:fs' as string)) as {
+  readFileSync(p: string, enc: 'utf8'): string;
+};
+
+describe('conflicted row layout', () => {
+  const css = readFileSync('src/styles/changes.css', 'utf8');
+  const rule = (sel: string) => {
+    const m = css.match(new RegExp(`(?:^|\\n)${sel.replace('.', '\\.')} \\{([^}]*)\\}`));
+    return m ? m[1] : '';
+  };
+
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    gitStatus.mockReset();
+    gitChangeStats.mockReset();
+  });
+
+  it('puts Ours and Theirs together on a second line and lets the row grow', async () => {
+    const { cv, listEl } = setup(files);
+    await cv.refresh();
+    const rows = [...listEl.querySelectorAll<HTMLElement>('.change-row')];
+    const conflicted = rows.filter((r) => r.dataset.status === 'conflicted');
+    expect(conflicted).toHaveLength(2);
+    for (const row of conflicted) {
+      expect(row.classList.contains('change-row-conflict')).toBe(true);
+      const box = row.querySelector('.change-accepts')!;
+      expect(box.parentElement).toBe(row);
+      expect([...box.children].map((b) => b.textContent)).toEqual(['Ours', 'Theirs']);
+    }
+    expect(rows.find((r) => r.dataset.status === 'modified')!.classList.contains('change-row-conflict')).toBe(false);
+
+    expect(rule('.change-row-conflict')).toMatch(/height:\s*auto/);
+    const accepts = rule('.change-accepts');
+    expect(accepts).toMatch(/grid-row:\s*2/);
+    expect(accepts).toMatch(/grid-column:\s*3 \/ -1/);
+    expect(accepts).toMatch(/white-space:\s*nowrap/);
+  });
+});

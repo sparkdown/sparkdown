@@ -685,6 +685,7 @@ export class ChangesView {
       noise ? 'change-row-noise' : '',
       reviewed ? 'reviewed' : '',
       again ? 'changed-again' : '',
+      c.status === 'conflicted' && this.opts.onAcceptConflict ? 'change-row-conflict' : '',
     ]
       .filter(Boolean)
       .join(' ');
@@ -716,9 +717,14 @@ export class ChangesView {
     const ours = reason ?? 'Accept ours (this side of the conflict)';
     const theirs = reason ?? 'Accept theirs (the other side of the conflict)';
     const dis = reason ? ' aria-disabled="true"' : '';
+    // One wrapper so both buttons share a second line under the name; side
+    // by side in the row's grid they ran past its columns and wrapped onto
+    // the next row.
     return (
+      `<span class="change-accepts">` +
       `<button type="button" class="change-accept" data-side="ours" tabindex="-1" title="${escapeHtml(ours)}" aria-label="${escapeReviewText(`Accept ours for ${c.path}`)}"${dis}>Ours</button>` +
-      `<button type="button" class="change-accept" data-side="theirs" tabindex="-1" title="${escapeHtml(theirs)}" aria-label="${escapeReviewText(`Accept theirs for ${c.path}`)}"${dis}>Theirs</button>`
+      `<button type="button" class="change-accept" data-side="theirs" tabindex="-1" title="${escapeHtml(theirs)}" aria-label="${escapeReviewText(`Accept theirs for ${c.path}`)}"${dis}>Theirs</button>` +
+      `</span>`
     );
   }
 
