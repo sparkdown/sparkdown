@@ -233,6 +233,24 @@ impl Stored {
         }
     }
 
+    /// A local folder that no longer exists is not reopened: drop the
+    /// window sections on it and its entries in the recent folders (the
+    /// welcome screen has no "missing" state for a recent folder). Remote
+    /// entries are kept. `exists` is asked about local paths only.
+    pub fn drop_missing_windows_and_recents(&mut self, exists: impl Fn(&str) -> bool) {
+        self.windows.retain(|_, w| match &w.folder {
+            Some(FolderId::Local { path }) => exists(path),
+            _ => true,
+        });
+        if let Some(Value::Array(recents)) = self.prefs.get_mut("recent_folders") {
+            recents.retain(|v| match v.as_str() {
+                Some(s) if s.starts_with("ssh://") => true,
+                Some(s) => exists(s),
+                None => false,
+            });
+        }
+    }
+
     /// Drop the saved sessions of local folders `exists` says are gone.
     pub fn drop_missing_folders(&mut self, exists: impl Fn(&str) -> bool) {
         self.folders.retain(|_, f| match &f.folder {
@@ -643,6 +661,7 @@ impl ConfigStore {
             None => Stored::default(),
         };
         stored.drop_missing_folders(|p| Path::new(p).is_dir());
+        stored.drop_missing_windows_and_recents(|p| Path::new(p).is_dir());
         // If the stored prefs could not be parsed, keep a copy of the file
         // before the first save rewrites it, so the values can be recovered.
         // Once per load; errors are ignored.
@@ -1674,6 +1693,57 @@ mod tests {
             None,
         );
         assert!(std::fs::read_to_string(&path).unwrap().contains("/p/b.md"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_folder_that_no_longer_exists_is_not_restored_and_leaves_windows_and_recents() {
+        let d = tmpdir("missing-folder");
+        for r in ["good", "images"] {
+            std::fs::create_dir_all(d.join(r)).unwrap();
+        }
+        let path = d.join("config.json");
+        let good = windows::local_folder_id(d.join("good").to_str().unwrap()).unwrap();
+        let images = windows::local_folder_id(d.join("images").to_str().unwrap()).unwrap();
+        let (gp, ip) = (
+            d.join("good").to_string_lossy().into_owned(),
+            d.join("images").to_string_lossy().into_owned(),
+        );
+        let store = ConfigStore::open(path.clone());
+        let cfg = AppConfig {
+            recent_folders: vec![ip.clone(), gp.clone(), "ssh://host/srv".into()],
+            ..Default::default()
+        };
+        store
+            .save_from(
+                &windows::label_for_folder(&good),
+                &cfg,
+                Some((good.clone(), Some(gp.clone()))),
+            )
+            .unwrap();
+        store
+            .save_from(
+                &windows::label_for_folder(&images),
+                &cfg,
+                Some((images.clone(), Some(ip.clone()))),
+            )
+            .unwrap();
+        // imagesrepo is renamed while the app is closed.
+        std::fs::rename(d.join("images"), d.join("images.x")).unwrap();
+        let (store, plan) = launch(&path, Some(&good));
+        assert_eq!(plan.len(), 1, "no window for the missing folder: {plan:?}");
+        assert_eq!(plan[0].session.folder.as_ref(), Some(&good));
+        let s = store.stored();
+        assert!(s
+            .windows
+            .values()
+            .all(|w| w.folder.as_ref() != Some(&images)));
+        assert!(!s.folders.contains_key(&images.key()));
+        assert_eq!(
+            s.prefs["recent_folders"],
+            serde_json::json!([gp, "ssh://host/srv"]),
+            "a missing local recent goes, a remote one stays"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
