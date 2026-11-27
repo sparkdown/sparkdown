@@ -3303,6 +3303,31 @@ describe('App integration', () => {
       }
     });
 
+    it('switches diagrams back to the dark theme when the dialog is cancelled', async () => {
+      // WebKitGTK sends no afterprint for a cancelled dialog; the backend
+      // sends print://ended for it (and for a finished print) instead.
+      const path = '/x/cancel.md';
+      vfs.set(path, '# Cancel');
+      restoreConfig([path]);
+      const app = await startApp();
+      const titleBefore = document.title;
+      document.documentElement.dataset.theme = 'dark';
+      previewThemeCalls.length = 0;
+      try {
+        await app.exportPdf();
+        expect(previewThemeCalls).toEqual(['export:light']);
+        emitTauriEvent('print://ended');
+        expect(previewThemeCalls).toEqual(['export:light', 'theme:dark']);
+        expect(document.querySelectorAll('.print-target, .print-path')).toHaveLength(0);
+        expect(document.title).toBe(titleBefore);
+        // A late afterprint for the same export changes nothing more.
+        window.dispatchEvent(new Event('afterprint'));
+        expect(previewThemeCalls).toEqual(['export:light', 'theme:dark']);
+      } finally {
+        document.documentElement.dataset.theme = 'light';
+      }
+    });
+
     it('keeps light diagrams with nothing to switch back in the light theme', async () => {
       const path = '/x/light.md';
       vfs.set(path, '# Light');

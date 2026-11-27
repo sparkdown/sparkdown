@@ -6,7 +6,8 @@ import type { FileTree } from '../file-tree';
 import type { TabManager } from '../tabs';
 import type { ThemeManager } from '../theme';
 import { showShortcutsDialog } from '../shortcuts-dialog';
-import { MENU, ACTIONS } from '../event-names';
+import { MENU, ACTIONS, PRINT_ENDED } from '../event-names';
+import { finishPrint } from './export-pdf';
 import type { PaneController } from './panes';
 import type { CockpitController } from './cockpit';
 import type { HtmlScriptsController } from './html-scripts';
@@ -109,6 +110,7 @@ export function registerMenuListeners(t: ActionTargets): void {
   reg(MENU.TOGGLE_HTML_JS, () => t.htmlScripts.toggle(false));
   reg(MENU.EXPORT_HTML, () => t.exportHtml());
   reg(MENU.EXPORT_PDF, () => t.exportPdf());
+  reg(PRINT_ENDED, () => finishPrint());
   reg(MENU.FIND, () => openFindForFocus(t));
   reg(MENU.SHOW_SHORTCUTS, () => showShortcutsDialog());
   reg(MENU.SHOW_SETTINGS, () => t.openSettings());

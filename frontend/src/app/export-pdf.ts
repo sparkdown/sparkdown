@@ -59,9 +59,13 @@ export function waitForImages(root: ParentNode, timeoutMs = IMAGE_WAIT_MS): Prom
 let titleBeforePrint: string | null = null;
 /** Runs once when the current export's print ends (see printTarget). */
 let afterPrintEnds: (() => void) | null = null;
+/** Drops the current export's `afterprint` listener. */
+let dropAfterPrint: (() => void) | null = null;
 
 /** End an export: drop the marks and give the page its title back. */
 function endPrint(doc: Document): void {
+  dropAfterPrint?.();
+  dropAfterPrint = null;
   clearPrintTarget(doc);
   if (titleBeforePrint !== null) doc.title = titleBeforePrint;
   titleBeforePrint = null;
@@ -71,9 +75,19 @@ function endPrint(doc: Document): void {
 }
 
 /**
+ * End the current export now: the Linux backend's `print://ended`, sent
+ * when its dialog is cancelled (no `afterprint` then) or its print is
+ * done. Nothing happens when no export is pending.
+ */
+export function finishPrint(doc: Document = document): void {
+  if (titleBeforePrint === null && afterPrintEnds === null && dropAfterPrint === null) return;
+  endPrint(doc);
+}
+
+/**
  * Print `target` as `title`. The page title is what the PDF destinations
- * suggest as the file name. The marks and title stay until `afterprint` (or
- * the next export): the dialog is asynchronous on macOS and Windows, and the
+ * suggest as the file name. The marks and title stay until `afterprint`,
+ * `finishPrint` or the next export: the dialog is asynchronous, and the
  * marks only apply to print media. `onEnd` runs once when that print ends
  * (a later export before then takes its place).
  */
@@ -87,16 +101,17 @@ export async function printTarget(
   const win = doc.defaultView ?? window;
   const onAfterPrint = () => endPrint(doc);
 
+  dropAfterPrint?.();
   if (titleBeforePrint === null) titleBeforePrint = doc.title;
   afterPrintEnds = onEnd ?? null;
   markPrintTarget(target);
   doc.title = title;
   await waitForImages(target);
   win.addEventListener('afterprint', onAfterPrint, { once: true });
+  dropAfterPrint = () => win.removeEventListener('afterprint', onAfterPrint);
   try {
     await openPrintDialog();
   } catch (err) {
-    win.removeEventListener('afterprint', onAfterPrint);
     endPrint(doc);
     throw err;
   }

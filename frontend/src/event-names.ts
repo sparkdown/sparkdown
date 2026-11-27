@@ -22,6 +22,11 @@ export const EVENTS = {
   FOCUS_MODE_CHANGED: 'focus-mode-changed',
 } as const;
 
+// Sent by the Rust side when a Linux Export PDF dialog is done with
+// (print finished or failed, or cancelled). Mirror of PRINT_ENDED_EVENT in
+// src-tauri/src/commands.rs.
+export const PRINT_ENDED = 'print://ended';
+
 // Tauri events sent from the Rust menu handler. Mirror of menu IDs in
 // src-tauri/src/menu.rs — the Rust side emits `menu:<id>`. Keep in sync.
 export const MENU = {
