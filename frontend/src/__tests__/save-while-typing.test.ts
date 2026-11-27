@@ -81,7 +81,12 @@ function setup(initial: string, path: string | null = PATH) {
     tabs.updateContent(next);
     tabs.refreshModified();
   };
-  return { docs, tabs, type };
+  /** The editor's own text changes without a keystroke: CodeMirror keeps
+   *  `\n` line ends while the tab still holds the file's `\r\n`. */
+  const setEditorText = (next: string) => {
+    text = next;
+  };
+  return { docs, tabs, type, setEditorText };
 }
 
 describe('save while the user keeps typing', () => {
@@ -300,6 +305,57 @@ describe('save while the user keeps typing', () => {
     beforeWrite = null;
     expect(await docs.save()).toBe(true);
     expect(disk.get('/p/new.md')).toBe('draft more');
+    expect(tabs.activeTab()?.modified).toBe(false);
+  });
+});
+
+describe('saving a file with CRLF line ends', () => {
+  beforeEach(() => {
+    disk.clear();
+    beforeRead = null;
+    beforeWrite = null;
+    writes.length = 0;
+    failWrite = 0;
+    intervalMs = 0;
+    writeMs = 0;
+    askedAt.clear();
+    messageMock.mockClear();
+  });
+
+  it('a clean CRLF tab saves with one write and stays saved', async () => {
+    const { docs, tabs, setEditorText } = setup('a\r\nb\r\n');
+    setEditorText('a\nb\n');
+    expect(await docs.save()).toBe(true);
+    expect(writes).toEqual(['a\nb\n']);
+    const tab = tabs.activeTab()!;
+    expect(tab.modified).toBe(false);
+    expect(tab.savedContent).toBe('a\nb\n');
+    expect(messageMock).not.toHaveBeenCalled();
+  });
+
+  it('switching away from a clean CRLF tab during the save gives no line-end-only write', async () => {
+    const { docs, tabs, setEditorText } = setup('a\r\nb\r\n');
+    setEditorText('a\nb\n');
+    const id = tabs.activeTab()!.id;
+    beforeWrite = () => {
+      if (writes.length === 1) tabs.openTab('/p/other.md', 'other');
+    };
+    expect(await docs.save(id)).toBe(true);
+    expect(writes).toEqual(['a\nb\n']);
+    expect(disk.get(PATH)).toBe('a\nb\n');
+    const tab = tabs.getTab(id)!;
+    expect(tab.modified).toBe(false);
+    expect(tab.savedContent).toBe('a\nb\n');
+  });
+
+  it('an edit typed during the save of a CRLF tab is still written', async () => {
+    const { docs, tabs, type, setEditorText } = setup('a\r\nb\r\n');
+    setEditorText('a\nb\n');
+    beforeWrite = () => {
+      if (writes.length === 1) type('a\nb\nc');
+    };
+    expect(await docs.save()).toBe(true);
+    expect(writes).toEqual(['a\nb\n', 'a\nb\nc']);
     expect(tabs.activeTab()?.modified).toBe(false);
   });
 });

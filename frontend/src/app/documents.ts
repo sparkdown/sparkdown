@@ -2,7 +2,7 @@ import { open, save as nativeSave, message } from '@tauri-apps/plugin-dialog';
 import type { PreviewPane } from '../preview';
 import { LOCAL_ORIGIN } from '../tabs';
 import { RemotePicker, type RemotePickerOptions } from '../remote-picker';
-import { isPreviewable, isMarkdownFile, stripMarkdownExt, dirname, basename, defaultSavePath } from '../utils';
+import { isPreviewable, isMarkdownFile, stripMarkdownExt, dirname, basename, defaultSavePath, sameText } from '../utils';
 import { DIALOG_FILTERS } from '../file-types';
 import { api } from '../api';
 import type { AppContext } from './context';
@@ -357,9 +357,12 @@ export class DocumentController {
         return false;
       }
       const content = id === this.ctx.tabs.activeTab()?.id ? this.ctx.editor.getContent() : tab.content;
-      if (content === written) {
+      // Line ends only: the editor keeps \n while a CRLF tab that was never
+      // edited still holds the file's \r\n (see sameText). That is no new
+      // text, so no further write.
+      if (sameText(content, written)) {
         this.notifyWritten(path);
-        return this.ctx.tabs.markSaved(id, content);
+        return this.ctx.tabs.markSaved(id, written);
       }
       try {
         await this.writeOwn(path, content, false);
@@ -441,7 +444,8 @@ export class DocumentController {
       // The picker is async: take the text again so keys typed meanwhile count.
       if (id === this.ctx.tabs.activeTab()?.id) content = this.ctx.editor.getContent();
       await this.writeOwn(path, content);
-      if (this.ctx.tabs.getTab(id)?.content !== content) {
+      const now = this.ctx.tabs.getTab(id)?.content;
+      if (now === undefined || !sameText(now, content)) {
         // Typing landed during the write: the file exists with `content`, so
         // bind the tab to it and keep the tab dirty for the newer text.
         if (this.ctx.tabs.setPathFor(id, path)) this.ctx.tabs.recordWritten(id, content);

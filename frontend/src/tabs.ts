@@ -302,8 +302,10 @@ export class TabManager {
 
   markSaved(tabId: string | null = this.activeTabId, expectedContent?: string): boolean {
     const tab = tabId ? this.getTab(tabId) : null;
-    if (!tab || (expectedContent !== undefined && tab.content !== expectedContent)) return false;
-    tab.savedContent = tab.content;
+    if (!tab || (expectedContent !== undefined && !sameText(tab.content, expectedContent))) return false;
+    // The baseline is what the file holds: `expectedContent` when given (it
+    // may differ from the tab's text in line ends only).
+    tab.savedContent = expectedContent ?? tab.content;
     tab.modified = false;
     tab.diskConflict = false;
     this.updateModifiedState(tab);
