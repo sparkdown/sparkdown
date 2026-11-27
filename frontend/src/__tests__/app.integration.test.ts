@@ -98,6 +98,7 @@ import { folderSessions,
   systemClipboard,
 } from './helpers/tauri-mocks';
 import { App } from '../app';
+import { WRITE_INTERVAL_MS } from '../app/documents';
 import { FileTree } from '../file-tree';
 import { api } from '../api';
 import { installRemoteSessions } from '../remote';
@@ -256,6 +257,9 @@ async function startApp(): Promise<App> {
 
 /** Let queued microtasks (event handlers, promise chains) drain. */
 const flush = () => new Promise((r) => setTimeout(r, 0));
+/** A save waits out the backend's per-file write interval, then checks the
+ *  buffer once more before it settles (documents.ts runFollowUp). */
+const settleSave = () => new Promise((r) => setTimeout(r, WRITE_INTERVAL_MS + 30));
 
 /** Wait out the app's 250 ms watcher coalescing debounce plus the reads. */
 const watcherSettle = async () => {
@@ -871,6 +875,7 @@ describe('App integration', () => {
 
       emitTauriEvent(MENU.SAVE);
       await flush();
+      await settleSave();
 
       expect(vfs.get('/docs/doc.md')).toBe('edited content');
       expect(activeTabDot().style.display).toBe('none');
@@ -1037,6 +1042,7 @@ describe('App integration', () => {
       dialogResponses.message.push('Yes'); // "Save"
       emitTauriEvent('exit-requested');
       await flush();
+      await settleSave();
 
       expect(vfs.get('/docs/doc.md')).toBe('modified!');
       expect(quitCalls.count).toBe(1);
@@ -1077,6 +1083,7 @@ describe('App integration', () => {
       dialogResponses.message.push('Yes'); // "Save"
       emitTauriEvent('exit-requested');
       await flush();
+      await settleSave();
 
       expect(vfs.get('/docs/doc.md')).toBe('modified!');
       const order = callOrder('write_file', 'save_config', 'quit');
@@ -1121,6 +1128,7 @@ describe('App integration', () => {
       dialogResponses.message.push('Yes'); // "Save"
       emitTauriEvent('close-requested', { mode: 'close' });
       await flush();
+      await settleSave();
 
       expect(vfs.get('/docs/doc.md')).toBe('modified!');
       const order = callOrder('write_file', 'save_config', 'window_close');
@@ -1182,6 +1190,7 @@ describe('App integration', () => {
       pressCtrlQ();
       await flush();
       await flush();
+      await settleSave();
       expect(vfs.get('/docs/doc.md')).toBe('dirty');
       expect(quitCalls.count).toBe(1);
     });
@@ -1319,6 +1328,7 @@ describe('App integration', () => {
       emitTauriEvent(MENU.SAVE);
       await flush();
       await flush();
+      await settleSave();
       expect(vfs.get('/docs/b.md')).toBe('B original!');
       expect(activeTabDot().style.display).toBe('none');
 
@@ -1378,6 +1388,7 @@ describe('App integration', () => {
       emitTauriEvent(MENU.SAVE);
       await flush();
       await flush();
+      await settleSave();
       expect(vfs.get('/docs/b.md')).toBe('user text');
       expect(tabEl('b.md').classList.contains('tab-conflict')).toBe(false);
       expect(activeTabDot().style.display).toBe('none');
@@ -3175,7 +3186,7 @@ describe('App integration', () => {
 
       emitTauriEvent(MENU.TOGGLE_FOCUS_MODE);
       emitTauriEvent(MENU.SAVE);
-      await waitUntil(() => userRun.lastHooks !== null && !notice.classList.contains('hidden'), 'hook notice');
+      await until(() => userRun.lastHooks !== null && !notice.classList.contains('hidden'), 'hook notice');
       expect(on()).toBe(true);
       expect(drawerShown()).toBe(false);
       expect(notice.textContent).toBe('On save: Lint failed');
@@ -3197,7 +3208,7 @@ describe('App integration', () => {
       emitTauriEvent(MENU.OPEN_FILE_PATH, { path: '/docs/doc.md' });
       await flush();
       emitTauriEvent(MENU.SAVE);
-      await waitUntil(() => !$('terminal-panel').classList.contains('hidden'), 'Output in the drawer');
+      await until(() => !$('terminal-panel').classList.contains('hidden'), 'Output in the drawer');
       expect($('hook-notice').classList.contains('hidden')).toBe(true);
     });
 
