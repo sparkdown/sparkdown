@@ -44,18 +44,24 @@
   color: var(--fg-muted);
 }
 
+.shortcuts-section,
+.shortcut-row {
+  min-width: 0;
+}
+
 .shortcut-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
   padding: 3px 0;
 }
 
-/* #52: the description wraps; the key label never shrinks or overflows. */
+/* Labels keep a readable width; long key lists wrap inside the row
+   instead of pushing into the next section. */
 .shortcut-desc {
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: 1 1 8em;
+  min-width: 8em;
   font-size: 12px;
   color: var(--fg);
   overflow-wrap: break-word;
@@ -69,10 +75,13 @@
   background: var(--toolbar-bg);
   border: 1px solid var(--border);
   color: var(--fg-muted);
-  min-width: 20px;
-  text-align: center;
-  flex: 0 0 auto;
-  white-space: nowrap;
+  box-sizing: border-box;
+  flex: 0 1 auto;
+  min-width: 6.5em;
+  max-width: 55%;
+  text-align: right;
+  white-space: normal;
+  overflow-wrap: break-word;
 }
 
 .shortcuts-hint {
